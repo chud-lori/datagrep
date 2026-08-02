@@ -1,0 +1,18 @@
+[package]
+name = "dbx-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The stable seam of dbx: Driver / Connection / Cursor / Catalog / Value / Shape / Capabilities. No tokio, no Arrow, no reqwest."
+
+[dependencies]
+async-trait = { workspace = true }
+bitflags = { workspace = true }
+bytes = { workspace = true }
+futures-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

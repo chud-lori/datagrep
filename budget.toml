@@ -1,0 +1,167 @@
+# dbx performance budget — machine-readable transcription of design doc §5.
+# Semantics (non-negotiable, §5): all memory figures are the WHOLE PROCESS TREE,
+# summed, using the platform-correct metric (§6): macOS phys_footprint, Windows
+# Private Working Set + QueryVideoMemoryInfo (reported separately), Linux PSS from
+# smaps_rollup + fdinfo drm-memory-*. Deltas are written "idle+N" wherever the
+# idle floor moved, so the line measures our data structures, not the floor.
+# "target" is the goal; "fail" is the CI-red threshold.
+
+[P1]
+metric = "cold start to interactive, warm FS"
+target = "250ms"
+fail = "600ms"
+
+[P2]
+metric = "cold start, cold FS"
+target = "700ms"
+fail = "1500ms"
+
+[P3]
+metric = "RAM idle, 0 connections, 1080p@1x"
+target = "90MB"
+fail = "140MB"
+
+[P3b]
+metric = "RAM idle at 4K@2x or 2 displays"
+target = "130MB"
+fail = "190MB"
+
+[P4]
+metric = "RAM, 3 connections idle"
+target = "idle+18MB"
+fail = "idle+40MB"
+
+[P5]
+metric = "RAM, 100k rows x 24 cols"
+target = "idle+55MB"
+fail = "idle+110MB"
+
+[P6]
+metric = "RAM, 1M rows streamed"
+target = "idle+260MB"
+fail = "idle+480MB"
+
+[P7]
+metric = "reclaim, 10s after closing all result tabs"
+target = "idle+15MB"
+fail = "idle+40MB"
+
+[P8]
+metric = "first-row latency, localhost PG (p50/p95)"
+target = "70ms/130ms"
+fail = "250ms p95"
+
+[P9]
+metric = "scroll frame time, 1M-row fling (p50/p95/p99), 1080p"
+target = "3ms/6ms/12ms"
+fail = "any frame > 33ms"
+
+[P9b]
+metric = "scroll frame time at 4K@2x (p50/p95/p99)"
+target = "5ms/9ms/16ms"
+fail = "any frame > 33ms"
+
+[P10]
+metric = "installer, compressed"
+target = "22MB"
+fail = "35MB"
+
+[P11]
+metric = "installed on disk"
+target = "55MB"
+fail = "90MB"
+
+[P12]
+metric = "CPU-time per 60s wall, idle, all threads"
+target = "8ms"
+fail = "50ms"
+
+[P13]
+metric = "idle wakeups per second"
+target = "2/s"
+fail = "10/s"
+
+[P14]
+metric = "background disk writes, 60s idle"
+target = "0B"
+fail = "64KB"
+
+[P15]
+metric = "window-shown to first real frame"
+target = "16.7ms"                                    # 1 frame
+fail = "100ms, or any blank/white frame presented"
+
+[P16]
+metric = "glyph atlas resident bytes, steady state"  # replaced the JS-bundle gate
+target = "8MB"
+fail = "24MB"
+
+[P16b]
+metric = "atlas growth over a 30-min mixed session"
+target = "+2MB"
+fail = "unbounded, or > 2 repacks/min"
+
+[P16c]
+metric = "startup pipeline/shader compile, cold driver cache"
+target = "120ms cold / 30ms warm"
+fail = "400ms cold"
+
+[P16d]
+metric = "render pipelines / crates in release graph"
+target = "24 / 400"
+fail = "60 / 600"
+
+[P17]
+metric = "query cancel to connection usable"
+target = "100ms"
+fail = "400ms"
+
+[P18]
+metric = "RAM, 50 editor tabs, no results"
+target = "idle+30MB"
+fail = "idle+70MB"
+
+[P19]
+metric = "presents per 60s idle"                     # flagship gate; valid on software CI
+target = "0"
+fail = "> 2"
+
+[P20]
+metric = "GPU busy-time per 60s idle"
+target = "0ms"
+fail = "5ms"
+
+[P21]
+metric = "idle energy: macOS energy impact / package power delta"
+target = "0.2 / 0.05W"
+fail = "2.0 / 0.5W"
+
+[P21b]
+metric = "Windows global timer resolution while idle"
+target = "not raised (>= 15.6ms)"
+fail = "any timeBeginPeriod(<15)"
+
+[P22]
+metric = "compositor interactions per second at idle"
+target = "0"
+fail = "> 1/s"
+
+[P23]
+metric = "GPU memory, idle / 1M-row grid"
+target = "48MB / 120MB"
+fail = "256MB"
+
+[P24]
+metric = "mixed-DPI drag (4K@2x <-> 1080p@1x): relayout stall; atlas rebuilds"
+target = "100ms; <= 1 rebuild per new scale"
+fail = "250ms; rebuild per move event; blurry text"
+
+[P25]
+metric = "occluded/minimized: RAM drop within 10s"
+target = ">= 30% of swapchain freed; 0 presents"
+fail = "still rendering while occluded"
+
+[P26]
+metric = "power under 10s sustained fling"
+target = "25 energy impact / 4W"
+fail = "8W"
