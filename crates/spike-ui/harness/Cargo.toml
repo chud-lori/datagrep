@@ -1,0 +1,60 @@
+# SPIKE — throwaway UI toolkit spike (design doc §8: S1, S8). Not part of the
+# `dbx` product. Standalone package: the empty [workspace] table below makes
+# this its OWN workspace root, so gpui's git-adjacent dependency tree and its
+# own Cargo.lock never touch the shared dbx workspace lockfile.
+#
+# Isolation note: an earlier attempt put this [workspace] table directly in
+# ../Cargo.toml (the file the parent's `members = ["crates/*"]` glob matches).
+# That breaks the parent with "multiple workspace roots found" (verified
+# empirically — see SPIKE-REPORT.md). Nesting one directory deeper, outside
+# the glob's reach, gets the same isolation without breaking concurrent work
+# in sibling crates/dbx-* dirs.
+[package]
+name = "spike-ui-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[workspace]
+
+[dependencies]
+# gpui-ce (crates.io, 0.3.3) was tried first per the design doc's §1.1
+# mitigation. It does NOT pair with gpui-component here: gpui-component
+# 0.5.1's own manifest depends on the literal crate `gpui = "^0.2.2"` from
+# crates.io, and gpui-ce's README's [patch] recipe for exactly this situation
+# fails with "patch for `gpui-ce` ... points to the same source" — Cargo
+# refuses a [patch.crates-io] entry that renames one crates.io package to
+# another crates.io package (verified: `cargo generate-lockfile` error, see
+# SPIKE-REPORT.md). The patch trick only applies when the *dependent* (here,
+# gpui-component) pulls gpui from git, which the crates.io 0.5.1 release does
+# not. Falling back per the resolution order, but skipping the git-zed-SHA
+# rung: gpui-component 0.5.1 (newest release, published 2026-02-05) declares
+# `gpui = "^0.2.2"` against crates.io directly, so the plain crates.io pairing
+# below is the *current, upstream-tested* combination — strictly better than
+# hand-pinning a git SHA that gpui-component's own maintainers aren't
+# building against.
+gpui = "0.2.2"
+# NOTE: at the published 0.5.1 tag there is no per-language `tree-sitter-sql`
+# feature (that granular split landed later on `main`) — only the bundled
+# `tree-sitter-languages` (all grammars, incl. `tree-sitter-sequel` for SQL).
+# Using the bundle here; it also lets S8 report the real "all grammars"
+# binary-size cost the design doc worries about in §5.1.
+gpui-component = { version = "0.5.1", features = ["tree-sitter-languages"] }
+
+[[bin]]
+name = "s1_idle"
+path = "src/bin/s1_idle.rs"
+
+[[bin]]
+name = "s8_audit"
+path = "src/bin/s8_audit.rs"
+
+[profile.release]
+# Mirror the parent workspace release profile so the S8 binary-size gate is
+# measured the way the real product would ship (design §5.1 / §9.5).
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"
+incremental = false

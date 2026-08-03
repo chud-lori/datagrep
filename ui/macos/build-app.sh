@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Builds ui/macos and assembles dbx.app by hand.
+#
+# There is no Xcode on this machine — Command Line Tools 16.4 only — so there is
+# no xcodebuild and no .xcodeproj. `swift build` produces the executable and this
+# script writes the bundle layout (Info.plist + Contents/MacOS/) around it.
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+CONFIG="${CONFIG:-release}"
+APP_NAME="dbx"
+BUNDLE_ID="dev.dbx.macos"
+VERSION="0.1.0"
+
+echo "==> swift build -c ${CONFIG}  (DBX_FFI=${DBX_FFI:-stub})"
+swift build -c "${CONFIG}"
+
+BIN_DIR="$(swift build -c "${CONFIG}" --show-bin-path)"
+BIN="${BIN_DIR}/dbx-app"
+[ -x "${BIN}" ] || { echo "build produced no executable at ${BIN}" >&2; exit 1; }
+
+APP="${PWD}/${APP_NAME}.app"
+rm -rf "${APP}"
+mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
+
+cp "${BIN}" "${APP}/Contents/MacOS/${APP_NAME}"
+
+cat > "${APP}/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>              <string>${APP_NAME}</string>
+  <key>CFBundleDisplayName</key>       <string>${APP_NAME}</string>
+  <key>CFBundleExecutable</key>        <string>${APP_NAME}</string>
+  <key>CFBundleIdentifier</key>        <string>${BUNDLE_ID}</string>
+  <key>CFBundleVersion</key>           <string>${VERSION}</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+  <key>CFBundlePackageType</key>       <string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>LSMinimumSystemVersion</key>    <string>13.0</string>
+  <key>NSHighResolutionCapable</key>   <true/>
+  <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <key>NSPrincipalClass</key>          <string>NSApplication</string>
+  <key>LSApplicationCategoryType</key> <string>public.app-category.developer-tools</string>
+</dict>
+</plist>
+PLIST
+
+printf 'APPL????' > "${APP}/Contents/PkgInfo"
+
+# Ad-hoc signature. codesign ships with the Command Line Tools; without this the
+# app still launches but macOS re-validates it on every start.
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --sign - --timestamp=none "${APP}" >/dev/null 2>&1 \
+    && echo "==> ad-hoc signed" || echo "==> codesign failed (app will still run)"
+fi
+
+SIZE=$(du -sh "${APP}" | cut -f1)
+echo "==> built ${APP} (${SIZE})"
+echo "    open ${APP}"

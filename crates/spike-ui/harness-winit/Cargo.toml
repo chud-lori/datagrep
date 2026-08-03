@@ -1,0 +1,43 @@
+# SPIKE — S1 fallback rung (design doc §8/§1.1 resolution ladder). gpui 0.2.2
+# (../harness) FAILS TO BUILD on this machine: its build.rs shells out to
+# `xcrun metal` to precompile Metal shaders offline, which requires the full
+# Xcode.app toolchain -- this machine has only Command Line Tools 16.4
+# installed (no Xcode.app under /Applications, `xcrun --find metal` fails).
+# See SPIKE-REPORT.md for the exact error and why installing Xcode (multi-GB,
+# App Store sign-in) was judged out of scope for a spike.
+#
+# wgpu compiles its Metal backend through the objc2-metal Rust bindings and
+# compiles MSL source at RUNTIME via the Metal framework's own compiler
+# (Metal.framework ships with the OS) -- verified empirically: a throwaway
+# wgpu 30 + winit 0.30 probe built clean in 33s and found a real Metal
+# adapter on this machine. That is why this bare-winit+wgpu rung of the
+# ladder is used for S1 in place of gpui: it measures the floor gpui sits on,
+# per the task's explicit fallback instructions.
+#
+# Kept as a SEPARATE standalone package (own empty [workspace] table, own
+# Cargo.lock) from ../harness so a broken gpui build can never block this
+# one, and vice versa.
+[package]
+name = "spike-ui-harness-winit"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[workspace]
+
+[dependencies]
+wgpu = "30"
+winit = "0.30"
+pollster = "0.4"
+
+[[bin]]
+name = "s1_idle_winit"
+path = "src/bin/s1_idle_winit.rs"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"
+incremental = false

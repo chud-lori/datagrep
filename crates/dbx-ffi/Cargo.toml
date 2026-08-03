@@ -1,0 +1,48 @@
+[package]
+name = "dbx-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "C ABI over CoreApi: the seam a native Swift/AppKit macOS app links against (design §3, §4.4 'the desktop UI is just a CoreApi client')."
+
+[lib]
+name = "dbx_ffi"
+# staticlib: what a Swift app links directly (one binary, no dylib to sign or
+# ship). cdylib: what `swift run`/SwiftPM and a plugin host load at runtime.
+# `rlib` is also emitted so this crate's own integration tests can link it.
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+dbx-api = { path = "../dbx-api" }
+dbx-core = { path = "../dbx-core" }
+dbx-lang = { path = "../dbx-lang" }
+dbx-profiles = { path = "../dbx-profiles" }
+dbx-secrets = { path = "../dbx-secrets" }
+dbx-drv-postgres = { path = "../dbx-drv-postgres" }
+dbx-drv-sqlite = { path = "../dbx-drv-sqlite" }
+dbx-drv-redis = { path = "../dbx-drv-redis" }
+
+# The one global runtime (design §3.4). `rt-multi-thread` for the 4 workers,
+# `sync` for the broadcast/watch channels CoreApi hands out.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+once_cell = "1"
+
+# --- deviations from the ticket's dependency list, justified -------------
+# serde_json: every string this ABI returns is JSON by the header's own
+# contract ("Returns JSON: [...]"). Not optional.
+serde_json = { workspace = true }
+# arrow-array/-schema: `dbx_core::store::WindowSlice::Table` hands back an
+# `Arc<RecordBatch>`. Reading a tabular cell at all means reading Arrow.
+# Pinned to dbx-core's exact versions so the `RecordBatch` flowing across the
+# seam is the same crate, not two incompatible majors.
+arrow-array = "59.1"
+arrow-schema = "59.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.clippy]
+uninlined_format_args = "allow"
+# Every `extern "C"` entry point here takes raw pointers by contract.
+missing_safety_doc = "allow"

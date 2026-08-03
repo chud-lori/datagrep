@@ -1,0 +1,714 @@
+//! Query lifecycle: run, status, progress, and **the stop button** (§3.3).
+//!
+//! ## `dbx_query_run` really is non-blocking
+//!
+//! The header promises *"returns immediately with a handle; rows stream in the
+//! background"*, and this implementation takes that literally: **nothing**
+//! about opening the profile, resolving its keychain secret, dialling the
+//! server, or waiting for the server to accept the statement happens on the
+//! calling thread. `dbx_query_run` allocates a handle, spawns one task on the
+//! global runtime, and returns.
+//!
+//! The consequence is deliberate and worth stating plainly: **connection and
+//! SQL errors do not come back through `err_out`.** They cannot — they have
+//! not happened yet. They arrive in `dbx_query_status_json` as
+//! `{"state":"failed","error":"…"}`, and the progress callback fires when they
+//! do. `err_out` is reserved for what *is* knowable synchronously: NULL
+//! pointers, non-UTF-8 arguments, empty SQL.
+//!
+//! This is the design's own stance, not a shortcut — §3.5: *"Opening the app
+//! connects to nothing. Startup is never gated on network."* A Run button
+//! that freezes AppKit for a three-second TLS handshake is the failure mode
+//! this product exists to avoid.
+//!
+//! ## Cancellation is honest (§3.3)
+//!
+//! > "The stop button **always** returns control instantly (drop feeder, close
+//! > cursor, free store). The status line then tells the truth: *'stopped
+//! > receiving results; the server may still be executing this query.'*"
+//!
+//! `dbx_query_cancel` never awaits. It hands back the *pending*
+//! [`CancelReport`] — the honest one, with `"outcome": null` — because at that
+//! instant nobody knows what the server did. The real answer arrives later as
+//! [`QueryEvent::CancelOutcome`]; the supervisor task stores it and fires the
+//! progress callback. **Call `dbx_query_cancel` again to read it**: the call
+//! is idempotent, never re-cancels, and always returns the latest known
+//! report. That is how the frozen header's one-shot signature carries a
+//! two-phase truth.
+//!
+//! ## No polling (§3.4)
+//!
+//! The supervisor waits on the result store's `watch` channel and the core's
+//! event broadcast in a `select!`. There is no sleep loop anywhere in this
+//! crate.
+
+use std::ffi::{c_char, c_void};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use dbx_api::LanguageId;
+use dbx_core::query::CancelReport;
+use dbx_core::store::{ChunkBody, StorePhase, StoreState};
+use dbx_core::{QueryEvent, QueryId};
+use serde_json::json;
+use tokio::task::JoinHandle;
+
+use crate::core::{core_ref, CoreInner, DbxCore};
+use crate::ffi_util::{cstr, guard, guard_quiet, to_c_string};
+use crate::runtime::runtime;
+
+/// Fired when the query makes progress. Called from a tokio worker thread —
+/// the Swift side must hop to the main queue itself.
+pub type DbxProgressFn = extern "C" fn(ctx: *mut c_void);
+
+/// The callback plus its opaque context.
+///
+/// `ctx` is an opaque pointer the caller owns; this crate only ever passes it
+/// back. It must stay valid until `dbx_query_free`, which is the contract the
+/// header's comment implies and this crate's README states outright.
+struct ProgressHook {
+    cb: Option<DbxProgressFn>,
+    ctx: *mut c_void,
+}
+
+// SAFETY: `ctx` is never dereferenced by Rust — it is handed straight back to
+// the C callback. Moving the pointer between threads is exactly what the
+// header documents ("Called from a background thread").
+unsafe impl Send for ProgressHook {}
+
+impl ProgressHook {
+    fn fire(&self) {
+        let Some(cb) = self.cb else { return };
+        let ctx = self.ctx;
+        // A panic unwinding out of a C callback would be undefined behaviour
+        // and would also kill the supervisor task. Contain it.
+        let _ = std::panic::catch_unwind(move || cb(ctx));
+    }
+}
+
+/// Everything the supervisor task and the FFI entry points share.
+struct QueryShared {
+    core: Arc<CoreInner>,
+    started: Instant,
+    inner: Mutex<QueryInner>,
+    progress: Mutex<ProgressHook>,
+}
+
+#[derive(Default)]
+struct QueryInner {
+    /// `None` until the server accepts the statement.
+    qid: Option<QueryId>,
+    /// Set when the query could not be started at all (unknown profile,
+    /// connect failure, bad SQL). Reported as `state: "failed"`.
+    start_error: Option<String>,
+    /// Last store phase seen by the supervisor.
+    phase: Option<StorePhase>,
+    rows: u64,
+    /// Cached the first time any chunk reveals them.
+    ///
+    /// **CoreApi gap.** Column names arrive baked into the first admitted
+    /// chunk; neither driver populates `Batch::schema_delta`, and
+    /// `StoreState.chunks` stays empty forever for a genuinely empty result.
+    /// So a `SELECT id, name FROM t WHERE 1=0` reports `"columns": []` — the
+    /// header's `columns` field simply cannot be filled for an empty result
+    /// set today.
+    columns: Vec<(String, String)>,
+    /// The user pressed stop, possibly before the query was even accepted.
+    cancel_requested: bool,
+    /// Latest known report — pending at first, resolved once the server
+    /// answers (§3.3).
+    cancel_report: Option<CancelReport>,
+}
+
+impl QueryShared {
+    fn lock(&self) -> std::sync::MutexGuard<'_, QueryInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn notify(&self) {
+        let hook = self
+            .progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        hook.fire();
+    }
+
+    fn fail(&self, message: String) {
+        self.lock().start_error = Some(message);
+        self.notify();
+    }
+}
+
+/// One running (or finished) query.
+pub struct DbxQuery {
+    shared: Arc<QueryShared>,
+    tasks: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl std::fmt::Debug for DbxQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.shared.lock();
+        f.debug_struct("DbxQuery")
+            .field("qid", &inner.qid)
+            .field("rows", &inner.rows)
+            .field("phase", &inner.phase)
+            .finish()
+    }
+}
+
+impl DbxQuery {
+    /// The query id, once the server has accepted the statement.
+    pub(crate) fn qid(&self) -> Option<QueryId> {
+        self.shared.lock().qid
+    }
+
+    pub(crate) fn core(&self) -> &Arc<CoreInner> {
+        &self.shared.core
+    }
+
+    /// Columns as last learned from the stream — used to size skeleton rows
+    /// for a window that has not arrived yet.
+    pub(crate) fn column_count(&self) -> u32 {
+        self.shared.lock().columns.len() as u32
+    }
+}
+
+/// Borrow a `DbxQuery*` argument.
+///
+/// # Safety
+/// `q` must come from `dbx_query_run` and not yet be freed.
+pub(crate) unsafe fn query_ref<'a>(q: *mut DbxQuery) -> Result<&'a DbxQuery, String> {
+    if q.is_null() {
+        return Err("DbxQuery* must not be NULL".to_string());
+    }
+    Ok(&*q)
+}
+
+// ---- run ---------------------------------------------------------------
+
+/// Start a statement. Returns immediately; rows stream in the background.
+///
+/// # Safety
+/// `core` must come from `dbx_core_new`; `profile`/`sql` must be valid
+/// NUL-terminated UTF-8; `err_out` must be NULL or writable.
+#[no_mangle]
+pub unsafe extern "C" fn dbx_query_run(
+    core: *mut DbxCore,
+    profile: *const c_char,
+    sql: *const c_char,
+    err_out: *mut *mut c_char,
+) -> *mut DbxQuery {
+    guard(err_out, std::ptr::null_mut(), "dbx_query_run", || {
+        let core = core_ref(core)?.clone();
+        let profile = cstr(profile, "profile")?.to_string();
+        let sql = cstr(sql, "sql")?.to_string();
+        if sql.trim().is_empty() {
+            return Err("sql must not be empty".to_string());
+        }
+        let rt = runtime()?;
+
+        let shared = Arc::new(QueryShared {
+            core,
+            started: Instant::now(),
+            inner: Mutex::new(QueryInner::default()),
+            progress: Mutex::new(ProgressHook {
+                cb: None,
+                ctx: std::ptr::null_mut(),
+            }),
+        });
+        let task = rt.spawn(drive(shared.clone(), profile, sql));
+        Ok(Box::into_raw(Box::new(DbxQuery {
+            shared,
+            tasks: Mutex::new(vec![task]),
+        })))
+    })
+}
+
+/// The whole life of a query, off the calling thread.
+async fn drive(shared: Arc<QueryShared>, profile: String, sql: String) {
+    // Subscribe *before* running so no `CancelOutcome` can be missed by a
+    // subscriber that started a moment too late.
+    let events = shared.core.api.subscribe_events();
+
+    let (id, driver_id) = match shared.core.open_profile(&profile).await {
+        Ok(v) => v,
+        Err(e) => return shared.fail(e),
+    };
+
+    // Split with `dbx-lang` rather than shipping a second tokenizer. A script
+    // pasted into the editor ("CREATE TABLE …; INSERT …; SELECT …") runs in
+    // order and the handle tracks the **last** statement, which is the one
+    // that produces the grid — the same shape `dbx-cli` gives a `-c` script.
+    let statements = split_statements(&driver_id, &sql);
+    let Some((last, leading)) = statements.split_last() else {
+        return shared.fail("sql contains no statement".to_string());
+    };
+
+    for stmt in leading {
+        if shared.lock().cancel_requested {
+            return shared.fail("cancelled before the server accepted the query".to_string());
+        }
+        if let Err(e) = run_to_completion(&shared, id, stmt).await {
+            return shared.fail(e);
+        }
+    }
+
+    if shared.lock().cancel_requested {
+        return shared.fail("cancelled before the server accepted the query".to_string());
+    }
+
+    let qid = match shared
+        .core
+        .api
+        .run_query(id, dbx_api::Request::native(last.as_str()))
+        .await
+    {
+        Ok(qid) => qid,
+        Err(e) => return shared.fail(e.to_string()),
+    };
+
+    // If stop was pressed while the server was still accepting, honour it now.
+    let cancel_now = {
+        let mut inner = shared.lock();
+        inner.qid = Some(qid);
+        inner.cancel_requested
+    };
+    shared.notify();
+    if cancel_now {
+        if let Some(report) = shared.core.api.cancel(qid).await.ok() {
+            shared.lock().cancel_report = Some(report);
+        }
+    }
+
+    supervise(shared, qid, events).await;
+}
+
+/// Watch one query's store and republish it into [`QueryInner`], without
+/// polling (design §3.4).
+async fn supervise(
+    shared: Arc<QueryShared>,
+    qid: QueryId,
+    mut events: tokio::sync::broadcast::Receiver<QueryEvent>,
+) {
+    let Some(store) = shared.core.api.queries().store(qid) else {
+        return;
+    };
+    let mut watch = store.subscribe();
+
+    loop {
+        let state = watch.borrow_and_update().clone();
+        let terminal = state.phase.is_terminal();
+        absorb(&shared, &state);
+        shared.notify();
+
+        if terminal {
+            break;
+        }
+        tokio::select! {
+            changed = watch.changed() => {
+                if changed.is_err() { break; }
+            }
+            event = events.recv() => match event {
+                Ok(QueryEvent::CancelOutcome { qid: q, report }) if q == qid => {
+                    shared.lock().cancel_report = Some(report);
+                    shared.notify();
+                }
+                Ok(_) => {}
+                // Lagged: the store watch is the source of truth for rows, so
+                // a missed broadcast event costs nothing but a cancel outcome
+                // we then read from the next `cancel` call.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => break,
+            },
+        }
+    }
+
+    // The store is terminal, but the server half of a cancel may still be in
+    // flight (§3.3). Keep listening for exactly that, then stop.
+    while shared.lock().cancel_requested && shared.lock().cancel_report_is_pending() {
+        match events.recv().await {
+            Ok(QueryEvent::CancelOutcome { qid: q, report }) if q == qid => {
+                shared.lock().cancel_report = Some(report);
+                shared.notify();
+                break;
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            Err(_) => break,
+        }
+    }
+}
+
+impl QueryInner {
+    fn cancel_report_is_pending(&self) -> bool {
+        self.cancel_report
+            .as_ref()
+            .is_none_or(|r| r.outcome.is_none())
+    }
+}
+
+/// Fold one store snapshot into the shared state.
+fn absorb(shared: &Arc<QueryShared>, state: &StoreState) {
+    let mut inner = shared.lock();
+    inner.rows = state.rows;
+    inner.phase = Some(state.phase.clone());
+    if inner.columns.is_empty() {
+        inner.columns = columns_of(state);
+    }
+}
+
+/// Columns, dug out of the first chunk that reveals any.
+///
+/// **CoreApi gap #4 in `dbx-cli`'s list, hit again here.** There is no way to
+/// learn a result's columns before its first chunk lands, so this is where
+/// they come from.
+fn columns_of(state: &StoreState) -> Vec<(String, String)> {
+    for chunk in &state.chunks {
+        match &chunk.body {
+            ChunkBody::Table(batch) => {
+                return batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|f| (f.name().clone(), f.data_type().to_string()))
+                    .collect();
+            }
+            ChunkBody::Docs(segment) => {
+                return crate::rows::doc_columns(segment)
+                    .into_iter()
+                    .map(|name| (name, "document-field".to_string()))
+                    .collect();
+            }
+            // Spilled chunks are Arrow with the store's one settled schema; a
+            // later resident chunk carries it. Keep looking.
+            ChunkBody::Spilled { .. } => {}
+        }
+    }
+    Vec::new()
+}
+
+/// Run one statement and wait for its result set to finish, then give its
+/// memory straight back (design §5, P7: `close_query`, not `cancel`, is what
+/// returns the budget). Used for the leading statements of a script, whose
+/// rows nobody is going to look at.
+async fn run_to_completion(
+    shared: &Arc<QueryShared>,
+    id: dbx_core::ProfileId,
+    sql: &str,
+) -> Result<(), String> {
+    let qid = shared
+        .core
+        .api
+        .run_query(id, dbx_api::Request::native(sql))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let result = match shared.core.api.queries().store(qid) {
+        Some(store) => {
+            let mut watch = store.subscribe();
+            loop {
+                let phase = watch.borrow_and_update().phase.clone();
+                match phase {
+                    StorePhase::Failed(msg) => break Err(msg.to_string()),
+                    p if p.is_terminal() => break Ok(()),
+                    _ => {}
+                }
+                if watch.changed().await.is_err() {
+                    break Ok(());
+                }
+            }
+        }
+        None => Ok(()),
+    };
+    shared.core.api.close_query(qid).await;
+    result
+}
+
+/// Statement splitting via `dbx-lang` — never a second tokenizer here.
+fn split_statements(driver_id: &str, sql: &str) -> Vec<String> {
+    let Some(language) = language_for_driver(driver_id) else {
+        // An engine this build has no splitter profile for: send the text
+        // through verbatim rather than guessing where a statement ends.
+        return vec![sql.to_string()];
+    };
+    let lang = dbx_lang::language_for(language);
+    lang.split(sql)
+        .iter()
+        .map(|span| span.text(sql).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// The language a profile's engine speaks. One line per driver, like
+/// [`crate::drivers::register_drivers`].
+fn language_for_driver(id: &str) -> Option<LanguageId> {
+    match id {
+        "sqlite" => Some(LanguageId::Sql(dbx_api::SqlDialect::Sqlite)),
+        "postgres" => Some(LanguageId::Sql(dbx_api::SqlDialect::Postgres)),
+        "redis" => Some(LanguageId::RedisCli),
+        _ => None,
+    }
+}
+
+// ---- free --------------------------------------------------------------
+
+/// Stop the query and free the handle.
+///
+/// # Safety
+/// `q` must come from `dbx_query_run`, freed at most once. Any `DbxRows`
+/// created from it must be freed first.
+#[no_mangle]
+pub unsafe extern "C" fn dbx_query_free(q: *mut DbxQuery) {
+    guard_quiet((), || {
+        if q.is_null() {
+            return;
+        }
+        let q = Box::from_raw(q);
+        // Detach the callback before anything else: the Swift-owned `ctx` may
+        // be freed the instant this returns, and firing into it would be a
+        // use-after-free.
+        {
+            let mut hook = q
+                .shared
+                .progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            hook.cb = None;
+            hook.ctx = std::ptr::null_mut();
+        }
+        for task in q
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+        {
+            task.abort();
+        }
+        // Closing (not cancelling) is what returns the memory — design §5, P7:
+        // "close the tab, get the memory back".
+        let qid = q.shared.lock().qid;
+        if let (Some(qid), Ok(rt)) = (qid, runtime()) {
+            let api = q.shared.core.api.clone();
+            rt.spawn(async move { api.close_query(qid).await });
+        }
+        drop(q);
+    })
+}
+
+// ---- cancel ------------------------------------------------------------
+
+/// **The stop button.** Always returns instantly (§3.3).
+///
+/// Idempotent: calling it again does not re-cancel, it just hands back the
+/// latest known outcome — which is how the server's answer, arriving later as
+/// a `CancelOutcome` event, reaches the caller through a one-shot signature.
+///
+/// # Safety
+/// `q` must come from `dbx_query_run`; `outcome_json_out` must be NULL or
+/// point at a writable `char*`. A non-NULL result must be `dbx_string_free`d.
+#[no_mangle]
+pub unsafe extern "C" fn dbx_query_cancel(q: *mut DbxQuery, outcome_json_out: *mut *mut c_char) {
+    guard_quiet((), || {
+        if !outcome_json_out.is_null() {
+            *outcome_json_out = std::ptr::null_mut();
+        }
+        let Ok(q) = query_ref(q) else { return };
+
+        let (qid, already, report) = {
+            let mut inner = q.shared.lock();
+            let already = inner.cancel_requested;
+            inner.cancel_requested = true;
+            (inner.qid, already, inner.cancel_report.clone())
+        };
+
+        let report = match (already, report, qid) {
+            // Already stopped: hand back whatever we know now, which may be
+            // the server's real answer.
+            (true, Some(report), _) => cancel_json(&report),
+            (true, None, _) => pending_json(),
+            // First press, query accepted: the local half happens here,
+            // synchronously, and the server half is fired and forgotten.
+            (false, _, Some(qid)) => {
+                let Ok(rt) = runtime() else { return };
+                // `CoreApi::cancel` awaits nothing (design §3.3); `block_on`
+                // only supplies the runtime context its background task needs.
+                match rt.block_on(q.shared.core.api.cancel(qid)) {
+                    Ok(report) => {
+                        q.shared.lock().cancel_report = Some(report.clone());
+                        cancel_json(&report)
+                    }
+                    Err(e) => json!({
+                        "local_stopped": true,
+                        "kind": null,
+                        "outcome": null,
+                        "message": format!("stopped; the query was already closed ({e})."),
+                    }),
+                }
+            }
+            // First press, not yet accepted: nothing has reached the server,
+            // so nothing can be cancelled on it. `drive` will see the flag.
+            (false, _, None) => json!({
+                "local_stopped": true,
+                "kind": "ClientAbandon",
+                "outcome": "ClientAbandoned",
+                "message": "stopped before the server accepted the query.",
+            }),
+        };
+
+        if !outcome_json_out.is_null() {
+            if let Ok(text) = serde_json::to_string(&report) {
+                *outcome_json_out = to_c_string(text);
+            }
+        }
+    })
+}
+
+/// The `CancelReport` as JSON, verbatim — including `CancelReport::message`,
+/// which design §3.3 insists is shown to the user "never embellished".
+fn cancel_json(report: &CancelReport) -> serde_json::Value {
+    json!({
+        "local_stopped": report.local_stopped,
+        "kind": format!("{:?}", report.kind),
+        "outcome": report.outcome.as_ref().map(|o| format!("{o:?}")),
+        "message": report.message.as_ref(),
+    })
+}
+
+fn pending_json() -> serde_json::Value {
+    json!({
+        "local_stopped": true,
+        "kind": null,
+        "outcome": null,
+        "message": "stopped receiving results; the server may still be executing this query.",
+    })
+}
+
+// ---- status ------------------------------------------------------------
+
+/// A status snapshot, in exactly the shape the frozen header documents.
+///
+/// # Safety
+/// `q` must come from `dbx_query_run`; `err_out` must be NULL or writable.
+#[no_mangle]
+pub unsafe extern "C" fn dbx_query_status_json(
+    q: *mut DbxQuery,
+    err_out: *mut *mut c_char,
+) -> *mut c_char {
+    guard(
+        err_out,
+        std::ptr::null_mut(),
+        "dbx_query_status_json",
+        || {
+            let q = query_ref(q)?;
+            let inner = q.shared.lock();
+            let elapsed_ms = q.shared.started.elapsed().as_millis() as u64;
+
+            let (state, error) = match (&inner.start_error, &inner.phase) {
+                (Some(e), _) => ("failed", Some(e.clone())),
+                (None, Some(StorePhase::Loading)) => ("streaming", None),
+                (None, Some(StorePhase::Parked(_))) => ("parked", None),
+                (None, Some(StorePhase::Capped)) => ("capped", None),
+                (None, Some(StorePhase::Complete)) => ("done", None),
+                (None, Some(StorePhase::Cancelled)) => ("cancelled", None),
+                (None, Some(StorePhase::Failed(m))) => ("failed", Some(m.to_string())),
+                // No phase yet: still opening the connection / waiting for the
+                // server to accept. "streaming" with zero rows is what the UI
+                // should draw — a spinner, not an empty grid.
+                (None, None) => ("streaming", None),
+            };
+
+            // `total_known` = "rows_loaded is the final count". True exactly
+            // when nothing more can ever be admitted. A capped result is
+            // final too — it is complete *up to the cap*, and the banner, not
+            // this flag, is what says so (design §3.2).
+            let total_known = inner.start_error.is_some()
+                || inner.phase.as_ref().is_some_and(StorePhase::is_terminal);
+
+            let payload = json!({
+                "state": state,
+                "rows_loaded": inner.rows,
+                "elapsed_ms": elapsed_ms,
+                "error": error,
+                "columns": inner
+                    .columns
+                    .iter()
+                    .map(|(name, ty)| json!({"name": name, "type": ty}))
+                    .collect::<Vec<_>>(),
+                "total_known": total_known,
+            });
+            drop(inner);
+
+            let text = serde_json::to_string(&payload)
+                .map_err(|e| format!("could not encode the query status: {e}"))?;
+            Ok(to_c_string(text))
+        },
+    )
+}
+
+// ---- progress ----------------------------------------------------------
+
+/// Register a progress callback. Fired from a tokio worker thread.
+///
+/// Pass a NULL `cb` to detach. `ctx` must outlive the query handle.
+///
+/// # Safety
+/// `q` must come from `dbx_query_run`. `ctx` is never dereferenced here, but
+/// it must remain valid for as long as the callback is attached.
+#[no_mangle]
+pub unsafe extern "C" fn dbx_query_on_progress(
+    q: *mut DbxQuery,
+    cb: Option<DbxProgressFn>,
+    ctx: *mut c_void,
+) {
+    guard_quiet((), || {
+        let Ok(q) = query_ref(q) else { return };
+        let mut hook = q
+            .shared
+            .progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        hook.cb = cb;
+        hook.ctx = ctx;
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_script_splits_into_statements_via_dbx_lang() {
+        let stmts = split_statements(
+            "sqlite",
+            "CREATE TABLE t (id INTEGER);\nINSERT INTO t VALUES (1);\nSELECT * FROM t",
+        );
+        assert_eq!(stmts.len(), 3, "got {stmts:?}");
+        assert!(stmts[2].starts_with("SELECT"));
+    }
+
+    #[test]
+    fn a_single_statement_stays_one_statement() {
+        let stmts = split_statements("sqlite", "SELECT 1");
+        assert_eq!(stmts, vec!["SELECT 1".to_string()]);
+        // A trailing terminator and whitespace must not invent an empty
+        // second statement (`dbx-lang` spans exclude the `;`).
+        assert_eq!(
+            split_statements("sqlite", "SELECT 1;\n\n"),
+            vec!["SELECT 1".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_unknown_engine_is_passed_through_verbatim() {
+        assert_eq!(split_statements("mongo", "db.x.find({})").len(), 1);
+    }
+
+    #[test]
+    fn every_registered_engine_has_a_language() {
+        for id in crate::drivers::known_driver_ids() {
+            assert!(language_for_driver(id).is_some(), "{id} has no language");
+        }
+    }
+}
