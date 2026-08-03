@@ -1,0 +1,49 @@
+# fixtures/postgres/docker-compose.yml — the §6 seeded PG datasets.
+#
+# Usage: see fixtures/README.md. Short version:
+#   cd fixtures/postgres && docker compose up -d
+#   # first boot only: seed.sql runs automatically via docker-entrypoint-initdb.d
+#   docker compose logs -f postgres   # watch seeding progress
+#
+# fsync/synchronous_commit are disabled — this is a throwaway perf fixture,
+# never a datastore you care about durability for. Do not reuse this compose
+# file for anything that needs to survive a crash.
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: dbx-fixtures-postgres
+    environment:
+      POSTGRES_USER: dbx
+      POSTGRES_PASSWORD: dbx
+      POSTGRES_DB: dbx_fixtures
+    ports:
+      - "55432:5432"
+    shm_size: "1gb"
+    command:
+      - "postgres"
+      - "-c"
+      - "fsync=off"
+      - "-c"
+      - "full_page_writes=off"
+      - "-c"
+      - "synchronous_commit=off"
+      - "-c"
+      - "max_locks_per_transaction=4096" # bench_catalog: 100k relations
+      - "-c"
+      - "shared_buffers=512MB"
+      - "-c"
+      - "maintenance_work_mem=512MB"
+      - "-c"
+      - "max_wal_size=4GB" # quiets "checkpoints occurring too frequently" during the bulk-load seed
+    volumes:
+      - ./seed.sql:/docker-entrypoint-initdb.d/01-seed.sql:ro
+      - dbx-fixtures-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dbx -d dbx_fixtures"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  dbx-fixtures-pgdata:

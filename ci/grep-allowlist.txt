@@ -1,0 +1,25 @@
+# ci/grep-allowlist.txt — waives specific §5.2 anti-pattern findings from
+# ci/gates.sh's grep-gates step (xtask grep-gates), for cases that are
+# justified and reviewed rather than banned outright.
+#
+# Format: one entry per line, `<rule-id> <path-fragment>`, `#` comments and
+# blank lines ignored. A finding is waived when its rule matches AND the
+# path-fragment is a substring of the finding's path (relative to repo
+# root, leading slash). Every entry MUST carry a one-line justification
+# comment on the same line — a bare waiver with no reason will be rejected
+# in review.
+#
+# Rule ids emitted by xtask grep-gates:
+#   controlflow-poll   — ControlFlow::Poll outside spike/bench/test dirs
+#   tokio-interval      — tokio::time::interval anywhere in gated source
+#   unbounded-channel   — mpsc::unbounded_channel (hard fail only inside
+#                          crates/dbx-core/src; warn elsewhere already)
+#   unwrap              — .unwrap() in non-test src/ (warn-only, not
+#                          normally worth allowlisting — the count is
+#                          informational)
+#   format-in-render    — format! in a *render*/*paint* file (warn-only)
+#
+# Example (do not uncomment — no waivers are currently justified):
+# tokio-interval  crates/dbx-tui/src/tick.rs  # ratatui redraw tick, not the data/render path; reviewed 2026-xx-xx
+
+# (no active entries — nothing in the tree currently needs a waiver)

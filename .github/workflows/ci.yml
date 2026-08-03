@@ -1,0 +1,50 @@
+name: CI
+
+# The Tier-1 gate (design doc §6): every PR, hardware-independent,
+# deterministic, <8 min. Runs ci/gates.sh verbatim — the same script
+# contributors run locally, so "green in CI" and "green locally" mean
+# the same thing. See ci/README.md for the Tier-1 vs Tier-2 split; the
+# nightly Tier-2 real-hardware fleet is not wired up here (tracked as a
+# TODO in ci/README.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: gates.sh (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable, rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Two Cargo workspaces in this repo: the root workspace (crates/*)
+      # and xtask/ (opts out via its own [workspace] table — see
+      # xtask/Cargo.toml — so its lockfile/target need caching separately).
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            xtask
+
+      - name: Shellcheck ci/gates.sh
+        run: shellcheck ci/gates.sh
+
+      - name: Run Tier-1 gates
+        run: ./ci/gates.sh
