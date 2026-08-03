@@ -1,0 +1,41 @@
+[package]
+name = "dbx-drv-mongo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MongoDB driver for dbx: the official `mongodb` 3.x driver over the dbx-api seam (design §3.1, §3.2, §3.3, §3.6)."
+
+[dependencies]
+dbx-api = { path = "../dbx-api" }
+# The Mongo shell subset parser (design §3.6 requirement 6) — already built
+# and tested; this crate consumes `dbx_lang::mongo::{parse, MongoStatement}`
+# and never reimplements shell parsing.
+dbx-lang = { path = "../dbx-lang" }
+
+# The official async driver. Default features (`compat-3-0-0` -> bson 2.x,
+# `rustls-tls`, `dns-resolver`) are kept: `rustls-tls` gives TLS support out
+# of the box (unlike the Postgres driver, TLS is not deferred here), and
+# `dns-resolver` is required for `mongodb+srv://` URLs (ticket requirement
+# 1: `parse_url` must accept both `mongodb://` and `mongodb+srv://`).
+mongodb = "3"
+# Pinned to the same major/minor `mongodb` 3.8.0 vendors internally
+# (`bson2 = "2.15.0"`, feature `bson-2`/`compat-3-0-0`) so Cargo unifies to a
+# single `bson` crate in the dependency graph instead of two incompatible
+# copies.
+bson = "2.15"
+
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+futures-util = "0.3"
+
+thiserror = { workspace = true }
+tracing = "0.1"
+
+# Required to implement dbx-api's #[async_trait] traits (dbx-api does not
+# re-export the macro) and to build Value::Bytes/Unsupported without a
+# separate transitive `bytes` version.
+async-trait = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

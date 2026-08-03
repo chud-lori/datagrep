@@ -26,6 +26,22 @@ bitflags! {
         const KEY_ENUMERATION   = 1 << 8;
         /// The engine can put the whole session in read-only mode server-side.
         const READ_ONLY_SESSION = 1 << 9;
+        /// Savepoints — a transaction can nest.
+        const NESTED_TRANSACTIONS = 1 << 10;
+        /// `EXPLAIN` can actually run the statement and report real timings.
+        const EXPLAIN_ANALYZE   = 1 << 11;
+        /// More than one statement per round trip.
+        const MULTI_STATEMENT   = 1 << 12;
+        /// Placeholders are positional (`$1`, `?`).
+        const POSITIONAL_PARAMS = 1 << 13;
+        /// Placeholders are named (`:name`, `@name`).
+        const NAMED_PARAMS      = 1 << 14;
+        /// Results can be streamed straight to a file without going through
+        /// the result store (design §5.1: "export all" ≠ "load all").
+        const EXPORT_STREAMING  = 1 << 15;
+        /// The driver can compile a `Predicate` at all; false greys out the
+        /// filter box rather than erroring at run time.
+        const EXPRESSION_FILTER = 1 << 16;
     }
 }
 

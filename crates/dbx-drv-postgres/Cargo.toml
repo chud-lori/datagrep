@@ -1,0 +1,32 @@
+[package]
+name = "dbx-drv-postgres"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Postgres driver for dbx: tokio-postgres extended protocol over the dbx-api seam (design §3.1, §3.2, §3.3)."
+
+[dependencies]
+dbx-api = { path = "../dbx-api" }
+
+# Native async Postgres client. `array-impls` off (arrays are decoded
+# manually into dbx_api::Value::Array — see src/value.rs); "with-*" feature
+# flags left off on purpose: we decode from raw `Type`/`&[u8]`, never through
+# tokio-postgres's `FromSql` convenience impls for chrono/uuid/etc, so this
+# driver carries no transitive chrono/uuid/serde_json dependency.
+tokio-postgres = { version = "0.7", features = ["runtime"] }
+
+tokio = { version = "1", features = ["rt", "sync", "net", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = "0.3"
+
+thiserror = { workspace = true }
+tracing = "0.1"
+
+# Required to implement dbx-api's #[async_trait] traits (dbx-api does not
+# re-export the macro).
+async-trait = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

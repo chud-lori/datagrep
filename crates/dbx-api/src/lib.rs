@@ -28,6 +28,11 @@ pub mod request;
 pub mod shape;
 pub mod value;
 
+/// Re-exported so driver crates can build `Value::Bytes` / `Value::Unsupported`
+/// without taking their own `bytes` dependency — losing raw bytes because a
+/// crate could not name the type would defeat design §3.1's "never lose bytes".
+pub use bytes::Bytes;
+
 pub use caps::{Capabilities, Caps, LanguageId, ParamStyle, SqlDialect};
 pub use catalog::{
     Catalog, Completion, CompletionCtx, Enumeration, FieldTrie, InferredSchema, LevelDef, ListOpts,

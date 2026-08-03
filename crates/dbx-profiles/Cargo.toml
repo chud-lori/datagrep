@@ -1,0 +1,34 @@
+[package]
+name = "dbx-profiles"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Local persistence for dbx (design §3.7): profiles, folders, tunnels, query history (+FTS5), saved queries, editor tabs, kv — one SQLite file, WAL, opened lazily, no secrets ever (§3.8)."
+
+[dependencies]
+dbx-api = { path = "../dbx-api" }
+# `bundled` compiles SQLite from source with -DSQLITE_ENABLE_FTS5 baked in
+# unconditionally (no separate rusqlite/libsqlite3-sys cargo feature exists
+# for it — verified against libsqlite3-sys's build.rs). We still detect FTS5
+# at runtime (db.rs) and degrade to a LIKE scan if it's ever missing, e.g. if
+# this crate is built against a system libsqlite3 instead one day.
+#
+# Pinned to 0.37 (rather than 0.32) to match dbx-drv-sqlite's rusqlite
+# version: libsqlite3-sys sets `links = "sqlite3"`, and Cargo allows only one
+# version of a crate with a given `links` key in the whole workspace — two
+# different rusqlite majors in the graph is a hard resolver error, not just
+# a lockfile inefficiency.
+rusqlite = { version = "0.37", features = ["bundled", "modern_sqlite"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = "0.8"
+tracing = "0.1"
+# sync only: the store runs on a dedicated worker thread (design §3.4 blocking
+# pool rule); async methods channel commands to it via oneshot handshakes.
+tokio = { version = "1", features = ["sync"], default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }
+tempfile = "3"

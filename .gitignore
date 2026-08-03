@@ -1,4 +1,7 @@
 /target
+# per-crate build dirs used to avoid cargo lock contention
+/target-*
+.build
 **/*.rs.bk
 *.pdb
 .DS_Store
