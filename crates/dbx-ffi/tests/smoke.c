@@ -258,6 +258,13 @@ int main(void) {
     char *before = dbx_query_status_json(slow, &err);
     no_err(err, "status before cancel");
     printf("       before: %s\n", before ? before : "(null)");
+    /* SQLite can reach the soft row cap in well under a second, and a capped
+     * feeder has already closed its cursor (dbx-core feeder.rs: the cursor is
+     * released on every exit path). Cancelling then genuinely cancels nothing,
+     * and reporting "cancelled" would be a lie — so what we assert below
+     * depends on whether the query was still live when the button was hit. */
+    int was_live = before && (strstr(before, "\"state\":\"streaming\"") != NULL ||
+                              strstr(before, "\"state\":\"parked\"") != NULL);
     dbx_string_free(before);
 
     struct timespec t0, t1;
@@ -273,9 +280,19 @@ int main(void) {
     ok(outcome && strstr(outcome, "\"local_stopped\":true") != NULL, "  the local half stopped");
     dbx_string_free(outcome);
 
-    char *after = await_state(slow, "\"state\":\"cancelled\"", 5000);
+    char *after = await_state(slow, was_live ? "\"state\":\"cancelled\"" : "\"state\":\"", 5000);
     printf("       after:  %s\n", after ? after : "(null)");
-    ok(after && strstr(after, "\"state\":\"cancelled\"") != NULL, "the query reports cancelled");
+    if (was_live) {
+        ok(after && strstr(after, "\"state\":\"cancelled\"") != NULL,
+           "a live query reports cancelled");
+    } else {
+        /* Already finished before the button was pressed: the terminal phase
+         * must be preserved, not overwritten with a cancellation that did not
+         * happen. */
+        ok(after && (strstr(after, "\"state\":\"capped\"") != NULL ||
+                     strstr(after, "\"state\":\"done\"") != NULL),
+           "an already-finished query keeps its honest terminal state");
+    }
     dbx_string_free(after);
 
     /* The server half arrives later; calling cancel again reads it. */

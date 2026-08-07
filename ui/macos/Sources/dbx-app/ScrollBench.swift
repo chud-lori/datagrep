@@ -9,10 +9,11 @@ import DbxKit
 /// This is NOT a display-link sampler (a display link is a timer, which the
 /// design bans). Each step runs one at a time on the main queue with the run
 /// loop free in between, so the numbers are per-scroll-step frame times.
+@MainActor
 enum ScrollBench {
     static var isRunning = false
 
-    static func run(on results: ResultsViewController, workbench: Workbench, steps: Int = 400) {
+    static func run(on results: ResultsViewController, model: AppModel, steps: Int = 400) {
         guard !isRunning else { return }
         let table = results.tableView
         let total = table.numberOfRows
@@ -32,7 +33,7 @@ enum ScrollBench {
         func step(_ i: Int) {
             if i >= steps {
                 finish(samples, before: before, cpuBefore: cpuBefore, results: results,
-                       workbench: workbench)
+                       model: model)
                 return
             }
             let row = (i * stride) % max(total - 60, 1)
@@ -53,7 +54,7 @@ enum ScrollBench {
 
     private static func finish(
         _ samples: [Double], before: Footprint.Sample, cpuBefore: Double,
-        results: ResultsViewController, workbench: Workbench
+        results: ResultsViewController, model: AppModel
     ) {
         isRunning = false
         let sorted = samples.sorted()
@@ -80,9 +81,10 @@ enum ScrollBench {
             Double(pager?.maxFetchNanos ?? 0) / 1e6, pager?.evictions ?? 0,
             pager?.residentPages ?? 0, pager?.residentRows ?? 0)
         FileHandle.standardError.write(Data((report + "\n").utf8))
-        workbench.statusBar.setMessage(
-            String(format: "scroll p50/p95/p99 = %.2f / %.2f / %.2f ms", pct(50), pct(95), pct(99)))
-        workbench.refreshFootprint()
+        model.message = String(
+            format: "scroll p50/p95/p99 = %.2f / %.2f / %.2f ms", pct(50), pct(95), pct(99))
+        model.isError = false
+        model.refreshFootprint()
 
         if ProcessInfo.processInfo.arguments.contains("--quit-after-bench") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { NSApp.terminate(nil) }

@@ -77,9 +77,14 @@ struct StatusBar: View {
             .keyboardShortcut(".", modifiers: .command)
         }
         .font(.system(size: 11))
+        .monospacedDigit()
         .padding(.horizontal, 12)
-        .frame(height: 26)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .frame(height: 28)
+        // A material, not a fill: the status bar floats above the content
+        // instead of merging into the same flat plane as everything else.
+        .background(.ultraThinMaterial)
         .overlay(alignment: .top) { Divider() }
+        .animation(.smooth(duration: 0.2), value: model.state)
+        .animation(.smooth(duration: 0.2), value: model.rowsLoaded)
     }
 }

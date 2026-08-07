@@ -915,6 +915,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbx-ffi"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "dbx-api",
+ "dbx-core",
+ "dbx-drv-postgres",
+ "dbx-drv-redis",
+ "dbx-drv-sqlite",
+ "dbx-lang",
+ "dbx-profiles",
+ "dbx-secrets",
+ "once_cell",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "dbx-lang"
 version = "0.1.0"
 dependencies = [

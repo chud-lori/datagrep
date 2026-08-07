@@ -26,6 +26,22 @@ mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 
 cp "${BIN}" "${APP}/Contents/MacOS/${APP_NAME}"
 
+# SwiftPM resource bundles (engine brand marks). `Bundle.module` resolves these
+# from Bundle.main.resourceURL, so they MUST be inside Contents/Resources — if
+# this loop copies nothing, every engine icon silently falls back to an SF
+# Symbol and `Bundle.module` traps on a target that has no other resource.
+shopt -s nullglob
+BUNDLES=("${BIN_DIR}"/*.bundle)
+if [ ${#BUNDLES[@]} -eq 0 ]; then
+  echo "==> WARNING: no .bundle in ${BIN_DIR} — engine icons will fall back to SF Symbols" >&2
+else
+  for b in "${BUNDLES[@]}"; do
+    cp -R "${b}" "${APP}/Contents/Resources/"
+    echo "==> bundled $(basename "${b}")"
+  done
+fi
+shopt -u nullglob
+
 cat > "${APP}/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -39,7 +55,8 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundlePackageType</key>       <string>APPL</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>LSMinimumSystemVersion</key>    <string>13.0</string>
+  <key>LSMinimumSystemVersion</key>    <string>14.0</string>
+  <key>NSApplicationSupportsSecureRestorableState</key><true/>
   <key>NSHighResolutionCapable</key>   <true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
   <key>NSPrincipalClass</key>          <string>NSApplication</string>

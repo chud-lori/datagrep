@@ -5,3 +5,6 @@
 **/*.rs.bk
 *.pdb
 .DS_Store
+ui/macos/.build
+ui/macos/.bench
+ui/macos/*.app

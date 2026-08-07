@@ -58,33 +58,29 @@ final class CatalogNode: ObservableObject, Identifiable {
         self.env = ""
     }
 
+    /// Engine glyphs and node glyphs come from `DbxKit.EngineStyle` /
+    /// `NodeStyle` — one definition, used by the sidebar, the toolbar picker
+    /// and the connection sheet alike, so an engine looks the same everywhere.
     var symbol: String {
-        if isProfile {
-            switch driver {
-            case "redis": return "bolt.horizontal.circle"
-            case "mongo": return "doc.text.magnifyingglass"
-            case "sqlite": return "internaldrive"
-            default: return "server.rack"
-            }
-        }
-        switch kind {
-        case "database", "schema": return "cylinder"
-        case "table", "view": return "tablecells"
-        case "collection": return "doc.text"
-        case "key", "hash", "string": return "key"
-        case "column", "field": return "tag"
-        default: return "circle"
-        }
+        isProfile ? EngineStyle.symbol(for: driver) : NodeStyle.symbol(forKind: kind)
+    }
+
+    var tint: Color {
+        isProfile ? EngineStyle.tint(for: driver) : Color.secondary
     }
 
     var badge: String? {
-        if isProfile { return "\(driver) · \(env)" }
+        if isProfile { return didLoad ? "\(children.count)" : nil }
         switch enumeration {
-        case .cheap: return nil
+        case .cheap: return didLoad && !children.isEmpty ? "\(children.count)" : nil
         case .scanOnly: return "scan"
         case .paged: return "paged"
         case .onDemand: return nil
         }
+    }
+
+    var subtitle: String? {
+        isProfile ? "\(EngineStyle.displayName(for: driver)) · \(env)" : nil
     }
 
     var isPreviewable: Bool {
@@ -123,8 +119,72 @@ final class AppModel: ObservableObject {
     @Published var detailBody: String = ""
     @Published var showDetail = false
 
-    var isProd: Bool { activeEnv == "prod" }
+    // New-connection sheet.
+    @Published var showNewConnection = false
+    @Published var newName: String = ""
+    @Published var newURL: String = ""
+    @Published var newError: String?
+
+    /// FFI gap: `dbx_profiles_add` hard-codes `env: Env::Dev`, so no profile
+    /// created through this ABI can ever report `prod`. The §3.8 red-chrome
+    /// guardrail would be unreachable dead code without a client-side marker,
+    /// so one profile name per line is remembered here (UserDefaults, never the
+    /// profile store — the engine owns that file).
+    @Published var prodMarked: Set<String> = [] {
+        didSet { UserDefaults.standard.set(Array(prodMarked), forKey: Self.prodKey) }
+    }
+    private static let prodKey = "dbx.prodMarkedProfiles"
+
+    /// Sidebar visibility, bound to `NavigationSplitView`'s `columnVisibility`
+    /// and persisted. Bound rather than driven by `toggleSidebar(_:)` because
+    /// the bound value is the only version we can guarantee is recoverable —
+    /// a split view dragged shut has no state we own.
+    @Published var sidebarVisible = true {
+        didSet { UserDefaults.standard.set(sidebarVisible, forKey: Self.sidebarKey) }
+    }
+    private static let sidebarKey = "dbx.sidebarVisible"
+
+    /// Advances one notch per progress callback. The only thing driving the
+    /// activity bar — no timer anywhere.
+    @Published var progressPhase: Double = 0
+
+    /// Sorting is a re-issued query, so these are query state, not view state.
+    @Published var sortColumn: String?
+    @Published var sortAscending = true
+    /// The last statement the user actually asked for, before dbx wrapped it in
+    /// an ORDER BY or a WHERE. Sorting twice must not nest two subqueries.
+    private var baseSQL: String = ""
+    private var baseFilters: [(column: String, value: String)] = []
+
+    /// The grid is only shown when it has something to show; otherwise the pane
+    /// holds a `ContentUnavailableView`, so "nothing here" is a stated fact and
+    /// not an empty rectangle the user has to interpret.
+    var showsGrid: Bool { rowsLoaded > 0 }
+
+    var activeDriver: String { roots.first { $0.name == activeProfile }?.driver ?? "" }
+    var canSortInEngine: Bool { EngineStyle.supportsSubqueryOrderBy(activeDriver) }
+
+    var isProd: Bool { activeEnv == "prod" || prodMarked.contains(activeProfile) }
     var isRunning: Bool { state.map { !$0.isTerminal } ?? false }
+
+    /// `.navigationSubtitle` — the connection state, in the titlebar, always.
+    var connectionSubtitle: String {
+        guard !activeProfile.isEmpty else { return "no connection" }
+        let driver = roots.first { $0.name == activeProfile }?.driver ?? "?"
+        let env = isProd ? "PRODUCTION" : activeEnv
+        guard let state else { return "\(driver) · \(env) · idle" }
+        return "\(driver) · \(env) · \(state.rawValue) · \(rowsLoaded.formatted()) rows"
+    }
+
+    /// Where the engine keeps its profile store. Not the temp directory: a
+    /// connection you added has to still be there tomorrow.
+    static var profilesDBPath: String {
+        let dir = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("dbx", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("profiles.sqlite").path
+    }
 
     private let queryQueue = DispatchQueue(label: "dbx.query", qos: .userInitiated)
     private let catalogQueue = DispatchQueue(label: "dbx.catalog", qos: .userInitiated)
@@ -140,47 +200,129 @@ final class AppModel: ObservableObject {
             self.detailBody =
                 Self.prettify(window.detailJSON(absoluteRow: UInt64(row), col: col))
                 ?? "(no detail available)"
-            self.showDetail = true
+            withAnimation(.smooth(duration: 0.22)) { self.showDetail = true }
         }
         results.onHiddenColumnsChanged = { [weak self] n in
             guard let self else { return }
             self.hiddenColumns = n
         }
+        results.onSortRequested = { [weak self] col in self?.sort(by: col) }
+        results.onFilterRequested = { [weak self] col, value in self?.filter(col, equals: value) }
+        results.onCopied = { [weak self] label in
+            self?.message = label
+            self?.isError = false
+        }
         editor.onSelectionChanged = { [weak self] in self?.refreshDirectives() }
+
+        prodMarked = Set(UserDefaults.standard.stringArray(forKey: Self.prodKey) ?? [])
+        if UserDefaults.standard.object(forKey: Self.sidebarKey) != nil {
+            sidebarVisible = UserDefaults.standard.bool(forKey: Self.sidebarKey)
+        }
 
         sqlText = """
             -- ⌘⏎ runs the statement under the caret.
             -- Block directives (design §3.6) are parsed and shown in the status bar:
             -- @limit 1000000
             -- @timeout 30s
-            SELECT * FROM public.events;
-
-            -- A smaller bounded result:
-            -- @limit 500
-            SELECT * FROM public.users;
+            SELECT name, type FROM sqlite_master ORDER BY name;
             """
         editor.setText(sqlText)
 
-        let dbPath = FileManager.default.temporaryDirectory
-            .appendingPathComponent("dbx-ui-profiles.sqlite").path
         do {
-            let c = try DbxCoreHandle(profilesDBPath: dbPath)
+            let c = try DbxCoreHandle(profilesDBPath: Self.profilesDBPath)
             core = c
-            let profiles = try c.profiles()
-            roots = profiles.map { p in
-                let n = CatalogNode(profile: p)
-                n.onExpand = { [weak self] node, prefix in self?.load(node, prefix: prefix) }
-                return n
-            }
-            activeProfile = profiles.first?.name ?? ""
-            activeEnv = profiles.first?.env ?? "dev"
-            message = "core ready · \(profiles.count) profiles · nothing connected yet"
+            reloadProfiles()
+            message = "core ready · \(roots.count) profiles · nothing connected yet"
         } catch {
             message = "dbx_core_new failed: \(error)"
             isError = true
         }
         refreshFootprint()
         refreshDirectives()
+    }
+
+    // MARK: - profiles
+
+    /// One `dbx_profiles_list_json` call. Any subtree already expanded is
+    /// dropped with it — profiles changed, so the tree below them is stale.
+    func reloadProfiles() {
+        guard let core else { return }
+        do {
+            let profiles = try core.profiles()
+            roots = profiles.map { p in
+                let n = CatalogNode(profile: p)
+                n.onExpand = { [weak self] node, prefix in self?.load(node, prefix: prefix) }
+                return n
+            }
+            if !roots.contains(where: { $0.name == activeProfile }) {
+                activeProfile = profiles.first?.name ?? ""
+                activeEnv = profiles.first?.env ?? "dev"
+            }
+        } catch {
+            message = "could not list profiles: \(error)"
+            isError = true
+        }
+    }
+
+    func addProfile(name: String, url: String) {
+        guard let core else { return }
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let u = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty, !u.isEmpty else {
+            newError = "both a name and a connection URL are required"
+            return
+        }
+        newError = nil
+        queryQueue.async { [weak self] in
+            var failure: String?
+            do { try core.addProfile(name: n, url: u) } catch { failure = "\(error)" }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let failure {
+                    self.newError = failure
+                    return
+                }
+                self.showNewConnection = false
+                self.newName = ""
+                self.newURL = ""
+                self.reloadProfiles()
+                self.activeProfile = n
+                self.activeEnv = self.roots.first { $0.name == n }?.env ?? "dev"
+                self.message = "added profile `\(n)`"
+                self.isError = false
+            }
+        }
+    }
+
+    func removeActiveProfile() {
+        guard let core, !activeProfile.isEmpty else { return }
+        let n = activeProfile
+        do {
+            try core.removeProfile(name: n)
+            prodMarked.remove(n)
+            reloadProfiles()
+            message = "removed profile `\(n)`"
+            isError = false
+        } catch {
+            message = "\(error)"
+            isError = true
+        }
+    }
+
+    func selectProfile(_ name: String) {
+        activeProfile = name
+        activeEnv = roots.first { $0.name == name }?.env ?? "dev"
+    }
+
+    /// §3.8 layer 1: the window turns red for a connection the user has said is
+    /// production. Client-side only, and the UI says exactly that.
+    func toggleProdMark(_ name: String) {
+        if prodMarked.contains(name) {
+            prodMarked.remove(name)
+        } else {
+            prodMarked.insert(name)
+        }
+        objectWillChange.send()
     }
 
     // MARK: - catalog, one level per call
@@ -262,9 +404,96 @@ final class AppModel: ObservableObject {
         run(sql: block.text, directives: block.directives)
     }
 
+    /// What the user asked for. Resets the derived state, because a new
+    /// statement is a new question — carrying the old sort into it would be
+    /// applying an ORDER BY to a column that may not exist any more.
     func run(sql: String, directives: BlockDirectives) {
+        baseSQL = sql
+        sortColumn = nil
+        sortAscending = true
+        baseFilters = []
+        execute(directives: directives)
+    }
+
+    /// Click a header: re-issue the SAME question with an ORDER BY pushed to
+    /// the engine. Sorting the 2 048 rows that happen to be in the page cache
+    /// would reorder 0.4% of a 500 000-row result and call it sorted.
+    func sort(by column: String) {
+        guard !baseSQL.isEmpty else { return }
+        guard canSortInEngine else {
+            message =
+                "sorting is only offered where dbx can push ORDER BY to the engine — \(EngineStyle.displayName(for: activeDriver)) results would have to be sorted client-side, which would only sort the rows already loaded"
+            isError = true
+            return
+        }
+        if sortColumn == column {
+            sortAscending.toggle()
+        } else {
+            sortColumn = column
+            sortAscending = true
+        }
+        execute(directives: directives)
+    }
+
+    /// Right-click a cell -> "Filter by this value". Same rule as sorting: the
+    /// predicate goes to the engine, so it is true of the whole result.
+    func filter(_ column: String, equals value: String) {
+        guard !baseSQL.isEmpty, canSortInEngine else {
+            message = "filtering needs an engine dbx can wrap the statement for"
+            isError = true
+            return
+        }
+        baseFilters.removeAll { $0.column == column }
+        baseFilters.append((column, value))
+        execute(directives: directives)
+    }
+
+    func clearDerived() {
+        sortColumn = nil
+        baseFilters = []
+        execute(directives: directives)
+    }
+
+    var hasDerivedClauses: Bool { sortColumn != nil || !baseFilters.isEmpty }
+
+    /// `baseSQL` wrapped in whatever ORDER BY / WHERE the user has clicked
+    /// together. One level of wrapping only — sorting twice re-wraps the base,
+    /// it never nests.
+    var effectiveSQL: String {
+        var inner = baseSQL.trimmingCharacters(in: .whitespacesAndNewlines)
+        while inner.hasSuffix(";") { inner = String(inner.dropLast()) }
+        guard hasDerivedClauses else { return baseSQL }
+        var q = "SELECT * FROM (\n\(inner)\n) AS dbx_result"
+        if !baseFilters.isEmpty {
+            let clauses = baseFilters.map { f -> String in
+                f.value.isEmpty
+                    ? "\(quoteIdent(f.column)) IS NULL OR \(quoteIdent(f.column)) = ''"
+                    : "\(quoteIdent(f.column)) = '\(f.value.replacingOccurrences(of: "'", with: "''"))'"
+            }
+            q += "\nWHERE (" + clauses.joined(separator: ") AND (") + ")"
+        }
+        if let sortColumn {
+            q += "\nORDER BY \(quoteIdent(sortColumn)) \(sortAscending ? "ASC" : "DESC")"
+        }
+        return q
+    }
+
+    private func quoteIdent(_ name: String) -> String {
+        let escaped = name.replacingOccurrences(of: "\"", with: "\"\"")
+        // MySQL only accepts double-quoted identifiers under ANSI_QUOTES, which
+        // dbx does not set; backticks are unambiguous there.
+        if EngineStyle.displayName(for: activeDriver) == "MySQL" {
+            return "`\(name.replacingOccurrences(of: "`", with: "``"))`"
+        }
+        return "\"\(escaped)\""
+    }
+
+    private func execute(directives: BlockDirectives) {
         guard let core else { return }
+        let sql = effectiveSQL
         let profile = directives.connection ?? activeProfile
+        results.sortColumn = sortColumn
+        results.sortAscending = sortAscending
         if directives.readOnly && SQLBlocks.isWriteStatement(sql) {
             message =
                 "blocked by `-- @readonly` — client-side classifier only; the server was not asked to enforce read-only"
@@ -307,6 +536,11 @@ final class AppModel: ObservableObject {
         guard let query, let status = try? query.status() else { return }
         results.apply(status: status)
         state = status.state
+        // One notch per progress event. This is the ONLY thing that moves the
+        // activity bar — no timer, no display link.
+        if !status.state.isTerminal, status.rowsLoaded != rowsLoaded {
+            progressPhase = progressPhase >= 0.999 ? 0 : min(1, progressPhase + 0.14)
+        }
         rowsLoaded = status.rowsLoaded
         totalKnown = status.totalKnown
         elapsedMs = status.elapsedMs
