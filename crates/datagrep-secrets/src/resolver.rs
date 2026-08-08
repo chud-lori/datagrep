@@ -337,6 +337,17 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
     i
 }
 
+/// Lock the in-memory store, recovering from a poisoned mutex.
+///
+/// A panic in another test must not cascade into unrelated failures here: the
+/// map holds no invariant that a partial write could corrupt, so the contents
+/// are still perfectly usable after a poisoning panic.
+fn lock(memory: &MemoryStore) -> std::sync::MutexGuard<'_, HashMap<(String, String), String>> {
+    memory
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,15 +509,4 @@ mod tests {
         let err = res.resolve(&r).await.unwrap_err();
         assert!(matches!(err, SecretError::Keychain { .. }));
     }
-}
-
-/// Lock the in-memory store, recovering from a poisoned mutex.
-///
-/// A panic in another test must not cascade into unrelated failures here: the
-/// map holds no invariant that a partial write could corrupt, so the contents
-/// are still perfectly usable after a poisoning panic.
-fn lock(memory: &MemoryStore) -> std::sync::MutexGuard<'_, HashMap<(String, String), String>> {
-    memory
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

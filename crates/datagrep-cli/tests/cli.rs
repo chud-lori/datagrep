@@ -158,10 +158,7 @@ fn profiles_add_postgres_url_with_inline_password_never_stores_it() {
     // there for reasons that have nothing to do with what is being asserted.
     // Skip loudly rather than fail, and rather than pretend to have run.
     if !out.status.success() && stderr(&out).contains("secure storage") {
-        eprintln!(
-            "SKIPPED {}: no OS credential store on this machine",
-            "profiles_add_postgres_url_with_inline_password_never_stores_it"
-        );
+        eprintln!("SKIPPED profiles_add_…never_stores_it: no OS credential store here");
         return;
     }
     assert!(out.status.success(), "{}", stderr(&out));

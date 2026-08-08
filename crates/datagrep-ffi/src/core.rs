@@ -77,6 +77,23 @@ impl DatagrepCore {
     /// Build a core over an explicit profile store — the seam the integration
     /// tests use with [`Store::open_in_memory`].
     pub fn with_store(store: Store) -> Result<Self, String> {
+        Self::build(store, SecretResolver::new())
+    }
+
+    /// Same, but with secrets held in memory instead of the OS keychain.
+    ///
+    /// The tests in this crate add profiles carrying passwords, which means
+    /// [`SecretResolver::new`] would reach for the real credential store: that
+    /// fails outright on a bare CI runner (no Secret Service on the session
+    /// bus) and quietly *succeeds* on a developer's Mac, leaving a junk
+    /// credential in their login keychain on every run. Nothing these tests
+    /// assert depends on a real keychain.
+    #[cfg(test)]
+    pub fn with_store_in_memory_secrets(store: Store) -> Result<Self, String> {
+        Self::build(store, SecretResolver::in_memory())
+    }
+
+    fn build(store: Store, secrets: SecretResolver) -> Result<Self, String> {
         let rt = runtime()?;
         // `CoreApi::new` must be constructed inside a runtime: its shared
         // `TimerWheel` spawns the (armed-on-demand) worker task.
@@ -86,7 +103,7 @@ impl DatagrepCore {
         Ok(Self(Arc::new(CoreInner {
             api: Arc::new(api),
             store: Arc::new(store),
-            secrets: Arc::new(SecretResolver::new()),
+            secrets: Arc::new(secrets),
             registered: Mutex::new(HashMap::new()),
             enforcement: Mutex::new(HashMap::new()),
         })))

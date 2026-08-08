@@ -46,6 +46,8 @@ arrow-array = "59.1"
 arrow-schema = "59.1"
 
 [dev-dependencies]
+# `SecretResolver::in_memory` — see DatagrepCore::with_store_in_memory_secrets.
+datagrep-secrets = { path = "../datagrep-secrets", features = ["test-support"] }
 tempfile = "3"
 
 [lints.clippy]

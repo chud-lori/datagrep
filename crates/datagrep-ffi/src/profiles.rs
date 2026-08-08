@@ -709,7 +709,8 @@ mod tests {
 
     fn test_core() -> *mut DatagrepCore {
         let core =
-            DatagrepCore::with_store(datagrep_profiles::Store::open_in_memory()).expect("core");
+            DatagrepCore::with_store_in_memory_secrets(datagrep_profiles::Store::open_in_memory())
+                .expect("core");
         Box::into_raw(Box::new(core))
     }
 
