@@ -176,9 +176,12 @@ allow-wildcard-paths = true
 highlight = "all"
 
 deny = [
-  # A second TLS stack. Every network driver here is rustls + ring, which
-  # gives one trust store, one set of protocol defaults, and one place to
-  # assert "a downgrade to plaintext is never silent". native-tls delegates
+  # A second TLS stack. The drivers that speak TLS at all — elasticsearch and
+  # mongo — are rustls + ring; postgres implements none and mysql compiles it
+  # out (see SECURITY.md). Keeping that to one stack gives one trust store,
+  # one set of protocol defaults, and one place to assert "a downgrade to
+  # plaintext is never silent", and stops a second one arriving the day
+  # postgres or mysql does grow TLS. native-tls delegates
   # to whatever the platform ships — SecureTransport, Schannel, or a system
   # OpenSSL of unknown vintage — so TLS behaviour would become per-platform
   # and untestable from the workspace, and openssl-sys would put a C build
