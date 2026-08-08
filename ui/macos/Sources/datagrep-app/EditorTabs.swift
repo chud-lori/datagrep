@@ -183,19 +183,27 @@ private struct EditorTabChip: View {
 
             // One dot, two meanings, never both at once: unsaved work, or a
             // close button once the pointer is over the chip.
-            ZStack {
-                if hovering {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .onTapGesture(perform: close)
-                } else if tab.isDirty {
+            // The unsaved dot keeps its own slot instead of sharing the close
+            // button's. Sharing meant it disappeared the moment the pointer
+            // touched the chip — i.e. exactly when someone is looking at the
+            // tab to find out whether they have unsaved work.
+            HStack(spacing: 3) {
+                if tab.isDirty {
                     Circle()
-                        .fill(Color.secondary)
+                        .fill(Color.accentColor)
                         .frame(width: 6, height: 6)
+                        .help("Unsaved changes")
                 }
+                ZStack {
+                    if hovering {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.secondary)
+                            .onTapGesture(perform: close)
+                    }
+                }
+                .frame(width: 10, height: 10)
             }
-            .frame(width: 10, height: 10)
         }
         .padding(.horizontal, 9)
         .frame(height: 22)

@@ -364,7 +364,7 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         let tab = tabs.active ?? newTab()
         tab.text = text
         tab.selectedRange = NSRange(location: 0, length: 0)
-        if tab.name != nil { tab.isDirty = true }
+        tab.isDirty = true
         load(tab)
         scheduleAutosave()
     }
@@ -610,6 +610,14 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     }
 
     private func close(_ tab: EditorTab) {
+        // Closing an unsaved scratch tab is the ONLY action that destroys typed
+        // SQL: quitting keeps everything (the session is restored verbatim,
+        // dirty flags included) and closing a *named* query only drops it from
+        // the session. So this is the one place a confirmation belongs, and
+        // there is deliberately none on quit.
+        if tab.isDirty, tab.name == nil, !tab.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if !confirmDiscard(tab) { return }
+        }
         guard let all = allTabs.firstIndex(where: { $0.id == tab.id }) else { return }
         let idx = tabs.tabs.firstIndex { $0.id == tab.id } ?? 0
         let wasActive = tab.id == tabs.activeID
@@ -686,6 +694,39 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         store.save(tab.record, text: tab.text)
         persistSession()
         refreshSavedList()
+    }
+
+    /// Asks before throwing away an untitled tab's SQL, offering to keep it as
+    /// a saved query instead. Returns true if the caller should go ahead and
+    /// close.
+    ///
+    /// "Save…" runs the normal save path, which prompts for a name; if the user
+    /// backs out of *that* prompt the tab is left untouched rather than closed,
+    /// because cancelling a name prompt is not consent to discard.
+    private func confirmDiscard(_ tab: EditorTab) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Discard this query?"
+        alert.informativeText =
+            "\(tab.displayTitle) has not been saved. Closing the tab deletes it — "
+            + "quitting datagrep would keep it."
+        alert.addButton(withTitle: "Discard")
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Save…")
+        // Destructive default: make Return cancel, not discard.
+        alert.buttons[0].keyEquivalent = ""
+        alert.buttons[1].keyEquivalent = "\r"
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return true
+        case .alertThirdButtonReturn:
+            activate(tab)
+            saveActiveTab()
+            // Only close if it really did get saved.
+            return tab.name != nil
+        default:
+            return false
+        }
     }
 
     /// First few words of the first statement, so the dialog opens with
@@ -856,7 +897,12 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     // MARK: - NSTextViewDelegate
 
     func textDidChange(_ notification: Notification) {
-        if let tab = tabs.active, tab.name != nil { tab.isDirty = true }
+        // Every tab, not just named ones. An untitled scratch tab is the case
+        // that actually needs the marker: `close(_:)` deletes its record, so
+        // closing it is the one action in the app that destroys typed SQL for
+        // good. Gating this on `name != nil` meant the tab most at risk was the
+        // only one that never showed it.
+        tabs.active?.isDirty = true
         // Safe here: the edit cycle has completed, so asking the layout manager
         // for the visible range will not re-enter it.
         highlighter.refreshVisible()
