@@ -13,6 +13,24 @@ APP_NAME="datagrep"
 BUNDLE_ID="com.lori.datagrep"
 VERSION="0.1.0"
 
+# Default to the REAL engine. The stub links a synthetic in-memory dataset and
+# cannot connect to any database, so a stub bundle looks fine and does nothing —
+# not what anyone following the README wants. Opt into it with DATAGREP_FFI=stub.
+if [ "${DATAGREP_FFI:-real}" != "stub" ]; then
+    export DATAGREP_FFI=real
+    REPO_ROOT="$(cd ../.. && pwd)"
+    export DATAGREP_FFI_LIB_DIR="${DATAGREP_FFI_LIB_DIR:-${REPO_ROOT}/target/release}"
+    if [ ! -f "${DATAGREP_FFI_LIB_DIR}/libdatagrep_ffi.a" ]; then
+        echo "==> building the engine (cargo build --release -p datagrep-ffi)"
+        (cd "${REPO_ROOT}" && cargo build --release -p datagrep-ffi)
+    fi
+    [ -f "${DATAGREP_FFI_LIB_DIR}/libdatagrep_ffi.a" ] || {
+        echo "no libdatagrep_ffi.a in ${DATAGREP_FFI_LIB_DIR}" >&2
+        echo "build it with: cargo build --release -p datagrep-ffi" >&2
+        exit 1
+    }
+fi
+
 echo "==> swift build -c ${CONFIG}  (DATAGREP_FFI=${DATAGREP_FFI:-stub})"
 swift build -c "${CONFIG}"
 
