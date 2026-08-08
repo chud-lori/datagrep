@@ -34,6 +34,9 @@ struct Workbench: View {
             DetailArea(model: model)
         }
         .navigationSplitViewStyle(.balanced)
+        // Renders nothing unless a newer release exists, and triggers its own
+        // once-per-launch check. One line is the whole integration.
+        .overlay(alignment: .bottomTrailing) { UpdateNoticeView() }
         // §3.8 guardrail, layer 1: a connection marked production tints every
         // accent in the window red.
         .tint(model.isProd ? Color.red : nil)
@@ -85,6 +88,10 @@ private struct DetailArea: View {
             }
         }
         .overlay(alignment: .top) { ProdStripe(isProd: model.isProd) }
+        // `HistoryModel` is a nested ObservableObject, so the presentation flag
+        // has to be observed by something that observes *it* — that is what the
+        // modifier is for. One line here, no state in this view.
+        .historySheet(model.history)
         // Deferred with the rest of the chrome — see `StartupStage`. Attaching
         // `.inspector` costs ~35 ms of view-graph construction for a column that
         // starts hidden, which is 14% of the 250 ms budget spent on something
@@ -280,6 +287,9 @@ private struct WorkbenchToolbar: ToolbarContent {
             .keyboardShortcut(".", modifiers: .command)
             .disabled(!model.isRunning)
             .help("Cancel — returns instantly, then reports what the server actually did  ⌘.")
+
+            HistoryToolbarButton(history: model.history)
+                .keyboardShortcut("y", modifiers: .command)
 
             Button {
                 withAnimation(.smooth(duration: 0.22)) { model.showDetail.toggle() }

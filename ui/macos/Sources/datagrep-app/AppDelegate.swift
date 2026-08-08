@@ -296,6 +296,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         withAnimation(.smooth(duration: 0.25)) { model.sidebarVisible.toggle() }
     }
 
+    /// ⌘Y. In the menu as well as the toolbar because the toolbar controls are
+    /// deferred past first paint, and a shortcut that only works once the
+    /// chrome has caught up is a shortcut people stop trusting.
+    @objc func showQueryHistory(_ sender: Any?) { model.history.isPresented = true }
+
+    /// The user asked, so this one reports its outcome instead of failing
+    /// silently the way the launch check does.
+    @objc func checkForUpdates(_ sender: Any?) {
+        UpdateCheck.shared.checkNow { newer, failed in
+            let alert = NSAlert()
+            if failed {
+                alert.messageText = "Could not check for updates"
+                alert.informativeText =
+                    "datagrep could not reach the release manifest. You are running \(UpdateCheck.shared.currentVersion)."
+            } else if let newer {
+                alert.messageText = "datagrep \(UpdateCheck.normalize(newer.version)) is available"
+                alert.informativeText =
+                    "You are running \(UpdateCheck.shared.currentVersion). Updates are never downloaded or installed automatically — the notice at the bottom of the window links to the release."
+            } else {
+                alert.messageText = "datagrep is up to date"
+                alert.informativeText = "You are running \(UpdateCheck.shared.currentVersion)."
+            }
+            alert.runModal()
+        }
+    }
+
     // MARK: - main menu
 
     /// Hand-built because there is no Xcode here and therefore no MainMenu.nib.
@@ -309,6 +335,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(
             withTitle: "About datagrep", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
             keyEquivalent: "")
+        add(appMenu, "Check for Updates…", #selector(checkForUpdates(_:)), "")
         appMenu.addItem(.separator())
         appMenu.addItem(
             withTitle: "Hide datagrep", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
@@ -360,6 +387,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let queryMenu = NSMenu(title: "Query")
         add(queryMenu, "Run Statement Under Caret", #selector(runStatement(_:)), "\r")
         add(queryMenu, "Cancel", #selector(cancelQuery(_:)), ".")
+        queryMenu.addItem(.separator())
+        add(queryMenu, "Query History…", #selector(showQueryHistory(_:)), "y")
         queryMenu.addItem(.separator())
         add(queryMenu, "Focus Editor", #selector(focusEditor(_:)), "l")
         add(queryMenu, "Toggle Cell Detail", #selector(toggleDetail(_:)), "i")

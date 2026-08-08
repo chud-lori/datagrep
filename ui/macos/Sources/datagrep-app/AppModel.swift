@@ -156,6 +156,12 @@ final class AppModel: ObservableObject {
     let results = ResultsViewController()
     let editor = SQLEditorController()
 
+    /// The automatic log of every statement this window has run. Its own object
+    /// rather than more fields here: the query path's whole contact with it is
+    /// the three `execution*` calls below, and nothing else in the model reads
+    /// it back.
+    let history = HistoryModel()
+
     @Published var roots: [CatalogNode] = []
     @Published var activeProfile: String = ""
     @Published var activeEnv: String = "dev"
@@ -334,6 +340,20 @@ final class AppModel: ObservableObject {
         }
         editor.onSelectionChanged = { [weak self] in self?.refreshDirectives() }
 
+        // Query history. Opening an entry gets a NEW tab rather than replacing
+        // the active buffer — a history panel that silently overwrites the SQL
+        // someone was half way through writing has cost them more than it saved.
+        history.onOpenInEditor = { [weak self] sql, connection in
+            self?.openInNewEditorTab(sql: sql, connection: connection)
+        }
+        history.onRerun = { [weak self] sql, connection in
+            self?.rerunFromHistory(sql: sql, connection: connection)
+        }
+        history.onStatus = { [weak self] text in
+            self?.message = text
+            self?.isError = false
+        }
+
         legacyProdMarks = Set(UserDefaults.standard.stringArray(forKey: Self.prodKey) ?? [])
         prodMarked = legacyProdMarks
         if UserDefaults.standard.object(forKey: Self.sidebarKey) != nil {
@@ -394,6 +414,24 @@ final class AppModel: ObservableObject {
                     }
                 }
                 NSApp.terminate(nil)
+            }
+        }
+
+        // Same family as DATAGREP_EDIT_FIXTURE, and for the same reason: the
+        // history panel is a sheet, which is its own window, so `--screenshot`
+        // (which draws the main window) cannot see it.
+        //   DATAGREP_HISTORY_FIXTURE=panel  opens the sheet — capture it with
+        //                                   DATAGREP_EDIT_SHOT.
+        //   DATAGREP_HISTORY_FIXTURE=open   replays the newest entry into a new
+        //                                   editor tab, visible to --screenshot.
+        if let mode = ProcessInfo.processInfo.environment["DATAGREP_HISTORY_FIXTURE"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                guard let self else { return }
+                if mode == "open", let entry = self.history.entries.first {
+                    self.history.openInEditor(entry)
+                } else {
+                    self.history.isPresented = true
+                }
             }
         }
 
@@ -848,6 +886,51 @@ final class AppModel: ObservableObject {
         run(sql: sql, directives: SQLBlocks.directives(in: sql))
     }
 
+    // MARK: - history
+
+    /// The driver id recorded alongside a statement. Taken from the profile
+    /// rather than looked up later: history has to stay readable after the
+    /// connection it ran on has been deleted.
+    private func driverID(for profile: String) -> String {
+        profilesByName[profile]?.driver ?? roots.first { $0.name == profile }?.driver ?? ""
+    }
+
+    /// Opens a recorded statement in a **new** editor tab, bound to the
+    /// connection it originally ran on.
+    ///
+    /// `editor.setText` replaces the *active* tab's text, so calling it alone
+    /// would destroy whatever unsaved SQL happened to be in front of the user.
+    /// `newTab()` makes a fresh tab active first, so nothing is overwritten and
+    /// ⌘W still throws the copy away.
+    private func openInNewEditorTab(sql: String, connection: String?) {
+        let tab = editor.newTab()
+        editor.setText(sql)
+        if let connection, !connection.isEmpty, profilesByName[connection] != nil {
+            // Through the tab model's own command, so the binding is persisted
+            // with the tab exactly as picking it from the chip would be.
+            editor.tabs.onBind?(tab, connection)
+            selectProfile(connection)
+        }
+        sqlText = sql
+        refreshDirectives()
+        editor.focus()
+        message = "opened a history entry in a new tab — your other tabs are untouched"
+        isError = false
+    }
+
+    /// Run Again: same statement, same connection, in its own tab. The tab is
+    /// deliberate — the results that appear should have visible SQL next to
+    /// them, and it still costs no one their buffer.
+    private func rerunFromHistory(sql: String, connection: String?) {
+        openInNewEditorTab(sql: sql, connection: connection)
+        var d = SQLBlocks.directives(in: sql)
+        if let connection, !connection.isEmpty, profilesByName[connection] != nil {
+            d.connection = connection
+        }
+        directives = d
+        run(sql: sql, directives: d)
+    }
+
     // MARK: - query
 
     func refreshDirectives() {
@@ -958,6 +1041,12 @@ final class AppModel: ObservableObject {
             message =
                 "blocked by `-- @readonly` — client-side classifier only; the server was not asked to enforce read-only"
             isError = true
+            // Recorded: a statement that was refused is exactly the one people
+            // come back looking for, and it never reaches the engine to be
+            // recorded any other way.
+            history.executionBlocked(
+                sql: sql, connection: profile, engine: driverID(for: profile),
+                reason: message)
             return
         }
         // The per-connection read-only guard. It names the profile that refused
@@ -970,6 +1059,8 @@ final class AppModel: ObservableObject {
                 "`\(profile)` is read-only — \(verb) not sent (\(safety.enforcement.refusalClause)). ⌘E to change it."
             isError = true
             state = nil
+            history.executionBlocked(
+                sql: sql, connection: profile, engine: driverID(for: profile), reason: message)
             return
         }
         if safety.confirmWrites, SQLBlocks.isWriteStatement(sql) {
@@ -1035,6 +1126,9 @@ final class AppModel: ObservableObject {
         guard let core else { return }
         message = "running on \(profile)…"
         isError = false
+        // Four string copies, no I/O: the entry itself is only written once the
+        // statement reaches a terminal state.
+        history.executionStarted(sql: sql, connection: profile, engine: driverID(for: profile))
         state = .streaming
 
         queryQueue.async { [weak self] in
@@ -1048,6 +1142,9 @@ final class AppModel: ObservableObject {
                     self.message = "\(error)"
                     self.isError = true
                     self.results.clear()
+                    // Never got a query handle, so `refreshFromCore` will never
+                    // see this one go terminal.
+                    self.history.executionFailedToStart("\(error)")
                 }
             }
         }
@@ -1077,6 +1174,10 @@ final class AppModel: ObservableObject {
         rowsLoaded = status.rowsLoaded
         totalKnown = status.totalKnown
         elapsedMs = status.elapsedMs
+        // Safe on every tick: this records once, when the query goes terminal.
+        history.executionProgressed(
+            state: status.state, rowsLoaded: status.rowsLoaded, elapsedMs: status.elapsedMs,
+            error: status.error)
         if let e = status.error {
             message = e
             isError = true
