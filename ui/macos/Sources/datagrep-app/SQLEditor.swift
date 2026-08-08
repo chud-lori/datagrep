@@ -289,9 +289,44 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         tabBarHost.translatesAutoresizingMaskIntoConstraints = false
         welcomeHost = NSHostingView(rootView: EditorWelcomeState(model: tabs))
         welcomeHost.translatesAutoresizingMaskIntoConstraints = false
+        // An NSHostingView installs its own constraints to defend its SwiftUI
+        // content's ideal size. That is what made this pane grow to fit the
+        // welcome state and the tab bar instead of the split's height — the
+        // same trap AppDelegate already sidesteps with
+        // `NSHostingController.sizingOptions = []` for the window. Both hosts
+        // here are laid out entirely by the constraints below, so neither
+        // should contribute a size of its own.
+        welcomeHost.sizingOptions = []
+        tabBarHost.sizingOptions = []
+        // An NSHostingView defends its SwiftUI content's intrinsic size at
+        // `required` priority, and a hidden view still takes part in Auto
+        // Layout. Pinned to all four of the scroll view's edges, that let the
+        // welcome state's own height inflate the scroll view and with it this
+        // whole controller's view — measured at 1151 pt inside a ~490 pt pane,
+        // which pushed the tab bar off the top and left the visible area
+        // showing the middle of an empty text view. It must never be the thing
+        // that decides how tall the editor is.
+        for axis in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
+            welcomeHost.setContentCompressionResistancePriority(.defaultLow, for: axis)
+            welcomeHost.setContentHuggingPriority(.defaultLow, for: axis)
+        }
 
         let container2 = EditorContainerView()
         container2.keyHandler = { [weak self] e in self?.handleKeyEquivalent(e) ?? false }
+        // NSScrollView's fitting size follows its document view, and an
+        // NSTextView's grows with its content, so this container reported a
+        // fitting height far larger than the window. VSplitView honours a
+        // child's ideal size, so SwiftUI laid the editor pane out at 1151 pt
+        // inside a 673 pt window: the tab bar ended up above the visible area
+        // and the pane showed the middle of an empty text view, with nothing
+        // to click. The editor's height is the split's decision, never the
+        // text's.
+        for axis in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
+            scroll.setContentCompressionResistancePriority(.defaultLow, for: axis)
+            scroll.setContentHuggingPriority(.defaultLow, for: axis)
+            container2.setContentCompressionResistancePriority(.defaultLow, for: axis)
+            container2.setContentHuggingPriority(.defaultLow, for: axis)
+        }
         container2.addSubview(tabBarHost)
         container2.addSubview(scroll)
         container2.addSubview(welcomeHost)
@@ -420,6 +455,7 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     /// Frontmost tab per connection. Mirrored into `session.json` so it
     /// survives a relaunch.
     private var activeByScope: [String: String] = [:]
+
 
     private func updateWelcomeState() {
         welcomeHost?.isHidden = !tabs.tabs.isEmpty
@@ -936,4 +972,22 @@ struct SQLEditorView: NSViewControllerRepresentable {
     let controller: SQLEditorController
     func makeNSViewController(context: Context) -> SQLEditorController { controller }
     func updateNSViewController(_ nsViewController: SQLEditorController, context: Context) {}
+
+    /// Take the height offered, never the one AppKit would ask for.
+    ///
+    /// Without this SwiftUI sizes the representable from the controller view's
+    /// Auto Layout fitting size, which follows the `NSScrollView`, which
+    /// follows the `NSTextView` — so the pane grew with the document. In a
+    /// 673 pt window the editor was laid out 1151 pt tall, putting the tab bar
+    /// above the visible area and leaving a dead, unclickable band where the
+    /// editor should be. `VSplitView` decides how tall this pane is; the text
+    /// inside it does not get a vote.
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        nsViewController: SQLEditorController,
+        context: Context
+    ) -> CGSize? {
+        guard let width = proposal.width, let height = proposal.height else { return nil }
+        return CGSize(width: width, height: height)
+    }
 }
