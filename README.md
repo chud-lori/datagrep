@@ -1,9 +1,10 @@
 # datagrep
 
-A lightweight database client for SQL and NoSQL in one app — *the client you don't
-have to close to get your laptop back.*
+**Every database in one native app. Free and open source.**
 
-Native macOS app (SwiftUI + AppKit) and a CLI, both over one Rust engine.
+Postgres, MySQL, SQLite, Redis and MongoDB — SQL and documents as equals, not one
+bolted onto the other. A native macOS app (SwiftUI + AppKit) and a CLI, both over
+one Rust engine. No Electron, no JVM.
 
 ## Engines
 
