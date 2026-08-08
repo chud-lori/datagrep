@@ -191,10 +191,12 @@ final class AppModel: ObservableObject {
     @Published var schemaTarget: SchemaTarget?
     @Published var schemaLoad: SchemaLoad = .idle
 
-    // New-connection sheet.
+    // New-connection sheet. The same `ConnectionForm` the Edit sheet uses, so
+    // adding and editing a connection ask for the same things in the same
+    // order rather than being two dialogs that happen to be about one subject.
     @Published var showNewConnection = false
-    @Published var newName: String = ""
-    @Published var newURL: String = ""
+    let newForm = ConnectionForm()
+    let newTest = ConnectionTestState()
     @Published var newError: String?
 
     /// The Edit Connection sheet, or nil when it is closed.
@@ -341,6 +343,19 @@ final class AppModel: ObservableObject {
         }
         editor.onSelectionChanged = { [weak self] in self?.refreshDirectives() }
 
+        // The editor's view of the connection list. Without this the tab chips
+        // and the welcome state can only name the profiles a restored tab
+        // happens to be bound to, so neither could draw an engine mark.
+        editor.profilesProvider = { [weak self] in
+            (self?.roots ?? []).map { EditorConnectionOption(name: $0.name, driver: $0.driver) }
+        }
+        editor.onConnectionChanged = { [weak self] name in
+            guard let name, !name.isEmpty else { return }
+            self?.selectProfile(name, scopeEditors: false)
+        }
+        editor.tabs.onNewConnection = { [weak self] in self?.showNewConnection = true }
+        editor.tabs.onPickConnection = { [weak self] name in self?.selectProfile(name) }
+
         // Query history. Opening an entry gets a NEW tab rather than replacing
         // the active buffer — a history panel that silently overwrites the SQL
         // someone was half way through writing has cost them more than it saved.
@@ -361,14 +376,11 @@ final class AppModel: ObservableObject {
             sidebarVisible = UserDefaults.standard.bool(forKey: Self.sidebarKey)
         }
 
-        sqlText = """
-            -- ⌘⏎ runs the statement under the caret.
-            -- Block directives are parsed and shown in the status bar:
-            -- @limit 1000000
-            -- @timeout 30s
-            SELECT name, type FROM sqlite_master ORDER BY name;
-            """
-        editor.setText(sqlText)
+        // No seed text, and no starter tab. An editor is something the user
+        // makes — for a connection — and until then the pane holds the welcome
+        // state. The old boilerplate here was a SQLite `sqlite_master` query
+        // that was wrong for every other engine, dropped into a document the
+        // user then had to clear before they could type.
 
         do {
             let c = try DatagrepCoreHandle(profilesDBPath: Self.profilesDBPath)
@@ -492,10 +504,22 @@ final class AppModel: ObservableObject {
             } else {
                 activeEnv = profilesByName[activeProfile]?.env ?? activeEnv
             }
+            // Editors are scoped by connection, so the tab bar has to follow
+            // the profile list: a connection that just appeared (or vanished)
+            // changes which editors are showing.
+            editor.refreshConnections()
+            editor.setScope(activeProfile.isEmpty ? nil : activeProfile)
         } catch {
             message = "could not list profiles: \(error)"
             isError = true
         }
+    }
+
+    /// Save the New Connection sheet. The URL sent carries the typed password,
+    /// which `datagrep_profiles_add` lifts into the keychain before the profile
+    /// is written — the one path that is known to keep it off disk.
+    func addProfileFromForm() {
+        addProfile(name: newForm.name, url: newForm.urlWithPassword)
     }
 
     func addProfile(name: String, url: String) {
@@ -503,7 +527,7 @@ final class AppModel: ObservableObject {
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let u = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !n.isEmpty, !u.isEmpty else {
-            newError = "both a name and a connection URL are required"
+            newError = "a name and either a host or a file are required"
             return
         }
         newError = nil
@@ -517,13 +541,55 @@ final class AppModel: ObservableObject {
                     return
                 }
                 self.showNewConnection = false
-                self.newName = ""
-                self.newURL = ""
+                self.newForm.apply(ConnectionFields(engineID: "postgres"))
+                self.newForm.name = ""
+                self.newTest.clear()
                 self.reloadProfiles()
-                self.activeProfile = n
-                self.activeEnv = self.roots.first { $0.name == n }?.env ?? "dev"
-                self.message = "added profile `\(n)`"
+                self.selectProfile(n)
+                self.message = "added connection `\(n)`"
                 self.isError = false
+            }
+        }
+    }
+
+    // MARK: - testing a connection
+
+    /// Test what the New Connection sheet currently describes. Nothing is
+    /// saved, and no password reaches the keychain — a failed test leaves no
+    /// wreckage behind to clean up.
+    func testNewConnection() {
+        runTest(newTest, name: nil, url: newForm.urlWithPassword)
+    }
+
+    /// Test what the Edit sheet currently describes.
+    ///
+    /// The edited URL is dialled rather than the saved profile whenever the
+    /// user has typed anything, so the button answers "will this work?" and not
+    /// "did the old one work?". With nothing typed it falls back to the saved
+    /// profile, which is the only way to test the keychain password.
+    func testConnection(_ draft: ConnectionDraft) {
+        let typed = draft.urlToTest.trimmingCharacters(in: .whitespacesAndNewlines)
+        let unchanged = typed == draft.originalURL && draft.password.isEmpty
+        runTest(draft.test, name: unchanged ? draft.originalName : nil, url: unchanged ? nil : typed)
+    }
+
+    private func runTest(_ state: ConnectionTestState, name: String?, url: String?) {
+        guard let core else { return }
+        state.begin()
+        // The dial happens on `queryQueue` and can take the engine's full
+        // connect timeout: the sheet stays live and says "connecting…" instead
+        // of the window beachballing on a host that is not there.
+        queryQueue.async { [weak self] in
+            var result: ConnectionTestResult?
+            var failure: String?
+            do { result = try core.testConnection(name: name, url: url) } catch {
+                failure = "\(error)"
+            }
+            DispatchQueue.main.async {
+                guard self != nil else { return }
+                state.running = false
+                state.result = result
+                state.failure = failure
             }
         }
     }
@@ -694,15 +760,63 @@ final class AppModel: ObservableObject {
     }
 
     func removeActiveProfile() {
-        guard let core, !activeProfile.isEmpty else { return }
-        let n = activeProfile
+        guard !activeProfile.isEmpty else { return }
+        removeProfile(named: activeProfile)
+    }
+
+    /// Delete a connection, after asking.
+    ///
+    /// Destructive and irreversible — the engine's `datagrep_profiles_remove`
+    /// deletes the keychain entry along with the row — so it is confirmed, the
+    /// alert is `.critical`, and it says out loud that the saved password goes
+    /// too. The editors written for this connection are *not* deleted: their
+    /// `.sql` files stay where they are, because removing a connection is not
+    /// permission to destroy SQL someone wrote.
+    func removeProfile(named name: String) {
+        guard core != nil, profilesByName[name] != nil else { return }
+        let safety = safety(for: name)
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Remove the connection “\(name)”?"
+        var detail =
+            "The connection is deleted from datagrep. The database itself is untouched."
+        if profilesByName[name]?.hasSecret == true {
+            detail += " Its saved password is removed from the macOS keychain as well."
+        }
+        if safety.isProd {
+            detail += " This connection is marked production."
+        }
+        detail += " Editors you wrote for it are kept on disk."
+        alert.informativeText = detail
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        // The destructive button is the one that has to be chosen deliberately;
+        // ⏎ must not delete a connection.
+        alert.buttons.first?.hasDestructiveAction = true
+        alert.buttons.last?.keyEquivalent = "\r"
+
+        let commit: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.commitRemoval(of: name)
+        }
+        guard let window = NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) else {
+            commit(alert.runModal())
+            return
+        }
+        alert.beginSheetModal(for: window, completionHandler: commit)
+    }
+
+    private func commitRemoval(of name: String) {
+        guard let core else { return }
         do {
-            try core.removeProfile(name: n)
-            prodMarked.remove(n)
-            legacyProdMarks.remove(n)
-            profilesByName.removeValue(forKey: n)
+            try core.removeProfile(name: name)
+            prodMarked.remove(name)
+            legacyProdMarks.remove(name)
+            profilesByName.removeValue(forKey: name)
+            editor.forgetEditors(of: name)
+            if activeProfile == name { activeProfile = "" }
             reloadProfiles()
-            message = "removed profile `\(n)`"
+            message = "removed connection `\(name)`"
             isError = false
         } catch {
             message = "\(error)"
@@ -710,9 +824,107 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func selectProfile(_ name: String) {
+    /// Copy a connection, so a second one against the same server (a different
+    /// database, a read-only twin) does not have to be retyped.
+    ///
+    /// The copy carries the URL and the safety settings; it deliberately does
+    /// **not** carry the password — the secret never crosses this ABI, so the
+    /// only honest thing to do is say so and let the user type it once.
+    func duplicateProfile(named name: String) {
+        guard let core, let original = profilesByName[name] else { return }
+        guard ProfileABI.canPrefill else {
+            message =
+                "this engine build cannot read a connection back, so `\(name)` cannot be copied — add the connection again instead"
+            isError = true
+            return
+        }
+        let copyName = uniqueProfileName(basedOn: name)
+        queryQueue.async { [weak self] in
+            var failure: String?
+            var url = ""
+            do {
+                url = try core.profileDetail(name: name).url
+                if url.isEmpty {
+                    failure = "the engine reported no connection URL for `\(name)`"
+                } else {
+                    try core.addProfile(name: copyName, url: url)
+                }
+            } catch {
+                failure = "\(error)"
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let failure {
+                    self.message = "could not copy `\(name)`: \(failure)"
+                    self.isError = true
+                    return
+                }
+                self.reloadProfiles()
+                self.selectProfile(copyName)
+                self.message =
+                    original.hasSecret
+                    ? "copied `\(name)` to `\(copyName)` — the saved password was not copied, so set one with ⌘E"
+                    : "copied `\(name)` to `\(copyName)`"
+                self.isError = !original.hasSecret ? false : true
+            }
+        }
+    }
+
+    private func uniqueProfileName(basedOn name: String) -> String {
+        var candidate = name + " copy"
+        var n = 2
+        while profilesByName[candidate] != nil {
+            candidate = "\(name) copy \(n)"
+            n += 1
+        }
+        return candidate
+    }
+
+    /// Drop this connection's pooled socket so the next statement dials again.
+    ///
+    /// A connection that has gone stale — a laptop that slept, a server that
+    /// restarted, a VPN that dropped — otherwise keeps failing on the socket it
+    /// already has. The engine closes the pool when a profile is forgotten,
+    /// which is what a no-op update triggers, so this is a real reconnect and
+    /// not a cosmetic one.
+    func reconnect(_ name: String) {
+        guard let core, profilesByName[name] != nil else { return }
+        var patch = ProfilePatch()
+        patch.set("env", profilesByName[name]?.env ?? "dev")
+        let json = patch.json
+        message = "reconnecting `\(name)`…"
+        isError = false
+        queryQueue.async { [weak self] in
+            var failure: String?
+            do { try core.updateProfile(name: name, patchJSON: json) } catch {
+                failure = "\(error)"
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let failure {
+                    self.message = "could not reconnect `\(name)`: \(failure)"
+                    self.isError = true
+                    return
+                }
+                // Drop the cached catalog too: the tree came off the old
+                // connection, and half of a reconnect is forgetting what the
+                // stale one told us.
+                self.reloadProfiles()
+                self.message = "`\(name)` will dial again on the next statement"
+                self.isError = false
+            }
+        }
+    }
+
+    /// Make `name` the window's connection, and show its editors.
+    ///
+    /// `scopeEditors: false` is for the one caller that is already inside the
+    /// editor — binding a tab to a connection — where re-scoping from here
+    /// would fight the move the editor has just made.
+    func selectProfile(_ name: String, scopeEditors: Bool = true) {
         activeProfile = name
         activeEnv = roots.first { $0.name == name }?.env ?? "dev"
+        if scopeEditors { editor.setScope(name.isEmpty ? nil : name) }
     }
 
     /// Layer 1 of the production guardrail: the window turns red for a
@@ -775,7 +987,12 @@ final class AppModel: ObservableObject {
                     child.onExpand = { [weak self] n, p in self?.load(n, prefix: p) }
                     return child
                 }
-                node.didLoad = true
+                // Only a level that actually came back counts as loaded. Marking
+                // a failed fetch loaded made the failure permanent: the expand
+                // hook fires once and `didLoad` is what stops it firing again,
+                // so a dropped connection could never be retried by reopening
+                // the node.
+                node.didLoad = failure == nil
                 if let failure {
                     self.message = "catalog error: \(failure)"
                     self.isError = true
@@ -799,9 +1016,33 @@ final class AppModel: ObservableObject {
     }
 
     func select(_ node: CatalogNode) {
-        activeProfile = node.profile
+        selectProfile(node.profile)
         if let root = roots.first(where: { $0.profile == node.profile }) { activeEnv = root.env }
         if node.isDescribable { showSchema(for: node) }
+    }
+
+    // MARK: - editors, per connection
+
+    /// New SQL Editor, owned by one connection. The double-click and the
+    /// context-menu entry on a connection row both land here.
+    func openSQLEditor(for profile: String) {
+        guard profilesByName[profile] != nil || roots.contains(where: { $0.name == profile })
+        else { return }
+        selectProfile(profile)
+        editor.newTab(connection: profile)
+        editor.focus()
+        message = "new editor for `\(profile)`"
+        isError = false
+    }
+
+    /// Every editor that belongs to a connection, open or closed — what the
+    /// connection's Open Editor submenu lists.
+    func editors(for profile: String) -> [SavedQueryRecord] { editor.editors(for: profile) }
+
+    func openEditor(_ record: SavedQueryRecord) {
+        if let connection = record.connection { selectProfile(connection) }
+        editor.openEditor(record)
+        editor.focus()
     }
 
     // MARK: - schema, one describe() per object, cached
@@ -905,13 +1146,14 @@ final class AppModel: ObservableObject {
     /// `newTab()` makes a fresh tab active first, so nothing is overwritten and
     /// ⌘W still throws the copy away.
     private func openInNewEditorTab(sql: String, connection: String?) {
-        let tab = editor.newTab()
+        let known = connection.flatMap { profilesByName[$0] != nil ? $0 : nil }
+        // The tab is created *in* the connection it ran on, so it lands in that
+        // connection's bar rather than being made somewhere else and rebound.
+        let tab = editor.newTab(connection: known)
         editor.setText(sql)
-        if let connection, !connection.isEmpty, profilesByName[connection] != nil {
-            // Through the tab model's own command, so the binding is persisted
-            // with the tab exactly as picking it from the chip would be.
-            editor.tabs.onBind?(tab, connection)
-            selectProfile(connection)
+        if let known {
+            editor.tabs.onBind?(tab, known)
+            selectProfile(known)
         }
         sqlText = sql
         refreshDirectives()

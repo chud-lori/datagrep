@@ -119,18 +119,34 @@ private struct NodeRow: View {
                     set: { v in withAnimation(.smooth(duration: 0.22)) { node.isExpanded = v } })
             ) {
                 if node.isLoading {
+                    // A real spinner, not three static dots. Fetching 200 tables
+                    // off a remote server takes seconds, and a row that says
+                    // "loading…" without moving is indistinguishable from a row
+                    // that has hung — which is exactly what it looked like.
                     HStack(spacing: 6) {
-                        Image(systemName: "ellipsis")
-                            .foregroundStyle(.tertiary)
-                        Text("loading…").foregroundStyle(.secondary)
+                        ProgressView()
+                            .controlSize(.small)
+                            .scaleEffect(0.7)
+                            .frame(width: 14, height: 14)
+                        Text(node.isProfile ? "connecting…" : "loading…")
+                            .foregroundStyle(.secondary)
                     }
                     .font(.callout)
                 } else if node.needsPrefix {
                     ScanPrompt(node: node, model: model)
                 } else if let err = node.loadError {
-                    Label(err, systemImage: "exclamationmark.triangle")
-                        .font(.caption)
-                        .foregroundStyle(.red)
+                    // Named, and retryable. A failure used to leave the row
+                    // marked loaded, so collapsing and reopening it did nothing
+                    // and the only way back was relaunching the app.
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label(err, systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Try Again") { model.load(node, prefix: nil) }
+                            .controlSize(.small)
+                    }
+                    .padding(.vertical, 2)
                 } else if node.didLoad && visibleChildren.isEmpty {
                     Text(filter.isEmpty ? "no children" : "no match")
                         .font(.callout)
@@ -247,31 +263,19 @@ private struct NodeLabel: View {
         .contentShape(Rectangle())
         .onHover { h in withAnimation(.smooth(duration: 0.12)) { hovering = h } }
         .onTapGesture { model.select(node) }
+        // Double-click a connection: a new editor for it, DBeaver-style. The
+        // previewable branch is unchanged — a profile row is never previewable
+        // (its kind is `profile`), so these two have never overlapped.
         .onTapGesture(count: 2) {
-            if node.isPreviewable { model.preview(node) }
+            if node.isProfile {
+                model.openSQLEditor(for: node.name)
+            } else if node.isPreviewable {
+                model.preview(node)
+            }
         }
         .contextMenu {
             if node.isProfile {
-                Button("Set as Active Connection") { model.selectProfile(node.name) }
-                // No `.keyboardShortcut` here: ⌘E is already registered
-                // window-wide above, and registering it twice is ambiguous.
-                Button("Edit Connection…") { model.editConnection(named: node.name) }
-                Divider()
-                Toggle(
-                    "Treat as Production",
-                    isOn: Binding(
-                        get: { model.prodMarked.contains(node.name) },
-                        set: { _ in model.toggleProdMark(node.name) })
-                )
-                .help(
-                    model.prodIsStored
-                        ? "Stores env = prod on the connection itself, so the CLI sees it too"
-                        : "Marked in this window only — this engine build cannot store an environment on the profile")
-                Divider()
-                Button("Remove Connection…") {
-                    model.selectProfile(node.name)
-                    model.removeActiveProfile()
-                }
+                ConnectionMenu(model: model, name: node.name)
             } else {
                 if node.isDescribable {
                     Button("Show Schema") { model.showSchema(for: node) }
@@ -285,6 +289,68 @@ private struct NodeLabel: View {
             }
         }
         .help(node.subtitle ?? node.kind)
+    }
+}
+
+/// Everything you can do to one connection, in one menu.
+///
+/// Ordered the way macOS orders a contextual menu: the thing you almost always
+/// want first (open it, work in it), then the editors that already exist for
+/// it, then the settings, and the irreversible one last behind its own
+/// separator. Verbs, and no "Connection" suffix on every line — the menu is
+/// already on a connection, so repeating the noun six times only makes the
+/// destructive entry harder to pick out.
+private struct ConnectionMenu: View {
+    @ObservedObject var model: AppModel
+    let name: String
+
+    /// Editors this connection already owns, open or closed. Reopening one
+    /// beats making a third copy of the same query.
+    private var editors: [SavedQueryRecord] { model.editors(for: name) }
+
+    var body: some View {
+        Button("Connect") { model.selectProfile(name) }
+            .disabled(model.activeProfile == name)
+        Button("Reconnect") { model.reconnect(name) }
+            .help("Drop the pooled socket so the next statement dials the server again")
+
+        Divider()
+
+        Button("New SQL Editor") { model.openSQLEditor(for: name) }
+        if editors.isEmpty {
+            // Shown and disabled rather than hidden: the entry appearing only
+            // sometimes is harder to learn than one that says why it is off.
+            Button("Open Editor") {}
+                .disabled(true)
+        } else {
+            Menu("Open Editor") {
+                ForEach(editors, id: \.id) { record in
+                    Button(record.name ?? "Untitled") { model.openEditor(record) }
+                }
+            }
+        }
+
+        Divider()
+
+        // No `.keyboardShortcut` here: ⌘E is already registered window-wide by
+        // the sidebar, and registering it twice is ambiguous.
+        Button("Edit…") { model.editConnection(named: name) }
+        Button("Duplicate") { model.duplicateProfile(named: name) }
+        Toggle(
+            "Treat as Production",
+            isOn: Binding(
+                get: { model.prodMarked.contains(name) },
+                set: { _ in model.toggleProdMark(name) })
+        )
+        .help(
+            model.prodIsStored
+                ? "Stores env = prod on the connection itself, so the CLI sees it too"
+                : "Marked in this window only — this engine build cannot store an environment on the profile"
+        )
+
+        Divider()
+
+        Button("Remove…", role: .destructive) { model.removeProfile(named: name) }
     }
 }
 
