@@ -1,5 +1,7 @@
-//! [`MongoCatalog`] (ticket item 5, design §5.1: lazy, on-demand browsing —
-//! never an eager whole-catalog index). `database` and `collection` levels
+//! [`MongoCatalog`] (ticket item 5). Browsing is lazy and on demand — never
+//! an eager whole-catalog index, which would make connecting to a large
+//! deployment cost a full crawl nobody asked for. `database` and `collection`
+//! levels
 //! are cheap server enumerations (`listDatabases`/`listCollections`); the
 //! `field` level has no server-declared schema at all (`SCHEMA_DECLARED` is
 //! false), so it is *inferred* by sampling — and always labeled as such.
@@ -127,9 +129,9 @@ impl MongoCatalog {
             .collect())
     }
 
-    /// Cached inference, populated lazily on first use (design §5.1: never
-    /// eager). A cache hit costs nothing; a miss runs one `$sample` at the
-    /// default size.
+    /// Cached inference, populated lazily on first use — never eagerly, since
+    /// sampling a collection nobody opened is pure waste. A cache hit costs
+    /// nothing; a miss runs one `$sample` at the default size.
     async fn inferred(&self, db: &str, coll: &str) -> Result<InferredSchema, DbError> {
         let key = (db.to_string(), coll.to_string());
         if let Some(cached) = self.field_cache.lock().await.get(&key) {
@@ -213,9 +215,9 @@ impl MongoCatalog {
 
 /// Record one sampled document's top-level fields into `root`, recursing one
 /// level into document-valued fields so nested paths ("address.city") are
-/// visible too — a shallow but honest reading of design §3.1's `FieldTrie`
-/// (full arbitrary-depth recursion is a grid/view-projection concern above
-/// this seam, per the design's `ViewProjection` note).
+/// visible too — a shallow but honest `FieldTrie`. Full arbitrary-depth
+/// recursion is a grid/view-projection concern above this seam, not the
+/// catalog's.
 fn record_doc(root: &mut Vec<(Arc<str>, FieldTrie)>, doc: &BsonDocument) {
     for (k, v) in doc.iter() {
         let idx = match root
@@ -262,10 +264,9 @@ impl Catalog for MongoCatalog {
                 kind: ObjectKind::Field,
                 // Never free: listing fields means sampling documents.
                 // `OnDemand` keeps the UI from auto-expanding into a
-                // `$sample` aggregation just because a triangle got drawn
-                // (design's `Enumeration` doc: "stops a KEYS * ... because
-                // someone clicked a triangle" — the Mongo-shaped version of
-                // that same mistake is auto-sampling every collection).
+                // `$sample` aggregation just because someone clicked a
+                // disclosure triangle — the Mongo-shaped version of firing a
+                // `KEYS *` at a server to populate a tree node.
                 enumeration: Enumeration::OnDemand,
             },
         ]
@@ -327,8 +328,9 @@ impl Catalog for MongoCatalog {
                     }
                 }
                 // Real indexes via `listIndexes`, fetched here and only here —
-                // on the explicit `describe()` of this one collection (design
-                // §5.1: lazy; never during tree expansion, never on connect).
+                // on the explicit `describe()` of this one collection, never
+                // during tree expansion and never on connect, so browsing a
+                // deployment never fans out into a command per collection.
                 // Sizes come from the `collStats` reply already in hand.
                 let index_sizes = result.get_document("indexSizes").ok();
                 let indexes = self.list_index_entries(db, coll, index_sizes).await?;
@@ -705,7 +707,8 @@ mod tests {
     /// FieldTrie inference over a synthetic heterogeneous document set,
     /// exercising exactly the shape ticket item 5/`record_doc` builds:
     /// presence ratios and mixed types stay visible rather than collapsing
-    /// to a majority type (design §3.1).
+    /// to a majority type — "usually an int" is a different fact from "an
+    /// int", and the catalog must not flatten one into the other.
     #[test]
     fn record_doc_builds_heterogeneous_field_trie_with_correct_presence() {
         let mut root: Vec<(Arc<str>, FieldTrie)> = Vec::new();

@@ -1,5 +1,8 @@
-//! [`MongoTransaction`]: an explicit, `begin()`-opened transaction (design
-//! §3.1's `Transaction` trait; §3.5's session-pinning rule).
+//! [`MongoTransaction`]: an explicit, `begin()`-opened transaction behind
+//! `datagrep-api`'s `Transaction` trait. Every operation it runs — and every
+//! cursor it hands out — is pinned to the one `ClientSession` the transaction
+//! was opened on; a statement that escaped to another session would silently
+//! run outside the transaction.
 //!
 //! **Why no actor task, unlike `datagrep-drv-postgres`'s `actor.rs`.** The
 //! ticket suggested reusing the Postgres actor-task pattern "if the
@@ -293,7 +296,8 @@ mod tests {
 
     #[test]
     fn id_filter_compiles_named_keys_and_refuses_an_empty_identity() {
-        // Empty identity: refused, never guessed at (design §3.8).
+        // Empty identity: refused, never guessed at — an empty filter would
+        // match every document in the collection.
         assert!(id_filter(&[]).is_err());
         // The named field is what reaches the filter — no `_id` assumption.
         let f = id_filter(&[(FieldPath::field("_id"), Value::I64(1))]).unwrap();

@@ -14,7 +14,7 @@ use datagrep_api::shape::{RowSchema, Shape};
 
 use crate::actor::ActorCmd;
 
-/// Pull-based cursor (design §3.2): each `next_batch` asks the actor for at
+/// Pull-based cursor: each `next_batch` asks the actor for at
 /// most `hint.max_rows` rows; between pulls nothing is read off the socket,
 /// which is the entire backpressure story.
 pub struct MySqlCursor {

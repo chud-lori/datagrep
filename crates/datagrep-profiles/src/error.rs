@@ -1,5 +1,5 @@
 //! The one error type this crate returns. Coarse by design, mirroring
-//! `datagrep_api::DbError`'s philosophy (design §3): callers match on a handful of
+//! `datagrep_api::DbError`'s philosophy: callers match on a handful of
 //! variants, not per-driver detail.
 
 use std::path::PathBuf;
@@ -30,17 +30,17 @@ pub enum ProfilesError {
     #[error("toml import error: {0}")]
     TomlDe(#[from] toml::de::Error),
 
-    /// design §3.8: `Profile.config` may never contain a secret-shaped key.
-    /// Point the caller at `secret_ref` instead.
+    /// `Profile.config` may never contain a secret-shaped key. Point the
+    /// caller at `secret_ref` instead.
     #[error(
         "config key `{key}` looks like a secret (matches `{pattern}`) — secrets never live in \
          Profile.config; store the credential in the OS keychain and reference it via \
-         `secret_ref` instead (design §3.8)"
+         `secret_ref` instead"
     )]
     SecretShapedKey { key: String, pattern: &'static str },
 
     /// The on-disk schema is newer than this build knows how to read.
-    /// Migrations are forward-only (design §3.7); we refuse to guess.
+    /// Migrations are forward-only; we refuse to guess.
     #[error(
         "database schema version {found} is newer than this build supports (max {supported}) — \
          upgrade datagrep-profiles"

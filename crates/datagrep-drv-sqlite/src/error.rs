@@ -9,8 +9,8 @@ use datagrep_api::DbError;
 /// SQLite's `SQLITE_INTERRUPT` (raised by [`rusqlite::InterruptHandle::interrupt`],
 /// see `canceller.rs`) is mapped to [`DbError::Cancelled`] rather than
 /// [`DbError::Query`] — the user asked for this, it is not a server-side
-/// rejection of the statement (design §3.3: "the user cancelled; not a
-/// failure, and the UI must not dress it as one").
+/// rejection of the statement. A cancel is not a failure and the UI must
+/// not dress it as one.
 pub(crate) fn map_sqlite_err(err: rusqlite::Error) -> DbError {
     use rusqlite::ffi::ErrorCode;
     use rusqlite::Error as E;

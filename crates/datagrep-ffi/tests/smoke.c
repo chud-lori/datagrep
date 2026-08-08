@@ -275,7 +275,7 @@ int main(void) {
     double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
     printf("       cancel returned in %.3f ms\n", ms);
     printf("       outcome: %s\n", outcome ? outcome : "(null)");
-    ok(ms < 50.0, "the stop button returned instantly (design 3.3)");
+    ok(ms < 50.0, "the stop button returned instantly");
     ok(outcome != NULL, "an outcome JSON came back");
     ok(outcome && strstr(outcome, "\"local_stopped\":true") != NULL, "  the local half stopped");
     datagrep_string_free(outcome);

@@ -34,8 +34,8 @@ pub type Row = Vec<CellText>;
 
 /// A format's streaming writer. `commands::query`/`commands::export` drive
 /// this one window (or one row, for the non-table formats) at a time; no
-/// implementation is allowed to accumulate the full result (design §3.2,
-/// ticket "NEVER accumulate the whole result in a Vec before printing").
+/// implementation is allowed to accumulate the full result (ticket: "NEVER
+/// accumulate the whole result in a Vec before printing").
 ///
 /// `Send` because `export` hands a sink adapter across
 /// `datagrep_core::CoreApi::run_export`'s (`Send`) sink seam.

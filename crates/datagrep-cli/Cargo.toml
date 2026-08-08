@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "datagrep query -f q.sql --format json | jq — the first runnable face of datagrep: `CoreApi` over a terminal (design §4 killer feature #4, §9 tier-3 extension surface)."
+description = "datagrep query -f q.sql --format json | jq — the first runnable face of datagrep: `CoreApi` over a terminal."
 
 [[bin]]
 name = "datagrep"

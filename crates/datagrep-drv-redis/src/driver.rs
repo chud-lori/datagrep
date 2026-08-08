@@ -1,4 +1,4 @@
-//! [`RedisDriver`]: the `Driver` impl (design §3.1 requirement 1).
+//! [`RedisDriver`]: the `datagrep-api` `Driver` impl.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -20,15 +20,14 @@ use crate::connection::RedisConnection;
 use crate::error::map_redis_error;
 
 /// Flags this driver's connections report, decided up front and explained
-/// per-flag (design §3.1: "capabilities, not driver checks").
+/// per-flag. Callers branch on capabilities, never on the driver's id.
 ///
 /// **Deliberately absent, with reasons** (see the crate-level report for the
 /// full write-up):
 /// - `TRANSACTIONS` — `MULTI`/`EXEC` is a single optimistic pipeline, not an
 ///   interactive transaction (no mid-transaction reads of your own writes,
 ///   no savepoints); `begin()` returns `DbError::Unsupported` so the UI
-///   greys the button rather than offering a control that lies (design
-///   §2.6).
+///   greys the button rather than offering a control that lies.
 /// - `DDL` — Redis has no schema to declare.
 /// - `SCHEMA_DECLARED` — same reason; the catalog is enumeration-only.
 /// - `EXACT_COUNT_CHEAP` — `DBSIZE` is O(1) and exact for the *whole*
@@ -44,12 +43,12 @@ use crate::error::map_redis_error;
 ///   set a capability flag that's true for some commands and a lie for
 ///   most, this is left unset and `RedisCanceller::kind()` reports the
 ///   truth dynamically, per cancel, which is exactly what `CancelOutcome`
-///   exists for (design §3.3). Flagged as a `datagrep-api` capability-model gap
-///   in the crate report.
+///   exists for. Flagged as a `datagrep-api` capability-model gap in the
+///   crate report.
 ///
 /// `KEY_ENUMERATION` is intentionally *not* included in this constant: it
-/// depends on a post-handshake `DBSIZE` probe (design §3.1 requirement 4)
-/// and is added by [`RedisConnection::capabilities`], never here.
+/// depends on a post-handshake `DBSIZE` probe and is added by
+/// [`RedisConnection::capabilities`], never here.
 pub const REDIS_CAPS: Caps = Caps::EDITABLE_RESULTS.union(Caps::EXPRESSION_FILTER);
 
 /// Baseline (pre-handshake) capabilities. `KEY_ENUMERATION` is optimistically
@@ -67,7 +66,7 @@ pub fn redis_capabilities_baseline() -> Capabilities {
     }
 }
 
-/// The Redis driver adapter (design §3.1). Stateless — all per-server state
+/// The Redis driver adapter. Stateless — all per-server state
 /// lives in the [`RedisConnection`]s it creates.
 #[derive(Debug, Default)]
 pub struct RedisDriver;
@@ -191,7 +190,7 @@ impl Driver for RedisDriver {
             if let Some(p) = &password {
                 info = info.set_password(p);
             }
-            // RESP3 unlocks the richer reply types §3.1 requirement 5 maps
+            // RESP3 unlocks the richer reply types `value.rs` maps
             // (Double, Boolean, Map, BigNumber, …); under RESP2 everything
             // downgrades to bulk strings/arrays and the mapping in
             // `value.rs` never actually exercises those arms against a real
@@ -271,7 +270,7 @@ fn bool_field(cfg: &ResolvedConfig, key: &str) -> Result<Option<bool>, DbError> 
     }
 }
 
-/// Hand-rolled `redis://`/`rediss://` splitter (design §3.1 requirement 1).
+/// Hand-rolled `redis://`/`rediss://` splitter.
 ///
 /// Grammar, matching the `redis` crate's own documented format
 /// (`redis-1.5.0/src/connection.rs`, `IntoConnectionInfo for &str`):

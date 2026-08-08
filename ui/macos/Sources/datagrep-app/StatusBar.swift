@@ -142,7 +142,7 @@ struct StatusBar: View {
             "state: \(model.state?.rawValue ?? "idle")",
             "rows: \(rowCountText) — \(rowCountHelp)",
             "elapsed: \(model.elapsedMs) ms",
-            "\(residentText)  (phys_footprint per design §5 measurement semantics, not ps RSS)",
+            "\(residentText)  (phys_footprint, not ps RSS)",
         ]
         if !model.directives.summary.isEmpty {
             lines.append("directives: \(model.directives.summary)")
@@ -241,7 +241,7 @@ struct StatusBar: View {
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .fixedSize()
-                    .help("phys_footprint (design §5 measurement semantics), not ps RSS")
+                    .help("phys_footprint, not ps RSS")
             }
 
             if !model.directives.summary.isEmpty, density == .full || density == .comfortable {

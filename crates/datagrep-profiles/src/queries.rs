@@ -1,5 +1,5 @@
-//! All SQL for design §3.7's tables. Every function here runs synchronously
-//! on the worker thread (see `store.rs`) — nothing in this module is async.
+//! All SQL for the store's tables. Every function here runs synchronously on
+//! the worker thread (see `store.rs`) — nothing in this module is async.
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
@@ -351,7 +351,7 @@ fn history_from_row(row: &Row<'_>) -> rusqlite::Result<HistoryEntry> {
     })
 }
 
-/// Records one executed query. design §3.7 dedupe: if the same
+/// Records one executed query. Dedupe rule: if the same
 /// `(profile_id, text_hash)` was recorded within the last second, the
 /// existing row is updated in place instead of a new one being inserted —
 /// this absorbs rapid re-runs/retries without flooding history.
@@ -686,10 +686,10 @@ mod tests {
         open_and_prepare(&Target::Memory, RetentionPolicy::default()).expect("open in-memory db")
     }
 
-    /// `query_history.profile_id` has a `REFERENCES profile(id)` (design
-    /// §3.7 — history belongs to a profile, and deleting a profile should
-    /// cascade its history), so tests that record history need a real
-    /// profile row to satisfy the foreign key.
+    /// `query_history.profile_id` has a `REFERENCES profile(id)` — history
+    /// belongs to a profile, and deleting a profile cascades its history — so
+    /// tests that record history need a real profile row to satisfy the
+    /// foreign key.
     fn ensure_profile(conn: &Connection, id: &str) {
         create_profile(
             conn,

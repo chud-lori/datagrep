@@ -315,7 +315,7 @@ async fn named_key_mutation_round_trips_regardless_of_declared_pk_order() {
         other => panic!("expected Ack, got {other:?}"),
     }
 
-    // An empty identity is refused, never guessed at (design §3.8).
+    // An empty identity is refused, never guessed at.
     let err = match conn
         .execute(Request::Op(Op::Mutate(MutationBatch {
             mutations: vec![Mutation::Delete {

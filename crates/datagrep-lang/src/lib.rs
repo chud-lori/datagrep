@@ -1,31 +1,30 @@
 //! # datagrep-lang — per-connection editor language support
 //!
-//! Implements the `Language` trait sketched in the design doc §3.6: the
-//! editor is language-agnostic, and the **connection** picks the language via
-//! `Capabilities::language` (`datagrep_api::LanguageId`). There is no cross-engine
-//! query language and no translation of user-authored text between engines
-//! — see §3.6 point 1–4 — so every [`Language`] impl here speaks exactly one
+//! The editor is language-agnostic: the **connection** picks the language via
+//! `Capabilities::language` (`datagrep_api::LanguageId`). There is no
+//! cross-engine query language and no translation of user-authored text
+//! between engines, so every [`Language`] impl here speaks exactly one
 //! engine's dialect, natively.
 //!
 //! Four responsibilities per language, matched 1:1 to trait methods:
-//! - [`Language::split`] — cut a buffer into statements (byte ranges). This
-//!   is, per the design doc, "where every client has bugs": see
-//!   [`sql::splitter`] for the gory dialect-specific details.
-//! - [`Language::classify`] — is a statement Read/Write/Ddl/Tcl/Admin, for
-//!   the client-side guardrail described in design §3.8 layer 2.
+//! - [`Language::split`] — cut a buffer into statements (byte ranges). This is
+//!   where every client has bugs: see [`sql::splitter`] for the gory
+//!   dialect-specific details.
+//! - [`Language::classify`] — is a statement Read/Write/Ddl/Tcl/Admin, for the
+//!   client-side write guardrail.
 //! - [`Language::context_at`] — a *minimal* cursor-context classification
 //!   (full semantic context, e.g. "inside a WHERE clause", is a later
-//!   milestone per the design doc).
+//!   milestone).
 //! - [`Language::highlight`] — a token stream for syntax highlighting.
 //!
-//! Hand-rolled lexers only (design §3.6 / §5.1 tree-sitter sizing note): no
-//! parser-generator, no tree-sitter, no `sqlparser-rs`. `sqlparser-rs` is
-//! reserved for optional *deep analysis*, out of scope for this crate.
+//! Hand-rolled lexers only: no parser-generator, no tree-sitter, no
+//! `sqlparser-rs`. `sqlparser-rs` is reserved for optional *deep analysis*,
+//! out of scope for this crate.
 //!
-//! No embedded JS engine for Mongo (design §3.6, explicit decision): the
-//! `mongo` module hand-rolls a ~700-line parser for the `db.coll.method(...)`
-//! surface plus extended-JSON constructors, and explicitly rejects anything
-//! that is actually arbitrary JavaScript.
+//! No embedded JS engine for Mongo: the `mongo` module hand-rolls a ~700-line
+//! parser for the `db.coll.method(...)` surface plus extended-JSON
+//! constructors, and explicitly rejects anything that is actually arbitrary
+//! JavaScript.
 
 #![warn(rust_2018_idioms)]
 #![warn(missing_debug_implementations)]
@@ -48,17 +47,16 @@ pub use directives::{DirectiveError, Directives};
 /// themselves).
 ///
 /// `directives` is a `Result` rather than a bare [`Directives`] so that a
-/// malformed directive comment (design §3.6 block directives) is a value the
-/// caller can react to per-statement — never a panic. See
+/// malformed directive comment is a value the caller can react to
+/// per-statement — never a panic. See
 /// [`directives::parse_directives`].
 #[derive(Clone, PartialEq, Eq)]
 pub struct StatementSpan {
     /// Byte range into the source buffer passed to [`Language::split`].
     pub range: Range<usize>,
     /// Directives parsed from the run of directive-comment lines immediately
-    /// above this statement (design §3.6: `@limit`, `@timeout`,
-    /// `@connection`, `@readonly`). `Ok(Directives::default())` when none are
-    /// present.
+    /// above this statement (`@limit`, `@timeout`, `@connection`,
+    /// `@readonly`). `Ok(Directives::default())` when none are present.
     pub directives: Result<Directives, DirectiveError>,
 }
 
@@ -78,9 +76,8 @@ impl StatementSpan {
     }
 }
 
-/// What a statement *does*, for the client-side write guardrail (design
-/// §3.8, layer 2 of three — "a guardrail against fat fingers, not an
-/// adversary").
+/// What a statement *does*, for the client-side write guardrail — one layer of
+/// several, and a guardrail against fat fingers, not against an adversary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StatementClass {
     Read,
@@ -131,7 +128,7 @@ pub trait Language: fmt::Debug + Send + Sync {
 
     /// Cut `src` into statements. Byte ranges only — no allocation of the
     /// statement text itself. A trailing statement with no terminator is
-    /// still returned as a span (design §3.6 splitter requirements).
+    /// still returned as a span.
     fn split(&self, src: &str) -> Vec<StatementSpan>;
 
     /// Classify a single statement's text (typically `span.text(src)` from a
@@ -151,11 +148,11 @@ pub trait Language: fmt::Debug + Send + Sync {
 }
 
 /// Registry: the one language impl for a given connection's
-/// `Capabilities::language` (design §3.6).
+/// `Capabilities::language`.
 ///
 /// `EsDsl`, `Cypher`, and `PartiQl` are members of [`LanguageId`] that this
-/// crate does not yet implement (out of scope for this milestone — see the
-/// crate-level deviations note); they resolve to a minimal
+/// crate does not yet implement (out of scope for this milestone); they
+/// resolve to a minimal
 /// [`fallback::FallbackLanguage`] rather than making this function partial,
 /// so the registry stays total and no caller has to handle a missing
 /// language.
@@ -168,12 +165,11 @@ pub fn language_for(id: LanguageId) -> &'static dyn Language {
         LanguageId::Sql(SqlDialect::Sqlite) => &sql::SQLITE,
         LanguageId::Sql(SqlDialect::Mssql) => &sql::MSSQL,
         // ClickHouse and DuckDB are SQL dialects without a dedicated splitter
-        // profile in this milestone (design §3.6 lists Postgres/MySQL/SQLite/
-        // MSSQL splitter quirks explicitly; ClickHouse/DuckDB are close
-        // enough to Postgres-family syntax generally that the Postgres
-        // profile — `--`/`/* */` comments, `'`/`"` quoting, `$$`
-        // dollar-quoting — is a reasonable default rather than a dedicated
-        // one; deviation noted in the final report).
+        // profile in this milestone. Only Postgres/MySQL/SQLite/MSSQL have
+        // their splitter quirks modelled explicitly; ClickHouse and DuckDB are
+        // close enough to Postgres-family syntax that the Postgres profile —
+        // `--`/`/* */` comments, `'`/`"` quoting, `$$` dollar-quoting — is a
+        // reasonable default until either earns one of its own.
         LanguageId::Sql(SqlDialect::Clickhouse) => &sql::POSTGRES,
         LanguageId::Sql(SqlDialect::Duckdb) => &sql::POSTGRES,
         LanguageId::MongoShell => &mongo::MONGO,

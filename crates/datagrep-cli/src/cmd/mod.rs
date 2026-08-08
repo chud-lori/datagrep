@@ -1,7 +1,7 @@
 //! One module per `datagrep` subcommand (ticket: "FOLLOW WHAT cli.rs DECLARES").
 //! `streaming` is the window-by-window execution loop `query` drives;
-//! `export` streams through `CoreApi::run_export` (the store-free §3.2/§5.1
-//! path) instead.
+//! `export` streams through `CoreApi::run_export` (the store-free path)
+//! instead.
 
 pub mod catalog;
 pub mod doctor;

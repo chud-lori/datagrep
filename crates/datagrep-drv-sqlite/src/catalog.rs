@@ -1,9 +1,9 @@
-//! Lazy, incremental catalog (design §3.1, §5.1) over `sqlite_master` /
-//! `PRAGMA` introspection. Every listing is paged and bounded — never a
-//! whole-catalog dump on connect.
+//! Lazy, incremental catalog over `sqlite_master` / `PRAGMA` introspection.
+//! Every listing is paged and bounded — never a whole-catalog dump on
+//! connect.
 //!
 //! The catalog talks to the connection's dedicated worker thread exactly
-//! like `Connection`/`Cursor` do (design §3.4): every method here sends a
+//! like `Connection`/`Cursor` do: every method here sends a
 //! [`crate::connection::WorkerMsg::Catalog`] job closure-free command and
 //! awaits the reply, so `rusqlite::Connection` is still only ever touched
 //! from its one owning thread.
@@ -240,7 +240,7 @@ impl Catalog for SqliteCatalog {
     /// trivially-"sampled" trie, it does a real (bounded) sample: SQLite's
     /// type affinity means a declared `INTEGER` column can still hold TEXT,
     /// so sampling actual storage classes is more honest than the decl type
-    /// alone (design risk #4: never lie about a value).
+    /// alone. Never lie about a value.
     async fn infer_shape(
         &self,
         path: &ObjectPath,
@@ -251,9 +251,9 @@ impl Catalog for SqliteCatalog {
             .await
     }
 
-    /// Bounded `LIKE`-prefix completion over `sqlite_master`, per design
-    /// §5.1 ("a bounded server-side prefix query ... you never need the
-    /// whole schema resident to complete a 3-character prefix").
+    /// Bounded `LIKE`-prefix completion over `sqlite_master`: a bounded
+    /// server-side prefix query, so the whole schema never has to be
+    /// resident just to complete a 3-character prefix.
     async fn complete(&self, ctx: CompletionCtx) -> Result<Vec<Completion>, DbError> {
         let prefix = current_word(&ctx.text, ctx.offset as usize).to_string();
         self.run(move |conn| complete_impl(conn, &prefix)).await
@@ -423,8 +423,8 @@ fn describe_path(conn: &rusqlite::Connection, path: &ObjectPath) -> Result<Objec
             }
             let ty = object_kind(conn, db, table)?;
             // Indexes are listed here and only here — on an explicit
-            // `describe()` of this one table (design §5.1: lazy; never on
-            // tree expansion, never on connect). `PRAGMA index_list` +
+            // `describe()` of this one table — lazily, never on tree
+            // expansion and never on connect. `PRAGMA index_list` +
             // `index_xinfo` are metadata-only and O(indexes), not O(rows).
             let indexes = list_indexes(conn, db, table)?;
             let mut extra = vec![(Arc::from("indexes"), Arc::from(indexes_json(&indexes)))];
@@ -436,7 +436,7 @@ fn describe_path(conn: &rusqlite::Connection, path: &ObjectPath) -> Result<Objec
             // SQLite has no cheap estimate (no trustworthy `reltuples`
             // equivalent) and can be O(table size) — running it on every
             // `describe()` would violate the "never eager, never slow on
-            // the happy path" catalog philosophy (design §5.1). A caller
+            // the happy path" catalog philosophy. A caller
             // that wants an exact count should ask for it explicitly via
             // `Op::Count`, which is what that request exists for.
             Ok(ObjectDetail {
@@ -719,8 +719,8 @@ fn complete_impl(conn: &rusqlite::Connection, prefix: &str) -> Result<Vec<Comple
 }
 
 /// The identifier-ish word ending at `offset` in `text` — a minimal
-/// tokenizer, not a SQL parser (design §3.6: the editor is language-agnostic
-/// and datagrep never translates user text; this only finds the prefix to look up).
+/// tokenizer, not a SQL parser. The editor is language-agnostic and
+/// datagrep never translates user text; this only finds the prefix to look up.
 fn current_word(text: &str, offset: usize) -> &str {
     let bytes = text.as_bytes();
     let end = offset.min(bytes.len());

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Redis driver for datagrep: SCAN-only browsing over the datagrep-api seam — never KEYS * (design §3.1, §3.2, §3.3, §5.2)."
+description = "Redis driver for datagrep: SCAN-only browsing over the datagrep-api seam — never KEYS *."
 
 [dependencies]
 datagrep-api = { path = "../datagrep-api" }

@@ -1,12 +1,12 @@
-//! The async facade over one dedicated worker thread (design's blocking-pool
-//! rule): every `rusqlite` call in this crate is synchronous and runs on
-//! that thread, never on an async runtime's own worker. `Store` methods hand
-//! a closure to the thread and `.await` a oneshot reply.
+//! The async facade over one dedicated worker thread: every `rusqlite` call
+//! in this crate is synchronous and runs on that thread, never on an async
+//! runtime's own worker. `Store` methods hand a closure to the thread and
+//! `.await` a oneshot reply.
 //!
-//! Construction is lazy (design §3.7: "opened lazily off the startup path")
-//! — `Store::open` just remembers where the database *would* live; the
-//! worker thread, the SQLite connection, and the migration/retention pass
-//! only happen on the first real call.
+//! Construction is lazy so nothing touches disk on the startup path —
+//! `Store::open` just remembers where the database *would* live; the worker
+//! thread, the SQLite connection, and the migration/retention pass only
+//! happen on the first real call.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -112,9 +112,9 @@ async fn spawn_worker(
     }
 }
 
-/// Local persistence for `datagrep` (design §3.7): profiles, folders, tunnels,
-/// query history (+FTS5), saved queries, editor tabs, and small key/value
-/// state, in one SQLite file.
+/// Local persistence for `datagrep`: profiles, folders, tunnels, query
+/// history (+FTS5), saved queries, editor tabs, and small key/value state,
+/// in one SQLite file.
 pub struct Store {
     target: Target,
     retention: RetentionPolicy,
@@ -217,8 +217,8 @@ impl Store {
     }
 
     // -- profile -----------------------------------------------------------
-    // design §3.8: every write is validated to reject secret-shaped config
-    // keys *before* the worker thread (and therefore SQLite) ever sees it.
+    // Every write is validated to reject secret-shaped config keys *before*
+    // the worker thread (and therefore SQLite) ever sees it.
 
     pub async fn create_profile(&self, profile: Profile) -> Result<Profile, ProfilesError> {
         validate_no_secrets(&profile.config)?;
@@ -298,7 +298,7 @@ impl Store {
     // -- query_history -------------------------------------------------
 
     /// Records one executed query, deduping against a same-hash entry for
-    /// the same profile within the last second (design §3.7).
+    /// the same profile within the last second.
     pub async fn record_history(
         &self,
         entry: NewHistoryEntry,
@@ -363,8 +363,8 @@ impl Store {
     // -- editor_tab: crash-safe session restore --------------------------
 
     /// Atomically replaces the entire open-tabs set. Called on every editor
-    /// change of note (not on a timer — design §5.1) so a crash never loses
-    /// more than the in-flight keystroke.
+    /// change of note — not on a timer, this crate runs none — so a crash
+    /// never loses more than the in-flight keystroke.
     pub async fn save_all_tabs(&self, tabs: Vec<EditorTab>) -> Result<(), ProfilesError> {
         self.run(move |db| queries::save_all_tabs(&mut db.conn, tabs))
             .await
@@ -397,11 +397,11 @@ impl Store {
         self.run(move |db| queries::kv_delete(&db.conn, &key)).await
     }
 
-    // -- TOML export/import (design §4, killer feature #5) ----------------
+    // -- TOML export/import ---------------------------------------------
 
     /// Git-committable TOML of folders, profiles, and tunnels. Secrets are
     /// excluded by construction — `Profile`/`Tunnel` only ever carry
-    /// `secret_ref`, never a secret value (design §3.8).
+    /// `secret_ref`, never a secret value.
     pub async fn export_profiles(&self) -> Result<String, ProfilesError> {
         self.run(|db| {
             let bundle = ExportBundle {

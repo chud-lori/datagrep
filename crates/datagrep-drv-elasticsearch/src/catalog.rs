@@ -1,5 +1,5 @@
-//! [`EsCatalog`] — lazy, on-demand namespace browsing (design §5.1: "expand
-//! on demand per node ... never an eager whole-catalog index").
+//! [`EsCatalog`] — lazy, on-demand namespace browsing: expand per node when
+//! the user asks, never an eager whole-catalog index.
 //!
 //! Two levels: **index / alias / data stream**, then **field**. Both are
 //! bounded server-side calls:
@@ -8,8 +8,8 @@
 //!   narrowed by an index-expression prefix so the server does the filtering;
 //! - the field level is `GET /<that one index>/_mapping` — **never** a
 //!   cluster-wide `GET /_mapping`, which on a cluster with a few thousand
-//!   indices is tens of megabytes of JSON and is exactly the mistake §5.1
-//!   names.
+//!   indices is tens of megabytes of JSON fetched to answer a question about
+//!   one index.
 //!
 //! # `SCHEMA_DECLARED` is false, and `describe` respects that
 //!
@@ -44,8 +44,8 @@ use crate::value::{json_to_value, FieldTypes};
 const DEFAULT_SAMPLE_SIZE: u32 = 500;
 /// `index.max_result_window` bounds any single sample.
 const MAX_SAMPLE_SIZE: u32 = 10_000;
-/// Completion candidate cap (design §5.1: "a *server-side* prefix query …
-/// LIMIT 50").
+/// Completion candidate cap: completion is a *server-side* prefix query with
+/// a small limit, never a client-side filter over everything.
 const COMPLETE_LIMIT: usize = 50;
 
 pub struct EsCatalog {
@@ -366,8 +366,8 @@ pub fn merge_mappings(json: &Json) -> FieldTypes {
 }
 
 /// Record one `_source` into a [`FieldTrie`], recursing one level into
-/// object-valued fields (the same shallow-but-honest reading of design §3.1's
-/// `FieldTrie` as the Mongo driver's `record_doc`).
+/// object-valued fields — the same shallow-but-honest `FieldTrie` the Mongo
+/// driver's `record_doc` builds.
 fn record_source(
     root: &mut Vec<(Arc<str>, FieldTrie)>,
     source: &OrderedJson,
@@ -435,10 +435,10 @@ fn decode_name_token(token: &ResumeToken) -> Option<String> {
 /// character set, plus the `*`/`,`/`-`/`+` an index *expression* legitimately
 /// uses.
 ///
-/// This is design §3.8 risk (2), "introspection queries built from
-/// server-returned names": a catalog path or a user-typed prefix reaches this
-/// function and then becomes part of a URL path, so a `/` or a `..` in it must
-/// not be able to retarget the request at a different endpoint.
+/// Introspection requests get built from server-returned names: a catalog
+/// path or a user-typed prefix reaches this function and then becomes part of
+/// a URL path, so a `/` or a `..` in it must not be able to retarget the
+/// request at a different endpoint.
 pub fn encode_index_expression(expr: &str) -> Result<String, DbError> {
     if expr.is_empty() {
         return Err(DbError::Unsupported {
@@ -783,9 +783,9 @@ mod tests {
         assert!(merge_mappings(&json!(null)).is_empty());
     }
 
-    /// Design §3.8 risk (2): a name that came back from the server (or was
-    /// typed by the user) becomes part of a URL path, so it must not be able
-    /// to retarget the request.
+    /// A name that came back from the server (or was typed by the user)
+    /// becomes part of a URL path, so it must not be able to retarget the
+    /// request.
     #[test]
     fn index_expressions_cannot_escape_their_path_segment() {
         assert_eq!(

@@ -1,10 +1,18 @@
-# datagrep performance budget — machine-readable transcription of design doc §5.
-# Semantics (non-negotiable, §5): all memory figures are the WHOLE PROCESS TREE,
-# summed, using the platform-correct metric (§6): macOS phys_footprint, Windows
-# Private Working Set + QueryVideoMemoryInfo (reported separately), Linux PSS from
-# smaps_rollup + fdinfo drm-memory-*. Deltas are written "idle+N" wherever the
-# idle floor moved, so the line measures our data structures, not the floor.
-# "target" is the goal; "fail" is the CI-red threshold.
+# datagrep performance budget — the numbers CI measures against.
+#
+# Semantics, non-negotiable: all memory figures are the WHOLE PROCESS TREE,
+# summed, using the platform-correct metric — macOS phys_footprint, Windows
+# Private Working Set + QueryVideoMemoryInfo (reported separately), Linux PSS
+# from smaps_rollup + fdinfo drm-memory-*. Anything narrower (RSS alone, a
+# single process) undercounts and would let a regression through.
+#
+# Deltas are written "idle+N" wherever the idle floor moved, so the line
+# measures our own data structures rather than whatever the floor happens to be
+# on the measuring machine.
+#
+# "target" is the goal we hold ourselves to; "fail" is the threshold that turns
+# CI red. The gap between them is deliberate slack for machine-to-machine
+# variance — a number between the two is a warning, not a build break.
 
 [P1]
 metric = "cold start to interactive, warm FS"

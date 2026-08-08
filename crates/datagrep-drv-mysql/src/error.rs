@@ -5,9 +5,9 @@
 use datagrep_api::DbError;
 
 /// MySQL error code for `ER_QUERY_INTERRUPTED` — what a statement killed via
-/// `KILL QUERY <conn_id>` dies with. Mapped to [`DbError::Cancelled`] because
-/// the design (§3.3) treats a user cancel as "not a failure, and the UI must
-/// not dress it as one". The connection itself survives a query kill.
+/// `KILL QUERY <conn_id>` dies with. Mapped to [`DbError::Cancelled`] rather
+/// than a query error: a cancel the user asked for is not a failure, and the
+/// UI must not dress it as one. The connection itself survives a query kill.
 pub const ER_QUERY_INTERRUPTED: u16 = 1317;
 
 /// MariaDB's statement-timeout error (`ER_STATEMENT_TIMEOUT`, 1969) and

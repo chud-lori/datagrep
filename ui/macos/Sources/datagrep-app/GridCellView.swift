@@ -3,7 +3,7 @@ import DatagrepKit
 import QuartzCore
 
 /// Cached text attributes. Built once at startup, never per cell and never per
-/// frame — design §5.1 ("never allocate per cell per frame").
+/// frame: nothing may be allocated per cell per frame.
 enum GridStyle {
     /// 24, not 20: 20 pt rows with 6 pt padding read as a spreadsheet from
     /// 1998. This is one line of monospaced 11.5 with real air around it.

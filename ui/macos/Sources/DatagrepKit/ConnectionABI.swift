@@ -8,10 +8,9 @@ import Foundation
 ///
 /// This mirrors `datagrep_api::Enforcement`, plus a fourth case the Rust enum
 /// does not need: `.unknown`, for a build whose ABI does not report the level
-/// at all. Design §3.8 is explicit that a badge implying the *server* refuses
-/// writes when only our own classifier does is worse than showing no badge, so
-/// `.unknown` is deliberately worded down to the same promise as `.client` —
-/// never up.
+/// at all. A badge implying the *server* refuses writes when only our own
+/// classifier does is worse than showing no badge, so `.unknown` is
+/// deliberately worded down to the same promise as `.client` — never up.
 public enum ReadOnlyEnforcement: String, Sendable, Hashable, CaseIterable {
     /// The engine itself refuses writes on this session.
     case server
@@ -80,8 +79,8 @@ public enum ReadOnlyEnforcement: String, Sendable, Hashable, CaseIterable {
     }
 
     /// A lock, always — the difference between the levels is carried by the
-    /// glyph *and* by the word, never by tint alone (§5 item 4: four
-    /// competitors have shipped safety UI that is invisible in one theme).
+    /// glyph *and* by the word, never by tint alone (a tint is the part of a
+    /// safety signal most likely to be invisible in one theme or the other).
     public var symbol: String {
         switch self {
         case .server: return "lock.shield.fill"

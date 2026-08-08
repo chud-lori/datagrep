@@ -1,7 +1,8 @@
-//! [`PgCatalog`] (ticket item 5, design §5.1: lazy, one-cheap-query-at-a-time
-//! browsing — never eager whole-catalog indexing). Every method below issues
-//! exactly one parameterized query against `pg_catalog`/`information_schema`
-//! equivalents, bounded by `ListOpts::limit`.
+//! [`PgCatalog`]: lazy, one-cheap-query-at-a-time browsing — never eager
+//! whole-catalog indexing, which would make connecting to a big server cost
+//! more than the user asked for. Every method below issues exactly one
+//! parameterized query against `pg_catalog`/`information_schema` equivalents,
+//! bounded by `ListOpts::limit`.
 //!
 //! # Two rules this file learned the hard way
 //!
@@ -277,7 +278,8 @@ impl Catalog for PgCatalog {
 
 /// Scan backwards from the caret over identifier characters to find the
 /// token being typed — the prefix fed to server-side `LIKE $1 || '%'`
-/// completion (design item 5: "never a local index").
+/// completion — matching happens on the server, never against a locally
+/// built index of the catalog.
 fn prefix_at_caret(text: &str, offset: usize) -> String {
     let bytes = text.as_bytes();
     let end = offset.min(bytes.len());
@@ -451,8 +453,9 @@ impl PgCatalog {
         let client = &*session;
         require_current_database(client, db).await?;
 
-        // One cheap query for size facts (design item 5: "reltuples estimate
-        // + pg_relation_size") plus the table comment. `relkind::text` for
+        // One cheap query for size facts — the `reltuples` estimate and
+        // `pg_relation_size`, never a `COUNT(*)` that would scan the table —
+        // plus the table comment. `relkind::text` for
         // the same reason as in `list_relations` — bare `relkind` is `"char"`
         // and panicked here on every `--describe` (TEST-REPORT.md F3).
         let size_row = client
@@ -481,8 +484,8 @@ impl PgCatalog {
         }
 
         // Indexes — fetched here and only here, on the explicit `describe()`
-        // of this one relation (design §5.1: lazy; never during tree
-        // expansion, never on connect). One catalog-only query.
+        // of this one relation — never during tree expansion, never on
+        // connect. One catalog-only query.
         let indexes = self.list_indexes(client, schema, table).await?;
         extra.push((Arc::from("indexes"), Arc::from(indexes_json(&indexes))));
 

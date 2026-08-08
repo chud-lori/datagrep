@@ -1,5 +1,5 @@
-//! [`SqliteDriver`]: the stateless entry point (design §3.1 — "Stateless:
-//! all per-server state lives in the Connections it creates").
+//! [`SqliteDriver`]: the stateless entry point. All per-server state lives
+//! in the `Connection`s it creates, never here.
 //!
 //! ## datagrep-api gaps this driver works around (do not fix by editing datagrep-api)
 //!

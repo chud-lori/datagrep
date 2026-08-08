@@ -1,6 +1,6 @@
-//! Black-box tests against `datagrep-profiles`'s public API only (design §3.7,
-//! §3.8). White-box tests that need to force `fts5_available` or otherwise
-//! reach into `Db` live in `src/queries.rs`.
+//! Black-box tests against `datagrep-profiles`'s public API only. White-box
+//! tests that need to force `fts5_available` or otherwise reach into `Db`
+//! live in `src/queries.rs`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -449,7 +449,8 @@ async fn retention_trims_rows_older_than_max_age_on_reopen() {
             .unwrap();
     }
 
-    // Retention only runs on open (design §5.1) — reopening is what trims.
+    // Retention only runs on open — there is no timer, so reopening is what
+    // trims.
     let store = Store::open(&path);
     let remaining = store.recent_history(Some("p1".into()), 100).await.unwrap();
     assert_eq!(
@@ -571,7 +572,7 @@ async fn kv_get_set_delete() {
 }
 
 // ---------------------------------------------------------------------
-// TOML export / import (design §4 killer feature #5)
+// TOML export / import
 // ---------------------------------------------------------------------
 
 #[tokio::test]

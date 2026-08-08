@@ -1,8 +1,7 @@
-//! [`PgCanceller`] (ticket item 4, design §3.3): out-of-band cancellation on
-//! a second socket. Postgres's own protocol gives no acknowledgement, so the
-//! honest outcome is always [`CancelOutcome::Requested`] — never
-//! `ServerCancelled` — matching the design table's "racy by protocol design,
-//! server sends no ack".
+//! [`PgCanceller`]: out-of-band cancellation on a second socket. Postgres's
+//! CancelRequest is racy by protocol design — the server sends no ack — so the
+//! honest outcome is always [`CancelOutcome::Requested`], never
+//! `ServerCancelled`.
 
 use std::sync::Arc;
 
@@ -56,11 +55,10 @@ impl Canceller for PgCanceller {
                         return Err(e);
                     }
                 }
-                // Postgres's CancelRequest has no reply message at all (see
-                // design §3.3 table); reaching this point only means the
-                // cancel socket connected and wrote the request, not that the
-                // server acted on it before the original query finished on
-                // its own.
+                // Postgres's CancelRequest has no reply message at all;
+                // reaching this point only means the cancel socket connected
+                // and wrote the request, not that the server acted on it
+                // before the original query finished on its own.
                 Ok(CancelOutcome::Requested)
             }
             .instrument(tracing::info_span!("pg_cancel_query")),

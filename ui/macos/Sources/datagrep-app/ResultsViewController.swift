@@ -435,8 +435,8 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     /// Numeric columns render right-aligned; text left-aligned.
     private var rightAlignedByID: [NSUserInterfaceItemIdentifier: Bool] = [:]
     private var columnNames: [String] = []
-    /// Design risk #7: a 400-path Mongo collection must not become a 400-column
-    /// grid. Columns beyond this are created but hidden.
+    /// A 400-path Mongo collection must not become a 400-column grid. Columns
+    /// beyond this are created but hidden.
     let maxVisibleColumns = 30
     private(set) var hiddenColumnCount = 0
     private var didSizeColumns = false
@@ -564,8 +564,8 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     }
 
     /// Applies a status snapshot. Columns only ever APPEND on the right; an
-    /// existing column is never moved, renamed or re-sized by a schema delta
-    /// (design risk #7 — columns jumping mid-scroll is the failure mode).
+    /// existing column is never moved, renamed or re-sized by a schema delta —
+    /// columns jumping mid-scroll is the failure mode.
     func apply(status: QueryStatus) {
         applySchema(status.columns)
         let newCount = Int(status.rowsLoaded)
@@ -796,7 +796,7 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
                 rightAligned: rightAlignedByID[tableColumn.identifier] ?? false)
             cell.onNestedClick = nil
             // Shimmer only while rows are genuinely still arriving; a terminal
-            // query leaves a completely static window (design §5 idle budget).
+            // query leaves a completely static window, within the idle budget.
             cell.setShimmer(isStreaming)
             return cell
         }

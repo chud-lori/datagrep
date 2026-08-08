@@ -1,4 +1,4 @@
-//! datagrep xtask — CI helper binary (design doc §5 / §6 / §11.3).
+//! datagrep xtask — CI helper binary.
 //!
 //! Invoked as `cd xtask && cargo run -- <cmd>`, or by `ci/gates.sh` as a
 //! prebuilt binary. Commands:
@@ -10,9 +10,10 @@
 //! * `count-crates [<workspace-root>] [--budget <path>] [--strict]`
 //!   Unique crates in `cargo tree --workspace -e normal` vs P16d. Always
 //!   exits 0 unless `--strict` and the fail threshold is breached (the gate
-//!   is warn-only for now per §5 wiring plan).
+//!   is warn-only for now).
 //! * `grep-gates [<root>] [--allowlist <path>]`
-//!   The §5.2 banned-pattern greps, structured, with an allowlist. Exits
+//!   The banned-pattern greps, structured, with an allowlist. Each rule and
+//!   the reason it exists is spelled out in `scan_content` below. Exits
 //!   nonzero on any non-allowlisted FAIL finding.
 //!
 //! No dependencies by design: the TOML subset parser below handles exactly
@@ -355,7 +356,7 @@ fn count_unique_crates(tree_output: &str) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// grep-gates — §5.2 banned anti-patterns, structured
+// grep-gates — banned anti-patterns, structured
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -412,19 +413,21 @@ fn scan_content(path: &str, content: &str) -> Vec<Finding> {
             });
         };
         if !skip {
-            // §5.2: "ControlFlow::Poll anywhere outside a benchmark" — repaints
-            // at display refresh forever; 200-1000x over the P12 idle budget.
+            // ControlFlow::Poll anywhere outside a benchmark is banned: it
+            // repaints at display refresh forever, 200-1000x over the P12
+            // idle budget.
             if line.contains("ControlFlow::Poll") {
                 push("controlflow-poll", Severity::Fail);
             }
-            // §3.4/§9.4: free-running tokio::time::interval banned — the only
-            // timer is the armed-on-demand DelayQueue. Allowlist justified uses.
+            // A free-running tokio::time::interval is banned — the only timer
+            // is the armed-on-demand DelayQueue. Allowlist justified uses.
             if line.contains("tokio::time::interval") {
                 push("tokio-interval", Severity::Fail);
             }
-            // §3.2: "If any channel in the data path is unbounded, we have
-            // re-implemented DBeaver." Hard fail inside datagrep-core src; warn
-            // elsewhere (allowlist justified non-data-path uses).
+            // An unbounded channel in the data path throws away backpressure:
+            // the producer outruns the consumer and the whole result lands in
+            // memory. Hard fail inside datagrep-core src; warn elsewhere
+            // (allowlist justified non-data-path uses).
             if line.contains("unbounded_channel") {
                 let sev = if path.contains("datagrep-core/src") {
                     Severity::Fail
@@ -437,8 +440,8 @@ fn scan_content(path: &str, content: &str) -> Vec<Finding> {
             if in_src && line.contains(".unwrap()") {
                 push("unwrap", Severity::Warn);
             }
-            // §5.2: "format! in the cell-render path" — allocates per cell per
-            // frame; use itoa/ryu into a per-frame arena. Warn on format! in
+            // format! in the cell-render path allocates per cell per frame;
+            // use itoa/ryu into a per-frame arena instead. Warn on format! in
             // any file whose path mentions render/paint.
             if render_path && line.contains("format!") {
                 push("format-in-render", Severity::Warn);
@@ -565,7 +568,11 @@ fn grep_gates(root: &str, allowlist_path: Option<&str>) -> Result<bool, String> 
         println!("note: {allowed_count} finding(s) waived via allowlist");
     }
     if fail_count > 0 {
-        println!("grep-gates: {fail_count} FAIL finding(s) — see §5.2 of the design doc");
+        println!(
+            "grep-gates: {fail_count} FAIL finding(s) — each rule and why it \
+             is banned is documented in xtask/src/main.rs (`scan_content`); \
+             ci/gates.sh runs this gate"
+        );
         Ok(false)
     } else {
         println!("grep-gates: OK ({} file(s) scanned)", files.len());
@@ -718,7 +725,7 @@ serde v1.0.100
     fn ignores_patterns_in_line_comments() {
         let f = scan_content(
             "/crates/datagrep-core/src/lib.rs",
-            "// ControlFlow::Poll is banned per design §5.2\n/// never use tokio::time::interval\n",
+            "// ControlFlow::Poll is banned\n/// never use tokio::time::interval\n",
         );
         assert!(f.is_empty());
     }

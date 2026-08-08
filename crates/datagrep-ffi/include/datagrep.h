@@ -27,8 +27,8 @@ bool  datagrep_profiles_add(DatagrepCore*, const char* name, const char* url, ch
 // subset of:
 // {"env":"dev"|"staging"|"prod","read_only":bool,"confirm_writes":bool,
 //  "auto_limit":i64|null,"idle_timeout_s":i64|null,"color":str|null}
-// This is how a profile is born prod (env drives the design 3.8 prod
-// guardrails: red chrome, confirm-on-write).
+// This is how a profile is born prod: env drives the prod guardrails (red
+// chrome, confirm-on-write).
 bool  datagrep_profiles_add_json(DatagrepCore*, const char* name, const char* url,
                                  const char* options_json, char** err_out);
 // Edit an existing profile, keyed by its current name. patch_json is any
@@ -56,8 +56,8 @@ bool  datagrep_profiles_update(DatagrepCore*, const char* name,
 char* datagrep_profiles_get_json(DatagrepCore*, const char* name, char** err_out);
 bool  datagrep_profiles_remove(DatagrepCore*, const char* name, char** err_out);
 
-// Read-only truth for one profile (design 3.8: say WHICH protection is in
-// force, never imply server enforcement that isn't there). Returns JSON:
+// Read-only truth for one profile: say WHICH protection is in force, never
+// imply server enforcement that isn't there. Returns JSON:
 // {"profile":str,"driver":str,"env":"dev"|"staging"|"prod",
 //  "read_only": null                                    // profile is writeable
 //             | {"enforcement":"server"|"client"|"none",
@@ -106,7 +106,7 @@ DatagrepQuery* datagrep_query_run(DatagrepCore*, const char* profile, const char
 void      datagrep_query_free(DatagrepQuery*);
 
 // Cancel. ALWAYS returns instantly. outcome_json describes whether the SERVER
-// also stopped (design §3.3) — caller must datagrep_string_free it if non-NULL.
+// also stopped — caller must datagrep_string_free it if non-NULL.
 void datagrep_query_cancel(DatagrepQuery*, char** outcome_json_out);
 
 // Status snapshot as JSON:

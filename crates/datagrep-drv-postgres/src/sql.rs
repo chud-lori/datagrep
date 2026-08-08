@@ -1,7 +1,7 @@
 //! SQL generation: identifier quoting and the `Op` → SQL compiler.
 //!
-//! Design §3.8 injection rules, restated for this driver: values are ALWAYS
-//! bound as `$n` parameters — never spliced as text — and identifiers always
+//! The injection rules for this driver: values are ALWAYS bound as `$n`
+//! parameters — never spliced as text — and identifiers always
 //! go through [`quote_ident`]. Nothing in this module ever interpolates a
 //! `Value` into the SQL string itself.
 
@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use datagrep_api::{DbError, FieldPath, ObjectPath, PathSeg, Predicate, SortKey, Value};
 
-/// Quote a Postgres identifier (design item 6). Embedded `"` are doubled;
+/// Quote a Postgres identifier. Embedded `"` are doubled;
 /// embedded NUL is rejected outright — Postgres identifiers cannot contain
 /// NUL and silently truncating at the NUL would let a name lie about itself.
 pub fn quote_ident(ident: &str) -> Result<String, DbError> {
@@ -361,7 +361,7 @@ pub fn compile_mutation(m: &datagrep_api::Mutation) -> Result<MutationSql, DbErr
 }
 
 /// The named row identity as `"col" = $n AND …`. An empty key is refused —
-/// we never guess which row to affect (design §3.8).
+/// we never guess which row to affect.
 fn key_where(key: &[(FieldPath, Value)], pb: &mut ParamBuilder) -> Result<String, DbError> {
     if key.is_empty() {
         return Err(DbError::Unsupported {

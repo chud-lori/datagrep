@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Per-language editor support for datagrep: statement splitting, classification, minimal edit context, and highlighting. Hand-rolled lexers only (design §3.6) — no parser-generator, no tree-sitter, no sqlparser-rs."
+description = "Per-language editor support for datagrep: statement splitting, classification, minimal edit context, and highlighting. Hand-rolled lexers only — no parser-generator, no tree-sitter, no sqlparser-rs."
 
 [dependencies]
 datagrep-api = { path = "../datagrep-api" }

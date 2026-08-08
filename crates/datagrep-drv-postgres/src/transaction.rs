@@ -1,11 +1,11 @@
 //! [`PgTransaction`]: the explicit, interactive transaction returned by
 //! [`crate::connection::PgConnection::begin`] — pinned to one physical
-//! session for its whole life (design §3.5: "a pool that silently moves a
-//! BEGIN to a different socket is a correctness bug"), which falls out for
-//! free here because the backing actor holds that pooled session for exactly
-//! that long (see `actor.rs`). Other work on the same logical connection
-//! takes a *different* session from [`crate::pool::PgPool`] rather than
-//! queueing behind this transaction.
+//! session for its whole life — a pool that silently moved a BEGIN to a
+//! different socket would be a correctness bug, not a performance detail.
+//! That falls out for free here because the backing actor holds the pooled
+//! session for exactly that long (see `actor.rs`). Other work on the same
+//! logical connection takes a *different* session from
+//! [`crate::pool::PgPool`] rather than queueing behind this transaction.
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};

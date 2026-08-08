@@ -1,4 +1,4 @@
-//! Statement classification (design §3.8, layer 2 write-guardrail): the
+//! Statement classification, feeding the client-side write guardrail: the
 //! first significant keyword after comments/whitespace decides
 //! [`StatementClass`], with one deliberate exception — `WITH` requires
 //! looking past the CTE list (skipping nested parens correctly, and

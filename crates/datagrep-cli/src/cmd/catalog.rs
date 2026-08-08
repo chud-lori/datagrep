@@ -1,7 +1,7 @@
-//! `datagrep catalog` (ticket item 4): list ONE level lazily — exactly the
-//! `CoreApi::list_catalog` call design §5.1 describes ("on connect issue
-//! exactly one cheap query \[...\] Expand-on-demand per node"). This command
-//! never recurses; each invocation is one `children()` call for one path.
+//! `datagrep catalog` (ticket item 4): list ONE level lazily — one
+//! `CoreApi::list_catalog` call, which on connect issues exactly one cheap
+//! query and expands on demand per node. This command never recurses; each
+//! invocation is one `children()` call for one path.
 //!
 //! `--describe` needs [`datagrep_api::Catalog::describe`], which `CoreApi` does
 //! not wrap the way it wraps `children` (as `list_catalog`) — no

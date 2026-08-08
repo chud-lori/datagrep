@@ -24,7 +24,7 @@ struct ConnectionSafety: Equatable {
 // MARK: - read-only badge
 
 /// A lock and a word, at two sizes. Never a tint on its own: a colour-only
-/// signal is exactly the failure mode §5 item 4 catalogues, and it would also
+/// signal disappears in whichever theme it was not tuned for, and it would also
 /// collide with the connection colour the user picked.
 struct ReadOnlyBadge: View {
     let level: ReadOnlyEnforcement
@@ -63,9 +63,10 @@ struct ReadOnlyBadge: View {
 
 // MARK: - production marker
 
-/// §3.8 layer 2, in the sidebar. Large and always visible, per the Sequel Ace
-/// lesson in §8: they shrank a full-width colour to a dot and got sustained
-/// backlash, so this is a filled band with a word in it, not a tint.
+/// Layer 2 of the production guardrail, in the sidebar. Large and always
+/// visible: when Sequel Ace shrank its full-width production colour to a dot it
+/// drew sustained backlash, so this is a filled band with a word in it, not a
+/// tint.
 struct ProdBanner: View {
     let name: String
 

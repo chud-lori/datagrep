@@ -1,13 +1,14 @@
-//! The one runtime (design §3.4).
+//! The one runtime.
 //!
 //! ```text
 //! tokio runtime    worker_threads = clamp(available_parallelism()-1, 2, 4)
 //! blocking pool    max 8, keep_alive 10s
 //! ```
 //!
-//! > "4 workers, not `num_cpus`: this is an I/O-bound desktop app; 32 worker
-//! > threads on a workstation costs ~32 × 2 MB of stack reservation and steals
-//! > from whatever the user is compiling."
+//! Four workers, not `num_cpus`: this is an I/O-bound desktop app. 32 worker
+//! threads on a workstation costs ~32 × 2 MB of stack reservation and steals
+//! cores from whatever the user is compiling, and buys nothing — the work here
+//! is waiting on sockets, not saturating CPUs.
 //!
 //! It is **process-global** rather than per-[`crate::DatagrepCore`] on purpose:
 //!
@@ -60,7 +61,7 @@ mod tests {
         let metrics = a.metrics();
         assert!(
             (2..=4).contains(&metrics.num_workers()),
-            "design §3.4 caps workers at 4, got {}",
+            "workers must stay capped at 4, got {}",
             metrics.num_workers()
         );
     }

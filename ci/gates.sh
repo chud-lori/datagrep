@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# ci/gates.sh — the Tier-1 gate (design doc §5.2, §6, §11 point 3).
+# ci/gates.sh — the Tier-1 gate.
 #
-# Tier-1 = every PR, hardware-independent, deterministic, <8 min (§6). No
+# Tier-1 = every PR, hardware-independent, deterministic, <8 min. No
 # wall-clock timing assertions live here — those need real hardware and
 # belong to the Tier-2 nightly fleet (see ci/README.md).
 #
@@ -103,7 +103,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Anti-pattern greps (design doc §5.2), via xtask grep-gates.
+# 4. Anti-pattern greps, via xtask grep-gates.
 #    HARD FAIL: unbounded_channel in crates/datagrep-core/src, ControlFlow::Poll
 #    outside spike/bench/test dirs, tokio::time::interval anywhere in gated
 #    source. WARN (count only): .unwrap() in non-test src/. WARN: format!
@@ -111,11 +111,11 @@ fi
 #    non-data-path cases; see that file's header for the format.
 # ---------------------------------------------------------------------------
 
-note "Anti-pattern greps (design doc §5.2)"
+note "Anti-pattern greps"
 if "${xtask_bin}" grep-gates "${repo_root}" --allowlist "${allowlist}"; then
   echo "grep-gates: OK"
 else
-  fail_gate "grep-gates (§5.2 banned anti-patterns)"
+  fail_gate "grep-gates (banned anti-patterns)"
 fi
 
 # ---------------------------------------------------------------------------

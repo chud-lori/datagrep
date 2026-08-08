@@ -505,8 +505,8 @@ void datagrep_query_cancel(DatagrepQuery *q, char **outcome_json_out) {
     q->finished_ms = now_ms();
     uint64_t rows = q->rows_loaded;
     pthread_mutex_unlock(&q->lock);
-    /* Returns instantly: we do NOT join the feeder here (design §3.3 — the stop
-       button always returns control immediately). */
+    /* Returns instantly: we do NOT join the feeder here, because the stop
+       button must always return control immediately. */
     if (outcome_json_out) {
         Sb s;
         sb_init(&s);

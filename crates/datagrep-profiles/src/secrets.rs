@@ -1,6 +1,6 @@
-//! design §3.8: "profiles store only `secret_ref`, NEVER a secret." This
-//! module is the enforcement point — every `create_profile`/`update_profile`
-//! call in `Store` runs `config` through here before it ever reaches SQL.
+//! Profiles store only a `secret_ref`, NEVER a secret. This module is the
+//! enforcement point — every `create_profile`/`update_profile` call in
+//! `Store` runs `config` through here before it ever reaches SQL.
 //!
 //! The check is a case-insensitive substring match on config *keys*, not
 //! values: we cannot know what a driver-specific field name means, but no

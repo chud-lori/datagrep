@@ -1,8 +1,8 @@
 //! Live SSH integration tests — `#[ignore]`d, opt-in.
 //!
-//! These need a real SSH server and are never run by `cargo test` by
-//! default (design brief: "live SSH tests behind `#[ignore]`"). Run
-//! explicitly once the environment below is set:
+//! These need a real SSH server, so they sit behind `#[ignore]` and are
+//! never run by a plain `cargo test`. Run them explicitly once the
+//! environment below is set:
 //!
 //! ```text
 //! DATAGREP_TUNNEL_TEST_HOST=example.com \

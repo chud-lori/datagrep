@@ -1,4 +1,4 @@
-//! The dedicated-worker-thread bridge (design §3.4). One `std::thread` per
+//! The dedicated-worker-thread bridge. One `std::thread` per
 //! connection owns the `rusqlite::Connection` for its entire life; every
 //! async method sends a [`WorkerMsg`] and awaits a `tokio::sync::oneshot`
 //! reply. See `lib.rs` for the full rationale.
@@ -153,7 +153,7 @@ impl JobSender {
 
     /// Run `f` on the worker thread with `&rusqlite::Connection` and return
     /// its result. Used by `SqliteCatalog` so introspection never leaves the
-    /// connection's owning thread either (design §3.4).
+    /// connection's owning thread either.
     pub async fn run_catalog_job<F, T>(&self, f: F) -> Result<T, DbError>
     where
         F: FnOnce(&rusqlite::Connection) -> Result<T, DbError> + Send + 'static,
@@ -216,7 +216,7 @@ fn build_server_info(conn: &rusqlite::Connection, path: &str) -> ServerInfo {
 
 /// The worker thread's entire body. Everything rusqlite-related for this
 /// connection happens here and nowhere else — `conn` never crosses a thread
-/// boundary (design §3.4). `cursors` is declared after `conn` so it drops
+/// boundary. `cursors` is declared after `conn` so it drops
 /// first, finalizing every open statement before the connection itself
 /// closes (no "still has open statements" teardown error, no thread leak).
 pub(crate) fn run_worker(
@@ -403,7 +403,7 @@ fn build_row_schema(columns: &[ColumnMeta], identity: Option<Identity>) -> RowSc
 /// against a real table: look up its declared primary key and, if every PK
 /// column made it into the output, report it. Anything else (raw SQL,
 /// projections, joins, expressions) stays `None` — never guess at what to
-/// mutate (design §3.8).
+/// mutate.
 fn detect_identity(
     conn: &rusqlite::Connection,
     req: &Request,
@@ -480,8 +480,8 @@ fn handle_execute<'conn>(
 /// `Mutation::Update`/`Delete` carry their row identity as **named**
 /// `(FieldPath, Value)` pairs (the same shape as `sets`), so the WHERE
 /// clause compiles directly from the mutation — no `PRAGMA table_info`
-/// lookup, no positional primary-key convention. The one-row invariant
-/// (design §3.8) is still enforced by [`expect_exactly_one`].
+/// lookup, no positional primary-key convention. The one-row invariant is
+/// still enforced by [`expect_exactly_one`].
 fn handle_mutate(
     conn: &rusqlite::Connection,
     batch: &MutationBatch,
@@ -512,7 +512,7 @@ fn handle_mutate(
 
 /// Compile the named row identity into `"col" = ? AND …`. The field names
 /// come from the mutation itself (`key: Vec<(FieldPath, Value)>`); an empty
-/// key is refused — we never guess which row to affect (design §3.8).
+/// key is refused — we never guess which row to affect.
 fn keyed_where(
     key: &[(datagrep_api::FieldPath, Value)],
     params: &mut Vec<Value>,
@@ -606,8 +606,9 @@ fn apply_mutation(conn: &rusqlite::Connection, m: &Mutation) -> Result<u64, DbEr
     }
 }
 
-/// Design §3.8: "every grid update ... must affect exactly 1 row or it
-/// rolls back with 'row identity changed — refresh'."
+/// Every grid update must affect exactly one row or it rolls back with
+/// "row identity changed — refresh". A stale or ambiguous row identity that
+/// matched several rows would silently edit rows the user never touched.
 fn expect_exactly_one(n: usize, verb: &str) -> Result<(), DbError> {
     if n == 1 {
         Ok(())

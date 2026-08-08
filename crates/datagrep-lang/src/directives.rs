@@ -1,4 +1,4 @@
-//! Block directives (design §3.6): the entire meta-language is four items,
+//! Block directives: the entire meta-language is four items,
 //! written as the last comment lines immediately above a statement:
 //!
 //! ```text

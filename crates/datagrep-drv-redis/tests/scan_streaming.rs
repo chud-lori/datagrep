@@ -1,5 +1,5 @@
-//! The load-bearing integration contract (design §3.1 requirement 2/3,
-//! §5.2): browsing a real keyspace and a real huge hash goes through
+//! The load-bearing integration contract: browsing a real keyspace and a
+//! real huge hash goes through
 //! `SCAN`/`HSCAN`, incrementally, and `KEYS` is **never** sent — proven from
 //! outside the driver via `INFO commandstats`, not just by reading the
 //! source. Run with `cargo test -p datagrep-drv-redis --test scan_streaming --
@@ -92,7 +92,7 @@ async fn scan_browses_50k_keys_incrementally_never_using_keys() {
     let keys_after = common::command_call_count(&mut raw, "keys").await;
     assert_eq!(
         keys_before, keys_after,
-        "KEYS must never be emitted by any code path in this driver (design §5.2)"
+        "KEYS must never be emitted by any code path in this driver"
     );
 }
 
@@ -175,7 +175,7 @@ async fn resume_token_continues_exactly_where_it_left_off() {
 
     // First cursor: take exactly one batch, remember the resume token, then
     // abandon it (never call next_batch again) — this is the "auto-disconnect,
-    // resume later" scenario resume_token exists for (design §3.5).
+    // resume later" scenario resume_token exists for.
     let mut first = conn
         .execute(scan_req(None))
         .await

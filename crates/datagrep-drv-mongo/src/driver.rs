@@ -25,9 +25,9 @@ use crate::error::map_mongo_error;
 ///
 /// `SERVER_CANCEL` here means "this engine has server-side cancel machinery
 /// in principle" — the *actual*, honestly-degraded strength of a given
-/// cancel is reported per-cancellation by [`crate::canceller::MongoCanceller::kind`]
-/// (design §3.3: "always send maxTimeMS ... true killOp needs privileges we
-/// may lack -> degrade to ClientAbandon and say so").
+/// cancel is reported per-cancellation by [`crate::canceller::MongoCanceller::kind`]:
+/// `maxTimeMS` always goes out, but a true `killOp` needs privileges we may
+/// lack, in which case the cancel degrades to `ClientAbandon` and says so.
 const BASE_CAPS: Caps = Caps::DDL
     .union(Caps::EXPLAIN)
     .union(Caps::SERVER_CANCEL)
@@ -36,9 +36,9 @@ const BASE_CAPS: Caps = Caps::DDL
     .union(Caps::KEY_ENUMERATION);
 
 /// Baseline/post-handshake capabilities, parameterized on whether this
-/// server (post-`hello`) actually supports multi-document transactions
-/// (design §3.1 caps list: "TRANSACTIONS (4.0+ replica sets — detect
-/// post-handshake and report honestly)").
+/// server actually supports multi-document transactions. Those need a 4.0+
+/// replica set, which is only knowable after `hello` — so the flag is
+/// detected post-handshake and reported honestly, never assumed.
 pub fn mongo_capabilities(transactions_supported: bool) -> Capabilities {
     let mut flags = BASE_CAPS;
     if transactions_supported {
@@ -49,8 +49,8 @@ pub fn mongo_capabilities(transactions_supported: bool) -> Capabilities {
         max_statement_bytes: Some(16 * 1024 * 1024), // BSON document hard limit
         // Ticket: "default_fetch_rows 101 then 1000" — 101 is the honest
         // single starting value; growth toward ~1000 is datagrep-core's adaptive
-        // sizing (design §3.2's `clamp(prev * target_ms / actual_ms, ...)`),
-        // not something a single `u32` field can express.
+        // sizing (`clamp(prev * target_ms / actual_ms, ...)`), not something
+        // a single `u32` field can express.
         default_fetch_rows: 101,
         // The engine takes structured commands, not `$1`/`?`-templated text
         // (ticket item 1).
@@ -65,7 +65,7 @@ pub fn mongo_capabilities(transactions_supported: bool) -> Capabilities {
     }
 }
 
-/// The MongoDB driver adapter (design §3.1). Stateless — all per-server state
+/// The MongoDB driver adapter. Stateless — all per-server state
 /// lives in the [`MongoConnection`]s it creates.
 #[derive(Debug, Default)]
 pub struct MongoDriver;
@@ -288,9 +288,10 @@ fn bool_field(cfg: &ResolvedConfig, key: &str) -> Result<Option<bool>, DbError> 
 }
 
 /// Reassemble a `mongodb://`/`mongodb+srv://` connection string from the
-/// resolved config fields (design §3.8: the password lives in the keychain
-/// as a [`datagrep_api::config::SecretString`], never in `ConnectionConfig`, and
-/// is only ever pulled back in at connect time).
+/// resolved config fields. The password lives in the keychain as a
+/// [`datagrep_api::config::SecretString`], never in `ConnectionConfig`, and is
+/// only ever pulled back in here at connect time — so a serialized config,
+/// a log line, or a debug dump can never carry it.
 fn build_uri(cfg: &ResolvedConfig) -> Result<String, DbError> {
     let hosts = str_field(cfg, "hosts")?.ok_or_else(|| {
         DbError::Config(ConfigError::MissingField {

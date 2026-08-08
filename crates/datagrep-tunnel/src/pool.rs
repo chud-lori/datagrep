@@ -1,8 +1,7 @@
 //! [`TunnelPool`] — one SSH connection per `(host, port, user)`, shared by
 //! refcounted checkout, torn down after the last checkout drops plus an
-//! idle grace period (design §3.5's connection-lifecycle philosophy,
-//! applied to the tunnel layer rather than the DB pool layer it was written
-//! for).
+//! idle grace period — the same connection-lifecycle stance datagrep takes
+//! for database connections, applied at the tunnel layer.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,7 +19,7 @@ use crate::tunnel::SshTunnel;
 /// How long a tunnel with zero checked-out clones is kept alive before the
 /// pool drops its own reference. Event-driven (a single timer armed only
 /// when the count reaches zero — see [`Checkout::drop`]), not a recurring
-/// poll, per design §5.1's no-polling rule.
+/// poll: an idle app should be an idle CPU.
 const IDLE_GRACE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -94,11 +93,11 @@ impl<P: HostKeyPolicy + 'static> TunnelPool<P> {
         // held across that would stall every other host's checkout, not
         // just this one. Two callers racing to connect the same
         // `(host, port, user)` for the first time both pay the connect
-        // cost; the design brief's own tradeoff for the DB pool applies
-        // just as well here ("no min_idle floor — reconnect is 20-80ms and
-        // nobody notices"), so the loser's redundant connection is cheap,
-        // not incorrect — it's simply dropped, per the double-checked
-        // insert below.
+        // cost. That is the same tradeoff datagrep makes for DB connections:
+        // there is no idle floor to keep, because a reconnect costs tens of
+        // milliseconds and nobody notices. So the loser's redundant
+        // connection is cheap, not incorrect — it's simply dropped, per the
+        // double-checked insert below.
         let tunnel =
             SshTunnel::connect(key.host.clone(), key.port, key.user.clone(), auth, policy).await?;
 
@@ -225,7 +224,7 @@ impl<P: HostKeyPolicy + 'static> Drop for Checkout<P> {
         let refs = self.refs.clone();
         let generation = self.generation.clone();
         // Single one-shot timer, armed only on the transition to zero —
-        // not a recurring poll (design §5.1).
+        // not a recurring poll that would wake an otherwise idle app.
         tokio::spawn(async move {
             tokio::time::sleep(IDLE_GRACE).await;
             if refs.load(Ordering::SeqCst) != 0 {

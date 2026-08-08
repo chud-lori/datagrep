@@ -1,19 +1,16 @@
 //! The hot path: one materialised window, and nothing else.
 //!
-//! > "**Invariant: `datagrep` never holds a result set larger than
-//! > `total_result_budget`, regardless of the query.**" (§3.2)
-//!
-//! and the claim this ABI has to make true on every scroll:
-//!
-//! > "The projected view materializes to a small Arrow batch **for the visible
-//! > window only**." (§3.2)
+//! **Invariant: `datagrep` never holds a result set larger than
+//! `total_result_budget`, regardless of the query** — and the claim this ABI
+//! has to make true on every scroll is that the projected view materializes to
+//! a small Arrow batch **for the visible window only**.
 //!
 //! [`datagrep_query_rows`] is a single `CoreApi::get_rows(qid, off..off+len)` and a
 //! single pass over exactly that rectangle. It never widens the range, never
 //! reads ahead, and never waits: a window the feeder has not reached yet comes
 //! back with `datagrep_rows_pending() == true` and zero rows, which is the signal to
-//! draw skeletons. Asking for it is itself what resumes the feeder (§3.6:
-//! *"scrolling is the pull signal"*), so the next call gets real rows.
+//! draw skeletons. Asking for it is itself what resumes the feeder — scrolling
+//! *is* the pull signal — so the next call gets real rows.
 //!
 //! ## Memory shape of a window
 //!
@@ -26,8 +23,8 @@
 //!
 //! `datagrep_rows_cell` returns a pointer that is either into `text` or **straight
 //! into an Arrow/`Arc<str>` buffer** the `slices` keep alive. The Swift side
-//! never allocates, never copies, and never re-formats on redraw — design §5.1's
-//! banned anti-pattern is "`format!` in the cell-render path", and there is no
+//! never allocates, never copies, and never re-formats on redraw. `format!` in
+//! the cell-render path is a banned anti-pattern here, and there is no
 //! cell-render path left on the Swift side to put one in.
 
 use std::ffi::c_char;
@@ -48,7 +45,7 @@ struct CellMeta {
     off: u32,
     len: u32,
     kind: u8,
-    /// Non-null: borrowed straight from a store buffer, zero copy (§5.1).
+    /// Non-null: borrowed straight from a store buffer, zero copy.
     ptr: *const u8,
 }
 
@@ -177,7 +174,7 @@ impl DatagrepRows {
         // `Pending` means none of it arrived; `Partial` means the tail did
         // not. Both mean "the feeder was resumed, ask again" — and both mean
         // the caller should draw skeletons for what `datagrep_rows_count` does not
-        // cover, so both set the flag (design §3.2 window resolver).
+        // cover, so both set the flag.
         let pending = matches!(window.status, WindowStatus::Pending | WindowStatus::Partial);
 
         let columns = project_columns(&window.slices);
@@ -381,10 +378,10 @@ fn doc_field<'a>(row: &'a Value, name: Option<&str>, cols: usize) -> Option<&'a 
 ///
 /// - **Table**: the Arrow schema, verbatim.
 /// - **Documents**: the ordered union of top-level field names seen *in this
-///   window*. Design §3.1's `ViewProjection`, at its simplest honest form. It
-///   is window-local on purpose — a document store has no global column list,
-///   and inventing one would mean scanning rows nobody asked for, which is the
-///   banned anti-pattern this whole design is built against.
+///   window*. A `ViewProjection` at its simplest honest form. It is
+///   window-local on purpose — a document store has no global column list, and
+///   inventing one would mean scanning rows nobody asked for, which is exactly
+///   the eager-materialisation this whole design is built against.
 /// - **Pairs**: `key`, `value` (Redis `SCAN`/`HGETALL`).
 fn project_columns(slices: &[WindowSlice]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();

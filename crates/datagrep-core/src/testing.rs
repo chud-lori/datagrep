@@ -1,11 +1,11 @@
 //! Reusable mock driver stack, behind `#[cfg(any(test, feature = "testing"))]`.
 //!
-//! The memory contract (design §3.2) can only be tested against a producer
-//! that never stops and a consumer that stops reading, so the mocks here are
-//! deliberately *hostile*: infinite batch production, a panic-on-execute mode
-//! for driver-panic isolation (§3.5), a slow mode for adaptive fetch sizing
-//! (§3.2), and a call counter so a test can prove the feeder actually parked
-//! rather than merely looking idle.
+//! The memory contract can only be tested against a producer that never stops
+//! and a consumer that stops reading, so the mocks here are deliberately
+//! *hostile*: infinite batch production, a panic-on-execute mode for
+//! driver-panic isolation, a slow mode for adaptive fetch sizing, and a call
+//! counter so a test can prove the feeder actually parked rather than merely
+//! looking idle.
 //!
 //! Sibling crates (`datagrep-drv-*`, the spike UI) enable the `testing` feature to
 //! reuse this instead of growing their own half-correct copy.
@@ -58,27 +58,31 @@ impl MockCounters {
         self.executes.load(Ordering::SeqCst)
     }
 
-    /// `Cursor::next_batch` calls — THE backpressure probe (design §3.2).
+    /// `Cursor::next_batch` calls — the backpressure probe. If this keeps
+    /// climbing while nobody is consuming, the data path is not bounded.
     pub fn next_batch_calls(&self) -> usize {
         self.next_batch.load(Ordering::SeqCst)
     }
 
-    /// `Cursor::close` calls; a cancelled query must close its cursor (§3.3).
+    /// `Cursor::close` calls; a cancelled query must close its cursor so no
+    /// server-side portal is left open.
     pub fn cursor_closes(&self) -> usize {
         self.cursor_closes.load(Ordering::SeqCst)
     }
 
-    /// `Connection::close` calls; an idle-reaped pool entry must close (§3.5).
+    /// `Connection::close` calls; an idle-reaped pool entry must actually close
+    /// its socket, not just be forgotten.
     pub fn conn_closes(&self) -> usize {
         self.conn_closes.load(Ordering::SeqCst)
     }
 
-    /// `Canceller::cancel` calls — the server half of a stop (§3.3).
+    /// `Canceller::cancel` calls — the server half of a stop.
     pub fn cancels(&self) -> usize {
         self.cancels.load(Ordering::SeqCst)
     }
 
-    /// `Connection::ping` calls; liveness is lazy, never on a timer (§3.4).
+    /// `Connection::ping` calls; liveness is checked lazily on next use, never
+    /// on a timer, so an idle app stays quiet.
     pub fn pings(&self) -> usize {
         self.pings.load(Ordering::SeqCst)
     }
@@ -89,7 +93,7 @@ impl MockCounters {
 pub enum MockPayload {
     /// `Shape::Table` rows — the Arrow lane of the store.
     Rows,
-    /// `Shape::Documents` values — the non-Arrow lane (design §3.2).
+    /// `Shape::Documents` values — the non-Arrow lane of the store.
     Docs,
     /// `Shape::Ack` — a statement acknowledgement (INSERT/DDL). Emits
     /// `Payload::Empty` chunks; the affected count travels in the shape.
@@ -106,21 +110,22 @@ pub struct MockPlan {
     /// Rows per batch, further bounded by the caller's [`FetchHint::max_rows`]
     /// so adaptive fetch sizing is observable.
     pub rows_per_batch: usize,
-    /// Panic inside `Connection::execute`, for driver-panic isolation (§3.5).
+    /// Panic inside `Connection::execute`, for testing driver-panic isolation.
     pub panic_on_execute: bool,
     /// Slow mode: sleep this long inside every `next_batch`.
     pub batch_delay: Option<Duration>,
     /// Fail with a recoverable `DbError::Query` after this many batches.
     pub fail_after: Option<u64>,
-    /// Distinct values in the `status` column. Low values make the §5.1
+    /// Distinct values in the `status` column. Low values make the
     /// dictionary-encoding heuristic fire.
     pub status_cardinality: usize,
     pub payload: MockPayload,
-    /// What this engine claims a cancel can do (§3.3).
+    /// What this engine claims a cancel can do.
     pub cancel_kind: CancelKind,
     /// What `Canceller::cancel` reports back.
     pub cancel_outcome: CancelOutcome,
-    /// Starting fetch size the connection advertises (§3.2).
+    /// Starting fetch size the connection advertises, which seeds the feeder's
+    /// adaptive sizing.
     pub default_fetch_rows: u32,
 }
 

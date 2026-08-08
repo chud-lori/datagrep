@@ -3,7 +3,7 @@
 //! Same constraint the Postgres driver hit, different type: mysql_async's
 //! `QueryResult<'a, 't, P>` mutably borrows its `Conn` for as long as the
 //! result is being streamed, while `Connection::execute` must hand back a
-//! `'static` `Box<dyn Cursor>` (design §3.1). (The Mongo driver escaped this
+//! `'static` `Box<dyn Cursor>`. (The Mongo driver escaped this
 //! because its `ClientSession`/cursor pair is fully owned; MySQL is not so
 //! lucky.) Rather than an unsafe self-referential struct, the `Conn` and the
 //! in-flight `QueryResult` live entirely on this task's stack; everything
@@ -18,7 +18,7 @@
 //! again. The integration test `undrained_result_does_not_poison_connection`
 //! exercises exactly this.
 //!
-//! Backpressure (§3.2/§5.1): rows are pulled off the socket one
+//! Backpressure: rows are pulled off the socket one
 //! `QueryResult::next()` at a time, only inside `FetchBatch` handling —
 //! nobody calls `next_batch`, nothing is read, the TCP window closes, the
 //! server stops producing. Nothing here ever calls `collect`.
@@ -146,7 +146,8 @@ fn spawn(
         if poisoned {
             // A transport/protocol failure mid-stream: the Conn's state is
             // no longer trustworthy. Take it so every later use of this
-            // connection observes `Closed` (design §3.5 isolation).
+            // connection observes `Closed` rather than inheriting a
+            // half-broken session.
             guard.take();
         }
         // Dropping `guard` here releases the connection to the next caller.
@@ -351,8 +352,8 @@ async fn handle_execute(
         return ExecuteEnd::Continue;
     };
 
-    // §3.3: always push a server-side deadline where one exists, so even an
-    // uncancellable statement is bounded. MySQL's `max_execution_time`
+    // Always push a server-side deadline where one exists, so even a
+    // statement we cannot cancel is bounded. MySQL's `max_execution_time`
     // applies to SELECT only; MariaDB's `max_statement_time` applies to all
     // statements. Both are reset afterwards.
     let timeout_was_set = match timeout {
@@ -443,7 +444,8 @@ async fn handle_script(
     }
 
     // The final statement: parameterized → binary protocol (real bound
-    // params, design §3.8); no params → text protocol. The two protocols
+    // params, so a value can never be re-parsed as SQL); no params → text
+    // protocol. The two protocols
     // return differently-typed `QueryResult`s, hence the split into a
     // shared generic continuation.
     if params.is_empty() {
@@ -701,13 +703,13 @@ pub fn schema_of(columns: &[Column]) -> RowSchema {
 /// Best-effort row identity from column metadata alone (no extra round trip:
 /// the MySQL column-definition packet carries table, original name, and
 /// PRI_KEY per column). Single-table results only; joins/expressions fall
-/// back to `None` → not editable, per design §3.8 ("no identity, no
-/// editing").
+/// back to `None` → not editable: with no identity there is no safe way to
+/// name the row an edit is meant to hit.
 ///
 /// Known limitation, stated: with a composite primary key only partially
 /// selected, the selected key columns still carry PRI_KEY_FLAG, so the
-/// derived identity can be too narrow. The §3.8 backstop (every generated
-/// mutation must affect exactly 1 row or the batch rolls back) is what makes
+/// derived identity can be too narrow. The backstop — every generated
+/// mutation must affect exactly 1 row or the batch rolls back — is what makes
 /// this safe rather than silently wrong.
 fn detect_identity(columns: &[Column]) -> Option<Identity> {
     let first_table = columns

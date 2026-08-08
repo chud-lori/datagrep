@@ -25,7 +25,7 @@ final class GridRowNumberRuler: NSRulerView {
     /// block-selection model — the gutter never invents its own selection path.
     var onSelectRow: ((Int, Bool) -> Void)?
 
-    // Cached once — never allocated per draw (design §5.1).
+    // Cached once — never allocated per draw.
     private static let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
     private static let para: NSParagraphStyle = {
         let p = NSMutableParagraphStyle()

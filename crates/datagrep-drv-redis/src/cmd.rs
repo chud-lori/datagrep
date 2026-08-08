@@ -1,9 +1,8 @@
 //! Small, dependency-free helpers shared by `connection.rs` and
 //! `catalog.rs`: building a `redis::Cmd` from tokenized arguments,
-//! compiling a [`Predicate`] to a `SCAN`-style glob (design §3.6's
-//! `Op::Scan`), and recognizing the handful of commands that block the
-//! connection (design §3.3's `Canceller` needs to know before it dispatches
-//! one).
+//! compiling a [`Predicate`] to a `SCAN`-style glob for `Op::Scan`, and
+//! recognizing the handful of commands that block the connection (the
+//! `Canceller` needs to know before one is dispatched).
 
 use std::sync::Arc;
 
@@ -26,8 +25,10 @@ where
     cmd
 }
 
-/// Commands that block the connection waiting on the server (design §3.3:
-/// "for blocking commands … use `CLIENT KILL ID` from a second connection").
+/// Commands that block the connection waiting on the server; cancelling one
+/// needs a real `CLIENT KILL ID` from a second connection, since simply
+/// abandoning it client-side would leave the socket hung until the server's
+/// own timeout.
 /// Matched case-insensitively against the first token only — `WAIT`/`WAITAOF`
 /// block unconditionally; the `B`-prefixed list commands and `XREAD`/
 /// `XREADGROUP` only block when a `BLOCK` option is present, which
@@ -67,8 +68,8 @@ pub fn is_blocking_invocation(args: &[String]) -> bool {
     false
 }
 
-/// Compile a portable [`Predicate`] into a Redis `MATCH` glob (design §3.6's
-/// small filter AST, `Op::Scan`). `Shape::Pairs` has no real field names —
+/// Compile a portable [`Predicate`] from `Op::Scan` into a Redis `MATCH`
+/// glob. `Shape::Pairs` has no real field names —
 /// the only addressable "column" of a Redis key listing is the key name
 /// itself, so this only understands predicates against a field literally
 /// named `key`, matching `datagrep_api::value::FieldPath::field("key")`.
@@ -121,11 +122,10 @@ pub fn prefix_glob(prefix: &str) -> String {
     format!("{}*", escape_glob_literal(prefix))
 }
 
-/// Derive top-level colon-delimited prefixes from a sample of key names
-/// (design §3.1's `RedisCatalog` requirement: "derive prefixes by sampling
-/// … and splitting on `:` — never a full keyspace walk"). Prefixes are
-/// returned with their trailing `:` kept, insertion-ordered by first
-/// appearance, deduplicated.
+/// Derive top-level colon-delimited prefixes from a *sample* of key names —
+/// the catalog builds its tree by splitting sampled keys on `:`, never by
+/// walking the whole keyspace. Prefixes are returned with their trailing
+/// `:` kept, insertion-ordered by first appearance, deduplicated.
 pub fn derive_prefixes(sampled_keys: &[String]) -> Vec<Arc<str>> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();

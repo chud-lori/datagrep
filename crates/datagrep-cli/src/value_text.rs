@@ -15,7 +15,7 @@
 //! collapses to `None`/`Some(String)`: a stored `Value::Null` is
 //! [`CellText::Null`], a genuinely missing field ([`Value::Absent`] — only
 //! reachable through the document lane, since Arrow's validity bitmap cannot
-//! represent it — design §3.2) is [`CellText::Absent`], and an empty string
+//! represent it) is [`CellText::Absent`], and an empty string
 //! is [`CellText::Text(String::new())`], which prints as nothing between
 //! delimiters rather than as the word `NULL`.
 
@@ -31,7 +31,8 @@ use datagrep_api::{Bytes, TzSpec, Value};
 /// floats keep their identity to the JSON formats (`{"id":1}`, never
 /// `{"id":"1"}`), and a `json`/`jsonb` cell keeps its raw text so the JSON
 /// formats can pass it through verbatim instead of double-encoding it.
-/// Decimals stay text deliberately (§risk-4 fidelity: JSON numbers are f64).
+/// Decimals stay text deliberately: JSON numbers are f64, and a NUMERIC that
+/// round-trips through f64 comes back silently wrong.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CellText {
     Null,
@@ -82,7 +83,7 @@ impl CellText {
 /// produced it. Total by construction: an Arrow type this build's converter
 /// never emits (see `datagrep_core::convert::ColKind`) becomes
 /// `Value::Unsupported` rather than panicking — the same "never lose bytes,
-/// never crash on a driver quirk" stance the design takes everywhere else.
+/// never crash on a driver quirk" stance datagrep takes everywhere else.
 pub fn arrow_cell_to_value(array: &dyn Array, row: usize) -> Value {
     if array.is_null(row) {
         return Value::Null;

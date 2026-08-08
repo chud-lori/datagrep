@@ -1,4 +1,4 @@
-//! [`MySqlCanceller`] (design §3.3): `KILL QUERY <conn_id>` issued from a
+//! [`MySqlCanceller`]: `KILL QUERY <conn_id>` issued from a
 //! *second*, pooled connection — the pinned primary connection is busy
 //! executing the very statement being killed, so it cannot deliver the kill
 //! itself. The pool holds no connections until the first cancel (min 0).

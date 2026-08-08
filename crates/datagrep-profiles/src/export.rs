@@ -1,7 +1,7 @@
-//! Plain-text, git-committable connection profiles (design §4, killer
-//! feature #5 / §3.7 / §3.8). `Folder`/`Profile`/`Tunnel` have no field that
-//! can hold a secret — only `secret_ref` — so exclusion is structural, not a
-//! filter we have to remember to apply.
+//! Plain-text, git-committable connection profiles.
+//! `Folder`/`Profile`/`Tunnel` have no field that can hold a secret — only
+//! `secret_ref` — so exclusion is structural, not a filter we have to
+//! remember to apply.
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -125,9 +125,9 @@ pub(crate) fn apply_import(
     }
 
     for p in bundle.profile {
-        // design §3.8, enforced again here: an imported TOML is still
-        // untrusted input until it clears the same secret-shape check a
-        // direct `create_profile`/`update_profile` call would.
+        // An imported TOML is still untrusted input until it clears the same
+        // secret-shape check a direct `create_profile`/`update_profile` call
+        // would.
         validate_no_secrets(&p.config)?;
         let config_json = serde_json::to_string(&p.config)?;
         tx.execute(

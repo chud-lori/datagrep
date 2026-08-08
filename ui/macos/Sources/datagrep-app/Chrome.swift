@@ -37,12 +37,12 @@ struct VisualEffect: NSViewRepresentable {
 
 /// Query progress, drawn from real data and nothing else.
 ///
-/// Design §5.2 bans a 60 fps indeterminate spinner: 30 s of "working…" is 1 800
-/// frames of GPU work for zero information. This bar moves **only** when a
-/// `DatagrepProgressFn` callback lands. If the block declared `-- @limit N` it is a
-/// true determinate bar; otherwise the segment advances one notch per progress
-/// event, so motion is literally proportional to rows arriving. When the query
-/// is terminal the bar is gone and nothing animates.
+/// No 60 fps indeterminate spinner: 30 s of "working…" is 1 800 frames of GPU
+/// work for zero information. This bar moves **only** when a
+/// `DatagrepProgressFn` callback lands. If the block declared `-- @limit N` it
+/// is a true determinate bar; otherwise the segment advances one notch per
+/// progress event, so motion is literally proportional to rows arriving. When
+/// the query is terminal the bar is gone and nothing animates.
 struct QueryProgressBar: View {
     @ObservedObject var model: AppModel
 

@@ -1,7 +1,7 @@
-//! Sessions, connection pools, and driver isolation (design §3.4, §3.5).
+//! Sessions, connection pools, and driver isolation.
 //!
-//! Three properties from the design are implemented here, and each of them is
-//! a refusal of something an incumbent does:
+//! Three properties are implemented here, and each of them is a refusal of
+//! something an incumbent does:
 //!
 //! - **Lazy connect.** Opening the app connects to nothing. A [`Session`] is a
 //!   pool that has not been used yet; the first socket is opened by the first
@@ -10,16 +10,18 @@
 //!   **no `min_idle` floor** — reconnect is 20–80 ms and nobody notices, while
 //!   a JVM client holds sockets and 500 MB of heap forever. The reap deadline
 //!   is scheduled on the shared [`TimerWheel`]; `tokio::time::interval` and
-//!   every other free-running tick are banned (§3.4).
+//!   every other free-running tick are banned, so an idle app wakes up zero
+//!   times per second.
 //! - **Isolation.** Every connection is a task with its own child
 //!   [`CancellationToken`], and every driver call inside it runs in a nested
 //!   task so a **driver panic is caught at the task boundary**, converted to
 //!   [`DbError::DriverPanic`], and the connection is poisoned and evicted. The
 //!   app lives, and sibling connections never notice.
 //!
-//! The token tree is `session → connection → query` (§3.4): cancelling a
-//! session stops its connections, and cancelling a connection stops the queries
-//! running on it.
+//! The token tree is `session → connection → query`: cancelling a session
+//! stops its connections, and cancelling a connection stops the queries
+//! running on it. Nothing has to be tracked by hand for a stop to reach
+//! everything it should.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -46,7 +48,7 @@ use crate::registry::DriverRegistry;
 use crate::timer::{TimerKey, TimerWheel};
 use crate::{lock, read, write};
 
-/// Pool shape, straight from design §3.5.
+/// Pool shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolPolicy {
     /// Sockets per profile. Four, not "as many as you like": a GUI runs a
@@ -54,9 +56,9 @@ pub struct PoolPolicy {
     /// memory the DBA pays for.
     pub max_size: usize,
     /// **Always zero.** Kept as a field so the decision is visible rather than
-    /// implied: "No `min_idle` floor — reconnect is 20–80 ms and nobody
-    /// notices" (§3.5). Raising it trades the app's idle RSS for latency
-    /// nobody perceives.
+    /// implied: there is no `min_idle` floor, because reconnecting costs
+    /// 20–80 ms and nobody notices. Raising it trades the app's idle RSS —
+    /// and sockets the DBA pays for — for latency nobody perceives.
     pub min_idle: usize,
     /// How long an unused socket survives before the reap timer closes it.
     pub idle_timeout: Duration,
@@ -119,8 +121,8 @@ struct ConnInner {
 ///
 /// Nothing outside that task ever touches the `Box<dyn Connection>`: callers
 /// send commands and await replies, which is what lets a panicking driver be
-/// contained (§3.5) and what makes "one task per live connection, owns the
-/// socket" (§3.4) literally true.
+/// contained and what makes "one task per live connection, which owns the
+/// socket" literally true.
 #[derive(Clone)]
 pub struct ConnectionHandle {
     inner: Arc<ConnInner>,
@@ -190,7 +192,7 @@ impl ConnectionHandle {
     }
 
     /// Cloneable, `'static` canceller usable from another task while a query
-    /// is in flight — the server half of a stop (§3.3).
+    /// is in flight — the server half of a stop.
     pub fn canceller(&self) -> Arc<dyn Canceller> {
         self.inner.canceller.clone()
     }
@@ -205,13 +207,13 @@ impl ConnectionHandle {
     }
 
     /// True once a driver panic or an unrecoverable error was seen here. A
-    /// poisoned connection is never returned to the pool (§3.5).
+    /// poisoned connection is never returned to the pool.
     pub fn is_poisoned(&self) -> bool {
         self.inner.poisoned.load(Ordering::Acquire)
     }
 
     /// Open a cursor. Returns as soon as the server accepts the request; it
-    /// never waits for or buffers the result (design §3.1).
+    /// never waits for or buffers the result.
     pub async fn execute(&self, req: Request) -> Result<Box<dyn Cursor>, DbError> {
         self.call(|reply| ConnCmd::Execute {
             req: Box::new(req),
@@ -220,13 +222,15 @@ impl ConnectionHandle {
         .await
     }
 
-    /// Cheap liveness check, used lazily on next use — never on a timer (§3.4).
+    /// Cheap liveness check, used lazily on next use — never on a timer, so an
+    /// idle connection generates no traffic at all.
     pub async fn ping(&self) -> Result<(), DbError> {
         self.call(|reply| ConnCmd::Ping { reply }).await
     }
 
     /// Ask the server for a read-only session, and report how strongly it was
-    /// actually enforced (§3.8).
+    /// actually enforced — some engines only advise, and the UI must not claim
+    /// a guarantee the server did not give.
     pub async fn set_read_only(&self, on: bool) -> Result<Enforcement, DbError> {
         self.call(|reply| ConnCmd::SetReadOnly { on, reply }).await
     }
@@ -244,8 +248,8 @@ impl ConnectionHandle {
             return Err(DbError::Closed);
         }
         let (reply, wait) = oneshot::channel();
-        // Both awaits sit inside a `select!` with this connection's token
-        // (§3.4). `datagrep-api` gives no per-request cancel flag — `ConnectCtx`
+        // Both awaits sit inside a `select!` with this connection's token.
+        // `datagrep-api` gives no per-request cancel flag — `ConnectCtx`
         // only covers `connect` — so a driver that blocks forever inside
         // `execute` cannot be interrupted cooperatively. What we *can*
         // guarantee is that the caller gets control back: the connection is
@@ -322,8 +326,8 @@ async fn run_connection(
         };
 
         if fatal {
-            // §3.5: poisoned and evicted. The pool will not hand this out
-            // again, and the app carries on.
+            // Poisoned and evicted. The pool will not hand this out again, and
+            // the app carries on.
             poisoned.store(true, Ordering::Release);
             break;
         }
@@ -346,7 +350,7 @@ fn is_fatal<T>(out: &Result<T, DbError>) -> bool {
 
 /// Run one driver call in its own task so a panic becomes a value.
 ///
-/// This is the whole of §3.5's isolation: `tokio::spawn` puts an unwind
+/// This is the whole of the isolation story: `tokio::spawn` puts an unwind
 /// boundary between the driver and us, and a panicking driver costs one
 /// connection instead of the process.
 pub(crate) async fn guarded<T, F>(fut: F) -> Result<T, DbError>
@@ -437,10 +441,10 @@ impl fmt::Debug for ConnLease {
 }
 
 /// A connection deliberately taken **out of pool rotation** for the duration of
-/// a transaction, a temp table, a `SET`, or a `USE db` (design §3.5).
+/// a transaction, a temp table, a `SET`, or a `USE db`.
 ///
-/// > "A pool that silently moves a `BEGIN` to a different socket is a
-/// > correctness bug, not an optimization."
+/// All of those are per-session server state. A pool that silently moves a
+/// `BEGIN` to a different socket is a correctness bug, not an optimization.
 ///
 /// Reserved: the transaction surface itself lands with the write path. What
 /// exists today is the guarantee that matters — while this value is alive, no
@@ -492,7 +496,8 @@ pub struct Session {
 }
 
 impl Session {
-    /// Create a pool. **Connects nothing** — design §3.5's lazy connect.
+    /// Create a pool. **Connects nothing** — the first socket is opened by the
+    /// first `acquire`, never here.
     pub fn new(
         profile: ProfileId,
         driver: Arc<dyn Driver>,
@@ -522,13 +527,13 @@ impl Session {
         self.profile
     }
 
-    /// This session's node of the token tree (§3.4). Connections take children.
+    /// This session's node of the token tree. Connections take children.
     pub fn cancel_token(&self) -> &CancellationToken {
         &self.cancel
     }
 
     /// Sockets currently idle in the pool. Reaches zero on its own after
-    /// `idle_timeout` — there is no floor (§3.5).
+    /// `idle_timeout` — there is no floor to stop at.
     pub fn idle_count(&self) -> usize {
         lock(&self.idle).len()
     }
@@ -554,7 +559,7 @@ impl Session {
         };
 
         // Reuse an idle socket if one is still healthy. Liveness is checked
-        // lazily on next use, never pinged on a timer (§3.4) — a dead socket
+        // lazily on next use, never pinged on a timer — a dead socket
         // surfaces as an error on the first statement, and the driver's own
         // `is_recoverable` decides whether it is poisoned.
         while let Some(idle) = self.take_idle() {
@@ -576,7 +581,8 @@ impl Session {
         })
     }
 
-    /// Take a connection out of rotation for a transaction (§3.5).
+    /// Take a connection out of rotation for a transaction, so per-session
+    /// server state cannot be split across sockets.
     pub async fn pin(self: &Arc<Self>) -> Result<PinnedConn, DbError> {
         Ok(PinnedConn {
             lease: self.acquire().await?,
@@ -600,7 +606,7 @@ impl Session {
         let entry = idle.pop()?;
         if let Some(key) = entry.reap {
             // Taking a socket out of the pool disarms its deadline; the wheel
-            // re-parks on its own once nothing is scheduled (§3.4).
+            // re-parks on its own once nothing is scheduled.
             self.timer.cancel(key);
         }
         Some(entry.handle)
@@ -630,7 +636,7 @@ impl Session {
 
     /// Fired by the timer wheel: the socket sat unused for `idle_timeout`, so
     /// close it. With `min_idle = 0` this takes the pool all the way to zero
-    /// and RSS back to baseline (§3.5).
+    /// and RSS back to baseline.
     fn reap(&self, id: ConnId) {
         let victim = {
             let mut idle = lock(&self.idle);
@@ -648,7 +654,8 @@ impl Session {
     async fn connect(self: &Arc<Self>) -> Result<ConnectionHandle, DbError> {
         let id = ConnId(self.next_id.fetch_add(1, Ordering::SeqCst));
         // Secrets are resolved just-in-time and dropped (zeroized) as soon as
-        // the handshake completes (§3.8). Wiring the keychain resolver is
+        // the handshake completes, so a password never sits in our heap for
+        // the life of a connection. Wiring the keychain resolver is
         // `datagrep-secrets`' job; until it is injected here, only profiles that
         // need no secret can connect.
         let cfg = ResolvedConfig::without_secrets(self.config.clone());
@@ -719,8 +726,8 @@ impl fmt::Debug for Session {
     }
 }
 
-/// Every open session, keyed by profile — one pool per profile (§3.5), and the
-/// root of the cancellation token tree (§3.4).
+/// Every open session, keyed by profile — one pool per profile, and the root
+/// of the cancellation token tree.
 pub struct SessionRegistry {
     drivers: Arc<DriverRegistry>,
     timer: Arc<TimerWheel>,
@@ -878,8 +885,8 @@ mod tests {
         }
     }
 
-    /// §3.5: "Opening the app connects to nothing." A session exists, has a
-    /// pool, and has dialled exactly zero times until something asks.
+    /// Opening the app connects to nothing: a session exists, has a pool, and
+    /// has dialled exactly zero times until something asks.
     #[tokio::test]
     async fn opening_a_session_connects_to_nothing() {
         let h = harness(PoolPolicy::default());
@@ -905,8 +912,8 @@ mod tests {
         h.registry.shutdown();
     }
 
-    /// §3.5: idle sockets are reaped **to zero** — there is no `min_idle`
-    /// floor — and the deadline rides the shared timer wheel, not a ticker.
+    /// Idle sockets are reaped **to zero** — there is no `min_idle` floor —
+    /// and the deadline rides the shared timer wheel, not a ticker.
     #[tokio::test]
     async fn idle_sockets_are_reaped_to_zero_on_the_timer_wheel() {
         let h = harness(PoolPolicy {
@@ -972,7 +979,7 @@ mod tests {
         h.registry.shutdown();
     }
 
-    /// **Test 6 — driver-panic isolation (§3.5).**
+    /// **Driver-panic isolation.**
     ///
     /// A driver that panics inside `execute` produces `DbError::DriverPanic`,
     /// its connection is poisoned and evicted from the pool, the session keeps
@@ -1040,8 +1047,8 @@ mod tests {
         h.registry.shutdown();
     }
 
-    /// The token tree is real: cancelling a session cancels its connections
-    /// (and therefore anything a query hangs off them — §3.4).
+    /// The token tree is real: cancelling a session cancels its connections,
+    /// and therefore anything a query hangs off them.
     #[tokio::test]
     async fn cancelling_a_session_cancels_its_connections() {
         let h = harness(PoolPolicy::default());
@@ -1069,7 +1076,7 @@ mod tests {
     }
 
     /// A pinned connection is out of rotation for as long as the pin lives —
-    /// the guarantee a `BEGIN` depends on (§3.5).
+    /// the guarantee a `BEGIN` depends on.
     #[tokio::test]
     async fn a_pinned_connection_leaves_the_pool() {
         let h = harness(PoolPolicy {

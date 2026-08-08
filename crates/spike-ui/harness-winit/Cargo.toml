@@ -1,4 +1,4 @@
-# SPIKE — S1 fallback rung (design doc §8/§1.1 resolution ladder). gpui 0.2.2
+# SPIKE — S1 fallback rung of the toolkit resolution ladder. gpui 0.2.2
 # (../harness) FAILS TO BUILD on this machine: its build.rs shells out to
 # `xcrun metal` to precompile Metal shaders offline, which requires the full
 # Xcode.app toolchain -- this machine has only Command Line Tools 16.4

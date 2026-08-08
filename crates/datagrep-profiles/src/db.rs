@@ -1,4 +1,4 @@
-//! Schema, migrations, and open-time maintenance (design §3.7).
+//! Schema, migrations, and open-time maintenance.
 //!
 //! Everything in this module runs synchronously on the store's dedicated
 //! worker thread (see `store.rs`) — never on an async task.
@@ -19,8 +19,9 @@ pub(crate) enum Target {
     Memory,
 }
 
-/// History retention policy, enforced on every open (design §5.1: "no
-/// background flush, no timers anywhere" — this is why it's not a cron job).
+/// History retention policy, enforced on every open. datagrep runs no
+/// background flush and no timers anywhere, so trimming happens at the one
+/// moment the database is already being touched rather than on a schedule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetentionPolicy {
     /// Keep at most this many `query_history` rows (newest first).
@@ -30,7 +31,7 @@ pub struct RetentionPolicy {
 }
 
 impl Default for RetentionPolicy {
-    /// design §3.7: "retention 20k rows/180d".
+    /// 20k rows or 180 days, whichever bites first.
     fn default() -> Self {
         RetentionPolicy {
             max_rows: 20_000,
@@ -96,13 +97,13 @@ pub(crate) fn open_and_prepare(
 type MigrationFn = fn(&Transaction<'_>) -> rusqlite::Result<()>;
 
 /// Migrations are append-only. Version N is `MIGRATIONS[N - 1]`; the current
-/// schema version lives in SQLite's own `PRAGMA user_version` (design §3.7:
-/// "forward-only migrations guarded by user_version").
+/// schema version lives in SQLite's own `PRAGMA user_version`, so the
+/// database carries its own version and no side-car file can drift from it.
 const MIGRATIONS: &[MigrationFn] = &[migrate_v1];
 
 /// Brings `conn` from its current `user_version` up to `MIGRATIONS.len()`.
 /// Refuses to run against a database from a *newer* schema version. Snapshots
-/// `<path>.bak` before applying anything, per design §3.7.
+/// `<path>.bak` before applying anything.
 pub(crate) fn migrate(
     conn: &mut Connection,
     backup_path: Option<&Path>,
@@ -154,10 +155,10 @@ fn backup_before_migrate(conn: &Connection, path: &Path) -> Result<(), ProfilesE
     Ok(())
 }
 
-/// design §3.7 schema, minus the `plugin` table: no plugin host exists yet
-/// (ticket explicitly scopes it out), so there is nothing for it to
-/// reference and adding it now would just be dead DDL to migrate again once
-/// the plugin host's actual shape (sha256, granted hosts) is known.
+/// The base schema, minus a `plugin` table: no plugin host exists yet, so
+/// there is nothing for it to reference and adding it now would just be dead
+/// DDL to migrate again once the plugin host's actual shape (sha256, granted
+/// hosts) is known.
 const BASE_SCHEMA_SQL: &str = r#"
 CREATE TABLE folder (
     id          TEXT PRIMARY KEY,
@@ -289,7 +290,7 @@ fn fts5_table_exists(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 /// Deletes rows past the retention window. Runs once at open time, not on a
-/// timer (design §5.1).
+/// timer — this crate starts no background threads of its own.
 pub(crate) fn trim_retention(
     conn: &Connection,
     retention: RetentionPolicy,
@@ -309,7 +310,7 @@ pub(crate) fn trim_retention(
 }
 
 /// Cheap, non-cryptographic hash used only as a dedupe/index key for
-/// `query_history.text_hash` (design §3.7). `DefaultHasher` (SipHash) avoids
+/// `query_history.text_hash`. `DefaultHasher` (SipHash) avoids
 /// pulling in a sha2 dependency this crate has no other use for; collisions
 /// only cost a missed dedupe, never a correctness or security property.
 pub(crate) fn hash_text(text: &str) -> String {

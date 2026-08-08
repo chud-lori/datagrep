@@ -2,16 +2,15 @@
 //! file, rows/sec progress to **stderr** so stdout stays pipeable (the ticket
 //! is explicit stdout must stay clean — export doesn't even use it).
 //!
-//! Rides [`datagrep_core::CoreApi::run_export`] — the store-free streaming
-//! endpoint design §3.2/§5.1 calls for ("export streams
-//! driver→Arrow→writer→disk with a fixed buffer, never touching grid state
-//! \[...\] 'Export all' ≠ 'load all'"). Each driver chunk is converted,
-//! written to the [`crate::format::RowSink`], and dropped before the next
-//! chunk is pulled; nothing is ever admitted to a result store, so the
-//! process's resident result bytes stay at zero however many rows go by —
-//! which is exactly what the streaming test below asserts against
-//! `CoreApi::result_bytes` (the documented white-box counter for §3.2's
-//! budget).
+//! Rides [`datagrep_core::CoreApi::run_export`], the store-free streaming
+//! endpoint: export streams driver→Arrow→writer→disk with a fixed buffer,
+//! never touching grid state, because "export all" is not "load all". Each
+//! driver chunk is converted, written to the [`crate::format::RowSink`], and
+//! dropped before the next chunk is pulled; nothing is ever admitted to a
+//! result store, so the process's resident result bytes stay at zero however
+//! many rows go by — which is exactly what the streaming test below asserts
+//! against `CoreApi::result_bytes`, the white-box counter for the resident
+//! result budget.
 
 use std::io::{IsTerminal, Write};
 use std::sync::Arc;
@@ -379,7 +378,7 @@ mod tests {
     /// **Gap 3 proof at the CLI seam**: a ~200k-row export goes through
     /// `CoreApi::run_export` and never touches the result store — the
     /// process-wide resident result byte counter (`CoreApi::result_bytes`,
-    /// §3.2's documented budget) stays at zero for the whole export, and
+    /// the resident result budget) stays at zero for the whole export, and
     /// every row still reaches the file.
     #[tokio::test]
     async fn export_of_200k_rows_never_grows_the_result_store() {
@@ -407,7 +406,7 @@ mod tests {
         assert_eq!(
             ctx.core.result_bytes(),
             0,
-            "export must never admit anything to the result store (§3.2/§5.1)"
+            "export must never admit anything to the result store"
         );
         let written = std::fs::read_to_string(&out_path).unwrap();
         assert_eq!(

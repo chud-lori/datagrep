@@ -8,8 +8,8 @@ import SwiftUI
 /// Named, not free-form: the value is stored on the profile and read back by
 /// the CLI, so it has to mean the same thing in both. Every swatch resolves to
 /// a *system* colour, which is why the sidebar marker stays legible in dark
-/// mode — §5 item 4 of the reference study is four competitors shipping safety
-/// UI that disappears in one theme.
+/// mode — safety UI that disappears in one theme is a failure other clients
+/// have shipped over and over.
 enum ConnectionColor {
     static let names = ["red", "orange", "yellow", "green", "blue", "purple", "graphite"]
 
@@ -417,7 +417,7 @@ struct ConnectionEditorSheet: View {
 // MARK: - pieces
 
 /// Says which protection is really in force. Never phrased so that a
-/// client-side guard could be mistaken for the server refusing writes (§3.8).
+/// client-side guard could be mistaken for the server refusing writes.
 struct EnforcementNote: View {
     let level: ReadOnlyEnforcement
 

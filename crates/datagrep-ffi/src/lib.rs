@@ -1,10 +1,10 @@
 //! # datagrep-ffi — the C ABI a native Swift/AppKit app links against
 //!
-//! Design §4.4: *"the desktop UI is just a `CoreApi` client"*, and §3:
-//! *"The UI links the core in-process. No IPC boundary at all."* This crate is
-//! that link — an `extern "C"` skin over [`datagrep_core::CoreApi`] and nothing
-//! else. It owns no database logic; every call here is a thin, panic-proof
-//! translation of a `CoreApi` call into pointers, JSON, and byte slices.
+//! The desktop UI is just a `CoreApi` client: it links the core in-process,
+//! with no IPC boundary at all. This crate is that link — an `extern "C"` skin
+//! over [`datagrep_core::CoreApi`] and nothing else. It owns no database logic;
+//! every call here is a thin, panic-proof translation of a `CoreApi` call into
+//! pointers, JSON, and byte slices.
 //!
 //! The header at `include/datagrep.h` is the contract and is hand-written, not
 //! generated: it is frozen against a Swift app being written in parallel.
@@ -12,32 +12,33 @@
 //!
 //! ## The four invariants this crate exists to preserve
 //!
-//! 1. **Only the visible window is ever materialised** (design §3.2). See
+//! 1. **Only the visible window is ever materialised.** See
 //!    [`rows::datagrep_query_rows`]: it calls `CoreApi::get_rows(qid, off..off+len)`
 //!    and formats exactly that rectangle.
 //!    [`datagrep_core::store::WindowStatus::Pending`] becomes
 //!    `datagrep_rows_pending() == true` — a skeleton to draw, never a block to wait
 //!    on.
-//! 2. **No allocation per cell per frame** (design §5.1). Cell text is
-//!    produced *once per window* into a single buffer owned by the
-//!    [`rows::DatagrepRows`], and `Utf8`/`LargeUtf8` Arrow columns and `Arc<str>`
-//!    document values are not copied at all — `datagrep_rows_cell` hands back a
-//!    pointer straight into the Arrow buffer, which the window keeps alive.
-//! 3. **The stop button always returns instantly** (design §3.3).
+//! 2. **No allocation per cell per frame.** Cell text is produced *once per
+//!    window* into a single buffer owned by the [`rows::DatagrepRows`], and
+//!    `Utf8`/`LargeUtf8` Arrow columns and `Arc<str>` document values are not
+//!    copied at all — `datagrep_rows_cell` hands back a pointer straight into
+//!    the Arrow buffer, which the window keeps alive.
+//! 3. **The stop button always returns instantly.**
 //!    [`query::datagrep_query_cancel`] never awaits; the server half's real answer
 //!    arrives later and is picked up by the query's supervisor task.
-//! 4. **`Absent` is not `NULL`** (design §3.1). `datagrep_rows_cell_kind` reports
-//!    `2` for [`datagrep_api::Value::Absent`] and `1` for [`datagrep_api::Value::Null`].
+//! 4. **`Absent` is not `NULL`.** `datagrep_rows_cell_kind` reports `2` for
+//!    [`datagrep_api::Value::Absent`] and `1` for [`datagrep_api::Value::Null`].
 //!    That distinction is the entire reason the document model exists, and
 //!    the ABI carries it as a first-class value.
 //!
 //! ## Threading
 //!
 //! One process-global multi-thread tokio runtime with `worker_threads` capped
-//! at 4 (design §3.4: *"4 workers, not `num_cpus`: this is an I/O-bound
-//! desktop app"*). Nothing in this crate ever calls `block_on` from inside a
-//! runtime thread; the progress callback is invoked from a worker thread and
-//! the header says so, because hopping to the main queue is the caller's job.
+//! at 4 — four workers, not `num_cpus`: this is an I/O-bound desktop app, and
+//! sizing the pool to the CPU only steals cores from the UI. Nothing in this
+//! crate ever calls `block_on` from inside a runtime thread; the progress
+//! callback is invoked from a worker thread and the header says so, because
+//! hopping to the main queue is the caller's job.
 //!
 //! ## Panics
 //!

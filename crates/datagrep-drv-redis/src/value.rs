@@ -1,6 +1,6 @@
-//! RESP → [`datagrep_api::Value`] mapping (design §3.1 requirement 5). Redis
-//! values are binary-safe, so every string-shaped reply is checked for valid
-//! UTF-8 before it is allowed to become `Value::Str`; anything else keeps
+//! RESP → [`datagrep_api::Value`] mapping. Redis values are binary-safe, so
+//! every string-shaped reply is checked for valid UTF-8 before it is
+//! allowed to become `Value::Str`; anything else keeps
 //! its raw bytes in `Value::Bytes` rather than lossily re-encoding it
 //! (`datagrep-api`'s "never lose bytes" rule).
 //!
@@ -94,12 +94,13 @@ fn bytes_to_value(bytes: Vec<u8>) -> Value {
     }
 }
 
-/// Build a `Document` from a RESP `Map`, preserving key order (design §3.1:
-/// "key order is data … for Redis hashes"). Map keys are themselves
-/// `Value`s; in every real-world reply (`CONFIG GET`, `XINFO`, `CLIENT
-/// INFO`, `HRANDFIELD WITHVALUES` when RESP3-mapped, …) they are strings, so
-/// the common path is a direct string key. A key that maps to anything
-/// other than `Value::Str` is not something the seam's `Document` can
+/// Build a `Document` from a RESP `Map`, preserving key order — for a Redis
+/// hash the order the server returned fields in is itself data, and
+/// re-sorting it would silently change what the user sees. Map keys are
+/// themselves `Value`s; in every real-world reply (`CONFIG GET`, `XINFO`,
+/// `CLIENT INFO`, `HRANDFIELD WITHVALUES` when RESP3-mapped, …) they are
+/// strings, so the common path is a direct string key. A key that maps to
+/// anything other than `Value::Str` is not something the seam's `Document` can
 /// represent as a field name — it is turned into a display string via
 /// `Debug` on the *pre-mapped* RESP value instead of being dropped, so the
 /// data is still visible even though the round-trip is lossy for that edge

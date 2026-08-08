@@ -1,5 +1,6 @@
 //! Error mapping: `mongodb::error::Error` -> the one `DbError` that crosses
-//! the datagrep-api seam (design: `DbError`'s doc comment, "coarse by design").
+//! the datagrep-api seam. `DbError` is coarse on purpose — see its own doc
+//! comment.
 
 use mongodb::error::{Error as MongoError, ErrorKind};
 
@@ -7,7 +8,8 @@ use datagrep_api::DbError;
 
 /// Translate a driver error into `DbError`. Kept coarse on purpose — engine
 /// detail lives in `DbError::Query { code, message, .. }` text, never in a
-/// leaked driver-specific enum (design §3.1 seam rule).
+/// leaked driver-specific enum: nothing above the seam should have to match
+/// on `mongodb::ErrorKind` to understand what went wrong.
 pub fn map_mongo_error(err: MongoError) -> DbError {
     match *err.kind {
         ErrorKind::Authentication { message, .. } => DbError::Auth(message),
@@ -49,7 +51,7 @@ pub fn map_mongo_error(err: MongoError) -> DbError {
 
 /// `true` when a driver-reported timeout should surface as `DbError::Timeout`
 /// rather than a generic protocol error — used where we set `maxTimeMS`
-/// ourselves (design §3.3) and want the honest "operation timed out" shape.
+/// ourselves and want the honest "operation timed out" shape.
 pub fn is_timeout(err: &MongoError) -> bool {
     // The driver reports server-side maxTimeMS expiry as a `Command` error
     // with code 50 ("ExceededTimeLimit"); client-side deadline elapsing is

@@ -164,7 +164,8 @@ async fn streaming_100k_rows_first_batch_arrives_before_completion() {
     conn.close().await.unwrap();
 }
 
-/// DECIMAL round-trips as an exact string — never through f64 (risk #4).
+/// DECIMAL round-trips as an exact string — never through f64, which would
+/// silently round it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
 async fn decimal_round_trips_as_string() {

@@ -1,5 +1,5 @@
-//! Profiles: plain-text, git-committable connections (design §4 killer
-//! feature #5), with secrets in the OS keychain and never on disk (§3.8).
+//! Profiles: plain-text, git-committable connections a team can review and
+//! share, with secrets in the OS keychain and never on disk.
 //!
 //! `datagrep_profiles_add` splits any inline password out of the parsed URL into a
 //! keychain [`SecretRef`] *before* the profile reaches
@@ -24,8 +24,8 @@ use crate::runtime::runtime;
 /// *absent* (leave alone) from JSON `null` (clear the value).
 ///
 /// Unknown keys are rejected rather than ignored — a typo in a safety setting
-/// (`"read_olny": true`) silently doing nothing is exactly the kind of
-/// decorative security §3.8 forbids.
+/// (`"read_olny": true`) silently doing nothing is decorative security: the
+/// user believes a guardrail is on when nothing is holding it up.
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfilePatch {
@@ -144,7 +144,8 @@ pub unsafe extern "C" fn datagrep_profiles_add(
 ///
 /// This is how a profile is born prod: `env` is persisted, listed by
 /// `datagrep_profiles_list_json`, and handed to the engine on connect — the
-/// §3.8 prod guardrails key off it. (`datagrep_profiles_add` used to hard-code
+/// prod guardrails (red chrome, confirm-on-write) key off it.
+/// (`datagrep_profiles_add` used to hard-code
 /// `env=dev` with no way to change it; that is the bug this call and
 /// `datagrep_profiles_update` close.)
 ///
@@ -481,7 +482,7 @@ pub unsafe extern "C" fn datagrep_profiles_get_json(
 /// ```
 ///
 /// `read_only` is `null` for a writeable profile. For a read-only one,
-/// `enforcement` is what the badge may honestly claim (design §3.8):
+/// `enforcement` is the strongest thing the badge may honestly claim:
 /// - `"server"` — a live connection accepted a server-side read-only session
 ///   (PG/MySQL `SET SESSION … READ ONLY`, SQLite `PRAGMA query_only`);
 ///   `server_confirmed` is `true`.

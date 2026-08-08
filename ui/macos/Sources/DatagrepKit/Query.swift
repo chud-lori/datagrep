@@ -98,7 +98,7 @@ public final class DatagrepQueryHandle: @unchecked Sendable {
     }
 
     /// Returns instantly. The outcome JSON is shown to the user VERBATIM —
-    /// for engines that cannot truly cancel it says so (design §3.3).
+    /// for engines that cannot truly cancel it says so.
     public func cancel() -> String? {
         var outcome: UnsafeMutablePointer<CChar>?
         withUnsafeMutablePointer(to: &outcome) { datagrep_query_cancel(raw, $0) }

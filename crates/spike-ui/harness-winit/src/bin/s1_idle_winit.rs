@@ -6,7 +6,8 @@
 //!
 //! One window, one static frame (a solid clear color -- no text-rendering
 //! crate is in scope for this fallback, see SPIKE-REPORT.md), no animation.
-//! `ControlFlow::Poll` is never used (design doc §5.1: banned outright).
+//! `ControlFlow::Poll` is never used — it is banned outright, because it
+//! repaints on a treadmill whether or not anything changed.
 //! The only wakeups are winit's initial Resumed/RedrawRequested at startup
 //! and our OWN 10s stderr heartbeat (WaitUntil) -- the heartbeat never calls
 //! redraw() or touches the GPU, so it does not inflate the present counter;

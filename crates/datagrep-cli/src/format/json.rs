@@ -4,9 +4,9 @@
 //!
 //! A `Null` cell serializes as JSON `null`; an `Absent` cell **omits the
 //! key** — the JSON-native way to say "this field truly is not here",
-//! distinct from "here, and null" (design §3.1's `Absent`/`Null` split,
-//! carried into the one output format that can actually represent it without
-//! inventing a sentinel).
+//! distinct from "here, and null". A field absent from a document is a
+//! different fact from a field that is null, and JSON is the one output
+//! format that can carry that split without inventing a sentinel.
 
 use std::io::{self, Write};
 

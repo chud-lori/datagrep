@@ -1,10 +1,10 @@
 //! # datagrep-tunnel — in-process SSH tunnels
 //!
-//! Implements design §3.5 ("Connections": "SSH tunnel endpoint is an
-//! in-process duplex stream, not a real listening TCP port — nothing on the
-//! machine can hijack it. Agent auth, `~/.ssh/config` including
-//! `ProxyJump`.") and §3.8's host-key pinning ("SSH host-key pinning with
-//! an explicit change prompt").
+//! A tunnel endpoint here is an in-process duplex stream, not a real
+//! listening TCP port: nothing else on the machine can connect to it, so a
+//! local process cannot ride the tunnel into the remote database. Auth goes
+//! through the SSH agent or `~/.ssh/config`, and host keys are pinned on
+//! first use with an explicit prompt if one ever changes.
 //!
 //! ## Shape
 //!
@@ -22,7 +22,7 @@
 //!   keyed by `(host, port, user)`, torn down after the last checkout drops
 //!   plus an idle grace period.
 //!
-//! ## Deviations from the original brief (see also inline doc comments)
+//! ## Known limitations (see also inline doc comments)
 //!
 //! - **No separate `russh-keys` dependency.** As of the pinned `russh`
 //!   version (0.62.5), key/agent handling lives in `russh::keys` inside the
@@ -31,9 +31,9 @@
 //!   older, incompatible `ssh-key`). See `Cargo.toml`.
 //! - **`ProxyJump` is parsed-but-ignored**, not implemented. See the
 //!   `ssh_config` module's doc comment for why.
-//! - **Keepalive is off by default and stays off** — see
-//!   [`SshTunnel::connect`] doc comment, citing design §5.1's no-polling
-//!   rule.
+//! - **Keepalive is off by default and stays off** — see the
+//!   [`SshTunnel::connect`] doc comment for why a timer that ticks forever
+//!   is the wrong default.
 //! - **Agent auth only tries plain public-key identities**, not
 //!   OpenSSH-certificate identities an agent might also offer. See
 //!   `tunnel.rs`'s `authenticate_agent`.
@@ -41,9 +41,9 @@
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
 #![warn(clippy::unwrap_used)]
-// Tests are allowed to unwrap freely (design brief: "No unwrap outside
-// tests"); `cfg(test)` covers this crate's own `#[cfg(test)] mod tests`
-// blocks under `cargo test`/`clippy --all-targets`.
+// No unwrap outside tests; inside them a panic *is* the failure report.
+// `cfg(test)` covers this crate's own `#[cfg(test)] mod tests` blocks under
+// `cargo test`/`clippy --all-targets`.
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 mod auth;

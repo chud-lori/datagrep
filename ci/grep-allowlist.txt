@@ -1,4 +1,4 @@
-# ci/grep-allowlist.txt — waives specific §5.2 anti-pattern findings from
+# ci/grep-allowlist.txt — waives specific anti-pattern findings from
 # ci/gates.sh's grep-gates step (xtask grep-gates), for cases that are
 # justified and reviewed rather than banned outright.
 #

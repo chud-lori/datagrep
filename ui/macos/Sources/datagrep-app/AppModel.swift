@@ -33,7 +33,7 @@ final class CatalogNode: ObservableObject, Identifiable {
         didSet {
             guard isExpanded, !didLoad, !isLoading else { return }
             // ScanOnly refuses to enumerate without a prefix — this is what stops
-            // the app firing `KEYS *` at a 40 GB Redis (design §3.1).
+            // the app firing `KEYS *` at a 40 GB Redis.
             if enumeration == .scanOnly { return }
             onExpand?(self, nil)
         }
@@ -208,12 +208,13 @@ final class AppModel: ObservableObject {
     /// Which connections this window treats as production.
     ///
     /// Originally a pure client-side fiction: `datagrep_profiles_add` hard-coded
-    /// `env: Env::Dev`, so no profile could ever report `prod` and the §3.8 red
-    /// chrome had nothing to fire on. Now it is a **mirror of the profile's real
-    /// `env`** whenever the engine can store one (`ProfileABI.canEdit`), and the
-    /// legacy UserDefaults set is migrated into the store and deleted — the CLI
-    /// and the GUI disagreeing about which connection is production is exactly
-    /// the split brain the guardrail exists to prevent.
+    /// `env: Env::Dev`, so no profile could ever report `prod` and the red
+    /// production chrome had nothing to fire on. Now it is a **mirror of the
+    /// profile's real `env`** whenever the engine can store one
+    /// (`ProfileABI.canEdit`), and the legacy UserDefaults set is migrated into
+    /// the store and deleted — the CLI and the GUI disagreeing about which
+    /// connection is production is exactly the split brain the guardrail exists
+    /// to prevent.
     ///
     /// It stays published under the same name because the window chrome, the
     /// toolbar menu and the sidebar all observe it.
@@ -362,7 +363,7 @@ final class AppModel: ObservableObject {
 
         sqlText = """
             -- ⌘⏎ runs the statement under the caret.
-            -- Block directives (design §3.6) are parsed and shown in the status bar:
+            -- Block directives are parsed and shown in the status bar:
             -- @limit 1000000
             -- @timeout 30s
             SELECT name, type FROM sqlite_master ORDER BY name;
@@ -714,7 +715,8 @@ final class AppModel: ObservableObject {
         activeEnv = roots.first { $0.name == name }?.env ?? "dev"
     }
 
-    /// §3.8 layer 1: the window turns red for a connection marked production.
+    /// Layer 1 of the production guardrail: the window turns red for a
+    /// connection marked production.
     ///
     /// Writes the profile's real `env` when the engine can store one, so the
     /// CLI and the GUI cannot disagree about which connection is production.

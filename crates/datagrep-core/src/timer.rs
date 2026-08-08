@@ -1,11 +1,13 @@
-//! The armed-on-demand timer wheel (design §3.4, "No polling").
+//! The armed-on-demand timer wheel — the core's answer to "no polling".
 //!
 //! One global task owns a [`DelayQueue`]. It arms a timer only while at least
 //! one deadline exists and **fully disarms — parks on a [`Notify`] with no
 //! timer registered — when the queue is empty**: zero connections, zero
-//! queries, zero timer wakeups. `setInterval` and free-running
-//! `tokio::time::interval` are banned (§3.4); every deadline in the core
-//! (idle reap, query timeout) goes through here.
+//! queries, zero timer wakeups. An idle app should not burn battery, and a
+//! free-running ticker costs a wakeup per interval forever whether or not
+//! anything is pending. So `setInterval`-style loops and free-running
+//! `tokio::time::interval` are banned in the core; every deadline (idle reap,
+//! query timeout) goes through here instead.
 
 use std::fmt;
 use std::future::poll_fn;
@@ -109,8 +111,8 @@ enum Step {
 async fn run_worker(shared: Arc<Shared>) {
     loop {
         // Fully disarmed state: queue empty → park on the Notify. No timer is
-        // registered anywhere while we sit here (§3.4). `notify_one` stores a
-        // permit, so a schedule racing this check is not lost.
+        // registered anywhere while we sit here. `notify_one` stores a permit,
+        // so a schedule racing this check is not lost.
         if lock(&shared.queue).is_empty() {
             shared.notify.notified().await;
             continue;
@@ -148,8 +150,8 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
-    /// §3.4: with nothing scheduled the worker is parked — the expiry future
-    /// is never polled over a 200 ms window (probe counter is flat).
+    /// With nothing scheduled the worker is parked — the expiry future is
+    /// never polled over a 200 ms window (probe counter is flat).
     #[tokio::test]
     async fn wheel_fully_disarms_when_empty() {
         let wheel = TimerWheel::new();

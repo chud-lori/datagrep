@@ -1,5 +1,5 @@
 //! `datagrep-drv-elasticsearch` — the Elasticsearch / OpenSearch driver behind
-//! `datagrep-api`'s `Driver` seam (design §3.1, §3.2, §3.3, §5.1).
+//! `datagrep-api`'s `Driver` seam.
 //!
 //! # Why this driver is hand-rolled on `reqwest`
 //!
@@ -7,9 +7,9 @@
 //! only alpha releases (`9.1.0-alpha.1` at the time of writing), and — the
 //! disqualifying part — **it has no streaming whatsoever**: every response
 //! body is read into memory in full before the caller sees a byte, and its
-//! streaming-helper issue has been open since 2020. Design §3.2's entire
-//! memory contract rests on the driver *not* doing that: `next_batch` is
-//! pull-only so that when nobody pulls, the socket stops being read, the TCP
+//! streaming-helper issue has been open since 2020. datagrep's entire
+//! bounded-memory contract rests on the driver *not* doing that: `next_batch`
+//! is pull-only so that when nobody pulls, the socket stops being read, the TCP
 //! window closes, and the server stops producing. A buffering client cannot
 //! participate in that at all.
 //!
@@ -57,7 +57,7 @@
 //!   (an object there is a *terms lookup* against another index). Native-request
 //!   parameters are substituted into the **parsed** JSON tree, never spliced
 //!   into text. See [`filter`] and [`console`].
-//! - **Cancellation is design §3.3's row, literally.** A search is submitted
+//! - **Cancellation is real, or it says it isn't.** A search is submitted
 //!   as `_async_search?wait_for_completion_timeout=0`, every request carries an
 //!   `X-Opaque-Id`, and a cancel resolves that tag through `GET /_tasks` and
 //!   issues `POST /_tasks/<id>/_cancel` (plus `DELETE /_async_search/<id>`).
@@ -107,8 +107,8 @@
 //!   worse than an honest capability flag.
 //! - **Date and geo-point mapping.** An Elasticsearch `date` arrives as either
 //!   epoch millis or one of many configurable formats; parsing those without a
-//!   date library would mean guessing at a `Value::Timestamp`, and design risk
-//!   #4 is explicit that a wrong instant is worse than a crash. Dates stay
+//!   date library would mean guessing at a `Value::Timestamp`, and a wrong
+//!   instant is worse than a crash. Dates stay
 //!   `Value::I64`/`Value::Str` exactly as the server sent them, and
 //!   `native_type` on the schema delta says `date` so the UI can format them.
 //!   `geo_point`/`geo_shape` likewise stay structural rather than becoming

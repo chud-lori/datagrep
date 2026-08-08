@@ -1,12 +1,13 @@
-//! [`PgConnection`] (ticket item 2): one *logical* connection to a Postgres
-//! server, backed by a small [`crate::pool::PgPool`] of physical sessions.
+//! [`PgConnection`]: one *logical* connection to a Postgres server, backed by
+//! a small [`crate::pool::PgPool`] of physical sessions.
 //!
 //! # Why a logical connection is not a single socket
 //!
 //! A streaming cursor and an interactive transaction both **pin** the socket
 //! they run on: `tokio_postgres::Transaction<'a>` borrows `&'a mut Client`,
-//! and a portal only exists inside a transaction (design §3.5 — "a pool that
-//! silently moves a BEGIN to a different socket is a correctness bug").
+//! and a portal only exists inside a transaction. A pool that silently moved
+//! a BEGIN to a different socket would be a correctness bug, so the pin is
+//! not negotiable.
 //!
 //! Earlier this driver drew the wrong conclusion from that and made *every*
 //! operation queue behind the pinned socket: `catalog()` and the next
@@ -54,7 +55,7 @@ use crate::transaction::PgTransaction;
 use crate::value::PgParam;
 
 /// A cheap, PII-free label for tracing spans — never the statement text
-/// itself (design §3.8/telemetry rule: query text is never logged).
+/// itself. Query text can carry customer data, so it is never logged.
 fn request_kind(req: &Request) -> &'static str {
     match req {
         Request::Native { .. } => "native",
@@ -77,8 +78,9 @@ impl PgConnection {
     }
 
     /// Compile a `Request` down to `(sql, params)`. `Native` text passes
-    /// through verbatim (never translated — design §3.6); `Op` is compiled
-    /// by `sql.rs`, always via bound `$n` parameters (design §3.8).
+    /// through verbatim — what the user typed is what the server runs, never
+    /// a translation of it; `Op` is compiled by `sql.rs`, always via bound
+    /// `$n` parameters so a value can never become SQL.
     fn compile(req: &Request) -> Result<(String, Vec<Value>), DbError> {
         match req {
             Request::Native { text, params, .. } => Ok((text.to_string(), params.clone())),
@@ -129,7 +131,7 @@ impl PgConnection {
             return Ok(Box::new(AckCursor::new(affected)));
         }
 
-        // SELECT-ish: portals require a transaction (ticket note). Wrapped
+        // SELECT-ish: portals only exist inside a transaction. Wrapped
         // read-only, since this is a transparent, single-statement wrapper
         // the caller never explicitly commits — see `actor.rs` module docs.
         //
@@ -204,8 +206,10 @@ impl PgConnection {
                     return Err(e);
                 }
             };
-            // Design §3.8: every generated mutation "must affect exactly one
-            // row or it rolls back with 'row identity changed — refresh'".
+            // A generated mutation must affect exactly one row or it rolls
+            // back: a row identity that now matches zero or many rows means
+            // the grid's picture of the table is stale, and editing on a
+            // stale picture silently rewrites the wrong rows.
             if !matches!(m, Mutation::Insert { .. }) && affected != 1 {
                 let _ = Self::rollback(&cmd_tx).await;
                 return Err(DbError::Query {

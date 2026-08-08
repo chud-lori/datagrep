@@ -2,7 +2,7 @@
 //! `JobSender` it holds routes `BEGIN`/statements/`COMMIT`/`ROLLBACK` to the
 //! exact same `rusqlite::Connection` the owning `SqliteConnection` uses, so
 //! there is no pool that could silently move a `BEGIN` to a different
-//! socket (design §3.5).
+//! socket.
 //!
 //! **Savepoints (nested transactions).** `datagrep-api`'s `Transaction` trait has
 //! no `begin`-from-a-transaction method, so nesting isn't a typed API here —

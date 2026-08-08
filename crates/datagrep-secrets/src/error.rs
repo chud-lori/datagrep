@@ -1,6 +1,6 @@
 //! Error type for secret resolution.
 //!
-//! Security invariant (design §3.8): no variant's `Display` may ever contain
+//! Security invariant: no variant's `Display` may ever contain
 //! secret material. References, env var *names*, exit statuses, and captured
 //! **stderr** are allowed; stdout (the secret channel of `exec:`) and resolved
 //! values are not. The exec command line is also kept out of every variant so
@@ -12,8 +12,8 @@ use std::time::Duration;
 #[derive(Debug, thiserror::Error)]
 pub enum SecretError {
     /// The ref is `prompt:` — the frontend must ask the user. Deliberately an
-    /// error, not a blocking read: this crate never touches a TTY (§3.8; the
-    /// UI gets a masked field, we only ever receive what it collected).
+    /// error, not a blocking read: this crate never touches a TTY — the UI
+    /// gets a masked field, and we only ever receive what it collected.
     #[error("secret requires an interactive prompt (ref `{reference}`)")]
     NeedsPrompt {
         /// The offending ref's string form (refs are not secrets).
@@ -53,7 +53,8 @@ pub enum SecretError {
 
     /// `exec:` command exited non-zero. stderr is captured (it is the
     /// command's diagnostic channel); stdout — the secret channel — and the
-    /// command line are deliberately NOT included (design §3.8: never logged).
+    /// command line are deliberately NOT included, so neither can ever be
+    /// logged.
     #[error("secret command failed with {status}; stderr: {stderr}")]
     ExecFailed {
         /// e.g. "exit status: 1" or "signal: 9".

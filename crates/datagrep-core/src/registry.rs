@@ -1,7 +1,7 @@
-//! Driver registry (design §2.8 / §3): registration costs a hashmap insert
-//! and constructs nothing; the driver is built lazily on first `get` and
-//! cached. `datagrep-core` never names a concrete driver — this registry is the
-//! only coupling.
+//! Driver registry: registration costs a hashmap insert and constructs
+//! nothing; the driver is built lazily on first `get` and cached, so linking a
+//! driver the user never opens costs nothing at startup. `datagrep-core` never
+//! names a concrete driver — this registry is the only coupling.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -31,7 +31,7 @@ impl DriverRegistry {
         }
     }
 
-    /// Register a driver id with a lazy constructor. §2.8: this is a hashmap
+    /// Register a driver id with a lazy constructor. This is a hashmap
     /// insert — nothing is constructed until the first [`DriverRegistry::get`].
     /// Re-registering an id replaces the entry (and forgets any built instance).
     pub fn register(
@@ -91,7 +91,7 @@ mod tests {
         assert_eq!(
             built.load(Ordering::SeqCst),
             0,
-            "§2.8: register builds nothing"
+            "register must build nothing"
         );
 
         let d1 = reg.get("mock").expect("registered");

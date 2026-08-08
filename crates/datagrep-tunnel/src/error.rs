@@ -1,6 +1,6 @@
 //! Error type for `datagrep-tunnel`.
 //!
-//! Security invariant, mirroring `datagrep-secrets` (design §3.8): no variant's
+//! Security invariant, mirroring `datagrep-secrets`: no variant's
 //! `Display`/`Debug` may ever contain secret material (passphrases,
 //! passwords, private key bytes). Those fields are always
 //! `datagrep_api::SecretString`, which redacts itself, or are simply not carried
@@ -51,8 +51,9 @@ pub enum TunnelError {
     #[error("SSH agent at {socket} offered no usable identity")]
     NoAgentIdentity { socket: String },
 
-    /// design §3.8: host key differs from the one pinned in the `TofuStore`.
-    /// Hard error — never auto-accepted. Both fingerprints are SHA256, in
+    /// The host key differs from the one pinned in the `TofuStore` — the
+    /// signature of a man-in-the-middle, so it is a hard error and is never
+    /// auto-accepted. Both fingerprints are SHA256, in
     /// the same `SHA256:base64…` form `ssh-keygen -l` prints.
     #[error(
         "HOST KEY CHANGED for {host}:{port}\n  \

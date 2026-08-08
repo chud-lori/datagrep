@@ -1,4 +1,4 @@
-# SPIKE — throwaway UI toolkit spike (design doc §8: S1, S8). Not part of the
+# SPIKE — throwaway UI toolkit spike (probes S1 and S8). Not part of the
 # `datagrep` product. Standalone package: the empty [workspace] table below makes
 # this its OWN workspace root, so gpui's git-adjacent dependency tree and its
 # own Cargo.lock never touch the shared datagrep workspace lockfile.
@@ -19,8 +19,8 @@ license = "Apache-2.0"
 [workspace]
 
 [dependencies]
-# gpui-ce (crates.io, 0.3.3) was tried first per the design doc's §1.1
-# mitigation. It does NOT pair with gpui-component here: gpui-component
+# gpui-ce (crates.io, 0.3.3) was tried first — it is the preferred rung of
+# the toolkit resolution ladder. It does NOT pair with gpui-component here: gpui-component
 # 0.5.1's own manifest depends on the literal crate `gpui = "^0.2.2"` from
 # crates.io, and gpui-ce's README's [patch] recipe for exactly this situation
 # fails with "patch for `gpui-ce` ... points to the same source" — Cargo
@@ -39,7 +39,8 @@ gpui = "0.2.2"
 # feature (that granular split landed later on `main`) — only the bundled
 # `tree-sitter-languages` (all grammars, incl. `tree-sitter-sequel` for SQL).
 # Using the bundle here; it also lets S8 report the real "all grammars"
-# binary-size cost the design doc worries about in §5.1.
+# binary-size cost of bundling every grammar, which is the number the
+# binary-size budget actually cares about.
 gpui-component = { version = "0.5.1", features = ["tree-sitter-languages"] }
 
 [[bin]]
@@ -52,7 +53,7 @@ path = "src/bin/s8_audit.rs"
 
 [profile.release]
 # Mirror the parent workspace release profile so the S8 binary-size gate is
-# measured the way the real product would ship (design §5.1 / §9.5).
+# measured the way the real product would ship.
 lto = "fat"
 codegen-units = 1
 strip = "symbols"

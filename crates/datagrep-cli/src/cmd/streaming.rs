@@ -1,19 +1,19 @@
 //! The window-by-window execution loop behind `query`.
 //!
 //! (`export` used to share this loop for lack of a store-free seam; it now
-//! rides [`datagrep_core::CoreApi::run_export`], the §3.2/§5.1 endpoint that
-//! streams driver chunks straight to the writer without touching the result
-//! store — see `cmd::export`.)
+//! rides [`datagrep_core::CoreApi::run_export`], the endpoint that streams
+//! driver chunks straight to the writer without touching the result store —
+//! see `cmd::export`.)
 //!
-//! Row buffering here is intentionally shaped like the design's own pipeline
-//! (§3.2): ask for one bounded [`FETCH_WINDOW`]-row slice, convert and hand
+//! Row buffering here is intentionally shaped like the engine's own pipeline:
+//! ask for one bounded [`FETCH_WINDOW`]-row slice, convert and hand
 //! it to the [`crate::format::RowSink`] immediately, discard it, ask for the
 //! next slice starting where the last one left off. Nothing here ever holds
 //! more than one window's rows, which is what the streaming-proof test in
 //! `query.rs` checks with the white-box counter below.
 //!
 //! Waiting for more data (`WindowStatus::Pending`/`Partial` with nothing new
-//! this round) is event-driven, not a sleep loop (design §3.4 "No polling"):
+//! this round) is event-driven, not a sleep loop — no polling:
 //! [`datagrep_core::CoreApi::subscribe_events`] already exists for exactly this,
 //! so this function waits on it instead of re-polling `get_rows` in a spin.
 
@@ -31,7 +31,7 @@ use crate::format::{Row, RowSink, Summary};
 use crate::value_text::{arrow_cell_to_value, CellText};
 
 /// Rows requested per `get_rows` call. Matches the order of magnitude of the
-/// design's own hot-window/soft-cap thinking (§3.2) without trying to be
+/// engine's own hot-window/soft-cap sizing without trying to be
 /// adaptive the way the driver-side fetch sizing is — this is a display
 /// window, not a wire fetch.
 pub(crate) const FETCH_WINDOW: u64 = 5_000;
@@ -248,7 +248,7 @@ fn shape_columns(shape: &datagrep_api::shape::Shape) -> (Vec<String>, Vec<bool>)
 }
 
 /// Wait for the next event about `qid` (or the deadline, or the broadcast
-/// channel closing) instead of busy-polling `get_rows` (design §3.4).
+/// channel closing) instead of busy-polling `get_rows`.
 async fn wait_for_progress(
     events: &mut broadcast::Receiver<QueryEvent>,
     qid: QueryId,
@@ -284,7 +284,7 @@ fn derive_columns(slice: &WindowSlice) -> Vec<String> {
         // arms exist so the match is total against the real `WindowSlice`,
         // per `value_text.rs`'s module docs on the same requirement. The
         // column names are a deliberately minimal placeholder, not a real
-        // `ViewProjection` (design §3.1) — that's out of scope while nothing
+        // `ViewProjection` — that's out of scope while nothing
         // exercises this path.
         WindowSlice::Docs { docs, .. } => match docs.as_ref() {
             DocSegment::Values(_) => vec!["doc".to_string()],

@@ -5,8 +5,8 @@
 use crate::config::ConfigError;
 
 /// Error from any driver operation. `is_recoverable` tells the core whether
-/// the connection survived — a non-recoverable error poisons and evicts it
-/// (design §3.5 isolation).
+/// the connection survived — a non-recoverable error poisons and evicts it, so
+/// one bad connection cannot take the rest of the app with it.
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
     /// Could not establish the connection (DNS, refused, handshake).
@@ -17,7 +17,7 @@ pub enum DbError {
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// A deadline elapsed (ours or a server-side one we set — design §3.3).
+    /// A deadline elapsed (ours or a server-side one we set).
     #[error("operation timed out")]
     Timeout,
 
@@ -49,7 +49,7 @@ pub enum DbError {
     },
 
     /// A driver panicked and was caught at the task boundary; the connection
-    /// is poisoned and evicted, the app lives (design §3.5, §9.5).
+    /// is poisoned and evicted, the app lives.
     #[error("driver panicked: {0}")]
     DriverPanic(String),
 

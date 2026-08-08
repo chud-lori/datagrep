@@ -9,8 +9,9 @@
 //! 1. `tokio_postgres::Transaction<'a>` borrows `&'a mut Client`, and a
 //!    streaming portal only exists inside a transaction — so a live cursor
 //!    *must* keep exclusive use of its `Client` (see `actor.rs`).
-//! 2. Design §3.5: "a pool that silently moves a BEGIN to a different socket
-//!    is a correctness bug" — a transaction or cursor **pins** its session.
+//! 2. A pool that silently moves a BEGIN to a different socket is a
+//!    correctness bug, not a performance detail — a transaction or cursor
+//!    **pins** its session.
 //!
 //! Both are true and neither is negotiable. The bug was the conclusion drawn
 //! from them: that *everything else* should queue behind the pinned session.
@@ -33,8 +34,8 @@
 //!   half-scrolled grid, an open interactive transaction), anything else that
 //!   needs the server takes a *different* physical connection from this pool,
 //!   dialled lazily with the same config. Catalog browsing and the next query
-//!   therefore never wait on a cursor. This is option 1 of the design note:
-//!   pinned means pinned, so everyone else takes another socket.
+//!   therefore never wait on a cursor. Pinned means pinned, so everyone else
+//!   takes another socket rather than relaxing the pin.
 //! * **Never hang.** The pool is capped at [`MAX_SESSIONS`]. At the cap,
 //!   [`PgPool::acquire`] waits with a bounded [`ACQUIRE_TIMEOUT`] and then
 //!   returns [`DbError::ResourceExhausted`] naming what is holding the

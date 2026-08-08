@@ -104,8 +104,8 @@ pub fn parse_server_version(version: &str) -> (Flavor, (u16, u16, u16)) {
     (flavor, (nums[0], nums[1], nums[2]))
 }
 
-/// The MySQL/MariaDB driver adapter (design §3.1). Stateless — all
-/// per-server state lives in the [`MySqlConnection`]s it creates.
+/// The MySQL/MariaDB driver adapter. Stateless — all per-server state lives
+/// in the [`MySqlConnection`]s it creates.
 #[derive(Debug, Default)]
 pub struct MySqlDriver;
 
@@ -204,7 +204,7 @@ impl Driver for MySqlDriver {
         }
         if let Some(pass) = opts.pass() {
             // The caller routes this into the keychain and zeroizes the
-            // source string (design §3.8).
+            // source string — a password must not linger in a config map.
             values.insert("password".to_string(), ConfigValue::Str(pass.to_string()));
         }
         if let Some(db) = opts.db_name() {
@@ -286,8 +286,9 @@ impl Driver for MySqlDriver {
         };
         let caps = mysql_capabilities(flavor, parsed_version);
 
-        // Second-connection pool for `KILL QUERY` (design §3.3). min 0 / max
-        // 2: it opens nothing until the first cancel.
+        // Second-connection pool for `KILL QUERY`: the primary connection is
+        // busy running the statement being killed, so the kill needs its own
+        // socket. min 0 / max 2, so it opens nothing until the first cancel.
         let kill_opts =
             OptsBuilder::from_opts(opts).pool_opts(PoolOpts::default().with_constraints(
                 PoolConstraints::new(0, 2).expect("0 <= 2 is a valid pool constraint"),

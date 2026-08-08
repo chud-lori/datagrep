@@ -1,5 +1,6 @@
-//! Wire-level `Value` mapping (ticket item 2, design §3.1 risk #4: "numeric →
-//! Decimal via string, NEVER f64").
+//! Wire-level `Value` mapping. `numeric` becomes a `Decimal` carried as a
+//! string and NEVER goes through f64 — a silently wrong number is worse than
+//! a crash.
 //!
 //! Decoding reads Postgres's binary wire format directly rather than going
 //! through `tokio-postgres`'s convenience `FromSql` impls for chrono/uuid/etc
@@ -50,8 +51,8 @@ pub fn logical_type_of(ty: &Type) -> LogicalType {
 
 /// A single decoded cell. Implements `FromSql` itself (rather than relying on
 /// per-type convenience impls) so it can accept *every* Postgres type and
-/// fall back to [`Value::Unsupported`] instead of erroring — "never lose
-/// bytes" (design §3.1).
+/// fall back to [`Value::Unsupported`] instead of erroring: an unrecognized
+/// type must still surface its bytes rather than fail the whole row.
 pub struct DecodedCell(pub Value);
 
 impl<'a> FromSql<'a> for DecodedCell {
@@ -257,7 +258,8 @@ fn nest(dims: &[usize], iter: &mut impl Iterator<Item = Value>) -> Vec<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// NUMERIC binary <-> decimal string (design risk #4: never f64).
+// NUMERIC binary <-> decimal string. Never f64: NUMERIC is arbitrary
+// precision, and rounding it through a float would silently corrupt money.
 //
 // Wire format (`numeric_send`/`numeric_recv` in Postgres's `numeric.c`):
 //   i16 ndigits, i16 weight, u16 sign, u16 dscale, then `ndigits` base-10000

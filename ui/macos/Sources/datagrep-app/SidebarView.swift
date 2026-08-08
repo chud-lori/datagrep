@@ -33,9 +33,9 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        // §3.8 layer 2. Full width, a word, and an icon — the Sequel Ace
-        // lesson in the reference study §8 is that shrinking this to a dot
-        // produced sustained backlash, so it is a band and not a tint.
+        // Layer 2 of the production guardrail. Full width, a word, and an icon —
+        // Sequel Ace shrinking the same signal to a dot produced sustained
+        // backlash, so it is a band and not a tint.
         .safeAreaInset(edge: .top, spacing: 0) {
             if model.isProd, !model.activeProfile.isEmpty {
                 VStack(spacing: 0) {

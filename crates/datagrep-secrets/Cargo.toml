@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Secret references and resolvers for datagrep: keychain | env | exec | prompt. Profiles never store secrets, only refs (design §3.7, §3.8, §4.5)."
+description = "Secret references and resolvers for datagrep: keychain | env | exec | prompt. Profiles never store secrets, only refs."
 
 [dependencies]
 datagrep-api = { path = "../datagrep-api" }
 # keyring 3.x: platform stores are opt-in features. `sync-secret-service` is the
-# blocking Secret Service client (DBus IPC) — we call it from spawn_blocking per
-# design §3.8 ("fetched once at pool creation on a blocking thread").
+# blocking Secret Service client (DBus IPC) — we call it from spawn_blocking,
+# once at pool creation, so an async worker never stalls on it.
 keyring = { version = "3", features = [
     "apple-native",
     "windows-native",

@@ -1,9 +1,9 @@
-//! Cursor implementations (design §3.1, §3.2, §3.5).
+//! Cursor implementations.
 //!
 //! [`RedisPairsCursor`] is the one true SCAN-family cursor: `SCAN`, `HSCAN`,
 //! `SSCAN`, and `ZSCAN` share identical cursor mechanics (an opaque numeric
 //! cursor, `MATCH`, `COUNT`), so one struct with a command switch drives all
-//! four (design §3.1 requirement 2: "one code path with a command switch").
+//! four rather than four near-identical cursor types.
 //!
 //! **SCAN's own guarantee, restated so the UI doesn't get it wrong:** SCAN
 //! guarantees every key present for the entire scan's duration is returned
@@ -60,7 +60,7 @@ impl ScanFamily {
     }
 }
 
-/// A paging cursor over one SCAN-family command (design §3.1 requirement 3).
+/// A paging cursor over one SCAN-family command.
 pub struct RedisPairsCursor {
     manager: redis::aio::ConnectionManager,
     family: ScanFamily,
@@ -118,8 +118,8 @@ impl Cursor for RedisPairsCursor {
         if self.exhausted {
             return Ok(None);
         }
-        // Design §3.3: Redis cancellation is our own SCAN loop stopping —
-        // there is nothing to send the server. Checked at the one natural
+        // Redis cancellation is our own SCAN loop stopping — there is
+        // nothing to send the server. Checked at the one natural
         // await-adjacent point in this loop, per round trip.
         if self.cancel.is_cancelled() {
             self.exhausted = true;
@@ -265,8 +265,7 @@ fn score_value(v: redis::Value) -> Value {
 }
 
 /// Pair each scanned key with its `TYPE`, one pipelined round trip for the
-/// whole batch (never one round trip per key, and never `KEYS *` — design
-/// §5.2).
+/// whole batch (never one round trip per key, and never `KEYS *`).
 async fn keyspace_pairs(
     manager: &mut redis::aio::ConnectionManager,
     raw_keys: Vec<redis::Value>,
@@ -302,7 +301,7 @@ async fn keyspace_pairs(
 /// A cursor that yields exactly one batch and then ends — for `Shape::Ack`
 /// replies (`OK`, an integer/affected count) and for single-value or
 /// single-statement `Request::Native` results that don't fit the SCAN-shaped
-/// cursor above (design §3.1 requirement 2).
+/// cursor above.
 pub struct OneShotCursor {
     shape: Shape,
     payload: Option<Payload>,
@@ -370,10 +369,9 @@ impl Cursor for OneShotCursor {
     }
 }
 
-/// Windowed `LRANGE` paging for a `LIST`-typed key (design §3.1 requirement
-/// 2: "a 1M-field HASH must page … never come back whole" — the same rule
-/// applies to a million-element list). `resume_token` is the next start
-/// offset as ASCII decimal.
+/// Windowed `LRANGE` paging for a `LIST`-typed key: a million-element list
+/// must page like a million-field hash does, never coming back whole.
+/// `resume_token` is the next start offset as ASCII decimal.
 pub struct ListCursor {
     manager: redis::aio::ConnectionManager,
     key: String,

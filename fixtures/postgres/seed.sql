@@ -1,4 +1,4 @@
--- fixtures/postgres/seed.sql — the §6 seeded Postgres datasets.
+-- fixtures/postgres/seed.sql — the seeded Postgres benchmark datasets.
 --
 -- Runs automatically on first container boot via docker-entrypoint-initdb.d
 -- (see docker-compose.yml), or manually:
@@ -17,7 +17,7 @@ SET client_min_messages = warning;
 
 -- ===========================================================================
 -- bench_wide — 1,000,000 rows x 24 mixed-type columns (the headline fixture,
--- ~1.2 GB on the wire per design §6). Exercises every Value variant datagrep-api
+-- ~1.2 GB on the wire). Exercises every Value variant datagrep-api
 -- needs to round-trip: ints of three widths, numeric, float, bool, text,
 -- timestamptz/timestamp/date/time/interval, array, jsonb, uuid, inet, bytea.
 -- ===========================================================================
@@ -85,7 +85,8 @@ ANALYZE bench_wide;
 -- ===========================================================================
 -- bench_narrow — 10,000,000 rows x 3 columns. Cheap per-row, expensive in
 -- aggregate: this is the fixture that dominates seed wall-clock time and the
--- one that exercises sustained streaming throughput (§5.1 "never buffer").
+-- one that exercises sustained streaming throughput: nothing in the read path
+-- may buffer a whole result before showing row 1.
 -- ===========================================================================
 
 DROP TABLE IF EXISTS bench_narrow;
@@ -137,9 +138,10 @@ ANALYZE bench_lowcard;
 
 -- ===========================================================================
 -- bench_catalog — 200 schemas x 500 tables = 100,000 relations. Proves
--- catalog introspection stays O(1) query, not O(schema size) (design §5.2:
--- "full-catalog introspection on connect" is banned outright), and backs
--- the M1 exit criterion "100k-relation catalog connect <400ms".
+-- catalog introspection stays O(1) query, not O(schema size). Full-catalog
+-- introspection on connect is banned outright — it is the failure mode that
+-- locks other clients up at real-world schema scale — and this fixture backs
+-- the exit criterion "100k-relation catalog connect <400ms".
 --
 -- The loop: COMMIT after every schema (500 CREATE TABLEs) rather than once
 -- at the end. A single 100k-table transaction needs >100k locks held
@@ -192,8 +194,8 @@ SELECT i FROM bench_slow_rows();
 
 -- ===========================================================================
 -- bench_hostile — one row, one 10 MB text value. Proves graceful truncation
--- in the grid/preview path, not an OOM (design §5.2 banned-anti-patterns:
--- "Loading the full result before showing row 1"). repeat('x', N) is exactly
+-- in the grid/preview path, not an OOM: loading a full result before showing
+-- row 1 is banned. repeat('x', N) is exactly
 -- N bytes since 'x' is single-byte ASCII.
 -- ===========================================================================
 

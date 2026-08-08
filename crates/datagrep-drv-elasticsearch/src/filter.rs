@@ -1,5 +1,6 @@
-//! `Predicate` -> Elasticsearch Query DSL (design §3.6's `Op::Scan { filter }`,
-//! compiled natively rather than translated text) and §3.8's injection rule.
+//! `Predicate` -> Elasticsearch Query DSL: `Op::Scan`'s filter is compiled
+//! natively as JSON, never translated into query text, and under datagrep's
+//! injection rule a value can never become part of the query's structure.
 //!
 //! # The injection rule, concretely
 //!
@@ -287,9 +288,9 @@ mod tests {
         );
     }
 
-    /// The design doc's injection scenario, in this engine's dialect: a
-    /// caller-supplied object must never land where Elasticsearch would read
-    /// it as query options/structure.
+    /// The injection scenario in this engine's dialect: a caller-supplied
+    /// object must never land where Elasticsearch would read it as query
+    /// options/structure.
     #[test]
     fn object_shaped_parameter_value_cannot_inject_a_query_clause() {
         // An attacker-shaped value trying to become `term` options (boost,

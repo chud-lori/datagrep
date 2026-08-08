@@ -1,8 +1,8 @@
 import Darwin
 import Foundation
 
-/// Design §5 measurement semantics: on macOS the memory number is
-/// `phys_footprint`, NOT `ps` RSS (RSS overcounts shared dyld pages by
+/// How datagrep measures memory: on macOS the number is `phys_footprint`,
+/// NOT `ps` RSS (RSS overcounts shared dyld pages by
 /// 10–30 MB). Both are reported so the difference is visible.
 public enum Footprint {
     public struct Sample {

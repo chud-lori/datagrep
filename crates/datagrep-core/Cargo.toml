@@ -3,7 +3,7 @@ name = "datagrep-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "datagrep orchestrator: sessions, streaming pipeline, result store, query lifecycle (design §3)"
+description = "datagrep orchestrator: sessions, streaming pipeline, result store, query lifecycle"
 
 [features]
 # Exposes the mock driver/cursor for driver crates and the spike UI to reuse.
@@ -24,13 +24,15 @@ tokio-util = { version = "0.7", features = ["time"] }
 tracing = "0.1"
 
 # Pinned here (not in the workspace manifest, which is owned by the orchestrator):
-# latest stable arrow-rs, trimmed per design §5.1 — array/schema/buffer only,
-# no parquet, no flight, no full compute kernels.
+# latest stable arrow-rs, deliberately trimmed to array/schema/buffer only —
+# no parquet, no flight, no full compute kernels. We store and slice columns;
+# we do not evaluate expressions over them, and the unused crates would cost
+# build time and binary size for nothing.
 arrow-array = "59.1"
 arrow-schema = "59.1"
 arrow-buffer = "59.1"
-# arrow-ipc: the spill format IS Arrow IPC (design §3.2 "append-only Arrow IPC
-# per result set"); this is the writer/reader for it, not a compute kernel.
+# arrow-ipc: the spill format is an append-only Arrow IPC stream per result
+# set; this is the writer/reader for it, not a compute kernel.
 arrow-ipc = "59.1"
 
 [dev-dependencies]

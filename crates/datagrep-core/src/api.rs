@@ -1,23 +1,20 @@
-//! `CoreApi` — the façade every frontend links against (design §3, §4.4).
+//! `CoreApi` — the façade every frontend links against.
 //!
-//! > "The UI links the core in-process. No IPC boundary at all."
-//!
-//! and
-//!
-//! > "Same core, three faces: GUI, TUI, CLI \[…\] the desktop UI is just a
-//! > `CoreApi` client."
+//! Same core, three faces: GUI, TUI and CLI all link this in-process. There is
+//! no IPC boundary anywhere; the desktop UI is just another `CoreApi` caller.
 //!
 //! So this is a plain struct with async methods, not a trait: there is no
 //! second implementation to abstract over, and a trait here would only buy
 //! dynamic dispatch nobody asked for. It becomes a trait the day a second
 //! backend exists, and not before.
 //!
-//! One method is deliberately **not** async: nothing in [`CoreApi::cancel`]
-//! awaits before it returns (§3.3). It is spelled `async` only so every
-//! frontend calls the façade the same way.
+//! One method is deliberately **not** async underneath: nothing in
+//! [`CoreApi::cancel`] awaits before it returns, so the stop button can never
+//! hang. It is spelled `async` only so every frontend calls the façade the
+//! same way.
 //!
 //! The profile store here is in memory. Persisting profiles to SQLite —
-//! folders, history, tabs, `secret_ref` and never a secret (§3.7) — is
+//! folders, history, tabs, and a `secret_ref` rather than a secret — is
 //! `datagrep-profiles`' job; this core only ever holds the resolved shape.
 
 use std::collections::HashMap;
@@ -53,8 +50,8 @@ impl fmt::Display for ProfileId {
 }
 
 /// Which environment a profile points at. Load-bearing, not decoration: `Prod`
-/// is what turns on red window chrome, confirm-on-write, and the rest of §3.8's
-/// third guardrail layer.
+/// is what turns on red window chrome, confirm-on-write, and the rest of the
+/// blast-radius guardrails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Env {
     #[default]
@@ -64,7 +61,8 @@ pub enum Env {
 }
 
 /// A saved connection, minus its secrets. Safe to persist, export, and diff —
-/// secrets live in the OS keychain and profiles hold only a reference (§3.8).
+/// secrets live in the OS keychain and profiles hold only a reference to them,
+/// so a leaked or shared profile file is not a leaked password.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Profile {
     pub id: ProfileId,
@@ -74,7 +72,8 @@ pub struct Profile {
     pub driver: Arc<str>,
     pub config: ConnectionConfig,
     pub env: Env,
-    /// Client-side read-only assertion (guardrail layer 2, §3.8).
+    /// Client-side read-only assertion — one layer of the write guardrails,
+    /// above the engine's own read-only enforcement.
     pub read_only: bool,
 }
 
@@ -92,7 +91,7 @@ pub struct CoreApi {
 }
 
 impl CoreApi {
-    /// A core with the design's published memory contract (§3.2).
+    /// A core with the default published memory contract.
     pub fn new() -> Self {
         Self::with_policy(MemoryPolicy::default(), PoolPolicy::default())
     }
@@ -122,9 +121,9 @@ impl CoreApi {
     /// Register a driver under its registry id.
     ///
     /// Not async because it cannot block: registration is a hashmap insert and
-    /// **constructs nothing** — the driver is built on first use (§2.8). That
-    /// is why adding an engine costs nothing at startup, which is the whole
-    /// answer to DBeaver's per-driver classloader.
+    /// **constructs nothing** — the driver is built on first use. That is why
+    /// adding an engine costs nothing at startup, which is the whole answer to
+    /// DBeaver's per-driver classloader.
     pub fn register_driver(
         &self,
         id: impl Into<Arc<str>>,
@@ -183,9 +182,10 @@ impl CoreApi {
 
     /// Open a session for a profile and prove it can reach the server.
     ///
-    /// Startup never calls this — that is §3.5's lazy connect. When the *user*
-    /// asks to connect, one socket is opened, validated, and returned to the
-    /// pool, where the idle reaper will close it again if nothing follows.
+    /// Startup never calls this: connecting is lazy, so opening the app dials
+    /// nothing. When the *user* asks to connect, one socket is opened,
+    /// validated, and returned to the pool, where the idle reaper will close it
+    /// again if nothing follows.
     pub async fn connect(&self, id: ProfileId) -> Result<Arc<Session>, DbError> {
         let session = self.session(id)?;
         // Acquiring and immediately releasing dials once and warms the pool
@@ -207,7 +207,8 @@ impl CoreApi {
     }
 
     /// Post-handshake capabilities of a profile's connection — what the UI
-    /// disables controls from, instead of letting them exist and error (§3.1).
+    /// disables controls from, instead of offering a control that only fails
+    /// once the user clicks it.
     pub async fn capabilities(&self, id: ProfileId) -> Result<Capabilities, DbError> {
         let session = self.session(id)?;
         let lease = session.acquire().await?;
@@ -224,19 +225,19 @@ impl CoreApi {
     /// Run a request on a profile's connection.
     ///
     /// Returns as soon as the server accepts it; the result streams into a
-    /// [`crate::store::ResultStore`] behind a bounded channel (§3.2). The
-    /// connection is held for the query's whole life and released when it ends.
+    /// [`crate::store::ResultStore`] behind a bounded channel. The connection
+    /// is held for the query's whole life and released when it ends.
     pub async fn run_query(&self, id: ProfileId, req: Request) -> Result<QueryId, DbError> {
         let session = self.session(id)?;
         let lease = session.acquire().await?;
         self.queries.run(lease, req).await
     }
 
-    /// **The export endpoint** (design §3.2/§5.1): run `req` and stream its
-    /// result **straight into `sink`, never through the result store**.
+    /// **The export endpoint**: run `req` and stream its result **straight
+    /// into `sink`, never through the result store**.
     ///
-    /// > "Export is a separate streaming endpoint that runs its own cursor at
-    /// > full fetch size straight to a file, never through the store."
+    /// Export runs its own cursor at full fetch size straight to a file. That
+    /// is what makes "Export all" different from "load all".
     ///
     /// One driver chunk is in flight at a time; nothing is admitted to any
     /// store, so [`CoreApi::result_bytes`] does not move no matter how many
@@ -252,8 +253,8 @@ impl CoreApi {
         crate::export::run_export_on(&lease, req, sink).await
     }
 
-    /// Resolve a row window (§3.2, §3.6). Asking for rows beyond what has been
-    /// fetched is what resumes the feeder — scrolling is the pull signal.
+    /// Resolve a row window. Asking for rows beyond what has been fetched is
+    /// what resumes the feeder — scrolling is the pull signal.
     pub async fn get_rows(&self, qid: QueryId, range: Range<u64>) -> Result<RowWindow, DbError> {
         self.queries
             .get_rows(qid, range)
@@ -261,19 +262,20 @@ impl CoreApi {
             .ok_or(DbError::Closed)
     }
 
-    /// **The stop button** (§3.3). Nothing here awaits: the local half is done
-    /// by the time this returns, and the server half is reported later as
+    /// **The stop button.** Nothing here awaits: the local half is done by the
+    /// time this returns, and the server half is reported later as
     /// [`QueryEvent::CancelOutcome`].
     pub async fn cancel(&self, qid: QueryId) -> Result<CancelReport, DbError> {
         self.queries.cancel(qid).ok_or(DbError::Closed)
     }
 
-    /// Close a result tab: forget the query and give its memory back (P7).
+    /// Close a result tab: forget the query and give its memory back. This,
+    /// not cancelling, is what returns the bytes.
     pub async fn close_query(&self, qid: QueryId) {
         self.queries.close(qid);
     }
 
-    /// Follow every query in the process — one channel, no polling (§3.4).
+    /// Follow every query in the process — one channel, and nothing polls it.
     pub fn subscribe_events(&self) -> broadcast::Receiver<QueryEvent> {
         self.queries.subscribe()
     }
@@ -285,13 +287,13 @@ impl CoreApi {
 
     // ---- catalog ------------------------------------------------------
 
-    /// One page of catalog children under `parent` (§3.1, §5.1).
+    /// One page of catalog children under `parent`.
     ///
     /// Expand-on-demand only, always bounded by [`ListOpts`], and never a
     /// whole-catalog crawl: eager introspection on connect is the incumbents'
     /// defining mistake and is refused by construction. The call is run inside
     /// its own task so a panicking catalog implementation cannot take the app
-    /// with it (§3.5).
+    /// with it.
     pub async fn list_catalog(
         &self,
         id: ProfileId,
@@ -308,13 +310,15 @@ impl CoreApi {
     // ---- lifecycle ----------------------------------------------------
 
     /// The shared deadline wheel. Everything with a deadline schedules here;
-    /// it disarms completely when nothing is pending (§3.4).
+    /// it disarms completely when nothing is pending, so an idle app costs no
+    /// timer wakeups at all.
     pub fn timer(&self) -> &Arc<TimerWheel> {
         &self.timer
     }
 
     /// Resident result bytes across every result set — the number the memory
-    /// contract is about, readable at any time (§4.2, `--report-footprint`).
+    /// contract is about, readable at any time (this is what
+    /// `--report-footprint` prints).
     pub fn result_bytes(&self) -> usize {
         self.queries.budget().used()
     }
@@ -412,7 +416,7 @@ mod tests {
             "local"
         );
 
-        // §3.5: adding a profile connects to nothing.
+        // Adding a profile connects to nothing — connecting is lazy.
         assert_eq!(
             counters.connects(),
             0,
@@ -482,7 +486,7 @@ mod tests {
 
     /// A profile whose driver was never registered fails at session open with
     /// a configuration error — the registry stays the only coupling to a
-    /// concrete engine (§3, crate rules).
+    /// concrete engine.
     #[tokio::test]
     async fn a_profile_for_an_unregistered_driver_fails_cleanly() {
         let core = CoreApi::with_policy(policy(), PoolPolicy::default());

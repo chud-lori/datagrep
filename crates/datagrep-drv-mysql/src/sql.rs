@@ -1,8 +1,8 @@
 //! SQL generation for MySQL/MariaDB: identifier quoting and the `Op` → SQL
 //! compiler.
 //!
-//! Design §3.8 injection rules, restated for this driver: values are ALWAYS
-//! bound as `?` parameters through the binary (prepared) protocol — never
+//! The injection rules for this driver: values are ALWAYS bound as `?`
+//! parameters through the binary (prepared) protocol — never
 //! spliced as text — and identifiers always go through [`quote_ident`].
 //! (`mysql_async` has no client-side parameter interpolation for positional
 //! `?` params the way mysql-js's `interpolateParams` does: `exec_*` sends a
@@ -382,7 +382,7 @@ pub fn compile_mutation(m: &datagrep_api::Mutation) -> Result<MutationSql, DbErr
 }
 
 /// The named row identity as `` `col` = ? AND … ``. An empty key is refused —
-/// we never guess which row to affect (design §3.8).
+/// we never guess which row to affect.
 fn key_where(key: &[(FieldPath, Value)], pb: &mut ParamBuilder) -> Result<String, DbError> {
     if key.is_empty() {
         return Err(DbError::Unsupported {

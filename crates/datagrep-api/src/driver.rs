@@ -1,6 +1,6 @@
-//! The driver contract (design §3.1). A driver is a pure stream-of-batches
-//! factory: it never sees the result store, Arrow, or the UI, and it MUST NOT
-//! buffer results — backpressure has to reach the database socket (§3.2).
+//! The driver contract. A driver is a pure stream-of-batches factory: it never
+//! sees the result store, Arrow, or the UI, and it MUST NOT buffer results —
+//! backpressure has to reach the database socket.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -63,7 +63,8 @@ pub trait Driver: Send + Sync {
     fn config_schema(&self) -> ConfigSchema;
 
     /// Split a pasted URL into config fields; the caller routes any password
-    /// into the keychain and zeroizes the source string (design §3.8).
+    /// into the keychain and zeroizes the source string — a pasted URL must not
+    /// leave a password sitting in a config file or in process memory.
     fn parse_url(&self, url: &str) -> Result<ConnectionConfig, ConfigError>;
 
     async fn connect(
@@ -74,7 +75,8 @@ pub trait Driver: Send + Sync {
 }
 
 /// One live connection. Owned by a single task; a panic inside is caught at
-/// the task boundary and becomes `DbError::DriverPanic` (design §3.5).
+/// the task boundary and becomes `DbError::DriverPanic` — one misbehaving
+/// driver must not take the process down with it.
 #[async_trait]
 pub trait Connection: Send + Sync {
     /// Post-handshake, version-aware capabilities.
@@ -98,7 +100,7 @@ pub trait Connection: Send + Sync {
     async fn begin(&self, opts: TxOpts) -> Result<Box<dyn Transaction>, DbError>;
 
     /// Returns HOW STRONGLY read-only was enforced, so the UI can say so
-    /// honestly — a client-only badge must admit it (design §3.8).
+    /// honestly — a client-only badge must admit it.
     async fn set_read_only(&self, on: bool) -> Result<Enforcement, DbError>;
 
     /// Graceful shutdown; idempotent. After this every call returns `Closed`.
@@ -106,7 +108,7 @@ pub trait Connection: Send + Sync {
 }
 
 /// A pull-based chunk stream. Pull-only is the backpressure story: nobody
-/// calls `next_batch`, nothing is read off the socket (design §3.2).
+/// calls `next_batch`, nothing is read off the socket.
 #[async_trait]
 pub trait Cursor: Send {
     fn shape(&self) -> &Shape;
@@ -117,7 +119,7 @@ pub trait Cursor: Send {
 
     /// Opaque serializable continuation (ES `search_after`+PIT, Redis SCAN
     /// cursor, SQL keyset). Lets the core close a server cursor on idle and
-    /// resume later — what makes auto-disconnect-to-zero safe (design §3.5).
+    /// resume later — what makes dropping to zero open connections on idle safe.
     fn resume_token(&self) -> Option<ResumeToken>;
 
     fn stats(&self) -> CursorStats;
@@ -127,7 +129,7 @@ pub trait Cursor: Send {
 }
 
 /// An open transaction, pinned to its connection's socket — a pool that moves
-/// a `BEGIN` between sockets is a correctness bug (design §3.5).
+/// a `BEGIN` between sockets is a correctness bug.
 #[async_trait]
 pub trait Transaction: Send {
     async fn execute(&self, req: Request) -> Result<Box<dyn Cursor>, DbError>;
@@ -137,7 +139,7 @@ pub trait Transaction: Send {
     async fn rollback(self: Box<Self>) -> Result<(), DbError>;
 }
 
-/// Out-of-band cancellation, honest about how strong it is per engine (§3.3).
+/// Out-of-band cancellation, honest about how strong it is per engine.
 /// Plain trait (not `async_trait`) so `cancel` can be called through
 /// `Arc<dyn Canceller>` from any task.
 pub trait Canceller: Send + Sync {
@@ -197,7 +199,7 @@ pub enum IsolationLevel {
 }
 
 /// How strongly a read-only request is actually enforced — the UI states
-/// which, because a client-side-only badge is a different promise (§3.8).
+/// which, because a client-side-only badge is a different promise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Enforcement {
     /// The server itself refuses writes on this session.
@@ -208,7 +210,7 @@ pub enum Enforcement {
     None,
 }
 
-/// What a cancel can actually do on this engine (design §3.3).
+/// What a cancel can actually do on this engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CancelKind {
     /// A real server-side kill exists (PG CancelRequest, `KILL QUERY`, …).
@@ -231,7 +233,7 @@ pub enum CancelOutcome {
 }
 
 /// Per-pull bounds. The driver picks the real chunk size within these; the
-/// core adapts them per batch toward a wall-clock window (design §3.2).
+/// core adapts them per batch toward a wall-clock window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FetchHint {
     pub max_rows: u32,
@@ -241,7 +243,9 @@ pub struct FetchHint {
 }
 
 impl Default for FetchHint {
-    /// §3.2 starting point: conservative rows, 4 MB ceiling, 80 ms mid-window.
+    /// Starting point before adaptive sizing takes over: conservative rows, a
+    /// 4 MB ceiling, and 80 ms — the middle of the 40–120 ms pull window that
+    /// keeps the UI responsive without paying a round trip per handful of rows.
     fn default() -> Self {
         Self {
             max_rows: 500,
@@ -332,7 +336,7 @@ mod tests {
         assert_eq!(h.max_bytes, 4 * 1024 * 1024);
         assert!(
             h.target_ms >= 40 && h.target_ms <= 120,
-            "inside §3.2 window"
+            "inside the 40-120 ms pull window"
         );
     }
 

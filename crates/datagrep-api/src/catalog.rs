@@ -1,4 +1,4 @@
-//! Lazy, incremental catalog (design §3.1, §5.1). Expand-on-demand only —
+//! Lazy, incremental catalog. Expand-on-demand only —
 //! eager whole-catalog indexing is the incumbents' defining mistake, and
 //! [`Enumeration`] is what stops a `KEYS *` because someone clicked a triangle.
 
@@ -38,7 +38,8 @@ pub trait Catalog: Send + Sync {
     ) -> Result<InferredSchema, DbError>;
 
     /// Completion candidates for the editor; expected to be a bounded
-    /// server-side prefix query plus whatever is already cached (§5.1).
+    /// server-side prefix query plus whatever is already cached — never a
+    /// full catalog crawl to populate a dropdown.
     async fn complete(&self, ctx: CompletionCtx) -> Result<Vec<Completion>, DbError>;
 }
 
@@ -118,7 +119,7 @@ impl Default for ListOpts {
 
 /// Result of sampling documents: a trie of observed field paths with type
 /// frequencies — the honest schema for schemaless engines, and the seed for
-/// the grid's `ViewProjection` (design §3.1).
+/// the grid's `ViewProjection`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct InferredSchema {
     /// How many documents were sampled; every ratio is relative to this.
@@ -128,7 +129,8 @@ pub struct InferredSchema {
 }
 
 /// Per-path statistics from sampling. Presence is counted separately from
-/// types because `Absent` is not a type (design §3.1).
+/// types because `Absent` is not a type — "this field was missing" is a fact
+/// about the document, not one of the values the field can hold.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct FieldTrie {
     /// In how many sampled parents this path was present at all.

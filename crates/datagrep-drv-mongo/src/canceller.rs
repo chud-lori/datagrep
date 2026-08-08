@@ -1,6 +1,8 @@
-//! [`MongoCanceller`] (ticket item 6, design §3.3): `ServerSide` when
-//! `killOp` is actually permitted (probed once, cached), else the honest
-//! `ClientAbandon` degrade the design doc calls for by name.
+//! [`MongoCanceller`] (ticket item 6): reports `ServerSide` when `killOp` is
+//! actually permitted (probed once, cached), else degrades to
+//! `ClientAbandon`. Cancellation reports what really happened — claiming a
+//! server-side kill that the deployment never granted us the privileges for
+//! would be worse than admitting the query is still running.
 //!
 //! **Correlating a cancel to a real operation.** `killOp` needs an `opid`,
 //! and nothing in `datagrep-api`'s `Canceller` trait carries a query identity to
@@ -15,8 +17,9 @@
 //! **"Always drop the cursor" (ticket item 6).** That invariant lives on
 //! [`crate::cursor::MongoCursor::close`], not here: `Canceller::cancel` has
 //! no handle to the cursor the core is abandoning (the trait is
-//! intentionally cursor-agnostic — design §3.1's "cloneable, `'static`,
-//! usable from another task while `execute()` is in flight"). What this
+//! intentionally cursor-agnostic: a `Canceller` must be cloneable,
+//! `'static`, and usable from another task while `execute()` is still in
+//! flight, which a cursor handle would not be). What this
 //! type guarantees is that closing a `MongoCursor` always drops the inner
 //! driver cursor deterministically, so `killCursors` fires regardless of
 //! whether the server-side `killOp` above ever lands.

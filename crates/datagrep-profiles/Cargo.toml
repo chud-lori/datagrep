@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Local persistence for datagrep (design §3.7): profiles, folders, tunnels, query history (+FTS5), saved queries, editor tabs, kv — one SQLite file, WAL, opened lazily, no secrets ever (§3.8)."
+description = "Local persistence for datagrep: profiles, folders, tunnels, query history (+FTS5), saved queries, editor tabs, kv — one SQLite file, WAL, opened lazily, no secrets ever."
 
 [dependencies]
 datagrep-api = { path = "../datagrep-api" }
@@ -25,8 +25,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 toml = "0.8"
 tracing = "0.1"
-# sync only: the store runs on a dedicated worker thread (design §3.4 blocking
-# pool rule); async methods channel commands to it via oneshot handshakes.
+# sync only: the store runs on a dedicated worker thread, never on an async
+# worker; async methods channel commands to it via oneshot handshakes.
 tokio = { version = "1", features = ["sync"], default-features = false }
 
 [dev-dependencies]

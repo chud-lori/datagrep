@@ -1,6 +1,6 @@
-//! `datagrep` — the CLI face of the engine (design §4 killer feature #4: "Same
-//! core, three faces: GUI, TUI, CLI \[...\] `datagrep query -f q.sql --format
-//! json` pipes into jq"). Parses args, wires `tracing-subscriber` to stderr
+//! `datagrep` — the CLI face of the engine. One core, three faces (GUI, TUI,
+//! CLI): `datagrep query -f q.sql --format json` pipes straight into jq.
+//! Parses args, wires `tracing-subscriber` to stderr
 //! only under `--verbose`, dispatches to `cmd::*`, and maps [`CliError`] to
 //! the ticket's exit codes (0 ok, 1 query error, 2 usage error, 130
 //! cancelled).
@@ -8,7 +8,7 @@
 //! Nothing here connects to a database, opens the profile store, or inits
 //! TLS before a subcommand actually needs it — [`Context::new`] is
 //! documented cheap, so `datagrep --help` and `datagrep profiles list` stay near the
-//! design's ≤250ms cold-start target (P1).
+//! ≤250ms cold-start target (P1).
 
 mod cli;
 mod cmd;
@@ -68,8 +68,8 @@ fn main() {
     }
 }
 
-/// Runs the command, racing it against Ctrl-C. Design §3.3's "the stop
-/// button always returns control instantly" is about `CoreApi::cancel`
+/// Runs the command, racing it against Ctrl-C. The rule that the stop button
+/// always returns control instantly is about `CoreApi::cancel`
 /// inside a running query; the process-level analogue here is: cancel
 /// whatever query is in flight (if any) — reporting the real
 /// `CancelReport::message`, not a canned one — and unwind through the normal

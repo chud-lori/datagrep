@@ -1,27 +1,28 @@
 //! # datagrep-drv-redis
 //!
 //! Redis driver for `datagrep`, implementing the frozen `datagrep-api` seam
-//! (the design doc §3.1) over the [`redis`] crate's async
-//! `connection-manager` (auto-reconnecting, cheaply cloneable — no internal
-//! mutex needed to make [`RedisConnection`] `Send + Sync`).
+//! over the [`redis`] crate's async `connection-manager`
+//! (auto-reconnecting, cheaply cloneable — no internal mutex needed to make
+//! [`RedisConnection`] `Send + Sync`).
 //!
 //! ## The one rule this whole crate exists to enforce
 //!
-//! **Never `KEYS *`.** Design §5.2 calls it out by name: "one click DOSes
-//! the user's production database." Every browse path — the catalog
-//! (`catalog.rs`), structured `Op::Scan` (`connection.rs`), and even a
-//! hand-typed `SCAN`/`HSCAN`/`SSCAN`/`ZSCAN` in `Request::Native`
+//! **Never `KEYS *`.** It is O(keyspace) and blocks the single-threaded
+//! server for the whole walk: one click DOSes the user's production
+//! database. Every browse path — the catalog (`catalog.rs`), structured
+//! `Op::Scan` (`connection.rs`), and even a hand-typed
+//! `SCAN`/`HSCAN`/`SSCAN`/`ZSCAN` in `Request::Native`
 //! (`connection.rs::native_scan_cursor`) — goes through the *same* cursor
 //! mechanics: an opaque server-side cursor, `MATCH`, `COUNT`, one round trip
 //! per page. `RedisCatalog::levels()` marks every level below `db-index` as
-//! [`datagrep_api::Enumeration::ScanOnly { requires_prefix: true }`] — design
-//! §3.1's own description of this flag: "the single most important catalog
-//! concept: it's what stops the app from firing `KEYS *` at a 40 GB Redis
-//! because someone clicked a triangle." Past `KEY_ENUMERATION_DBSIZE_THRESHOLD`
-//! keys, `KEY_ENUMERATION` itself turns off (`driver.rs`'s post-handshake
+//! [`datagrep_api::Enumeration::ScanOnly { requires_prefix: true }`] — the
+//! single most important catalog concept in this driver, and what stops the
+//! app from firing `KEYS *` at a 40 GB Redis because someone clicked a
+//! triangle. Past `KEY_ENUMERATION_DBSIZE_THRESHOLD` keys,
+//! `KEY_ENUMERATION` itself turns off (`driver.rs`'s post-handshake
 //! `DBSIZE` probe) — no "list all keys," ever, on a server that size.
 //!
-//! ## Cancellation (design §3.3)
+//! ## Cancellation
 //!
 //! Redis commands are atomic; the only thing that can run "long" from this
 //! driver's side is our own SCAN loop, and that stops the moment
@@ -47,7 +48,7 @@
 //! - **Server-side read-only sessions.** `set_read_only` always returns
 //!   [`datagrep_api::driver::Enforcement::Client`] — Redis has no session mode
 //!   that makes the *server* refuse writes, so the UI's read-only badge
-//!   must say it's client-enforced only (design §3.8).
+//!   must say it's client-enforced only.
 //! - **TLS.** `rediss://` parses and round-trips through the connection
 //!   form honestly, but `connect` fails fast rather than silently
 //!   downgrading to plaintext — see `error.rs`'s module doc for the full

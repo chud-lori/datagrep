@@ -30,7 +30,7 @@ use crate::sql::{self, Flavor};
 use crate::transaction::MySqlTransaction;
 
 /// A cheap, PII-free label for tracing spans — never the statement text
-/// itself (query text is never logged, design §3.8).
+/// itself. Query text can carry customer data, so it is never logged.
 fn request_kind(req: &Request) -> &'static str {
     match req {
         Request::Native { .. } => "native",
@@ -80,9 +80,10 @@ impl MySqlConnection {
 
     /// Compile a `Request` to a statement script + bound params.
     ///
-    /// `Native` text passes through verbatim (never translated, §3.6) but is
-    /// split into statements with datagrep-lang's MySQL-aware splitter
-    /// (backticks, `#` comments, `DELIMITER`) because the wire protocol runs
+    /// `Native` text passes through verbatim — what the user typed is what
+    /// the server runs, never a translation of it — but it is split into
+    /// statements with datagrep-lang's MySQL-aware splitter (backticks,
+    /// `#` comments, `DELIMITER`) because the wire protocol runs
     /// one statement per round trip: preceding statements execute to
     /// completion, the last one streams. That is this driver's
     /// `MULTI_STATEMENT` support.
@@ -219,7 +220,7 @@ impl MySqlConnection {
             return Err(DbError::Closed);
         }
         // The batch runs inside one explicit transaction so a violated
-        // exactly-one-row invariant rolls the whole batch back (§3.8).
+        // exactly-one-row invariant rolls the whole batch back.
         let cmd_tx = actor::spawn_transaction(guard, self.flavor, None, false);
 
         let mut total_affected = 0u64;
@@ -252,8 +253,10 @@ impl MySqlConnection {
                     return Err(e);
                 }
             };
-            // §3.8: every generated mutation must affect exactly one row or
-            // the batch rolls back.
+            // Every generated mutation must affect exactly one row or the
+            // batch rolls back: an identity matching zero or many rows means
+            // the grid's picture of the table is stale, and editing on a
+            // stale picture rewrites the wrong rows.
             if !matches!(m, Mutation::Insert { .. }) && affected != 1 {
                 Self::rollback_actor(&cmd_tx).await;
                 return Err(DbError::Query {
@@ -360,7 +363,7 @@ impl Connection for MySqlConnection {
             return Err(DbError::Closed);
         }
         // The actor holds the connection mutex for the transaction's whole
-        // life — session pinning by construction (design §3.5).
+        // life, so the BEGIN can never migrate to another socket.
         let cmd_tx = actor::spawn_transaction(guard, self.flavor, opts.isolation, opts.read_only);
         Ok(Box::new(MySqlTransaction::new(cmd_tx, self.flavor)))
     }

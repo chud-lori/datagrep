@@ -1,9 +1,8 @@
 //! [`SecretResolver`] — turns a [`SecretRef`] into a live
 //! [`SecretString`], and writes/deletes keychain-backed refs.
 //!
-//! Called once per pool creation (design §3.5/§3.8: "fetched once at pool
-//! creation on a blocking thread") — resolution is not a hot path, so every
-//! choice here favors safety over speed.
+//! Called once per pool creation, on a blocking thread — resolution is not a
+//! hot path, so every choice here favors safety over speed.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -23,11 +22,11 @@ const MAX_STDERR: usize = 1024;
 /// strangling a slow one.
 const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Resolves [`SecretRef`]s to [`SecretString`]s (design §4, killer feature #5).
+/// Resolves [`SecretRef`]s to [`SecretString`]s.
 ///
 /// All methods are async; keychain work is shipped to the blocking pool
 /// because Secret Service is DBus IPC — tens to hundreds of ms — and must
-/// never stall an async worker (design §3.4, §3.8).
+/// never stall an async worker.
 #[derive(Debug, Clone)]
 pub struct SecretResolver {
     exec_timeout: Duration,
@@ -66,7 +65,7 @@ impl SecretResolver {
             SecretRef::Keychain { service, account } => {
                 let entry = keychain_entry(service, account)?;
                 let (service, account) = (service.clone(), account.clone());
-                // Design §3.8: Secret Service is DBus IPC — blocking thread only.
+                // Secret Service is DBus IPC — blocking thread only.
                 tokio::task::spawn_blocking(move || match entry.get_password() {
                     Ok(password) => Ok(SecretString::new(password)),
                     Err(source) => Err(SecretError::Keychain {
@@ -160,7 +159,7 @@ impl SecretResolver {
 
     /// Run `sh -c <command>`; trimmed stdout is the secret.
     ///
-    /// SECURITY (design §3.8): the command line is never placed in an error or
+    /// SECURITY: the command line is never placed in an error or
     /// log, so it can never appear alongside its output; stdout is either the
     /// returned `SecretString` or wiped — it is never part of any error.
     async fn resolve_exec(&self, command: &str) -> Result<SecretString, SecretError> {

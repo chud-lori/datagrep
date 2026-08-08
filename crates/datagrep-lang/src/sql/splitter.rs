@@ -1,6 +1,6 @@
-//! The SQL statement splitter (design §3.6: "this is where every client has
-//! bugs"). Built on [`super::lexer::lex_chunks`] for quote/comment-aware
-//! scanning, plus three dialect-specific behaviors layered on top:
+//! The SQL statement splitter — this is where every client has bugs. Built on
+//! [`super::lexer::lex_chunks`] for quote/comment-aware scanning, plus three
+//! dialect-specific behaviors layered on top:
 //!
 //! - **MySQL `DELIMITER //`**: a client meta-command, recognized only when
 //!   it is the entire statement so far (nothing but whitespace precedes it
@@ -16,13 +16,13 @@
 //! terminators) are recognized but produce no span — a span with no
 //! statement content isn't useful to a caller and this crate would rather
 //! omit it than hand back something [`crate::Language::classify`] can only
-//! call `Unknown`. This is a documented interpretation, not a spec mandate.
+//! call `Unknown`.
 //!
 //! **Span ranges exclude the terminator** (`;`, a MySQL `DELIMITER` token,
 //! or the `GO`/`GO N` line): `"SELECT 1;"` splits to the span `"SELECT 1"`,
 //! not `"SELECT 1;"`. A trailing statement with no terminator is
-//! unaffected. This is a deliberate choice, not a spec mandate — a
-//! statement's *content* doesn't include its own separator — and it keeps
+//! unaffected. This is a deliberate choice — a statement's *content* doesn't
+//! include its own separator — and it keeps
 //! [`crate::Language::classify`] fed with exactly the text a caller would
 //! want to re-execute standalone.
 

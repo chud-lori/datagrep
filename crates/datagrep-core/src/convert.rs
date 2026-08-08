@@ -1,18 +1,19 @@
-//! Row → Arrow conversion, the store's tabular boundary (design §3.2, §5.1).
+//! Row → Arrow conversion, the store's tabular boundary.
 //!
 //! Everything below `datagrep-api` speaks `Vec<Value>`; everything at and above the
 //! [`crate::store::ResultStore`] speaks Arrow. This module is that boundary and
 //! nothing else crosses it.
 //!
-//! Two decisions from the design are implemented here:
+//! Two storage decisions are implemented here:
 //!
-//! - **§5.1 "Columnar"** — nulls live in Arrow validity bitmaps (one bit per
+//! - **Columnar** — nulls live in Arrow validity bitmaps (one bit per
 //!   value), not in an `Option<T>` per cell, and `Value::Absent` — the
 //!   not-present marker that keeps a Mongo grid truthful — becomes a null slot
-//!   exactly like `Value::Null` does. The distinction is preserved in the
-//!   document lane ([`crate::store::DocSegment`]), which is why documents are
+//!   exactly like `Value::Null` does. Arrow simply has no third state, so the
+//!   distinction is preserved in the document lane
+//!   ([`crate::store::DocSegment`]) instead, which is why documents are
 //!   deliberately *not* Arrow.
-//! - **§5.1 "Dictionary-encode"** — a string column whose sampled cardinality
+//! - **Dictionary encoding** — a string column whose sampled cardinality
 //!   over the first [`SAMPLE_BATCHES`] batches is under
 //!   [`DICTIONARY_RATIO`] of the sampled rows becomes
 //!   `Dictionary(Int32, Utf8)`. Its job is no longer shrinking a wire payload:
@@ -39,19 +40,19 @@ use datagrep_api::driver::Row;
 use datagrep_api::shape::{LogicalType, RowSchema};
 use datagrep_api::value::{Geometry, TzSpec, Value};
 
-/// How many leading batches feed the cardinality sample (design §5.1: "over the
-/// first 2 batches").
+/// How many leading batches feed the cardinality sample. Two is enough to see
+/// past a freakishly uniform first chunk without holding results back.
 pub const SAMPLE_BATCHES: usize = 2;
 
-/// Distinct/row ratio below which a string column is dictionary-encoded (§5.1:
-/// "<10% of row count").
+/// Distinct/row ratio below which a string column is dictionary-encoded: under
+/// 10% distinct values, the repeated strings are worth an index.
 pub const DICTIONARY_RATIO: f64 = 0.10;
 
 /// Below this many sampled rows the ratio is noise, so the sample is ignored —
 /// a 3-row first batch must not decide the encoding of a 10M-row result.
 pub const MIN_SAMPLE_ROWS: usize = 16;
 
-/// One-shot conversion of a single chunk (design §3.2 storage boundary).
+/// One-shot conversion of a single chunk.
 ///
 /// The sampling window degenerates to this one batch, so a low-cardinality
 /// string column is dictionary-encoded immediately. Streaming callers should
@@ -77,8 +78,8 @@ pub struct Converted {
     ///
     /// At most `SAMPLE_BATCHES - 1` entries, exactly once per converter: the
     /// alternative — publishing chunk 1 only after chunk 2 arrives — would
-    /// double first-row latency, and the design's whole point is that chunk 1
-    /// renders before chunk 2 is requested (§3.2).
+    /// double first-row latency, and the whole point of the pipeline is that
+    /// chunk 1 renders before chunk 2 is even requested.
     pub reencoded: Vec<(usize, RecordBatch)>,
 }
 
@@ -109,7 +110,7 @@ pub struct BatchConverter {
 }
 
 impl BatchConverter {
-    /// A converter for one result set with the design's 2-batch sample window.
+    /// A converter for one result set with the standard 2-batch sample window.
     pub fn new(schema: Arc<RowSchema>) -> Self {
         Self::with_window(schema, SAMPLE_BATCHES)
     }
@@ -140,7 +141,7 @@ impl BatchConverter {
         self.arrow_schema.clone()
     }
 
-    /// Column indices that ended up dictionary-encoded (§5.1). Empty while the
+    /// Column indices that ended up dictionary-encoded. Empty while the
     /// sampling window is still open.
     pub fn dictionary_columns(&self) -> Vec<usize> {
         self.dict
@@ -332,8 +333,9 @@ fn value_kind(v: &Value) -> Option<ColKind> {
         Value::Uuid(_) => ColKind::Uuid,
         Value::Bytes(_) => ColKind::Bytes,
         Value::Str(_) => ColKind::Str,
-        // Decimal stays a string so NUMERIC never round-trips through f64;
-        // JSON stays raw text so key order and precision survive (§3.1).
+        // Decimal stays a string so NUMERIC never round-trips through f64 —
+        // a silently wrong number is worse than a crash. JSON stays raw text
+        // so key order and numeric precision survive re-display unchanged.
         Value::Decimal(_) | Value::Json(_) => ColKind::Text,
         Value::Interval { .. }
         | Value::Array(_)
@@ -430,7 +432,8 @@ fn build_batch(
 }
 
 /// Assemble a batch, falling back to an empty batch of the same schema rather
-/// than panicking — a malformed chunk must never take the app down (§3.5).
+/// than panicking — a malformed chunk from one driver must never take the
+/// whole app down.
 fn finish_batch(schema: SchemaRef, columns: Vec<ArrayRef>, rows: usize) -> RecordBatch {
     let opts = RecordBatchOptions::new().with_row_count(Some(rows));
     match RecordBatch::try_new_with_options(schema.clone(), columns, &opts) {
@@ -449,9 +452,9 @@ fn cell_of(row: &Row, col: usize) -> &Value {
     row.get(col).unwrap_or(ABSENT)
 }
 
-/// Build one column. `Absent` and `Null` both become null slots (design §5.1:
-/// validity bitmaps, not `Option<T>` per cell); the `Absent`/`Null` distinction
-/// lives in the document lane, not here.
+/// Build one column. `Absent` and `Null` both become null slots in the Arrow
+/// validity bitmap, since Arrow has no third state; the `Absent`/`Null`
+/// distinction lives in the document lane, not here.
 fn build_column(kind: &ColKind, dict: bool, rows: &[Row], col: usize) -> (ArrayRef, u64) {
     let n = rows.len();
     let mut coerced = 0u64;
@@ -766,9 +769,9 @@ mod tests {
             .expect("column type")
     }
 
-    /// Test 5a: every `Value` variant that has an Arrow column type lands in
-    /// that type, and every variant that does not lands in the `Utf8` display
-    /// fallback with its bytes intact.
+    /// Every `Value` variant that has an Arrow column type lands in that type,
+    /// and every variant that does not lands in the `Utf8` display fallback
+    /// with its bytes intact.
     #[test]
     fn every_value_variant_maps_to_a_column() {
         let s = schema(vec![
@@ -864,7 +867,7 @@ mod tests {
         assert_eq!(col::<StringArray>(&b, 17).value(0), "0/1");
     }
 
-    /// Test 5b: `Absent` — the not-present marker that makes a document grid
+    /// `Absent` — the not-present marker that makes a document grid
     /// truthful — becomes a null slot, indistinguishable in Arrow from `Null`.
     /// The distinction survives in the document lane, never here.
     #[test]
@@ -892,8 +895,8 @@ mod tests {
         assert_eq!(ints.null_count(), 2);
     }
 
-    /// Test 5c: §5.1 — a low-cardinality string column is dictionary-encoded,
-    /// a high-cardinality one is not.
+    /// A low-cardinality string column is dictionary-encoded, a
+    /// high-cardinality one is not.
     #[test]
     fn dictionary_encoding_kicks_in_on_low_cardinality() {
         let s = schema(vec![
@@ -937,9 +940,9 @@ mod tests {
         assert_eq!(b.schema().field(0).data_type(), &DataType::Utf8);
     }
 
-    /// §5.1: the decision is taken over the first two batches, and the chunks
-    /// already emitted are re-encoded so the whole result set shares one
-    /// schema — which is what spill and export require.
+    /// The encoding decision is taken over the first two batches, and the
+    /// chunks already emitted are re-encoded so the whole result set shares
+    /// one schema — which is what spill and export require.
     #[test]
     fn streaming_converter_settles_after_two_batches_and_reencodes() {
         let s = Arc::new(schema(vec![field("status", LogicalType::Str)]));

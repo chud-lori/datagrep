@@ -1,7 +1,6 @@
-//! `datagrep-drv-postgres` — the Postgres driver behind `datagrep-api`'s `Driver` seam
-//! (the design doc §3.1, §3.2, §3.3, §5.1).
+//! `datagrep-drv-postgres` — the Postgres driver behind `datagrep-api`'s `Driver` seam.
 //!
-//! # Streaming (§3.2, §5.1 "Never buffer")
+//! # Streaming: never buffer a whole result
 //!
 //! `PgConnection::execute` never materializes a full result. A SELECT-ish
 //! statement (anything whose prepared `Statement::columns()` is non-empty)
@@ -16,7 +15,7 @@
 //! opened them — see `actor.rs` for the actor design that replaces what
 //! would otherwise need an unsafe self-referential struct.
 //!
-//! # Sessions (§3.5 "a cursor pins its connection")
+//! # Sessions: a cursor pins its connection
 //!
 //! One `PgConnection` is a *logical* connection backed by a small pool of
 //! *physical* sessions (`pool.rs`). A cursor or an interactive transaction
@@ -30,7 +29,7 @@
 //!
 //! # Known `datagrep-api` gaps found while implementing this driver
 //!
-//! 1. **Capability flags named in the ticket don't exist in `Caps`.**
+//! 1. **Capabilities Postgres really has that `Caps` cannot express.**
 //!    `NESTED_TRANSACTIONS`, `EXPLAIN_ANALYZE`, `MULTI_STATEMENT`,
 //!    `POSITIONAL_PARAMS`, `EXPORT_STREAMING`, `EXPRESSION_FILTER` are not
 //!    bits on `datagrep_api::caps::Caps` (`crates/datagrep-api/src/caps.rs` defines
@@ -49,7 +48,7 @@
 //!
 //! # Deviations
 //!
-//! - **TLS is deferred** (per the ticket): `connect` accepts a `tls` config
+//! - **TLS is deferred**: `connect` accepts a `tls` config
 //!   field (`disable`/`require`/`verify-ca`/`verify-full`) so the connection
 //!   form is honest about what the engine supports, but any mode other than
 //!   `disable` fails fast with `DbError::Tls("TLS not yet implemented...")`
@@ -60,8 +59,8 @@
 //!   rejects the write. Full support needs the statement's command tag, not
 //!   just its column list. `Op::Mutate` (which always runs read-write) is
 //!   unaffected. Documented in `connection.rs::execute_native_or_scan`.
-//! - **`Cursor::resume_token` always returns `None`** (ticket-specified for
-//!   v1): the portal dies with the wrapping transaction, which ends as soon
+//! - **`Cursor::resume_token` always returns `None`** in v1: the portal dies
+//!   with the wrapping transaction, which ends as soon
 //!   as the cursor is drained, closed, or dropped, so there is nothing to
 //!   resume into.
 //! - **Postgres `NOTICE` messages are not surfaced** on `Batch::notices` —

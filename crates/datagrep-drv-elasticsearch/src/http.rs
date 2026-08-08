@@ -6,7 +6,7 @@
 //! # Why hand-rolled
 //!
 //! The official `elasticsearch` crate has only ever published alpha releases,
-//! and — fatally for design §3.2 — it has no streaming API at all: it reads
+//! and — fatally for bounded memory — it has no streaming API at all: it reads
 //! the entire response body into memory before handing it back. A driver that
 //! buffers cannot make backpressure reach the socket. The `opensearch` crate
 //! is not a substitute (it forked at ES 7.10.2 and has diverged). So this
@@ -14,7 +14,7 @@
 //! `_search`, `_pit`, `_search/scroll`, `_count`, `_tasks`, `_async_search`,
 //! `_cat/indices`, `_mapping`, `_alias`, `_data_stream`, `_validate/query`.
 //!
-//! # Credentials (design §3.8)
+//! # Credentials
 //!
 //! [`Auth`] is built once at connect time from already-resolved secrets and
 //! stored as a pre-encoded `Authorization` header value. It is `Debug`-redacted
@@ -64,7 +64,7 @@ impl Product {
 pub enum PageMode {
     /// Point-in-time + `search_after`: the correct modern mechanism. Holds a
     /// consistent view without pinning a scroll context per shard, and gives a
-    /// resume token that survives an idle disconnect (design §3.1).
+    /// resume token that survives an idle disconnect.
     Pit,
     /// `_scroll`: the fallback for OpenSearch and pre-7.10 Elasticsearch,
     /// which have no `_pit` (or an incompatible one).
@@ -140,7 +140,7 @@ impl Auth {
 }
 
 /// Redacted: the whole point of this type is that the credential never reaches
-/// a log, a panic message, or a crash dump (design §3.8).
+/// a log, a panic message, or a crash dump.
 impl fmt::Debug for Auth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Auth::{}(\"••••\")", self.scheme())
@@ -191,7 +191,8 @@ impl Method {
     }
 
     /// Whether this verb can mutate cluster state at all. The read-only
-    /// guardrail (design §3.8 layer 2) needs both this and the path.
+    /// classifier needs both this and the path: on Elasticsearch a `POST` is
+    /// as often a search as a write.
     pub fn is_read(self) -> bool {
         matches!(self, Method::Get | Method::Head)
     }
@@ -204,9 +205,9 @@ pub struct EsHttp {
     /// Base URL with no trailing slash, e.g. `https://es.example.com:9200`.
     base: String,
     auth: Auth,
-    /// Applied per request via `reqwest`'s own timeout so even a request the
-    /// server never answers is bounded (design §3.3: "always send a
-    /// server-side deadline where one exists").
+    /// Applied per request via `reqwest`'s own timeout: every request carries
+    /// a deadline, so even one the server never answers is bounded rather than
+    /// hanging forever.
     request_timeout: Duration,
 }
 
@@ -362,7 +363,7 @@ impl EsHttp {
         }
 
         // Deliberately logs the path only. A body can contain user data and a
-        // URL can contain userinfo; neither belongs in a log line (§3.8).
+        // URL can contain userinfo; neither belongs in a log line.
         tracing::debug!(method = method.as_str(), path, "elasticsearch request");
 
         let resp = req.send().await.map_err(map_reqwest_error)?;

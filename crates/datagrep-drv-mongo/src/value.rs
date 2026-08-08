@@ -1,5 +1,5 @@
-//! BSON <-> `datagrep_api::Value` mapping (ticket item 4, design §3.1's "never
-//! lose bytes" and risk #4 "silent type-mapping bugs").
+//! BSON <-> `datagrep_api::Value` mapping (ticket item 4), under two rules:
+//! never lose bytes, and never let a type-mapping bug be silent.
 //!
 //! [`bson_to_value`] is infallible and exhaustive over every [`Bson`]
 //! variant: anything without a faithful `Value` counterpart rides in
@@ -12,7 +12,7 @@
 //! parameters. It is fallible: a handful of `Value` variants
 //! (`Time`, `Interval`, `Json`, `Ref`, `Geo`, `Vector`) have no BSON
 //! representation and are refused with `DbError::Unsupported` rather than
-//! silently coerced — see risk #4, "a wrong number is worse than a crash".
+//! silently coerced: a silently wrong value is worse than a crash.
 //! `Value::Unsupported` round-trips exactly when its `raw` bytes came from
 //! [`unsupported_raw`] (i.e. originated from this driver), by decoding the
 //! wrapper document back and pulling out the original `Bson`.
@@ -30,7 +30,7 @@ use datagrep_api::{Document as DatagrepDocument, TzSpec, Value};
 const OBJECT_ID_HEX_LEN: usize = 24;
 
 /// Decode `bson::Bson` into `datagrep_api::Value`, never failing and never losing
-/// bytes (design §3.1). Exhaustive over every variant named in the ticket.
+/// bytes. Exhaustive over every variant named in the ticket.
 pub fn bson_to_value(b: &Bson) -> Value {
     match b {
         Bson::Double(f) => Value::F64(*f),
@@ -43,8 +43,9 @@ pub fn bson_to_value(b: &Bson) -> Value {
         Bson::Null => Value::Null,
         Bson::Int32(v) => Value::I64(*v as i64),
         Bson::Int64(v) => Value::I64(*v),
-        // Decimal128 -> string, NEVER f64 (design risk #4). `Decimal128`'s
-        // own `Display` impl produces the canonical decimal-string form.
+        // Decimal128 -> string, NEVER f64: routing a decimal through binary
+        // floating point silently changes the number. `Decimal128`'s own
+        // `Display` impl produces the canonical decimal-string form.
         Bson::Decimal128(d) => Value::Decimal(Arc::from(d.to_string())),
         // ObjectId has no public byte accessor in `bson` 2.x, only
         // `to_hex()`; hex decoding is bijective, so this hand-rolled decode
@@ -56,14 +57,14 @@ pub fn bson_to_value(b: &Bson) -> Value {
         },
         Bson::Binary(bin) => binary_to_value(bin),
         // Every other BSON type has no `Value` counterpart: preserve raw
-        // bytes rather than guess (design §3.1 "never lose bytes").
+        // bytes rather than guess — never lose bytes.
         other => unsupported(other),
     }
 }
 
 fn bson_doc_to_value_doc(doc: &BsonDocument) -> DatagrepDocument {
-    // `bson::Document` iterates in insertion order (design: "key order is
-    // data for BSON" — §3.1's `Value::Document` doc comment).
+    // `bson::Document` iterates in insertion order, and key order is data for
+    // BSON — `Value::Document` preserves it rather than sorting.
     DatagrepDocument::from_fields(
         doc.iter()
             .map(|(k, v)| (Arc::from(k.as_str()), bson_to_value(v)))
@@ -170,7 +171,8 @@ pub fn looks_like_object_id_hex(s: &str) -> bool {
 
 /// Encode `datagrep_api::Value` to `bson::Bson` for predicate/mutation
 /// parameters. Fallible: a value with no BSON representation is refused
-/// rather than silently coerced (design risk #4).
+/// rather than silently coerced — a silently wrong value is worse than a
+/// crash.
 ///
 /// `Value::Unsupported` round-trips exactly when its `raw` bytes came from
 /// [`unsupported_raw`] (any producer of `Value` in this crate): decode the

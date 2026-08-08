@@ -178,9 +178,10 @@ fn field(value: &Value, path: &str) -> Option<Value> {
 
 // ------------------------------------------------------------------ tests --
 
-/// Design §3.2's whole contract: 100 000 documents arrive as many bounded
-/// batches — never one buffered result — every document is seen exactly once,
-/// and the process's resident memory does not grow with the result size.
+/// The bounded-memory contract, whole: 100 000 documents arrive as many
+/// bounded batches — never one buffered result — every document is seen
+/// exactly once, and the process's resident memory does not grow with the
+/// result size.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn streams_100k_documents_in_incremental_batches_with_flat_rss() {
@@ -272,7 +273,7 @@ async fn streams_100k_documents_in_incremental_batches_with_flat_rss() {
         "the server's own `took` must be reported"
     );
 
-    // §3.2's memory invariant: the driver never accumulates the result. A
+    // The memory invariant: the driver never accumulates the result. A
     // generous ceiling — the point is that it is bounded, not that it is zero.
     let growth = peak_rss.saturating_sub(baseline_rss);
     assert!(
@@ -295,8 +296,8 @@ async fn streams_100k_documents_in_incremental_batches_with_flat_rss() {
 }
 
 /// A resume token really does continue the same scan after the cursor (and, as
-/// far as the driver is concerned, the connection) has gone away — design
-/// §3.5's idle-auto-disconnect story.
+/// far as the driver is concerned, the connection) has gone away — the
+/// idle-auto-disconnect story.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn a_resume_token_continues_the_scan_where_it_stopped() {
@@ -377,7 +378,7 @@ async fn a_resume_token_continues_the_scan_where_it_stopped() {
 
 /// Heterogeneous documents make the grid grow columns without refetching:
 /// exactly one `AddColumn` per newly-observed `_source` field, in first-seen
-/// order, never re-announced (design risk #7).
+/// order, never re-announced.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn heterogeneous_documents_emit_schema_delta_add_column_events() {
@@ -459,7 +460,7 @@ async fn heterogeneous_documents_emit_schema_delta_add_column_events() {
     drop_index(&index).await;
 }
 
-/// Design §3.3, end to end: a genuinely slow search is cancelled through the
+/// Cancellation, end to end: a genuinely slow search is cancelled through the
 /// task API, control returns immediately, the outcome honestly reports a
 /// server-side cancel, and the connection survives.
 #[tokio::test(flavor = "multi_thread")]

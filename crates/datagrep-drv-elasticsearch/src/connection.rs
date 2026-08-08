@@ -1,6 +1,6 @@
 //! [`EsConnection`] — the `Connection` impl. Compiles a [`Request`] into an
 //! Elasticsearch REST call and hands back a streaming cursor, without ever
-//! buffering a result (design §3.2).
+//! buffering a result.
 //!
 //! # What each `Request` becomes
 //!
@@ -556,8 +556,9 @@ fn op_name(op: &Op) -> &'static str {
     }
 }
 
-/// The read-only classifier (design §3.8 layer 2). Deliberately allow-list
-/// shaped: an endpoint nobody thought about is refused, not permitted.
+/// The read-only classifier — the second layer of the read-only guardrail,
+/// after the UI badge. Deliberately allow-list shaped: an endpoint nobody
+/// thought about is refused, not permitted.
 pub fn is_read_request(req: &ConsoleRequest) -> bool {
     if req.method.is_read() {
         return true;
@@ -668,9 +669,9 @@ impl Connection for EsConnection {
     async fn set_read_only(&self, on: bool) -> Result<Enforcement, DbError> {
         self.check_open()?;
         self.read_only.store(on, Ordering::Release);
-        // Honest: this is our classifier, not the server's. The UI must say so
-        // (design §3.8 layer 1: "a read-only badge that's only client-side
-        // must say so").
+        // Honest: this is our classifier, not the server's. A read-only
+        // badge that is only client-side has to say that it is, or it
+        // promises a guarantee nothing is enforcing.
         Ok(Enforcement::Client)
     }
 

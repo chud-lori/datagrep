@@ -1,7 +1,6 @@
-//! MongoShell [`Language`] impl (design §3.6, requirement 6): the editor
-//! surface is `db.<collection>.<method>(...)` chains and raw command
-//! documents, hand-parsed by [`parser`] — explicitly **not** an embedded JS
-//! engine (design §3.6's "No embedded JS for Mongo" decision).
+//! MongoShell [`Language`] impl: the editor surface is
+//! `db.<collection>.<method>(...)` chains and raw command documents,
+//! hand-parsed by [`parser`] — explicitly **not** an embedded JS engine.
 
 pub mod date;
 pub mod error;

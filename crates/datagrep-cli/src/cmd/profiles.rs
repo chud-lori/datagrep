@@ -1,5 +1,5 @@
 //! `datagrep profiles` (ticket item 3): plain-text, git-committable connection
-//! profiles (design §4 killer feature #5). `add` splits any inline password
+//! profiles. `add` splits any inline password
 //! out of the parsed URL into a keychain [`datagrep_secrets::SecretRef`] before
 //! the profile ever reaches [`datagrep_profiles::Store::create_profile`] — which
 //! independently refuses a secret-shaped config key anyway

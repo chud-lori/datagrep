@@ -10,8 +10,8 @@ use std::path::PathBuf;
 /// so they never touch a developer's real `~/.config/datagrep`.
 pub const CONFIG_DIR_ENV: &str = "DATAGREP_CONFIG_DIR";
 
-/// Where `datagrep` keeps its one SQLite file (profiles, folders, tunnels, query
-/// history — design §3.7). `$DATAGREP_CONFIG_DIR`, then `$XDG_CONFIG_HOME/datagrep`,
+/// Where `datagrep` keeps its one SQLite file (profiles, folders, tunnels,
+/// query history). `$DATAGREP_CONFIG_DIR`, then `$XDG_CONFIG_HOME/datagrep`,
 /// then `$HOME/.config/datagrep` (`%APPDATA%\datagrep` on Windows), then `./.datagrep` as a
 /// last resort so the CLI still works somewhere writable.
 pub fn config_dir() -> PathBuf {
@@ -38,7 +38,7 @@ pub fn config_dir() -> PathBuf {
 }
 
 /// The one SQLite file `datagrep-profiles::Store` opens: profiles, folders,
-/// tunnels, and query history all live here (design §3.7).
+/// tunnels, and query history all live here.
 pub fn profiles_db_path() -> PathBuf {
     config_dir().join("profiles.db")
 }

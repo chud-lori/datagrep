@@ -1,4 +1,4 @@
-//! [`EsCanceller`] — design §3.3's Elasticsearch row, implemented literally:
+//! [`EsCanceller`] — real, server-side cancellation for this engine:
 //! *async search -> task id -> `POST /_tasks/<id>/_cancel`*.
 //!
 //! # Why a plain `_search` is not enough
@@ -18,11 +18,11 @@
 //! 2. **`_async_search`.** When the connection is configured for it (the
 //!    default on Elasticsearch), a scan's search is submitted as
 //!    `POST /<index>/_async_search?wait_for_completion_timeout=0`, which
-//!    returns immediately with a search id for work that is still running —
-//!    the design doc's prescription. `DELETE /_async_search/<id>` cancels a
-//!    still-running async search, and is used both as a second cancel path and
-//!    as the cleanup that stops a completed search's results from lingering in
-//!    the `.async-search` system index.
+//!    returns immediately with a search id for work that is still running.
+//!    `DELETE /_async_search/<id>` cancels a still-running async search, and
+//!    is used both as a second cancel path and as the cleanup that stops a
+//!    completed search's results from lingering in the `.async-search` system
+//!    index.
 //!
 //! # The honesty contract
 //!
@@ -51,7 +51,7 @@ use crate::http::{EsHttp, Method, OPAQUE_ID_HEADER};
 /// What is currently running, as far as the connection knows. Shared between
 /// the cursor that issues the searches and every [`EsCanceller`] the
 /// connection hands out (`Canceller` must be usable from another task while
-/// `execute()` is in flight — design §3.1).
+/// `execute()` is in flight, so it can never borrow from the cursor).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InFlight {
     /// The `X-Opaque-Id` on the currently-running request.
@@ -167,7 +167,7 @@ impl Canceller for EsCanceller {
 
             let mut server_cancelled = false;
 
-            // 1. The prescribed path: resolve our tagged task and cancel it.
+            // 1. The primary path: resolve our tagged task and cancel it.
             if let Some(tag) = snapshot.opaque_id.as_deref() {
                 match self.tasks_for(tag).await {
                     Ok(tasks) => {

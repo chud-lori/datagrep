@@ -34,8 +34,8 @@ use crate::transaction::MongoTransaction;
 use crate::value::{bson_to_value, value_to_bson, value_to_bson_for_field};
 
 /// Every request gets a server-side deadline, even when the caller supplied
-/// none (design §3.3: "always send maxTimeMS ... so even an uncancellable
-/// query is bounded").
+/// none: `maxTimeMS` always goes out, so even a query we turn out not to be
+/// able to kill is still bounded by the server itself.
 const DEFAULT_MAX_TIME: Duration = Duration::from_secs(30);
 
 pub struct MongoConnection {
@@ -399,7 +399,7 @@ impl MongoConnection {
         let result = builder.await;
         self.end_op().await;
         let cursor = result.map_err(map_mongo_error)?;
-        // Design ticket item 3: aggregate has no stable, re-issuable cursor
+        // Ticket item 3: aggregate has no stable, re-issuable cursor
         // key (pipeline stages like $group/$sort break any positional
         // notion of "the next document after this one"), so resume is
         // always `None`, with the reason documented right here.
@@ -744,9 +744,10 @@ impl MongoConnection {
                     .update_one(id_filter, update)
                     .await
                     .map_err(map_mongo_error)?;
-                // Design §3.8: every generated mutation must affect exactly
-                // one document or it is rejected with "row identity changed
-                // — refresh".
+                // Every generated mutation must affect exactly one document.
+                // A different count means the row the user edited is not the
+                // row on the server any more, so the write is rejected rather
+                // than applied to whatever now matches.
                 if result.matched_count != 1 {
                     return Err(DbError::Query {
                         code: None,
@@ -783,7 +784,8 @@ impl MongoConnection {
     /// `(FieldPath, Value)` pairs, so the filter compiles directly from the
     /// mutation — typically `{_id: …}`, but any caller-named field(s) work.
     /// The old "assume a single bare value means `_id`" guess is gone. An
-    /// empty identity is refused, never guessed at (design §3.8).
+    /// empty identity is refused, never guessed at — an empty filter would
+    /// match every document in the collection.
     fn id_filter(&self, key: &[(FieldPath, Value)]) -> Result<BsonDocument, DbError> {
         id_filter_from_key(key)
     }
@@ -938,7 +940,7 @@ pub(crate) fn is_write_method(method_lower: &str) -> bool {
 /// Compile a mutation's named row identity (`key: Vec<(FieldPath, Value)>`)
 /// into a filter document — one entry per named field, typically just
 /// `{_id: …}`. Shared by [`MongoConnection`] and `transaction.rs`. An empty
-/// identity is refused: we never guess which document to affect (§3.8).
+/// identity is refused: we never guess which document to affect.
 pub(crate) fn id_filter_from_key(key: &[(FieldPath, Value)]) -> Result<BsonDocument, DbError> {
     if key.is_empty() {
         return Err(DbError::Unsupported {

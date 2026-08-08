@@ -1,8 +1,8 @@
-//! Error mapping and the deferred-TLS marker (design §3.1 seam).
+//! Error mapping and the deferred-TLS marker.
 //!
-//! TLS posture mirrors `datagrep-drv-postgres`'s documented deviation: the ticket
-//! asks for `redis://`/`rediss://` parsing so the connection form is honest
-//! about what the engine supports, but the required dependency list
+//! TLS posture mirrors `datagrep-drv-postgres`'s documented deviation:
+//! `redis://`/`rediss://` both parse, so the connection form is honest
+//! about what the engine supports, but this crate's dependency list
 //! (`redis` with only `tokio-comp`/`connection-manager`) does not include a
 //! TLS backend (`tls-native-tls` / `tls-rustls`). Rather than silently
 //! downgrading a `rediss://` request to plaintext — a security regression —

@@ -7,7 +7,7 @@
 //! constructed until first use"), and `datagrep_profiles::Store::open` is
 //! documented lazy — its worker thread and SQLite file only come alive on
 //! the first real call. This is what keeps `datagrep --help` / `datagrep profiles
-//! list` near-instant (design P1).
+//! list` near-instant.
 
 use std::sync::{Arc, Mutex};
 
@@ -25,7 +25,7 @@ pub struct Context {
     /// The query currently streaming, if any — so a Ctrl-C handler running
     /// concurrently (see `main.rs`) can cancel *that* query specifically and
     /// report the real `CancelReport` rather than just killing the process
-    /// blind (design §3.3: the stop button tells the truth about what it did).
+    /// blind — the stop button has to tell the truth about what it did.
     current_query: Mutex<Option<datagrep_core::QueryId>>,
 }
 

@@ -1,5 +1,5 @@
-//! Cancellation must actually reach a running query (design §3.3/§10 risk
-//! #6: "user hits stop, app looks responsive, the server keeps burning").
+//! Cancellation must actually reach a running query — otherwise the user
+//! hits stop, the app looks responsive, and the server keeps burning.
 
 mod common;
 
@@ -52,9 +52,8 @@ async fn interrupt_mid_scan_surfaces_cancelled_and_connection_stays_usable() {
         .expect("closing the cancelled cursor should still succeed");
 
     // The load-bearing assertion: the *connection* survives a cancelled
-    // *cursor* — the design draws this line explicitly (§3.5 isolation is
-    // about driver panics poisoning a connection; a cooperative cancel must
-    // not do the same).
+    // *cursor*. Connection isolation exists to stop a driver panic from
+    // poisoning a connection; a cooperative cancel must not do the same.
     let mut check = conn
         .execute(Request::native("SELECT 1"))
         .await

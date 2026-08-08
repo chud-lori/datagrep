@@ -1,7 +1,7 @@
 //! Bridges an SSH `direct-tcpip` channel to an **in-process**
-//! `tokio::io::DuplexStream` (design §3.5: "SSH tunnel endpoint is an
-//! in-process duplex stream, not a real listening TCP port — nothing on the
-//! machine can hijack it").
+//! `tokio::io::DuplexStream`. The tunnel endpoint is that duplex stream, not
+//! a real listening TCP port, so nothing else on the machine can connect to
+//! it and ride the tunnel into the remote database.
 //!
 //! [`crate::SshTunnel::open_channel`] is the only real caller; this module
 //! exists standalone so the copy loop can be tested against a mock

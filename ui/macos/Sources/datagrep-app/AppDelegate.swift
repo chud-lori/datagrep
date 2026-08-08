@@ -38,11 +38,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var sidebarMenuItem: NSMenuItem!
     private var inspectorMenuItem: NSMenuItem!
 
-    /// Design §5.1 applied to the GUI: **the window is on screen before anything
-    /// is loaded.** The CLI honours the rule by never opening the profile DB
-    /// until a subcommand needs it and cold-starts in ~17 ms; the GUI's
-    /// equivalent is that nothing which touches the engine, the profile store or
-    /// the disk may sit between `exec` and first paint.
+    /// The lazy-startup rule applied to the GUI: **the window is on screen
+    /// before anything is loaded.** The CLI honours it by never opening the
+    /// profile DB until a subcommand needs it and cold-starts in ~17 ms; the
+    /// GUI's equivalent is that nothing which touches the engine, the profile
+    /// store or the disk may sit between `exec` and first paint.
     ///
     /// So this method does exactly three things on the critical path — build the
     /// menu, build the window, paint it — and everything else (`model.boot()`,
@@ -251,8 +251,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return NSSize(width: w, height: h)
     }
 
-    /// §3.8 layer 1. `titlebarAppearsTransparent` means the window background
-    /// *is* the titlebar background, so one property paints the whole chrome.
+    /// Layer 1 of the production guardrail. `titlebarAppearsTransparent` means
+    /// the window background *is* the titlebar background, so one property
+    /// paints the whole chrome.
     private func applyChromeTint(_ isProd: Bool) {
         guard let window else { return }
         window.backgroundColor = isProd
@@ -439,8 +440,8 @@ enum Startup {
     //
     // `--trace-startup` (or DATAGREP_TRACE_STARTUP=1) prints one line per phase
     // with both the elapsed-since-exec clock and the cost of that phase alone.
-    // It stays in the binary permanently: the cold-start budget (design §5 P1,
-    // ≤250 ms target / >600 ms FAIL) is a number that regresses silently, and a
+    // It stays in the binary permanently: the cold-start budget (P1, ≤250 ms
+    // target / >600 ms FAIL) is a number that regresses silently, and a
     // breakdown is the only way to see WHICH phase moved.
 
     nonisolated(unsafe) private static var lastMark: Double = 0
@@ -483,7 +484,7 @@ enum Startup {
 
 // MARK: - autopilot (measurement harness)
 
-/// Drives the app from the command line so the design §5 numbers can be
+/// Drives the app from the command line so the performance numbers can be
 /// produced repeatably instead of by hand-scrolling and guessing.
 ///
 ///   datagrep --add-profile bench=sqlite:///tmp/bench.db \

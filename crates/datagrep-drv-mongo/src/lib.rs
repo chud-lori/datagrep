@@ -1,7 +1,8 @@
-//! `datagrep-drv-mongo` — the MongoDB driver behind `datagrep-api`'s `Driver` seam
-//! (the design doc §3.1, §3.2, §3.3, §3.6, §5.1,
-//! risk #2 "does `Shape`/`Value` actually stretch to non-rectangular data?",
-//! risk #6 "document-grid UX").
+//! `datagrep-drv-mongo` — the MongoDB driver behind `datagrep-api`'s `Driver` seam.
+//!
+//! This is the crate where the rectangular assumptions get tested: `Shape` and
+//! `Value` have to stretch over documents that are ragged, nested, and typed
+//! per-field rather than per-column, without the grid ever inventing data.
 //!
 //! # Design decisions worth stating up front
 //!
@@ -9,8 +10,8 @@
 //!   consumes `datagrep_lang::mongo::{parse, MongoStatement, ParsedMongo}`
 //!   (`connection.rs::execute_text`) and dispatches the result to the
 //!   official `mongodb` driver — no reimplementation, no translation of the
-//!   parsed text (design §3.6).
-//! - **NoSQL injection (§3.8).** `filter.rs::compile_predicate` compiles
+//!   parsed text.
+//! - **NoSQL injection.** `filter.rs::compile_predicate` compiles
 //!   every comparison to an explicit operator (`{field: {"$eq": v}}`), never
 //!   the bare `{field: v}` shorthand, so a parameter value shaped like
 //!   `{"$ne": null}` can never promote itself into operator position — see
@@ -26,7 +27,7 @@
 //!   `Client`, unlike `tokio_postgres::Transaction<'a>`), so
 //!   `transaction.rs` shares it behind a plain `Arc<Mutex<ClientSession>>`
 //!   — see that module's doc comment for the full reasoning.
-//! - **Cancellation degrades honestly (§3.3).** `maxTimeMS` is set on every
+//! - **Cancellation degrades honestly.** `maxTimeMS` is set on every
 //!   request (`connection.rs::DEFAULT_MAX_TIME`, or the caller's
 //!   `ExecOpts::timeout`). `killOp` is probed once per connection and
 //!   cached; when unavailable (or when nothing is currently tagged

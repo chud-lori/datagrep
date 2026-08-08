@@ -1,4 +1,4 @@
-//! [`PostgresDriver`]: the `Driver` impl (ticket item 1).
+//! [`PostgresDriver`]: the `Driver` impl.
 
 use std::str::FromStr as _;
 use std::sync::Arc;
@@ -22,14 +22,14 @@ use crate::error::TlsMode;
 use crate::pool::PgPool;
 
 /// Capability flags this driver's baseline (pre-handshake) [`Capabilities`]
-/// reports. Note: the ticket's requested flag list names six flags
+/// reports. Note: six capabilities Postgres genuinely has
 /// (`NESTED_TRANSACTIONS`, `EXPLAIN_ANALYZE`, `MULTI_STATEMENT`,
-/// `POSITIONAL_PARAMS`, `EXPORT_STREAMING`, `EXPRESSION_FILTER`) that do not
-/// exist on `datagrep_api::Caps` (`crates/datagrep-api/src/caps.rs` defines only the
+/// `POSITIONAL_PARAMS`, `EXPORT_STREAMING`, `EXPRESSION_FILTER`) have no bit
+/// on `datagrep_api::Caps` (`crates/datagrep-api/src/caps.rs` defines only the
 /// ten below). Since `datagrep-api` is the frozen seam this driver must not
 /// modify, we set every flag that *does* exist and applies to Postgres, and
-/// call the gap out in the crate report rather than inventing bits that
-/// wouldn't compile against the real `Caps` type.
+/// leave the gap documented rather than inventing bits that wouldn't compile
+/// against the real `Caps` type.
 pub const PG_CAPS: Caps = Caps::TRANSACTIONS
     .union(Caps::DDL)
     .union(Caps::EXPLAIN)
@@ -58,8 +58,8 @@ pub fn pg_capabilities() -> Capabilities {
     }
 }
 
-/// The Postgres driver adapter (design §3.1). Stateless — all per-server
-/// state lives in the [`PgConnection`]s it creates.
+/// The Postgres driver adapter. Stateless — all per-server state lives in the
+/// [`PgConnection`]s it creates.
 #[derive(Debug, Default)]
 pub struct PostgresDriver;
 
@@ -210,7 +210,7 @@ impl Driver for PostgresDriver {
             })
         })?;
         if !matches!(tls_mode, TlsMode::Disable) {
-            // TLS deferred per the ticket: fail fast and honestly rather than
+            // TLS is not implemented yet: fail fast and honestly rather than
             // silently connecting in plaintext under a "require" label.
             return Err(DbError::Tls(format!(
                 "TLS not yet implemented (mode {tls_str:?}); use tls=disable for now"
@@ -234,8 +234,8 @@ impl Driver for PostgresDriver {
             .map_err(|_| DbError::Timeout)?
             .map_err(|e| DbError::Connect(e.to_string()))?;
 
-        // Design §3.5: a driver panic is caught at the task boundary and
-        // becomes `DbError::DriverPanic`; here that boundary is this spawned
+        // A driver panic is caught at the task boundary and becomes
+        // `DbError::DriverPanic`; here that boundary is this spawned
         // connection-driving task. If it errors (socket drop, protocol
         // violation) there is nothing to report it *to* by this point since
         // `connect` has already returned — matching how tokio-postgres's own

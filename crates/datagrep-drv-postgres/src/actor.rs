@@ -1,23 +1,23 @@
 //! The per-transaction actor task — the answer to a real constraint in this
 //! crate: `tokio_postgres::Transaction<'a>` borrows `&'a mut Client`, but
-//! `Connection::execute` must return a `'static` `Box<dyn Cursor>` (design
-//! §3.1). Rather than fight that with unsafe self-referential structs, the
-//! `Transaction` (and any portals bound within it) live entirely on this
-//! task's stack; everything crossing back out to the rest of the driver is
-//! an owned, `'static` channel handle.
+//! `Connection::execute` must return a `'static` `Box<dyn Cursor>`. Rather
+//! than fight that with unsafe self-referential structs, the `Transaction`
+//! (and any portals bound within it) live entirely on this task's stack;
+//! everything crossing back out to the rest of the driver is an owned,
+//! `'static` channel handle.
 //!
 //! One actor = one Postgres `Transaction`. It is used both for the
 //! transparent read-only wrapper `PgConnection::execute` opens around a
-//! streaming SELECT (design ticket note: "tokio-postgres portals require a
-//! transaction — wrap read queries in a transparent read-only transaction"),
-//! and for an explicit interactive [`crate::transaction::PgTransaction`]
-//! opened via `begin()`. Dropping every `Sender<ActorCmd>` clone (all
+//! streaming SELECT (tokio-postgres portals only exist inside a transaction,
+//! so read queries get a transparent read-only one), and for an explicit
+//! interactive [`crate::transaction::PgTransaction`] opened via `begin()`.
+//! Dropping every `Sender<ActorCmd>` clone (all
 //! cursors plus the owning `PgConnection`/`PgTransaction` handle) is treated
 //! as an implicit rollback — a safe default for "the caller went away".
 //!
 //! While it runs, the actor **pins** one physical session out of
-//! [`crate::pool::PgPool`] (design §3.5: moving an open transaction to another
-//! socket would be a correctness bug). It does *not* pin the whole logical
+//! [`crate::pool::PgPool`] — moving an open transaction to another socket
+//! would be a correctness bug. It does *not* pin the whole logical
 //! connection: anything else — catalog browsing, the next `execute()` — takes
 //! a different session from the pool. See the `pool.rs` module docs for why
 //! that indirection exists.

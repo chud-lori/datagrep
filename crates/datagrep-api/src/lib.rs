@@ -1,8 +1,8 @@
 //! # datagrep-api — THE STABLE SEAM
 //!
-//! The driver contract for `datagrep` (see the design doc, §3 and §3.1). Everything
-//! above this crate (core, frontends) and everything below it (drivers, the
-//! WASM host) meets here, and only here.
+//! The driver contract for `datagrep`. Everything above this crate (core,
+//! frontends) and everything below it (drivers, the WASM host) meets here, and
+//! only here.
 //!
 //! Ground rules this crate encodes:
 //! - **Streaming-first.** A driver is a factory of pull-based batch cursors;
@@ -30,7 +30,7 @@ pub mod value;
 
 /// Re-exported so driver crates can build `Value::Bytes` / `Value::Unsupported`
 /// without taking their own `bytes` dependency — losing raw bytes because a
-/// crate could not name the type would defeat design §3.1's "never lose bytes".
+/// crate could not name the type would defeat the never-lose-bytes rule above.
 pub use bytes::Bytes;
 
 pub use caps::{Capabilities, Caps, LanguageId, ParamStyle, SqlDialect};

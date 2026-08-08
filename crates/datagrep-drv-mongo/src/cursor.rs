@@ -31,9 +31,8 @@ pub enum ResumeStrategy {
 
 /// The two live-cursor shapes this driver produces: a plain `find`/
 /// `aggregate`/raw-cursor-command cursor, or one bound to an explicit
-/// transaction's [`mongodb::ClientSession`] (design's actor-pattern note —
-/// see `transaction.rs`'s module doc for why a full actor task turned out to
-/// be unnecessary here).
+/// transaction's [`mongodb::ClientSession`] (see `transaction.rs`'s module
+/// doc for why a full actor task turned out to be unnecessary here).
 enum Inner {
     Plain(mongodb::Cursor<BsonDocument>),
     Session {
@@ -43,10 +42,11 @@ enum Inner {
 }
 
 /// Streams `find`/`aggregate`/raw-cursor-command results (ticket item 3).
-/// Each BSON document becomes a `Value::Document` (key order preserved,
-/// design §3.1) and new top-level field paths emit `SchemaDelta::AddColumn`
-/// as they're first observed (design risk #7: "the grid grows a column
-/// without refetching").
+/// Each BSON document becomes a `Value::Document` with key order preserved
+/// (the order a document was written in is information the grid can show),
+/// and new top-level field paths emit `SchemaDelta::AddColumn` as they're
+/// first observed — so the grid grows a column mid-stream instead of having
+/// to refetch once a later document turns out to be wider.
 pub struct MongoCursor {
     inner: Option<Inner>,
     shape: Shape,
@@ -110,10 +110,10 @@ impl MongoCursor {
 
     /// Record any top-level field paths not yet seen on this cursor as
     /// `SchemaDelta::AddColumn` (ticket item 3). Deliberately shallow (only
-    /// the document root): the design's `ViewProjection`/`FieldTrie`
-    /// machinery that ranks and promotes *nested* paths into columns is a
-    /// datagrep-core concern (§3.1) — this cursor only reports what's true about
-    /// the wire-level documents it streamed.
+    /// the document root): the `ViewProjection`/`FieldTrie` machinery that
+    /// ranks and promotes *nested* paths into columns is a datagrep-core
+    /// concern — this cursor only reports what's true about the wire-level
+    /// documents it streamed.
     fn track_schema(&mut self, doc: &BsonDocument) -> Vec<datagrep_api::shape::SchemaDelta> {
         let mut deltas = Vec::new();
         for (k, v) in doc.iter() {
@@ -281,8 +281,8 @@ impl Cursor for DocsCursor {
     }
 }
 
-/// A one-shot `Ack`-shaped cursor for mutations and DDL (design:
-/// `Shape::Ack { affected, message }`), the `message` used to honestly state
+/// A one-shot `Shape::Ack { affected, message }` cursor for mutations and
+/// DDL, the `message` used to honestly state
 /// which count strategy ran (ticket item 2: "surfacing which ran").
 pub struct AckCursor {
     shape: Shape,

@@ -1,4 +1,4 @@
-//! The universal value model (design §3.1). The honest common denominator across
+//! The universal value model. The honest common denominator across
 //! engines is an ordered, resumable, chunked stream of `Value`s — rectangularity
 //! is a view the core computes, never part of the driver contract.
 
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::shape::{LogicalType, ObjectPath};
 
 /// Timezone qualifier for [`Value::Timestamp`] — always explicit, never a
-/// silently dropped tz. A wrong instant is worse than a crash (design risk #4).
+/// silently dropped tz. A wrong instant is worse than a crash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TzSpec {
     /// No timezone semantics at all (e.g. SQL `timestamp without time zone`).

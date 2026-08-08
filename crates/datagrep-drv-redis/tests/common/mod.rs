@@ -79,8 +79,8 @@ pub async fn seed_keys(mgr: &mut redis::aio::ConnectionManager, prefix: &str, n:
 }
 
 /// Seed one HASH key with `n` fields (`f{i}` -> `v{i}`) via pipelined
-/// `HSET`s, chunked the same way — used for the "1M-field hash must page"
-/// contract (design §3.1 requirement 2) at a 100k-field scale.
+/// `HSET`s, chunked the same way — used for the "a huge hash must page
+/// rather than come back whole" contract at a 100k-field scale.
 #[allow(dead_code)]
 pub async fn seed_hash(mgr: &mut redis::aio::ConnectionManager, key: &str, n: u32) {
     const CHUNK: u32 = 2000;

@@ -1,4 +1,4 @@
-//! Result shapes (design §3.1). A cursor announces *what kind of thing* it
+//! Result shapes. A cursor announces *what kind of thing* it
 //! streams; rectangularity for the grid is computed above this seam, so
 //! document stores never get forced through fake columns.
 
@@ -93,7 +93,7 @@ bitflags! {
 }
 
 /// Which fields identify a row. Every generated mutation targets exactly one
-/// row through these; no identity, no editing (design §3.8).
+/// row through these; no identity, no editing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity {
     /// Indices into [`RowSchema::fields`].
@@ -140,7 +140,8 @@ impl fmt::Display for ObjectPath {
 }
 
 /// Mid-stream schema evolution. New columns append and never reorder existing
-/// ones — the grid grows without refetching (design §3.1, risk #7).
+/// ones — the grid grows without refetching, and rows already drawn keep the
+/// column positions the user is looking at.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SchemaDelta {
     /// A new field crossed the presence threshold; appended on the right.

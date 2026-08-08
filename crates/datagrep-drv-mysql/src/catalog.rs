@@ -1,5 +1,5 @@
-//! [`MySqlCatalog`] (design §5.1: lazy, one cheap bounded query per level —
-//! never a crawl). MySQL's namespace is honestly two organizational levels
+//! [`MySqlCatalog`]: lazy browsing — one cheap bounded query per level, never
+//! a crawl of the whole catalog. MySQL's namespace is honestly two levels
 //! (`database` → `table`) plus columns; there is no schema tier and this
 //! catalog does not fake one.
 
@@ -161,8 +161,9 @@ impl Catalog for MySqlCatalog {
         let conn = guard.as_mut().ok_or(DbError::Closed)?;
 
         let mut out = Vec::new();
-        // Server-side prefix query, LIMIT 50 (design §5.1: debounced,
-        // bounded, never a resident full schema).
+        // Server-side prefix query, LIMIT 50: matching happens on the server
+        // against a bounded slice, so completion never needs a full schema
+        // resident in memory.
         let tables: Vec<(String, String)> = conn
             .exec(
                 "SELECT table_name, table_type FROM information_schema.tables \

@@ -1,6 +1,6 @@
 import Foundation
 
-/// The four block directives from design §3.6 — the entire meta-language.
+/// The four block directives — the entire meta-language datagrep adds to SQL.
 public struct BlockDirectives: Sendable, Equatable {
     public var limit: Int?
     public var timeout: String?
@@ -141,7 +141,7 @@ public enum SQLBlocks {
         return d
     }
 
-    /// Layer 2 of design §3.8: a fat-finger guardrail, not an adversary defence.
+    /// A fat-finger guardrail, not an adversary defence.
     /// Only used to honour `-- @readonly`, and the UI says exactly that.
     public static func isWriteStatement(_ sql: String) -> Bool {
         var s = sql

@@ -1,5 +1,6 @@
 //! [`SshTunnel`] — an authenticated SSH session plus `direct-tcpip` channel
-//! opening (design §3.5, §4 killer feature #5's SSH leg, §3.8).
+//! opening: the SSH leg of reaching a database that is not directly
+//! routable.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -23,8 +24,8 @@ use crate::host_key::HostKeyPolicy;
 /// `direct-tcpip` channels are opened on demand; the *transport* handed to
 /// a driver is never this tunnel itself, always the
 /// [`LocalEnd`][crate::bridge::LocalEnd] returned by
-/// [`open_channel`](Self::open_channel) (design §3.5: "not a real listening
-/// TCP port").
+/// [`open_channel`](Self::open_channel) — never a real listening TCP port
+/// that another process on the machine could hijack.
 pub struct SshTunnel<P: HostKeyPolicy + 'static> {
     handle: Arc<client::Handle<TunnelHandler<P>>>,
     host: String,
@@ -53,16 +54,16 @@ impl<P: HostKeyPolicy + 'static> std::fmt::Debug for SshTunnel<P> {
 }
 
 impl<P: HostKeyPolicy + 'static> SshTunnel<P> {
-    /// Dial `host:port`, verify its host key against `policy` (design
-    /// §3.8), and authenticate as `user` via `auth`.
+    /// Dial `host:port`, verify its host key against `policy`, and
+    /// authenticate as `user` via `auth`.
     ///
     /// **Keepalive: none, by default — and this is deliberate, not an
     /// oversight.** `russh::client::Config::keepalive_interval` defaults to
     /// `None` and we don't override it: a periodic keepalive is a timer
-    /// that fires forever whether or not anyone is using the tunnel. Design
-    /// §5.1's no-polling rule is explicit about the cost of exactly this
-    /// pattern ("a 30 s ping across 5 connections is 10 wakeups/min
-    /// forever, for nothing"). Instead, death is detected lazily: the next
+    /// that fires forever whether or not anyone is using the tunnel. A 30 s
+    /// ping across five connections is ten wakeups a minute, forever, for
+    /// nothing — on a laptop that is battery spent to learn something we
+    /// find out anyway. Instead, death is detected lazily: the next
     /// `open_channel` (or a read/write on an already-open channel) fails,
     /// and the caller (ultimately `TunnelPool`) reconnects then. A dead
     /// idle tunnel costs nothing until something tries to use it.
@@ -104,8 +105,8 @@ impl<P: HostKeyPolicy + 'static> SshTunnel<P> {
     }
 
     /// Open a `direct-tcpip` channel to `target_host:target_port` *through*
-    /// this SSH connection, bridged to an in-process duplex stream (design
-    /// §3.5). The returned stream is what a driver's `ConnectCtx::transport`
+    /// this SSH connection, bridged to an in-process duplex stream.
+    /// The returned stream is what a driver's `ConnectCtx::transport`
     /// should be — nothing on the local machine can connect to it, because
     /// nothing is listening; it is not a socket at all.
     pub async fn open_channel(
@@ -114,7 +115,7 @@ impl<P: HostKeyPolicy + 'static> SshTunnel<P> {
         target_port: u16,
     ) -> Result<LocalEnd, TunnelError> {
         let target_host = target_host.into();
-        // Originator address/port are advisory (RFC 4254 §7) and, because
+        // Originator address/port are advisory (RFC 4254 section 7) and, because
         // there is no real originating socket in an in-process bridge,
         // filled with the conventional loopback placeholder.
         let channel = self
@@ -166,7 +167,7 @@ async fn authenticate_keyfile<P: HostKeyPolicy + 'static>(
     let password = passphrase.as_ref().map(SecretString::expose);
     // Blocking file read + key decryption; key files are small (a few KB)
     // and this runs once per connect, not on any hot path — unlike keychain
-    // access (datagrep-secrets §3.8) it doesn't warrant `spawn_blocking`.
+    // access in `datagrep-secrets`, it doesn't warrant `spawn_blocking`.
     let key = keys::load_secret_key(&path, password).map_err(|source| TunnelError::KeyFile {
         path: path.clone(),
         reason: source.to_string(),

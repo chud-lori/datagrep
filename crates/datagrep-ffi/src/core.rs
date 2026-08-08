@@ -5,16 +5,16 @@
 //!
 //! | field | what it is | why it is here |
 //! |---|---|---|
-//! | `api` | [`datagrep_core::CoreApi`] | the only entry into the engine (design §3) |
-//! | `store` | [`datagrep_profiles::Store`] | the on-disk profile list (design §3.7) |
-//! | `secrets` | [`datagrep_secrets::SecretResolver`] | keychain lookups (design §3.8) |
+//! | `api` | [`datagrep_core::CoreApi`] | the only entry into the engine |
+//! | `store` | [`datagrep_profiles::Store`] | the on-disk profile list |
+//! | `secrets` | [`datagrep_secrets::SecretResolver`] | keychain lookups |
 //!
-//! `datagrep_core_new` **never blocks**, and that is load-bearing (design P1,
-//! ≤250 ms cold start): `CoreApi::new()` is plain data structures,
+//! `datagrep_core_new` **never blocks**, and that is load-bearing for the
+//! ≤250 ms cold-start budget: `CoreApi::new()` is plain data structures,
 //! `register_drivers` is three hashmap inserts that construct nothing, and
 //! `Store::open` is documented lazy — its worker thread and SQLite file only
-//! come alive on the first real call. Nothing here opens a socket
-//! (design §3.5: "Opening the app connects to nothing").
+//! come alive on the first real call. Nothing here opens a socket: opening the
+//! app connects to nothing, so startup is never gated on the network.
 //!
 //! ## Why the guts live behind an `Arc`
 //!
@@ -58,9 +58,9 @@ pub(crate) struct CoreInner {
     /// query instead of after a restart.
     registered: Mutex<HashMap<String, ProfileId>>,
     /// Saved-profile name → the [`Enforcement`] the driver reported the last
-    /// time `set_read_only(true)` ran on one of its connections (design §3.8:
-    /// the UI must say *which kind* of protection is in force, never imply
-    /// server enforcement it does not have). Absent until the first connect.
+    /// time `set_read_only(true)` ran on one of its connections. The UI must
+    /// say *which kind* of protection is in force and never imply server
+    /// enforcement it does not have. Absent until the first connect.
     enforcement: Mutex<HashMap<String, Enforcement>>,
 }
 
@@ -184,10 +184,11 @@ impl CoreInner {
             }
             Err(_) => {
                 // The server half could not be (re)confirmed on this socket.
-                // Never keep claiming `Server` from an earlier connection —
-                // that is exactly the lie §3.8 forbids. The client-side
-                // classifier already vetted this statement, so running it is
-                // still safe; the badge just must not over-promise.
+                // Never keep claiming `Server` from an earlier connection: a
+                // read-only badge that over-promises is worse than no badge,
+                // because the user relaxes on the strength of it. The
+                // client-side classifier already vetted this statement, so
+                // running it is still safe; only the claim has to come down.
                 self.lock_enforcement()
                     .insert(name.to_string(), Enforcement::Client);
             }
@@ -254,7 +255,7 @@ impl CoreInner {
 ///  "server_confirmed":bool}                             // profile is read-only
 /// ```
 ///
-/// `enforcement` is what the badge may claim (§3.8 honesty rule):
+/// `enforcement` is the strongest thing the badge may honestly claim:
 /// - `"server"` — a live connection of this profile accepted a server-side
 ///   read-only session (PG `SET SESSION … READ ONLY`, SQLite
 ///   `PRAGMA query_only`, …). `server_confirmed` is `true`.

@@ -1,7 +1,7 @@
 //! `serde_json::Value` -> `datagrep_api::Value`, and the mapping-aware
 //! precision rules that keep a `long` or a `scaled_float` from silently
-//! becoming a lossy `f64` (design §3.1: "never lose bytes", "decimals stay
-//! strings").
+//! becoming a lossy `f64`. Two standing rules: never lose bytes, and decimals
+//! stay strings.
 //!
 //! # `Absent` vs `Null` — by construction
 //!
@@ -73,8 +73,8 @@ impl EsType {
 }
 
 /// Dotted-path -> declared Elasticsearch type, flattened from one index's
-/// `_mapping`. Only ever fetched for the index actually being read (design
-/// §5.1: never the whole cluster's mappings).
+/// `_mapping`. Only ever fetched for the index actually being read, never the
+/// whole cluster's mappings.
 #[derive(Debug, Clone, Default)]
 pub struct FieldTypes {
     types: HashMap<String, (EsType, Arc<str>)>,
@@ -174,8 +174,8 @@ pub fn json_to_value(json: &OrderedJson, path: &str, types: &FieldTypes) -> Valu
             Value::Array(Arc::from(converted))
         }
         OrderedJson::Object(fields) => {
-            // Key order — and duplicate keys — are data (design §3.1), which
-            // is why the input is `OrderedJson` and not `serde_json::Value`.
+            // Key order — and duplicate keys — are data, which is why the
+            // input is `OrderedJson` and not `serde_json::Value`.
             let mut doc = Document::new();
             for (k, v) in fields {
                 let child = if path.is_empty() {
@@ -292,7 +292,7 @@ pub fn value_to_json(value: &Value) -> Json {
         }),
         Value::Uuid(bytes) => Json::String(format_uuid(bytes)),
         // Raw JSON text is re-parsed, not re-serialized, so key order and
-        // number precision survive (design §3.1).
+        // number precision survive.
         Value::Json(text) => serde_json::from_str(text).unwrap_or(Json::String(text.to_string())),
         Value::Array(items) => Json::Array(items.iter().map(value_to_json).collect()),
         Value::Document(doc) => {

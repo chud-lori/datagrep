@@ -1,4 +1,4 @@
-//! Capabilities, not driver checks (design §3.1). The UI renders a control
+//! Capabilities, not driver checks. The UI renders a control
 //! disabled with a truthful tooltip instead of existing-and-erroring; any
 //! `if driver_id == …` above this crate is a missing flag here.
 
@@ -37,7 +37,7 @@ bitflags! {
         /// Placeholders are named (`:name`, `@name`).
         const NAMED_PARAMS      = 1 << 14;
         /// Results can be streamed straight to a file without going through
-        /// the result store (design §5.1: "export all" ≠ "load all").
+        /// the result store — "export all" must not mean "load all into memory".
         const EXPORT_STREAMING  = 1 << 15;
         /// The driver can compile a `Predicate` at all; false greys out the
         /// filter box rather than erroring at run time.
@@ -52,12 +52,12 @@ pub struct Capabilities {
     pub flags: Caps,
     /// Server-imposed statement size limit, when one exists.
     pub max_statement_bytes: Option<u64>,
-    /// Starting fetch size before adaptive sizing kicks in (design §3.2:
-    /// PG 500, ClickHouse 65536, Mongo 101).
+    /// Starting fetch size before adaptive sizing kicks in; the sane per-engine
+    /// starting points differ wildly (PG 500, ClickHouse 65536, Mongo 101).
     pub default_fetch_rows: u32,
     pub param_style: ParamStyle,
     /// The language the editor should speak for this connection — there is no
-    /// cross-engine translation layer, by decision (design §3.6).
+    /// cross-engine translation layer, by decision.
     pub language: LanguageId,
     /// Identifier quoting char for statements we generate (`"` PG, `` ` `` MySQL).
     pub identifier_quote: char,
@@ -66,7 +66,7 @@ pub struct Capabilities {
 }
 
 /// How the engine's native protocol binds parameters — values are always bound,
-/// never spliced into text (design §3.8).
+/// never spliced into text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ParamStyle {
     /// `$1, $2` (Postgres).
@@ -82,7 +82,7 @@ pub enum ParamStyle {
 }
 
 /// Query language of a connection; the editor is language-agnostic and the
-/// connection decides (design §3.6).
+/// connection decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LanguageId {
     Sql(SqlDialect),

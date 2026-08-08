@@ -1,8 +1,8 @@
 //! [`SecretRef`] — the parsed form of a profile's secret reference string.
 //!
 //! References are **not** secrets: they name where a secret lives, and are
-//! deliberately safe to store in git-committable profiles (design §4.5) and to
-//! show in UI/errors. The referenced *value* only ever exists as a
+//! deliberately safe to store in git-committable profiles and to show in
+//! UI/errors. The referenced *value* only ever exists as a
 //! [`datagrep_api::SecretString`].
 
 use std::fmt;
@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use crate::SecretError;
 
-/// A parsed secret reference (design §4, killer feature #5).
+/// A parsed secret reference.
 ///
 /// String forms: `keychain:<service>:<account>` · `env:<VAR>` ·
 /// `exec:<command line>` · `prompt:`. `Display` round-trips through

@@ -1,7 +1,7 @@
-//! The store-free export path (design §3.2 / §5.1).
+//! The store-free export path.
 //!
-//! > "Export is a separate streaming endpoint that runs its own cursor at
-//! > full fetch size straight to a file, never through the store."
+//! Export is a separate streaming endpoint: it runs its own cursor at full
+//! fetch size straight to a file and never goes through the result store.
 //!
 //! [`run_export_on`] drives one cursor directly into an [`ExportSink`]: each
 //! chunk is pulled, handed to the sink, and dropped before the next pull.
@@ -11,12 +11,12 @@
 //! what makes "Export all" ≠ "load all": a 10M-row export writes to disk at
 //! whatever rate the sink can absorb without the process's resident result
 //! bytes ([`crate::store::GlobalBudget`]) moving at all, which is also the
-//! documented white-box counter the tests below assert on.
+//! white-box counter the tests below assert on.
 //!
 //! Backpressure still reaches the socket: the loop does not call
 //! `next_batch` again until the sink has returned, so a slow disk stalls the
-//! driver, which stalls the server — the same pull-only story as the feeder
-//! (§3.2), minus the store.
+//! driver, which stalls the server — the same pull-only story as the feeder,
+//! minus the store.
 
 use datagrep_api::driver::{Batch, Cursor, FetchHint};
 use datagrep_api::error::DbError;
@@ -26,8 +26,9 @@ use datagrep_api::shape::Shape;
 use crate::feeder::payload_rows;
 use crate::session::ConnLease;
 
-/// The fetch hint for the export path: "full fetch size" (§5.1). Rows are
-/// effectively bounded by the 4 MB byte ceiling; the generous row cap keeps a
+/// The fetch hint for the export path: full fetch size, since nothing here is
+/// waiting to be shown on screen. Rows are effectively bounded by the 4 MB
+/// byte ceiling; the generous row cap keeps a
 /// 10M-row export from doing 100k round trips, while one chunk stays small
 /// enough that dropping the future (Ctrl-C) never abandons much work.
 pub const EXPORT_FETCH_HINT: FetchHint = FetchHint {
@@ -78,7 +79,7 @@ pub struct ExportStats {
 /// Run `req` on `lease`'s connection and stream the result straight into
 /// `sink`, never touching a result store. The cursor is closed on every exit
 /// path, success or failure, so an aborted export leaves no server-side
-/// portal open (§3.3).
+/// portal open.
 pub async fn run_export_on(
     lease: &ConnLease,
     req: Request,
@@ -183,11 +184,10 @@ mod tests {
         (core, id, counters)
     }
 
-    /// **Gap 3 — export never goes through the store.** ~200k rows stream
-    /// through `run_export`; the global result budget (THE documented
-    /// white-box counter for resident result bytes, §3.2) must stay at zero
-    /// the whole time, no query is ever registered, and the sink never holds
-    /// more than one bounded chunk.
+    /// **Export never goes through the store.** ~200k rows stream through
+    /// `run_export`; the global result budget (the white-box counter for
+    /// resident result bytes) must stay at zero the whole time, no query is
+    /// ever registered, and the sink never holds more than one bounded chunk.
     #[tokio::test]
     async fn export_streams_200k_rows_without_store_growth() {
         let (core, id, _counters) = core_with(MockPlan {

@@ -1,6 +1,6 @@
-//! Savepoint-based nested transactions (design requirement: `NESTED_TRANSACTIONS`
-//! behavior via plain SQL — see the module doc on `transaction.rs` for why
-//! there is no typed "begin a nested transaction" API).
+//! Savepoint-based nested transactions: `NESTED_TRANSACTIONS` behavior is
+//! reached via plain SQL — see the module doc on `transaction.rs` for why
+//! there is no typed "begin a nested transaction" API.
 
 mod common;
 

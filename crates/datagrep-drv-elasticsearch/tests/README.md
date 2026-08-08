@@ -70,32 +70,33 @@ docker rm -f dg-test-es
 
 ## What each integration test proves
 
-- **`streams_100k_documents_in_incremental_batches_with_flat_rss`** — design
-  §3.2's memory contract. 100 000 documents arrive as ≥ 90 bounded batches at
+- **`streams_100k_documents_in_incremental_batches_with_flat_rss`** — the
+  bounded-memory contract. 100 000 documents arrive as ≥ 90 bounded batches at
   a 1000-row hint (never one buffered result), every document is seen exactly
   once, the cursor reports the server's own `took`, a resume token exists
   mid-stream, and the process's resident set grows by well under 128 MiB
   across the whole scan — i.e. the driver is not accumulating the result.
 - **`a_resume_token_continues_the_scan_where_it_stopped`** — the
-  idle-auto-disconnect story (§3.1/§3.5). Three pages are read, the cursor is
+  idle-auto-disconnect story. Three pages are read, the cursor is
   **closed** (which releases the point-in-time, exactly as the core does when
   it disconnects), and a fresh cursor built from the token alone returns
   precisely the remaining 700 documents with no document delivered twice.
-- **`heterogeneous_documents_emit_schema_delta_add_column_events`** — design
-  risk #7. Four differently-shaped documents (seeded as raw JSON text so the
+- **`heterogeneous_documents_emit_schema_delta_add_column_events`** — the
+  grid growing a column mid-stream instead of refetching. Four
+  differently-shaped documents (seeded as raw JSON text so the
   `_source` key order on the wire is under the test's control) produce exactly
   one `SchemaDelta::AddColumn` per newly-observed field, in first-seen order,
   never re-announced — and a field missing from a document resolves to
   `Absent`, not to a fake null.
-- **`cancel_mid_slow_query_reaches_the_server_and_returns_control`** — design
-  §3.3's Elasticsearch row. A ~10 s scripted filter query (written so
+- **`cancel_mid_slow_query_reaches_the_server_and_returns_control`** — honest
+  cancellation, end to end. A ~10 s scripted filter query (written so
   Elasticsearch cannot terminate the collection early and the JIT cannot fold
   the loop away) is cancelled after 2 s: the outcome is
   `CancelOutcome::ServerCancelled` — a task the tasks API confirmed, not an
   embellished client abandon — control returns in well under the query's own
   runtime, the pull reports `Cancelled` rather than an error, and the
   connection is immediately usable again.
-- **`catalog_lists_indices_maps_fields_and_infers_shape`** — design §5.1's
+- **`catalog_lists_indices_maps_fields_and_infers_shape`** — catalog
   laziness. Two levels, a prefix-narrowed `_cat/indices` listing, fields from
   **that one index's** `_mapping` (including nested and multi-fields),
   `describe` reporting document count, store size, a `fields` array and an

@@ -5,8 +5,8 @@ import AppKit
 /// Mirrors `crates/datagrep-lang`'s `TokenKind`, plus one case that crate has
 /// no reason to know about: `.directive`. The `-- @limit / @timeout /
 /// @connection / @readonly` lines are lexically comments but semantically the
-/// only meta-language datagrep has (design §3.6), so they must not look like
-/// prose the engine ignores.
+/// only meta-language datagrep has, so they must not look like prose the engine
+/// ignores.
 enum SQLTokenKind {
     case keyword, ident, string, comment, number, op, punct, directive
 }

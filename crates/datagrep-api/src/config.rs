@@ -1,6 +1,6 @@
 //! Declarative connection configuration. Drivers describe their form as data
 //! (`ConfigSchema`) so every frontend renders it without knowing the engine;
-//! secrets are resolved late and zeroized on drop, never stored (design §3.8).
+//! secrets are resolved late and zeroized on drop, never stored.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -45,7 +45,7 @@ pub enum FieldKind {
 }
 
 /// A stored config value. Deliberately tiny — connection profiles are
-/// git-committable TOML (design §4.5), not arbitrary JSON.
+/// git-committable TOML a human can read and review, not arbitrary JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ConfigValue {
     Str(String),
@@ -80,7 +80,7 @@ impl ResolvedConfig {
 }
 
 /// A secret that zeroizes its bytes on drop and redacts itself from `Debug` —
-/// never logged, never in crash dumps, never shown to the UI (design §3.8).
+/// never logged, never in crash dumps, never shown to the UI.
 pub struct SecretString(String);
 
 impl SecretString {

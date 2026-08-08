@@ -1,5 +1,6 @@
-//! MySQL wire values → `datagrep_api::Value` (design §3.1's honest mapping,
-//! risk #4: DECIMAL never rides through f64).
+//! MySQL wire values → `datagrep_api::Value`: an honest mapping, in which
+//! DECIMAL never rides through f64 (a silently rounded number is worse than
+//! an error).
 //!
 //! Decoding is driven by the column metadata, not the wire variant, because
 //! the two protocols disagree about representation: the binary (prepared)
@@ -372,7 +373,8 @@ fn decode_bytes(col: &Column, raw: Vec<u8>) -> Value {
     match ct {
         MYSQL_TYPE_NULL => Value::Null,
         MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL => {
-            // Design risk #4: DECIMAL/NUMERIC is string-backed, NEVER f64.
+            // DECIMAL/NUMERIC is string-backed, NEVER f64: it is an exact
+            // arbitrary-precision type and a float would round it.
             let s = text!();
             Value::Decimal(Arc::from(s))
         }
@@ -500,9 +502,10 @@ pub fn civil_from_days(z: i64) -> (i32, u32, u32) {
     ((y + i64::from(m <= 2)) as i32, m as u32, d as u32)
 }
 
-/// Convert a seam [`Value`] into a bindable `mysql_async::Value` — the
-/// parameter side of design §3.8: this is the ONLY place request values are
-/// encoded, and it produces protocol-level bound parameters, never SQL text.
+/// Convert a seam [`Value`] into a bindable `mysql_async::Value`. This is the
+/// ONLY place request values are encoded, and it produces protocol-level
+/// bound parameters, never SQL text — which is what keeps a value from ever
+/// being re-parsed as SQL.
 pub fn to_my_value(v: &Value) -> Result<MyValue, datagrep_api::DbError> {
     use datagrep_api::DbError;
     Ok(match v {
@@ -512,7 +515,7 @@ pub fn to_my_value(v: &Value) -> Result<MyValue, datagrep_api::DbError> {
         Value::U64(u) => MyValue::UInt(*u),
         Value::F64(f) => MyValue::Double(*f),
         // Decimal binds as its exact text — the server parses it with
-        // DECIMAL semantics; f64 never enters the picture (risk #4).
+        // DECIMAL semantics; f64 never enters the picture.
         Value::Decimal(s) => MyValue::Bytes(s.as_bytes().to_vec()),
         Value::Str(s) => MyValue::Bytes(s.as_bytes().to_vec()),
         Value::Bytes(b) => MyValue::Bytes(b.to_vec()),
@@ -698,7 +701,8 @@ mod tests {
         );
         assert!(
             !matches!(v, Value::F64(_)),
-            "DECIMAL through f64 is design risk #4"
+            "DECIMAL decoded as F64 — routing an exact decimal through a \
+             float silently rounds it"
         );
         // Trailing zeros are data too.
         assert_eq!(

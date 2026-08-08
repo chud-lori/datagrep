@@ -1,6 +1,6 @@
 //! What the core asks a driver to do. Two doors only: the engine's own text
-//! (never translated — design §3.6) or a structured [`Op`] each driver compiles
-//! natively or rejects with a capability error.
+//! (never translated) or a structured [`Op`] each driver compiles natively or
+//! rejects with a capability error.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +15,7 @@ use crate::value::{FieldPath, Value};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Request {
     /// User-authored text in the connection's own language, with values bound
-    /// as parameters — never spliced (design §3.8).
+    /// as parameters — never spliced into the text.
     Native {
         text: Arc<str>,
         params: Vec<Value>,
@@ -40,7 +40,8 @@ impl Request {
 /// Structured operations every driver compiles natively or rejects.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Op {
-    /// Browse: keyset pagination via `resume`, never OFFSET (design §3.6).
+    /// Browse: keyset pagination via `resume`, never OFFSET — OFFSET re-scans
+    /// everything it skips and drifts when rows change underneath it.
     Scan {
         path: ObjectPath,
         filter: Option<Predicate>,
@@ -126,14 +127,14 @@ pub struct SortKey {
 }
 
 /// Per-request execution options. `timeout` should also be pushed server-side
-/// where the engine supports it, so even uncancellable work is bounded (§3.3).
+/// where the engine supports it, so even uncancellable work is bounded.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ExecOpts {
     pub timeout: Option<Duration>,
     /// A hard row cap the driver enforces at the source when it can.
     pub row_limit: Option<u64>,
     /// Caller asserts this request must not write; drivers that can verify it
-    /// server-side should (layer 1 of the guardrails, design §3.8).
+    /// server-side should — layer 1 of the read-only guardrails.
     pub read_only_assert: bool,
 }
 
@@ -148,7 +149,7 @@ pub struct MutationBatch {
 /// never has to reverse-engineer which columns the values belong to (no
 /// `pg_index` lookups, no `PRAGMA table_info` positional conventions, no
 /// "assume `_id`"). Each mutation must affect exactly one row or the batch
-/// rolls back (§3.8).
+/// rolls back — a generated write that hits N rows is a data-loss bug.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Mutation {
     Update {

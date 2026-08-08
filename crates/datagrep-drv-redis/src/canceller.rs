@@ -1,6 +1,7 @@
-//! [`RedisCanceller`] (design §3.3): "commands are atomic; a 'long query' is
-//! our own SCAN loop → just stop" is the default and applies to almost
-//! every command. The one real exception is a command that blocks the
+//! [`RedisCanceller`]. Redis commands are atomic, so the only thing that
+//! runs "long" from this driver's side is our own SCAN loop — just stopping
+//! it is the default, and it applies to almost every command. The one real
+//! exception is a command that blocks the
 //! connection waiting on the server (`BLPOP`, `WAIT`, `XREAD BLOCK`, …) —
 //! for those, "just stop" leaves the connection hung until the server-side
 //! timeout, so a genuine server-side kill (`CLIENT KILL ID` from a second

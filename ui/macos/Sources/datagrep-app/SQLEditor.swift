@@ -11,10 +11,10 @@ struct EditorDecorations {
     var bracketB: NSRange?
 }
 
-/// NSTextView blinks its caret forever while focused. Design §5.0: that alone
-/// is 2 full-window repaints/sec and fails P12/P19/P20/P21/P22 simultaneously.
-/// Fix (b) from the design: stop blinking after 10 s of no input, resume on the
-/// next keystroke. The 10 s arm is a ONE-SHOT `asyncAfter`, not a repeating
+/// NSTextView blinks its caret forever while focused. That alone is 2
+/// full-window repaints/sec and fails P12/P19/P20/P21/P22 simultaneously, so
+/// the caret stops blinking after 10 s of no input and resumes on the next
+/// keystroke. The 10 s arm is a ONE-SHOT `asyncAfter`, not a repeating
 /// timer, and it fully disarms — so a settled window is genuinely quiescent.
 final class IdleCaretTextView: NSTextView {
     private var caretParked = false

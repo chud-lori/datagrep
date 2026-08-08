@@ -1,4 +1,5 @@
-# xtask — CI/dev task runner for datagrep (design doc §5/§6, deliverable of §11.3).
+# xtask — CI/dev task runner for datagrep (budget checks, benchmark fixtures,
+# and the grep gates run by ci/gates.sh).
 #
 # Standalone on purpose: the empty [workspace] table below opts this crate OUT of
 # the root workspace, so the root Cargo.toml's `crates/*` glob is never touched

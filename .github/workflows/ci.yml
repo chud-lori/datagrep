@@ -1,10 +1,10 @@
 name: CI
 
-# The Tier-1 gate (design doc §6): every PR, hardware-independent,
+# The Tier-1 gate: every PR, hardware-independent,
 # deterministic, <8 min. Runs ci/gates.sh verbatim — the same script
 # contributors run locally, so "green in CI" and "green locally" mean
 # the same thing. gates.sh covers cargo fmt --check, clippy -D warnings,
-# cargo test --workspace, the §5.2 anti-pattern greps, and the budget.toml
+# cargo test --workspace, the anti-pattern greps, and the budget.toml
 # size/crate-count checks.
 #
 # Runner policy (learned the hard way on chud-lori/tangi): never macos-13.

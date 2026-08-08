@@ -1,5 +1,5 @@
-//! S1 — zero-idle proof (design doc §8, gate: >2 presents/60s idle = FAIL,
-//! >20ms CPU/60s idle = FAIL).
+//! S1 — zero-idle proof. Gate: >2 presents/60s idle = FAIL,
+//! >20ms CPU/60s idle = FAIL.
 //!
 //! Deliberately uses ONLY the bare `gpui` crate — no `gpui-component` — so
 //! this measures gpui's own idle floor, uncontaminated by the component
@@ -8,15 +8,16 @@
 //! which does not touch the view or call `cx.notify()`).
 //!
 //! Present/redraw counter: `Render::render` is only invoked by gpui when the
-//! compositor actually needs a new frame from this view (retained mode — see
-//! design §5.1 "Retained over immediate mode"). We increment an `AtomicU64`
+//! compositor actually needs a new frame from this view (retained mode is
+//! chosen over immediate mode precisely so idle costs nothing). We increment
+//! an `AtomicU64`
 //! on every call as a present proxy. This is an application-level proxy, not
 //! a wgpu swapchain-present callback — gpui 0.2.2's public API does not
 //! expose one — so it is a lower bound on true presents, not an exact count;
 //! stated plainly in SPIKE-REPORT.md.
 //!
 //! Driving script wraps this binary and samples `ps -o utime,stime,rss` and
-//! (if available) `footprint` before/after the 60s idle window, per design §6.
+//! (if available) `footprint` before/after the 60s idle window.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};

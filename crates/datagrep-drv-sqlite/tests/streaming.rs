@@ -1,6 +1,6 @@
-//! End-to-end proof of the streaming contract (design §3.1/§3.2): a cursor
-//! over a 100k-row result must arrive in batches sized per the caller's
-//! `FetchHint`, never as one buffered blob.
+//! End-to-end proof of the streaming contract: a cursor over a 100k-row
+//! result must arrive in batches sized per the caller's `FetchHint`, never
+//! as one buffered blob.
 
 mod common;
 

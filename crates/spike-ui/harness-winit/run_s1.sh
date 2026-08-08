@@ -1,6 +1,6 @@
 #!/bin/bash
 # Drives s1_idle_winit for the S1 measurement: launches it, samples CPU-time
-# and RSS (design doc §6: ps -o utime,stime / ps -o rss) and phys_footprint
+# and RSS (ps -o utime,stime / ps -o rss) and phys_footprint
 # (via the `footprint` tool) every 5s for ~65s, keeping the LAST sample taken
 # before the process exits as the "t_end" reading (the app self-quits after
 # its 6th 10s heartbeat, so we poll instead of racing a fixed sleep against

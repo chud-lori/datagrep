@@ -1,6 +1,5 @@
 //! Catalog behavior on a seeded schema: database → table/view → column
-//! listing, `describe()`, and `complete()` (design §3.1/§5.1: lazy,
-//! incremental, bounded).
+//! listing, `describe()`, and `complete()` — lazy, incremental, bounded.
 
 mod common;
 

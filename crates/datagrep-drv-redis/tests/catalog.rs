@@ -1,4 +1,4 @@
-//! `RedisCatalog` against a real server (design §3.1 requirement 4): the
+//! `RedisCatalog` against a real server: the
 //! `db-index -> keyspace-prefix -> key` hierarchy, `ScanOnly{requires_prefix:
 //! true}` actually being enforced (no silent full-keyspace walk), and
 //! `describe()` on a real key.

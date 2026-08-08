@@ -135,7 +135,7 @@ pub struct ExportArgs {
     pub format: OutputFormat,
 
     /// Destination file. Streamed to, with a fixed buffer — never through the
-    /// result store (design §3.2, §5.1: "export all" ≠ "load all").
+    /// result store: "export all" is not "load all".
     #[arg(short = 'o', long = "out", value_name = "FILE")]
     pub out: PathBuf,
 
@@ -152,7 +152,7 @@ pub struct ExportArgs {
 pub enum ProfilesCommand {
     List,
     /// Add a profile from a connection URL. An inline password is split into
-    /// a keychain `SecretRef` and never written to the profile (design §3.8).
+    /// a keychain `SecretRef` and never written to the profile.
     Add {
         name: String,
         url: String,

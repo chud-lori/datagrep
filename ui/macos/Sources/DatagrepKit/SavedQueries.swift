@@ -6,11 +6,11 @@ import Foundation
 /// catalog, query and rows — and nothing else. There is no
 /// `datagrep_saved_query_*` / `datagrep_editor_tab_*` entry point, so the
 /// `saved_query` and `editor_tab` tables in `datagrep-profiles` are simply not
-/// reachable from Swift today. That is fine: the design doc's stated preference
-/// for saved queries is plain files ("git-friendly, not a proprietary store"),
-/// so this store writes exactly that — a `.sql` file you can open in any editor,
-/// plus a small JSON sidecar holding the things SQL cannot carry (which
-/// connection the tab is bound to, and where the caret was).
+/// reachable from Swift today. That is fine: saved queries belong in plain
+/// files — git-friendly, not a proprietary store — so this writes exactly that,
+/// a `.sql` file you can open in any editor plus a small JSON sidecar holding
+/// the things SQL cannot carry (which connection the tab is bound to, and where
+/// the caret was).
 ///
 /// One file pair per tab, never one big blob: a half-written blob loses every
 /// tab, a half-written sidecar loses one tab's caret position.

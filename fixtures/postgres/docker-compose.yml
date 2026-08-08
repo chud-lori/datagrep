@@ -1,4 +1,4 @@
-# fixtures/postgres/docker-compose.yml — the §6 seeded PG datasets.
+# fixtures/postgres/docker-compose.yml — the seeded PG benchmark datasets.
 #
 # Usage: see fixtures/README.md. Short version:
 #   cd fixtures/postgres && docker compose up -d

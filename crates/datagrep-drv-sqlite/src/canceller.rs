@@ -1,5 +1,5 @@
-//! Out-of-band cancellation (design §3.3: SQLite / DuckDB row = `ServerSide`
-//! via `sqlite3_interrupt`).
+//! Out-of-band cancellation. SQLite cancels server-side, via
+//! `sqlite3_interrupt`.
 //!
 //! [`rusqlite::InterruptHandle`] is the one piece of rusqlite state that is
 //! genuinely `Send + Sync` and safe to call from *any* thread while the
@@ -36,7 +36,7 @@ impl Canceller for SqliteCanceller {
         // `interrupt()` only sets a flag `sqlite3_step` checks between VM
         // opcodes — it returns before the running statement has actually
         // noticed and unwound. We have no ack that it did, so `Requested`
-        // (not `ServerCancelled`) is the honest outcome (design §3.3).
+        // (not `ServerCancelled`) is the honest outcome.
         self.handle.interrupt();
         Box::pin(async { Ok(CancelOutcome::Requested) })
     }

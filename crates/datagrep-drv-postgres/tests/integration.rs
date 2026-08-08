@@ -57,9 +57,9 @@ async fn connect() -> Box<dyn Connection> {
     )
 }
 
-/// Design §3.2: "first chunk renders before chunk 2 is requested" — proven
-/// here by timing the first batch of a 100k-row stream against the whole
-/// stream's completion time.
+/// Streaming means the first chunk is available long before chunk 2 is even
+/// requested — proven here by timing the first batch of a 100k-row stream
+/// against the whole stream's completion time.
 #[tokio::test]
 #[ignore]
 async fn streams_100k_rows_first_batch_arrives_fast() {
@@ -174,7 +174,8 @@ async fn streaming_does_not_retain_the_whole_result_set() {
     }
 }
 
-/// Design risk #4: NUMERIC must never round-trip through f64.
+/// NUMERIC must never round-trip through f64 — a silently wrong number is
+/// worse than a crash.
 #[tokio::test]
 #[ignore]
 async fn numeric_round_trips_as_decimal_string() {
@@ -200,8 +201,8 @@ async fn numeric_round_trips_as_decimal_string() {
     assert_eq!(rows[0][1], Value::Decimal(Arc::from("0.1")));
 }
 
-/// Design §3.3: cancel is racy ("Requested", never a guaranteed ack) but the
-/// connection must remain usable afterward.
+/// Cancel is racy — the outcome is always `Requested`, never a guaranteed ack
+/// — but the connection must remain usable afterward.
 #[tokio::test]
 #[ignore]
 async fn cancel_mid_sleep_leaves_connection_usable() {
@@ -235,8 +236,8 @@ async fn cancel_mid_sleep_leaves_connection_usable() {
         "pg_sleep(5) should not have completed normally within the test"
     );
 
-    // The connection must still be usable — a poisoned connection here would
-    // be a correctness bug per design §3.5.
+    // The connection must still be usable — a cancel that poisons the session
+    // it ran against is a correctness bug, not an acceptable side effect.
     conn.ping().await.expect("connection must survive a cancel");
     let mut cursor2 = conn
         .execute(Request::native("SELECT 1"))

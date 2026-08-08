@@ -1,5 +1,5 @@
-//! Row types for every table in design §3.7, plus the small enums (`Env`,
-//! `HistoryStatus`) that back their `CHECK`-constrained columns.
+//! Row types for every table in the profile store, plus the small enums
+//! (`Env`, `HistoryStatus`) that back their `CHECK`-constrained columns.
 //!
 //! Timestamps are milliseconds since the Unix epoch (`i64`), matching
 //! SQLite's `INTEGER` affinity and avoiding a chrono dependency this crate
@@ -24,10 +24,10 @@ pub fn now_ms() -> i64 {
 
 /// Generates a locally-unique id for a new row.
 ///
-/// Deviation from the ticket: the allowed dependency list has no `uuid`
-/// crate, and `datagrep-profiles` has no opinion on id *format* — callers that
-/// already carry a UUID generator (e.g. `datagrep-core`) are free to hand in
-/// their own `id` on every `create_*` call instead. This helper exists so
+/// There is deliberately no `uuid` dependency, and `datagrep-profiles` has no
+/// opinion on id *format* — callers that already carry a UUID generator (e.g.
+/// `datagrep-core`) are free to hand in their own `id` on every `create_*`
+/// call instead. This helper exists so
 /// the crate (and its tests) are self-sufficient: `<millis>-<counter>-<pid>`
 /// is unique per-process and monotonically increasing, which is all a local
 /// SQLite primary key needs.
@@ -37,7 +37,7 @@ pub fn new_id() -> String {
     format!("{:x}-{:x}-{:x}", now_ms(), n, std::process::id())
 }
 
-/// design §3.7: a folder in the profile tree. `parent_id = None` is the root.
+/// A folder in the profile tree. `parent_id = None` is the root.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Folder {
     pub id: String,
@@ -48,8 +48,8 @@ pub struct Folder {
     pub updated_at: i64,
 }
 
-/// design §3.8: the deployment tier a profile targets, driving the red
-/// window chrome / confirm-on-write / blocked-unqualified-write guardrails.
+/// The deployment tier a profile targets, driving the red window chrome /
+/// confirm-on-write / blocked-unqualified-write guardrails.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Env {
@@ -84,9 +84,9 @@ impl fmt::Display for Env {
     }
 }
 
-/// design §3.7 `profile` table. `config` is `datagrep_api::ConnectionConfig` —
+/// The `profile` table. `config` is `datagrep_api::ConnectionConfig` —
 /// the exact type drivers consume — serialized to `config_json`; it is
-/// validated on every save to reject secret-shaped keys (design §3.8, see
+/// validated on every save to reject secret-shaped keys (see
 /// `crate::secrets::validate_no_secrets`). There is deliberately no `secret`
 /// field on this type: nothing secret can flow through it by construction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,7 +97,7 @@ pub struct Profile {
     pub driver_id: String,
     pub config: ConnectionConfig,
     /// Opaque pointer into the OS keychain, e.g. `keychain:datagrep:profile:<id>`.
-    /// Never a secret value itself (design §3.8).
+    /// Never a secret value itself.
     pub secret_ref: Option<String>,
     pub tunnel_id: Option<String>,
     pub env: Env,
@@ -111,9 +111,9 @@ pub struct Profile {
     pub updated_at: i64,
 }
 
-/// design §3.7 `tunnel` table. SSH is in-process `russh` (design §3.8) —
-/// only connection coordinates and a `secret_ref` for the auth material live
-/// here, never a password or key.
+/// The `tunnel` table. SSH is in-process `russh`, so only connection
+/// coordinates and a `secret_ref` for the auth material live here, never a
+/// password or key.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tunnel {
     pub id: String,
@@ -156,7 +156,8 @@ impl HistoryStatus {
 }
 
 /// What the caller submits to `Store::record_history` — no `id`/`text_hash`,
-/// the store computes those (design §3.7 dedupe window).
+/// the store computes those, and `text_hash` is what the dedupe window
+/// compares on.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewHistoryEntry {
     pub profile_id: String,
@@ -168,7 +169,7 @@ pub struct NewHistoryEntry {
     pub error: Option<String>,
 }
 
-/// design §3.7 `query_history` row, as persisted.
+/// A `query_history` row, as persisted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub id: i64,
@@ -182,7 +183,7 @@ pub struct HistoryEntry {
     pub error: Option<String>,
 }
 
-/// design §3.7 `saved_query` table.
+/// The `saved_query` table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedQuery {
     pub id: String,
@@ -195,7 +196,7 @@ pub struct SavedQuery {
     pub updated_at: i64,
 }
 
-/// design §3.7 `editor_tab` table — the whole open-tabs set is persisted
+/// The `editor_tab` table — the whole open-tabs set is persisted
 /// together via `Store::save_all_tabs` for crash-safe session restore.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EditorTab {

@@ -1,5 +1,5 @@
-//! Redis [`Language`] impl (design §3.6 registry / requirement 5): a line
-//! splitter plus a redis-cli-compatible argument tokenizer, and
+//! Redis [`Language`] impl: a line splitter plus a
+//! redis-cli-compatible argument tokenizer, and
 //! classification via a fixed read/write/admin command table.
 //!
 //! A "statement" is one command. Redis-cli itself keeps reading lines while

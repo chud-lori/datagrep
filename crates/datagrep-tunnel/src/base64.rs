@@ -1,9 +1,9 @@
-//! Minimal standard-alphabet base64 (RFC 4648 §4, with padding).
+//! Minimal standard-alphabet base64 (RFC 4648 section 4, with padding).
 //!
 //! Used only to render/parse the known-hosts file's `host:port base64-key`
-//! entries (design §3.8). Not a dependency-worthy amount of code, and the
-//! crate's dependency list is deliberately pinned (see crate root docs), so
-//! this stays hand-rolled rather than pulling in a `base64` crate.
+//! entries. Not a dependency-worthy amount of code, and this crate keeps its
+//! dependency list deliberately small (see crate root docs), so this stays
+//! hand-rolled rather than pulling in a `base64` crate.
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 

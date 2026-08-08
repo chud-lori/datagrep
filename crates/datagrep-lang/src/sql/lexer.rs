@@ -1,5 +1,5 @@
-//! Shared dialect-aware SQL lexical scanner (design §3.6: "dialect-aware
-//! lexer (hand-rolled)"). One state machine walks the byte stream and
+//! Shared dialect-aware SQL lexical scanner, hand-rolled. One state machine
+//! walks the byte stream and
 //! classifies every byte into a [`Chunk`] — code, a quoted region (string or
 //! quoted identifier, in any of the dialects' quoting styles), or a comment
 //! (with nested `/* */` for Postgres). [`crate::sql::splitter`],
@@ -27,7 +27,7 @@ pub enum Chunk {
     /// `[...]`, or Postgres `$tag$...$tag$`.
     Quoted(Range<usize>, QuoteKind),
     /// A comment, delimiters included: `-- ...`, `# ...` (MySQL), or
-    /// `/* ... */` (nesting only for Postgres, per the design doc).
+    /// `/* ... */` (nesting only for Postgres, the one dialect that nests).
     Comment(Range<usize>),
 }
 

@@ -1,7 +1,7 @@
-//! Compiles the portable [`Op`] surface (design §3.6a) to SQLite text +
-//! bound parameters. **No user-authored text is ever translated** — this
-//! module only ever touches the structured `Op::*` path; `Request::Native`
-//! is passed straight through to rusqlite untouched (`connection.rs`).
+//! Compiles the portable [`Op`] surface to SQLite text + bound parameters.
+//! **No user-authored text is ever translated** — this module only ever
+//! touches the structured `Op::*` path; `Request::Native` is passed
+//! straight through to rusqlite untouched (`connection.rs`).
 //!
 //! Every value in a compiled predicate/limit/order is bound as a `?`
 //! parameter (never interpolated into the SQL string) — the load-bearing
@@ -23,7 +23,7 @@ pub(crate) struct Compiled {
 
 /// `db.table` / `table` → `"db"."table"` / `"table"`. Every part is quoted
 /// independently so a malicious/odd table name can never break out of its
-/// slot (design §3.8: identifiers via `quote_ident`, never spliced raw).
+/// slot — identifiers go through `quote_ident`, never spliced raw.
 pub(crate) fn compile_object_path(path: &ObjectPath) -> Result<String, DbError> {
     if path.parts().is_empty() {
         return Err(DbError::Query {
@@ -42,8 +42,9 @@ pub(crate) fn compile_object_path(path: &ObjectPath) -> Result<String, DbError> 
 
 /// `datagrep-api`'s [`FieldPath`] allows nested/indexed paths (`a.b[3]`) for
 /// document stores; a SQLite `Table` row is flat, so only a single field
-/// segment compiles. Anything deeper is a genuine capability gap, not a
-/// silent best-effort flatten (design: never guess past what's true).
+/// segment compiles. Anything deeper is reported as a genuine capability
+/// gap rather than silently best-effort flattened — never guess past what
+/// is true.
 pub(crate) fn field_ident(path: &FieldPath) -> Result<String, DbError> {
     match path.segments() {
         [PathSeg::Field(name)] => quote_ident(name),

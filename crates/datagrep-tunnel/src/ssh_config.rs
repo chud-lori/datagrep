@@ -1,9 +1,9 @@
-//! Minimal `~/.ssh/config` parser (design §3.5: "Agent auth, `~/.ssh/config`
-//! including `ProxyJump`").
+//! Minimal `~/.ssh/config` parser, so a saved connection can name a host the
+//! user already has configured for `ssh` rather than restating it.
 //!
-//! **Deviation from the design brief:** `ProxyJump` is deferred. Supporting
-//! it correctly means recursively dialing through intermediate hosts (each
-//! potentially needing its own auth/host-key flow) and layering a channel
+//! **`ProxyJump` is deferred.** Supporting it correctly means recursively
+//! dialing through intermediate hosts (each potentially needing its own
+//! auth/host-key flow) and layering a channel
 //! inside a channel; that's a real feature, not a config-parsing detail, and
 //! doesn't belong in a first pass at the parser. Every other line type is
 //! parsed; a `ProxyJump` line does not fail parsing — it's just not applied

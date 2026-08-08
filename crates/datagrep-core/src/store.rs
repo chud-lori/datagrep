@@ -1,24 +1,23 @@
-//! The windowed result store — the other half of the memory contract (§3.2).
+//! The windowed result store — the other half of the memory contract.
 //!
-//! > "**Invariant: `datagrep` never holds a result set larger than
-//! > `total_result_budget`, regardless of the query.** `SELECT * FROM events`
-//! > on a 2 TB table streams, spills, and caps. It does not OOM and it does not
-//! > freeze, because chunk 1 renders before chunk 2 is requested."
+//! **Invariant: datagrep never holds a result set larger than
+//! `total_result_budget`, regardless of the query.** `SELECT * FROM events` on
+//! a 2 TB table streams, spills, and caps. It does not OOM and it does not
+//! freeze, because chunk 1 renders before chunk 2 is requested.
 //!
 //! One store per result set. A **single writer task** consumes the feeder's
 //! bounded channel and is the only thing that ever mutates the store; readers
 //! take `Arc` snapshots of [`StoreState`] and never take a lock on the write
 //! path. That is why a 4 K scroll fling does not contend with a streaming
-//! query (§3.4: "store tasks — one per result set — single writer, no lock").
+//! query: there is no lock for the two to fight over.
 //!
-//! **Storage, with one important exception** (§3.2). Tabular results become
-//! Arrow [`RecordBatch`]es at this boundary: columnar collapses per-cell enum
+//! **Storage, with one important exception.** Tabular results become Arrow
+//! [`RecordBatch`]es at this boundary: columnar collapses per-cell enum
 //! overhead, nulls are validity bits, and Arrow IPC is simultaneously the spill
 //! format and the export format. Documents deliberately do **not** become
 //! Arrow — forcing heterogeneous documents into a columnar schema means either
 //! a union-of-everything or a re-encode on every schema delta — so they stay in
-//! [`DocSegment`], whose shape leaves room for the arena variant the design
-//! calls for.
+//! [`DocSegment`], whose shape leaves room for a future arena representation.
 //!
 //! Admission is three gates, checked in this order:
 //!
@@ -52,7 +51,7 @@ use crate::feeder::{FeedState, FeederHandle, ParkReason};
 use crate::lock;
 use crate::spill::{SpillReader, SpillWriter};
 
-/// Where overflow goes when a result set outgrows its hot budget (§3.2).
+/// Where overflow goes when a result set outgrows its hot budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpillPolicy {
     /// No disk. The store parks the feeder instead of overflowing — correct,
@@ -64,7 +63,7 @@ pub enum SpillPolicy {
     Enabled { dir: PathBuf, max_bytes: u64 },
 }
 
-/// The published memory contract, as data (design §3.2).
+/// The published memory contract, as data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryPolicy {
     /// Across **all** result sets, enforced by [`GlobalBudget`].
@@ -80,7 +79,8 @@ pub struct MemoryPolicy {
 }
 
 impl Default for MemoryPolicy {
-    /// Exactly the numbers in design §3.2.
+    /// The published defaults. These are the numbers the memory contract
+    /// promises, so changing one changes a user-visible guarantee.
     fn default() -> Self {
         Self {
             total_result_budget: 256 * 1024 * 1024,
@@ -106,9 +106,9 @@ impl MemoryPolicy {
     }
 }
 
-/// **The one counter every result set in the process shares** (§3.2
-/// `total_result_budget`): an `Arc<AtomicUsize>` of resident result bytes, plus
-/// the limit and a `Notify` that wakes stores parked on it.
+/// **The one counter every result set in the process shares**
+/// (`total_result_budget`): an `Arc<AtomicUsize>` of resident result bytes,
+/// plus the limit and a `Notify` that wakes stores parked on it.
 ///
 /// The notify is what makes the budget a *queue* rather than a deadlock: when
 /// one result set shrinks or closes, every store waiting on memory is woken to
@@ -189,7 +189,8 @@ impl fmt::Debug for GlobalBudget {
 
 /// One store's share of the global budget. Releasing on `Drop` — rather than
 /// at the end of the writer loop — is what makes "close the tab, get the memory
-/// back" true even when the store is dropped mid-stream (design §5, P7).
+/// back" true even when the store is dropped mid-stream, before the loop ever
+/// reaches its exit.
 #[derive(Debug)]
 struct BudgetLease {
     budget: GlobalBudget,
@@ -231,12 +232,12 @@ impl Drop for BudgetLease {
     }
 }
 
-/// A run of non-tabular rows, kept **out of Arrow on purpose** (design §3.2).
+/// A run of non-tabular rows, kept **out of Arrow on purpose**.
 ///
 /// Sparse documents in a columnar schema cost either a union-of-everything or a
 /// re-encode per schema delta, and both lose the `Absent`/`Null` distinction
 /// that makes a document grid truthful. The variants here are the decoded form;
-/// the design's target — an arena of the driver's original encoded bytes plus a
+/// the eventual target — an arena of the driver's original encoded bytes plus a
 /// lazy offset index, decoded only for the visible viewport — slots in as a
 /// further variant without changing any of this module's interfaces:
 ///
@@ -333,11 +334,11 @@ pub enum StorePhase {
     Loading,
     /// Not admitting; the feeder is parked for this reason.
     Parked(ParkReason),
-    /// Stopped at the soft row cap — complete up to the cap (§3.2).
+    /// Stopped at the soft row cap — complete up to the cap.
     Capped,
     /// The whole result set is resident/spilled; nothing more is coming.
     Complete,
-    /// The user stopped it (§3.3).
+    /// The user stopped it. Not a failure.
     Cancelled,
     /// The driver failed; the message is for the status line.
     Failed(Arc<str>),
@@ -369,8 +370,8 @@ pub struct StoreState {
     pub resident_bytes: usize,
     /// Bytes written to the spill file.
     pub spilled_bytes: u64,
-    /// Micros from store start to the first admitted chunk — the number P8
-    /// measures.
+    /// Micros from store start to the first admitted chunk — the latency the
+    /// user actually feels, since the grid can paint as soon as it lands.
     pub first_batch_micros: Option<u64>,
     /// Cells that did not fit their declared column type (see
     /// [`BatchConverter::coerced`]). Non-zero means a driver bug; it is shown,
@@ -386,7 +387,7 @@ pub struct StoreState {
     pub ack_message: Option<Arc<str>>,
     /// Non-fatal server messages collected from every chunk.
     pub notices: Vec<datagrep_api::driver::Notice>,
-    /// Schema evolution the driver reported mid-stream (§3.1). Append-only and
+    /// Schema evolution the driver reported mid-stream. Append-only and
     /// never reordered, so the grid can grow a column without refetching. The
     /// store records them; applying them to a `ViewProjection` is the grid's
     /// job and lands with the document view.
@@ -479,7 +480,8 @@ impl WindowSlice {
 
 /// How much of the requested window the store could actually answer. The UI
 /// renders each of these differently and **never** silently shows fewer rows
-/// than were asked for (design §5.1: "shows the boundary honestly").
+/// than were asked for — a short grid that looks complete is a lie about the
+/// data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowStatus {
     /// Every requested row is in the slices.
@@ -490,7 +492,7 @@ pub enum WindowStatus {
     /// None of the requested rows exist yet; the feeder has been resumed.
     Pending,
     /// The window is past the soft row cap — there is nothing more without
-    /// "[Load more]" (§3.2).
+    /// "[Load more]".
     Capped,
     /// The window is past the end of a stopped result set.
     Cancelled,
@@ -498,7 +500,7 @@ pub enum WindowStatus {
     Failed(Arc<str>),
 }
 
-/// The answer to `get_rows(qid, 12000..12100)` (design §3.2, §3.6).
+/// The answer to `get_rows(qid, 12000..12100)`.
 #[derive(Debug, Clone)]
 pub struct RowWindow {
     pub range: Range<u64>,
@@ -564,8 +566,8 @@ pub struct ResultStore {
 impl ResultStore {
     /// Start the writer task for one query's stream.
     ///
-    /// `cancel` is the query's node of the token tree (§3.4); cancelling it
-    /// stops the store and the feeder together.
+    /// `cancel` is the query's node of the token tree; cancelling it stops the
+    /// store and the feeder together.
     pub fn spawn(
         shape: Shape,
         rx: mpsc::Receiver<Batch>,
@@ -606,7 +608,7 @@ impl ResultStore {
         self.shared.snapshot()
     }
 
-    /// Follow state changes without polling (§3.4).
+    /// Follow state changes without polling: the writer publishes, readers wake.
     pub fn subscribe(&self) -> watch::Receiver<Arc<StoreState>> {
         self.state_sender().subscribe()
     }
@@ -625,7 +627,7 @@ impl ResultStore {
         self.state().rows
     }
 
-    /// Resolve a row window (design §3.2 window resolver, §3.6).
+    /// Resolve a row window — the grid's only way in.
     ///
     /// - **resident** → an `Arc` slice of the chunk, no copy;
     /// - **spilled** → read back from the Arrow IPC file on the blocking pool;
@@ -690,7 +692,7 @@ impl ResultStore {
                 StorePhase::Complete => WindowStatus::Ready,
                 StorePhase::Loading | StorePhase::Parked(_) => {
                     // Asking for rows we do not have is the signal that the
-                    // viewport moved: start fetching again (§3.6).
+                    // viewport moved: start fetching again.
                     self.shared.feeder.resume();
                     if delivered > 0 {
                         WindowStatus::Partial
@@ -708,8 +710,8 @@ impl ResultStore {
         }
     }
 
-    /// The local half of a stop (§3.3): stop the feeder, stop the writer, and
-    /// let the budget go. Returns immediately — it does not wait for the tasks.
+    /// The local half of a stop: stop the feeder, stop the writer, and let the
+    /// budget go. Returns immediately — it does not wait for the tasks.
     pub fn stop(&self) {
         self.cancel.cancel();
         self.shared.feeder.stop();
@@ -729,9 +731,9 @@ impl ResultStore {
 }
 
 impl Drop for ResultStore {
-    /// P7 ("reclaim 10 s after closing all result tabs") is a `Drop` impl: the
-    /// writer is cancelled, and the budget lease is released as soon as it and
-    /// the writer are gone.
+    /// Reclaiming memory after a result tab closes is a `Drop` impl, not a
+    /// background sweep: the writer is cancelled, and the budget lease is
+    /// released as soon as it and the writer are gone.
     fn drop(&mut self) {
         self.cancel.cancel();
         self.shared.feeder.stop();
@@ -750,8 +752,8 @@ impl fmt::Debug for ResultStore {
     }
 }
 
-/// Read one spilled chunk on the blocking pool (§3.4: spill I/O never runs on
-/// a worker thread).
+/// Read one spilled chunk on the blocking pool — spill I/O never runs on an
+/// async worker thread, where it would stall every other task on that thread.
 async fn read_spilled(reader: Option<SpillReader>, index: usize) -> Option<RecordBatch> {
     let reader = reader?;
     match tokio::task::spawn_blocking(move || reader.read(index)).await {
@@ -777,9 +779,9 @@ async fn run_store(
     let started = Instant::now();
     let mut converter = table_converter(&shape);
 
-    // An acknowledgement's whole payload lives in its *shape* (§3.1): publish
-    // it before consuming the (empty) stream so the count reaches every
-    // snapshot, not just the terminal one.
+    // An acknowledgement's whole payload lives in its *shape*, not in any
+    // chunk: publish it before consuming the (empty) stream so the count
+    // reaches every snapshot, not just the terminal one.
     if let Shape::Ack { affected, message } = &shape {
         let (affected, message) = (*affected, message.clone());
         shared.publish(|s| {
@@ -900,8 +902,8 @@ fn table_converter(shape: &Shape) -> Option<BatchConverter> {
 }
 
 /// A placeholder schema for a driver that emits rows under a shape that never
-/// declared one (`Shape::Unknown` narrowed by the first batch, §3.1). Columns
-/// are untyped, so every value takes the lossless display path.
+/// declared one (`Shape::Unknown`, narrowed by the first batch). Columns are
+/// untyped, so every value takes the lossless display path.
 fn synthesized_schema(width: usize) -> RowSchema {
     RowSchema {
         fields: (0..width)
@@ -1195,7 +1197,10 @@ mod tests {
         assert_eq!(state.phase, StorePhase::Complete);
         assert_eq!(state.rows, 100);
         assert_eq!(state.batches, 4);
-        assert!(state.first_batch_micros.is_some(), "P8 is measured here");
+        assert!(
+            state.first_batch_micros.is_some(),
+            "time-to-first-batch is measured here"
+        );
         assert!(budget.used() > 0, "resident bytes are charged");
 
         // A window inside one chunk.
@@ -1222,7 +1227,7 @@ mod tests {
         assert!(w.is_empty());
 
         // Closing stops the tasks but keeps the data readable; the budget is
-        // returned when the result set itself is dropped (design §5, P7).
+        // returned when the result set itself is dropped.
         store.close().await;
         assert!(
             budget.used() > 0,
@@ -1235,7 +1240,7 @@ mod tests {
         );
     }
 
-    /// **Test 4 — the global budget is shared across result sets (§3.2).**
+    /// **The global budget is shared across result sets.**
     ///
     /// The second store parks when the budget is exhausted, and resumes the
     /// moment the first one is closed. This is the invariant that makes
@@ -1341,8 +1346,8 @@ mod tests {
         store.close().await;
     }
 
-    /// Documents keep their own lane: they are never converted to Arrow, and
-    /// the `Absent`/`Null` distinction survives the store (§3.2).
+    /// Documents keep their own lane: they are never converted to Arrow, so
+    /// the `Absent`/`Null` distinction survives the store.
     #[tokio::test]
     async fn documents_are_not_converted_to_arrow() {
         let store = start(
@@ -1374,7 +1379,7 @@ mod tests {
     }
 
     /// A window past what has been fetched is `Pending` **and** resumes the
-    /// feeder: asking for rows is what makes them arrive (§3.6).
+    /// feeder: asking for rows is what makes them arrive.
     #[tokio::test]
     async fn a_window_past_the_frontier_is_pending_and_resumes_the_feeder() {
         let policy = MemoryPolicy {

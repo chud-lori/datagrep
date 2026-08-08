@@ -1,6 +1,6 @@
-//! Worker-thread lifecycle (design §3.4: one dedicated thread per
-//! connection, cleanly joined on close — no leak) and the
-//! `PRAGMA query_only` read-only guardrail (design §3.8 layer 1).
+//! Worker-thread lifecycle — one dedicated thread per connection, cleanly
+//! joined on close, no leak — and the `PRAGMA query_only` server-side
+//! read-only guardrail.
 
 mod common;
 
@@ -9,8 +9,8 @@ use std::time::Duration;
 use datagrep_api::{DbError, Enforcement, Request};
 
 /// `Result::expect_err`/`unwrap_err` require `T: Debug`, but `T` here is
-/// `Box<dyn Cursor>`, which isn't `Debug` (design: trait objects across the
-/// seam don't carry it). This is the non-generic equivalent.
+/// `Box<dyn Cursor>`, which isn't `Debug` — trait objects crossing the seam
+/// deliberately don't carry it. This is the non-generic equivalent.
 fn expect_err<T>(result: Result<T, DbError>, msg: &str) -> DbError {
     match result {
         Ok(_) => panic!("{msg}"),

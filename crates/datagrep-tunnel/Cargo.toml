@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "In-process SSH tunnels for datagrep: agent/key/password auth, TOFU host-key pinning, direct-tcpip channels bridged to in-process duplex streams (design §3.5, §3.8)."
+description = "In-process SSH tunnels for datagrep: agent/key/password auth, TOFU host-key pinning, direct-tcpip channels bridged to in-process duplex streams."
 
 [dependencies]
 datagrep-api = { path = "../datagrep-api" }
 # Pinned against 0.62.5 (crates.io max_stable_version as of 2026-08, verified
 # via the crates.io API). Deliberately NOT depending on the separate
-# `russh-keys` crate named in the original brief: as of this version the
+# `russh-keys` crate: as of this version the
 # russh workspace no longer publishes it (github.com/warp-tech/russh workspace
 # members are `russh`, `russh-config`, `cryptovec`, `pageant`, `russh-util` —
 # no `russh-keys`). Key/agent handling now lives in `russh::keys` inside the
@@ -40,5 +40,5 @@ features = ["net", "sync", "time", "io-util", "rt", "fs"]
 
 [dev-dependencies]
 # No tempfile crate: tests build unique paths under `std::env::temp_dir()`
-# by hand (design brief pins the dependency list; this keeps us inside it).
+# by hand, so the test suite adds no dependency of its own.
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

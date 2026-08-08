@@ -1,9 +1,8 @@
-//! [`RedisCatalog`] (design §3.1 requirement 4) — the centrepiece of this
-//! driver. Every level below `db-index` is [`Enumeration::ScanOnly`] with
-//! `requires_prefix: true`: nothing here ever walks the full keyspace, and
-//! nothing auto-expands without the user supplying a prefix box (design
-//! §5.2: "`KEYS *` … as a browse primitive: one click DOSes the user's
-//! production database").
+//! [`RedisCatalog`] — the centrepiece of this driver. Every level below
+//! `db-index` is [`Enumeration::ScanOnly`] with `requires_prefix: true`:
+//! nothing here ever walks the full keyspace, and nothing auto-expands
+//! without the user supplying a prefix box. `KEYS *` as a browse primitive
+//! means one click DOSes the user's production database.
 //!
 //! Path convention used throughout this module (there is no schema to
 //! derive it from, so it's a driver-local decision, documented here once):
@@ -33,9 +32,8 @@ use crate::cmd::{derive_prefixes, prefix_glob};
 use crate::error::map_redis_error;
 
 /// Above this many keys, a `DBSIZE` probe marks the server "production
-/// sized" and `KEY_ENUMERATION` is reported `false` (design §3.1
-/// requirement 4: "no 'list all keys', ever" past this point). Chosen to
-/// match the ticket's own example threshold.
+/// sized" and `KEY_ENUMERATION` is reported `false`: past this point there
+/// is no "list all keys", ever.
 pub const KEY_ENUMERATION_DBSIZE_THRESHOLD: i64 = 100_000;
 
 /// Pure predicate behind the `DBSIZE` probe — split out from `driver.rs`'s
@@ -85,7 +83,7 @@ impl RedisCatalog {
     /// `[db_index]` → keyspace-prefix listing. Requires an explicit
     /// (possibly empty) `opts.prefix` — `Enumeration::ScanOnly{
     /// requires_prefix: true}` means the UI always shows the "Scan for
-    /// keys…" box first, never auto-expands (design §3.1 requirement 4).
+    /// keys…" box first, never auto-expands.
     async fn list_prefixes(
         &self,
         _db_index: &Arc<str>,
@@ -98,9 +96,9 @@ impl RedisCatalog {
         } else {
             Some(prefix_glob(&scoped))
         };
-        // "Derive prefixes by sampling with SCAN COUNT n and splitting on
-        // ':' — never a full keyspace walk" (design §3.1 requirement 4):
-        // exactly one SCAN round trip, not an iterate-to-completion loop.
+        // Prefixes are derived by sampling with `SCAN COUNT n` and
+        // splitting on ':' — never a full keyspace walk. Exactly one SCAN
+        // round trip, not an iterate-to-completion loop.
         let sampled_keys = scan_once(
             &mut mgr,
             opts.resume.as_ref(),
@@ -187,8 +185,7 @@ impl RedisCatalog {
         // `MEMORY USAGE` walks the whole value to size it, which is exactly
         // the kind of unbounded work this driver otherwise refuses to do
         // silently — `SAMPLES` bounds the walk for aggregate types instead
-        // of visiting every element (design §3.1 requirement 4's own
-        // guard note).
+        // of visiting every element.
         let memory_bytes: Option<i64> = redis::cmd("MEMORY")
             .arg("USAGE")
             .arg(key)
@@ -338,8 +335,8 @@ impl Catalog for RedisCatalog {
             return Ok(Vec::new());
         }
         let mut mgr = self.manager.clone();
-        // Design §3.1 requirement 4: "`SCAN MATCH prefix* COUNT 100`, cap
-        // at 50 results" — one bounded round trip, never `KEYS`.
+        // `SCAN MATCH prefix* COUNT 100`, capped at 50 results — one
+        // bounded round trip, never `KEYS`.
         let (_next, keys) = scan_once(&mut mgr, None, Some(&prefix_glob(&prefix)), 100).await?;
         Ok(keys
             .into_iter()

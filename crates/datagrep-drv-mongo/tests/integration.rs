@@ -307,9 +307,9 @@ async fn cancel_mid_long_query_returns_control_promptly() {
     let outcome = canceller.cancel().await;
     let cancel_elapsed = start.elapsed();
 
-    // Design §3.3: "the stop button always returns control instantly" — the
-    // *cancel call itself* must not block for anywhere near the query's
-    // full runtime, independent of whether the server actually kills it.
+    // The stop button always returns control instantly: the *cancel call
+    // itself* must not block for anywhere near the query's full runtime,
+    // independent of whether the server actually kills it.
     assert!(
         cancel_elapsed < Duration::from_secs(3),
         "cancel() took {cancel_elapsed:?}, expected near-instant return"

@@ -37,8 +37,8 @@ struct Workbench: View {
         // Renders nothing unless a newer release exists, and triggers its own
         // once-per-launch check. One line is the whole integration.
         .overlay(alignment: .bottomTrailing) { UpdateNoticeView() }
-        // §3.8 guardrail, layer 1: a connection marked production tints every
-        // accent in the window red.
+        // Production guardrail, layer 1: a connection marked production tints
+        // every accent in the window red.
         .tint(model.isProd ? Color.red : nil)
         .sheet(isPresented: $model.showNewConnection) { NewConnectionSheet(model: model) }
         .animation(.smooth(duration: 0.25), value: model.sidebarVisible)

@@ -2,7 +2,7 @@
 //! point-in-time + `search_after` scan (or a `_scroll` scan where PIT does not
 //! exist), pulling exactly one page per [`Cursor::next_batch`] call.
 //!
-//! # Why this is the whole point (design §3.2)
+//! # Why this is the whole point
 //!
 //! `next_batch` is pull-only: if nobody calls it, no page is requested, no
 //! bytes are read, and the server is never asked to produce more. That is the
@@ -79,7 +79,7 @@ pub struct ScanSpec {
     /// null/absent conflation) — emitted with the first batch.
     pub notices: Vec<Notice>,
     /// Per-request deadline, pushed to the server as the search body's
-    /// `timeout` as well as applied to the HTTP call (design §3.3).
+    /// `timeout` as well as applied to the HTTP call.
     pub timeout: Option<Duration>,
 }
 
@@ -158,7 +158,7 @@ impl SearchCursor {
             types,
             // `root_hint` points the grid at `_source`, so document fields
             // render as top-level columns and the `_index`/`_id`/`_score`
-            // envelope stays available in the detail pane (design §3.1).
+            // envelope stays available in the detail pane.
             shape: Shape::Documents {
                 root_hint: Some(FieldPath::field("_source")),
             },
@@ -177,9 +177,9 @@ impl SearchCursor {
         }
     }
 
-    /// Rebuild a cursor from a [`ResumeToken`] — the idle-disconnect path
-    /// (design §3.5): the core closed everything, and the scan picks up from
-    /// the PIT id plus the last `search_after` values alone.
+    /// Rebuild a cursor from a [`ResumeToken`] — the idle-disconnect path:
+    /// the core closed everything, and the scan picks up from the PIT id plus
+    /// the last `search_after` values alone.
     /// `fresh_pit` is a **newly opened** point-in-time for a `Pit`-mode resume.
     ///
     /// The token's own PIT id is deliberately not reused: the whole point of a
@@ -291,7 +291,7 @@ impl SearchCursor {
         map.insert("sort".into(), Json::Array(self.full_sort()));
         if let Some(t) = self.spec.timeout {
             // Push the deadline server-side too, so even an uncancellable
-            // shard is bounded (design §3.3).
+            // shard is bounded.
             map.insert("timeout".into(), json!(format!("{}ms", t.as_millis())));
         }
         if !self.last_sort.is_empty() {
@@ -371,9 +371,9 @@ impl SearchCursor {
         }
     }
 
-    /// Design §3.3's prescription: submit with `wait_for_completion_timeout=0`
-    /// so the call returns a handle to still-running work, then poll. The
-    /// handle plus the `X-Opaque-Id` tag are what
+    /// Submit with `wait_for_completion_timeout=0` so the call returns a
+    /// handle to still-running work, then poll. A plain `_search` would give
+    /// us nothing to cancel; the handle plus the `X-Opaque-Id` tag are what
     /// [`crate::canceller::EsCanceller`] cancels.
     async fn run_async_search(
         &mut self,
@@ -470,7 +470,7 @@ impl SearchCursor {
                 // the only thing that deletes a *running* async search is
                 // `EsCanceller::cancel`, so this is the user's stop button
                 // landing — a cancellation, not a failure, and the UI must not
-                // dress it as one (design §3.3).
+                // dress it as one.
                 Err(e) if is_async_search_gone(&e) => {
                     self.clear_inflight().await;
                     return Err(DbError::Cancelled);
@@ -546,7 +546,7 @@ impl SearchCursor {
     ///
     /// Deliberately shallow and rooted at `_source`, matching this cursor's
     /// `root_hint`: promoting *nested* paths into columns is datagrep-core's
-    /// `ViewProjection`/`FieldTrie` job (design §3.1), and the envelope
+    /// `ViewProjection`/`FieldTrie` job, and the envelope
     /// pseudo-fields (`_id`, `_index`, `_score`) are not announced as columns
     /// because they live outside the hinted root — see the crate report's
     /// `datagrep-api` gaps.
@@ -602,7 +602,7 @@ impl SearchCursor {
 
 /// Extract an error out of an `_async_search` envelope, distinguishing a
 /// cancellation from a genuine failure so the UI never dresses a user cancel
-/// up as an error (design: "the user cancelled; not a failure").
+/// up as an error: the user cancelled, which is not a failure.
 fn async_search_error(envelope: &OrderedJson) -> Option<DbError> {
     let error = envelope.get("error")?;
     let text = error

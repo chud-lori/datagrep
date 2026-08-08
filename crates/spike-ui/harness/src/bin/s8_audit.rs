@@ -1,16 +1,16 @@
-//! S8 — gpui-component gap audit (design doc §8, S8: not a kill gate, a
-//! *costing* spike).
+//! S8 — gpui-component gap audit. Not a kill gate, a *costing* spike.
 //!
 //! (a) `Table` fed by a synthetic delegate: 1,000,000 rows x 24 columns,
 //!     generated on demand from (row_ix, col_ix) -- NO materialized
 //!     `Vec` of rows. Delegate calls are counted with `AtomicU64`s; if
 //!     `render_td` is ever called anywhere near 1,000,000 x 24 times at
-//!     startup, virtualization is fake (design doc's stated kill signal).
+//!     startup, virtualization is fake — that is the kill signal for S8.
 //! (b) `Input` in code-editor mode holding ~1 MB of generated SQL.
 //!
 //! A scripted sequence of `scroll_to_row` jumps exercises the table without
-//! needing real mouse input (no automation harness exists yet -- that's
-//! §6/CoreApi, out of scope for a throwaway spike). Delegate call counts are
+//! needing real mouse input (no automation harness exists yet -- that lives
+//! on the CoreApi side, out of scope for a throwaway spike). Delegate call
+//! counts are
 //! logged before/after each jump so the report can show they stay bounded to
 //! the viewport rather than scaling with the jump target.
 //!

@@ -13,10 +13,10 @@
 //! and calling `CoreApi::cancel` — not by the server stopping early. `opts`
 //! is still filled in honestly on the `Request` (a future driver that reads
 //! it gets real values), but today it's inert. `@readonly` is enforced
-//! purely client-side too, via `datagrep_lang::Language::classify` — guardrail
-//! layer 2 of design §3.8's three, exactly as documented ("a guardrail
-//! against fat fingers, not an adversary"); layers 1 (server-side) and 3
-//! (`env=prod` policy) do not exist in this build's `CoreApi`.
+//! purely client-side too, via `datagrep_lang::Language::classify` — it is a
+//! guardrail against fat fingers, not against an adversary. It is the second
+//! of three read-only layers; layers 1 (server-side) and 3 (`env=prod`
+//! policy) do not exist in this build's `CoreApi`.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -95,8 +95,8 @@ pub async fn run(ctx: &Context, args: &QueryArgs) -> Result<(), CliError> {
                 StatementClass::Write | StatementClass::Ddl | StatementClass::Admin
             ) {
                 return Err(CliError::query(format!(
-                    "statement {} blocked by the read-only guard (client-side; design §3.8 \
-                     layer 2) — {class:?} statement: {}",
+                    "statement {} blocked by the read-only guard (client-side) \
+                     — {class:?} statement: {}",
                     statement_index + 1,
                     preview(stmt_text)
                 )));

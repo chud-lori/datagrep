@@ -53,7 +53,7 @@ const BASE_CAPS: Caps = Caps::EXPLAIN
     // `profile: true` runs the search and reports real per-shard timings.
     .union(Caps::EXPLAIN_ANALYZE)
     // The cursor streams page by page and never materializes a result set, so
-    // "export all" genuinely is not "load all" (design §5.1).
+    // "export all" genuinely is not "load all".
     .union(Caps::EXPORT_STREAMING);
 
 /// Capabilities for a connection, narrowed by what the handshake found.
@@ -248,9 +248,9 @@ impl Driver for ElasticsearchDriver {
             return Err(DbError::Cancelled);
         }
 
-        // Exactly one cheap request on connect (design §5.1: "on connect issue
-        // exactly one cheap query"). `GET /` is a few hundred bytes and is the
-        // only reliable way to tell the two products apart.
+        // Exactly one cheap request on connect — no eager catalog crawl.
+        // `GET /` is a few hundred bytes and is the only reliable way to tell
+        // the two products apart.
         let root = tokio::time::timeout(timeout, http.root_info())
             .await
             .map_err(|_| DbError::Timeout)??;
@@ -490,7 +490,8 @@ fn parse_es_url(url: &str) -> Result<ConnectionConfig, ConfigError> {
                 values.insert("user".to_string(), ConfigValue::Str(percent_decode(u)));
                 if !p.is_empty() {
                     // The caller routes this into the keychain and zeroizes
-                    // the source string (design §3.8).
+                    // the source string, so the password never settles into a
+                    // stored `ConnectionConfig`.
                     values.insert("password".to_string(), ConfigValue::Str(percent_decode(p)));
                 }
             }

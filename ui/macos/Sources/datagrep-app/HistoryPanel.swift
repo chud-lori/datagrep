@@ -520,8 +520,7 @@ struct HistoryToolbarButton: View {
 
 /// One definition of what an outcome looks like. All three are system semantic
 /// colours, so they are legible in both appearances without a second palette —
-/// the §5 item 4 failure (four competitors shipping unreadable dark mode) comes
-/// from hardcoded values, every time.
+/// unreadable dark mode comes from hardcoded colour values, every time.
 enum HistoryStyle {
     static func tint(_ outcome: QueryOutcome) -> Color {
         switch outcome {

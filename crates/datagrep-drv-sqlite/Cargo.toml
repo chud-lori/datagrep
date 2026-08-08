@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "SQLite driver for datagrep: a dedicated worker thread per connection bridges rusqlite's sync API to the async datagrep-api seam (design §3.4)."
+description = "SQLite driver for datagrep: a dedicated worker thread per connection bridges rusqlite's sync API to the async datagrep-api seam."
 
 [dependencies]
 datagrep-api = { path = "../datagrep-api" }
 
-# rusqlite is sync by design; the whole cursor lives on a per-connection
-# worker thread (design §3.4) — never block_on inside an async task.
+# rusqlite is a synchronous API; the whole cursor lives on a per-connection
+# worker thread — never block_on inside an async task.
 # `column_decltype` gives us `Statement::columns()[i].decl_type()`, which
 # `value.rs`/`scan.rs` use for the BOOLEAN/DATE/TIME affinity mapping.
 # `hooks` gives us `progress_handler`, used only in `canceller.rs`/`error.rs`

@@ -3,10 +3,11 @@
 //!
 //! `CoreApi::register_driver` is documented as "a hashmap insert — nothing is
 //! constructed until first use" (`datagrep_core::api`), so registering every
-//! compiled-in engine unconditionally costs nothing at cold start (design
-//! §5.2: "Eager driver/TLS/regex init at startup" is a banned anti-pattern).
-//! The `SqliteDriver`/`PostgresDriver`/`RedisDriver` structs are not built
-//! until a profile actually needs one.
+//! compiled-in engine unconditionally costs nothing at cold start. Eager
+//! driver/TLS/regex init at startup is a banned anti-pattern here: it buys
+//! nothing and lands entirely on the launch time the user feels. The
+//! `SqliteDriver`/`PostgresDriver`/`RedisDriver` structs are not built until a
+//! profile actually needs one.
 
 use std::sync::Arc;
 
@@ -15,8 +16,8 @@ use datagrep_core::CoreApi;
 /// Register every driver this build was compiled with.
 ///
 /// Adding mongo is one line here plus one in `Cargo.toml` — nothing else in
-/// this crate names a concrete engine (design §3 crate rules: no
-/// `if driver_id == …` above `datagrep-api`).
+/// this crate names a concrete engine. No `if driver_id == …` above
+/// `datagrep-api`, ever; that is what capability flags are for.
 pub fn register_drivers(core: &CoreApi) {
     core.register_driver("sqlite", || {
         Arc::new(datagrep_drv_sqlite::SqliteDriver::new())

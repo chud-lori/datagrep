@@ -1,4 +1,4 @@
-//! Query lifecycle: run, status, progress, and **the stop button** (§3.3).
+//! Query lifecycle: run, status, progress, and **the stop button**.
 //!
 //! ## `datagrep_query_run` really is non-blocking
 //!
@@ -16,16 +16,17 @@
 //! do. `err_out` is reserved for what *is* knowable synchronously: NULL
 //! pointers, non-UTF-8 arguments, empty SQL.
 //!
-//! This is the design's own stance, not a shortcut — §3.5: *"Opening the app
-//! connects to nothing. Startup is never gated on network."* A Run button
-//! that freezes AppKit for a three-second TLS handshake is the failure mode
-//! this product exists to avoid.
+//! This is a deliberate stance, not a shortcut: opening the app connects to
+//! nothing, and startup is never gated on the network. A Run button that
+//! freezes AppKit for a three-second TLS handshake is the failure mode this
+//! product exists to avoid.
 //!
-//! ## Cancellation is honest (§3.3)
+//! ## Cancellation is honest
 //!
-//! > "The stop button **always** returns control instantly (drop feeder, close
-//! > cursor, free store). The status line then tells the truth: *'stopped
-//! > receiving results; the server may still be executing this query.'*"
+//! The stop button **always** returns control instantly: drop the feeder, close
+//! the cursor, free the store. The status line then tells the truth — "stopped
+//! receiving results; the server may still be executing this query" — rather
+//! than implying a kill we cannot guarantee.
 //!
 //! `datagrep_query_cancel` never awaits. It hands back the *pending*
 //! [`CancelReport`] — the honest one, with `"outcome": null` — because at that
@@ -36,7 +37,7 @@
 //! report. That is how the frozen header's one-shot signature carries a
 //! two-phase truth.
 //!
-//! ## No polling (§3.4)
+//! ## No polling
 //!
 //! The supervisor waits on the result store's `watch` channel and the core's
 //! event broadcast in a `select!`. There is no sleep loop anywhere in this
@@ -129,7 +130,7 @@ struct QueryInner {
     /// The user pressed stop, possibly before the query was even accepted.
     cancel_requested: bool,
     /// Latest known report — pending at first, resolved once the server
-    /// answers (§3.3).
+    /// answers.
     cancel_report: Option<CancelReport>,
 }
 
@@ -267,9 +268,9 @@ async fn drive(shared: Arc<QueryShared>, profile: String, sql: String) {
         return shared.fail("sql contains no statement".to_string());
     };
 
-    // Read-only guardrail layer 2 (design §3.8): every statement of the
-    // script is vetted by `datagrep-lang`'s classifier *before dispatch*, so a
-    // write never even reaches the server — the same client-side guard
+    // Read-only guardrail layer 2: every statement of the script is vetted by
+    // `datagrep-lang`'s classifier *before dispatch*, so a write never even
+    // reaches the server — the same client-side guard
     // `datagrep-cli`'s `@readonly` uses, and it applies regardless of how
     // strongly the server enforces read-only (layer 1).
     if read_only {
@@ -319,7 +320,7 @@ async fn drive(shared: Arc<QueryShared>, profile: String, sql: String) {
 }
 
 /// Watch one query's store and republish it into [`QueryInner`], without
-/// polling (design §3.4).
+/// polling — a sleep loop would burn a wakeup per tick on an idle query.
 async fn supervise(
     shared: Arc<QueryShared>,
     qid: QueryId,
@@ -359,7 +360,7 @@ async fn supervise(
     }
 
     // The store is terminal, but the server half of a cancel may still be in
-    // flight (§3.3). Keep listening for exactly that, then stop.
+    // flight. Keep listening for exactly that, then stop.
     while shared.lock().cancel_requested && shared.lock().cancel_report_is_pending() {
         match events.recv().await {
             Ok(QueryEvent::CancelOutcome { qid: q, report }) if q == qid => {
@@ -424,9 +425,9 @@ fn columns_of(state: &StoreState) -> Vec<(String, String)> {
 }
 
 /// Run one statement and wait for its result set to finish, then give its
-/// memory straight back (design §5, P7: `close_query`, not `cancel`, is what
-/// returns the budget). Used for the leading statements of a script, whose
-/// rows nobody is going to look at.
+/// memory straight back: `close_query`, not `cancel`, is what returns the
+/// result budget. Used for the leading statements of a script, whose rows
+/// nobody is going to look at.
 async fn run_to_completion(
     shared: &Arc<QueryShared>,
     id: datagrep_core::ProfileId,
@@ -573,8 +574,8 @@ pub unsafe extern "C" fn datagrep_query_free(q: *mut DatagrepQuery) {
         {
             task.abort();
         }
-        // Closing (not cancelling) is what returns the memory — design §5, P7:
-        // "close the tab, get the memory back".
+        // Closing (not cancelling) is what returns the memory: close the tab,
+        // get the memory back.
         let qid = q.shared.lock().qid;
         if let (Some(qid), Ok(rt)) = (qid, runtime()) {
             let api = q.shared.core.api.clone();
@@ -586,7 +587,7 @@ pub unsafe extern "C" fn datagrep_query_free(q: *mut DatagrepQuery) {
 
 // ---- cancel ------------------------------------------------------------
 
-/// **The stop button.** Always returns instantly (§3.3).
+/// **The stop button.** Always returns instantly.
 ///
 /// Idempotent: calling it again does not re-cancel, it just hands back the
 /// latest known outcome — which is how the server's answer, arriving later as
@@ -622,7 +623,7 @@ pub unsafe extern "C" fn datagrep_query_cancel(
             // synchronously, and the server half is fired and forgotten.
             (false, _, Some(qid)) => {
                 let Ok(rt) = runtime() else { return };
-                // `CoreApi::cancel` awaits nothing (design §3.3); `block_on`
+                // `CoreApi::cancel` awaits nothing; `block_on`
                 // only supplies the runtime context its background task needs.
                 match rt.block_on(q.shared.core.api.cancel(qid)) {
                     Ok(report) => {
@@ -656,7 +657,8 @@ pub unsafe extern "C" fn datagrep_query_cancel(
 }
 
 /// The `CancelReport` as JSON, verbatim — including `CancelReport::message`,
-/// which design §3.3 insists is shown to the user "never embellished".
+/// which is shown to the user exactly as the driver wrote it, never
+/// embellished into a stronger claim than the engine can back.
 fn cancel_json(report: &CancelReport) -> serde_json::Value {
     json!({
         "local_stopped": report.local_stopped,
@@ -712,7 +714,7 @@ pub unsafe extern "C" fn datagrep_query_status_json(
             // `total_known` = "rows_loaded is the final count". True exactly
             // when nothing more can ever be admitted. A capped result is
             // final too — it is complete *up to the cap*, and the banner, not
-            // this flag, is what says so (design §3.2).
+            // this flag, is what says so.
             let total_known = inner.start_error.is_some()
                 || inner.phase.as_ref().is_some_and(StorePhase::is_terminal);
 
@@ -724,7 +726,7 @@ pub unsafe extern "C" fn datagrep_query_status_json(
                 // the frozen header's documented shape — the GUI renders
                 // "N rows affected" from this.
                 "affected_rows": inner.affected,
-                // Read-only guard status (design §3.8's honesty rule): null
+                // Read-only guard status, stated honestly: null
                 // when the profile is writeable, otherwise
                 // {"enforcement":"server"|"client"|"none","server_confirmed":bool}
                 // — see the header comment on datagrep_connection_info_json.

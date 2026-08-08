@@ -1,7 +1,7 @@
-//! A minimal ISO-8601 UTC timestamp parser for `ISODate("...")` (design
-//! requirement 6). Hand-rolled rather than pulled in from a date/time crate
-//! — this crate's only allowed dependencies are `datagrep-api` and `thiserror`
-//! (design §3.6 dependency discipline) — so date-to-days math uses Howard
+//! A minimal ISO-8601 UTC timestamp parser for `ISODate("...")`. Hand-rolled
+//! rather than pulled in from a date/time crate — this crate's only
+//! dependencies are `datagrep-api` and `thiserror`, and parsing one fixed
+//! timestamp shape does not justify a third — so date-to-days math uses Howard
 //! Hinnant's well-known `days_from_civil` algorithm rather than a calendar
 //! library.
 //!
@@ -9,8 +9,7 @@
 //! `YYYY-MM-DDTHH:MM:SS.fff`, all optionally suffixed with `Z` (a `T` may
 //! also be a plain space, matching what `mongosh`'s `ISODate` accepts).
 //! Explicit numeric offsets (`+08:00`) are not supported — this is a
-//! deliberate scope cut, not full RFC 3339; see the crate-level deviations
-//! note in the final report.
+//! deliberate scope cut, not full RFC 3339.
 
 /// Days since the Unix epoch (1970-01-01) for a proleptic-Gregorian
 /// `(year, month, day)`, valid for the full `i64` year range. Howard

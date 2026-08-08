@@ -1,6 +1,6 @@
-//! Value mapping between rusqlite's storage classes and `datagrep-api::Value`
-//! (design §3.1, risk #4), plus identifier quoting (design §3.8: "identifiers
-//! via `quote_ident` per dialect").
+//! Value mapping between rusqlite's storage classes and `datagrep-api::Value`,
+//! plus identifier quoting: identifiers go through `quote_ident` for this
+//! dialect, never spliced raw.
 //!
 //! **SQLite type affinity, stated honestly.** SQLite columns are dynamically
 //! typed: a column declared `INTEGER` can still hold a `TEXT` value, because
@@ -10,8 +10,8 @@
 //! application convention layered on top of SQLite's untyped `INTEGER`
 //! storage, not a real distinct storage class; `Date`/`Time`/`Timestamp`
 //! declared columns keep their raw storage-class `Value` (`Str` or `I64`) and
-//! only get a [`LogicalType`] hint on the schema side, per design risk #4:
-//! "never lie about a value."
+//! only get a [`LogicalType`] hint on the schema side. Never lie about a
+//! value.
 //!
 //! [sqlite.org/datatype3]: https://www.sqlite.org/datatype3.html
 
@@ -26,9 +26,9 @@ use rusqlite::types::{ToSql, ToSqlOutput, ValueRef};
 ///
 /// NUL rejection matters specifically for the catalog (`catalog.rs`): SQLite
 /// identifiers are C strings under the hood, so a NUL byte would silently
-/// truncate whatever we build a `PRAGMA table_info("...")` statement from —
-/// exactly the "suspicious name" the design calls out, since `PRAGMA`
-/// statements cannot bind parameters and must be assembled as text.
+/// truncate whatever we build a `PRAGMA table_info("...")` statement from.
+/// `PRAGMA` statements cannot bind parameters and must be assembled as
+/// text, so the identifier itself is the only place to catch this.
 pub fn quote_ident(name: &str) -> Result<String, DbError> {
     if name.is_empty() {
         return Err(DbError::Query {
@@ -129,7 +129,7 @@ pub(crate) fn logical_type_for_decl(decl_type: Option<&str>) -> LogicalType {
 
 /// Adapter so a borrowed `&datagrep_api::Value` can be bound as a rusqlite
 /// parameter without cloning `datagrep-api`'s type into a local one. Values are
-/// always bound this way — never spliced into SQL text (design §3.8).
+/// always bound this way — never spliced into SQL text.
 pub(crate) struct SqlParam<'a>(pub &'a Value);
 
 impl ToSql for SqlParam<'_> {

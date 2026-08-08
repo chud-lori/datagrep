@@ -1,15 +1,13 @@
-//! Cell rendering — where design §5.1 is either honoured or thrown away.
+//! Cell rendering — where the no-allocation-per-cell-per-frame promise is
+//! either honoured or thrown away.
 //!
-//! > "Avoiding a `String` per visible cell per frame, in order of leverage:
-//! > (1) **`Utf8`/`LargeUtf8` columns need no formatting at all** — the bytes
-//! > are already a `&str` slice into the Arrow buffer; borrow, shape, done.
-//! > Zero allocation, zero copy."
-//!
-//! This module implements exactly that ordering:
+//! The goal is to avoid a `String` per visible cell per frame. In order of
+//! leverage: `Utf8`/`LargeUtf8` columns need no formatting at all — the bytes
+//! are already a `&str` slice into the Arrow buffer, so borrow, shape, done;
+//! zero allocation, zero copy. This module implements exactly that ordering:
 //!
 //! 1. **Borrowed, zero-copy** — Arrow `Utf8`/`LargeUtf8`, the string values of
-//!    an `Int32→Utf8` dictionary column (design §5.1: dictionary encoding is
-//!    now "load-bearing for P9"), and `Arc<str>`-backed document values
+//!    an `Int32→Utf8` dictionary column, and `Arc<str>`-backed document values
 //!    (`Str`/`Decimal`/`Json`). `datagrep_rows_cell` returns a pointer straight
 //!    into the store's own buffer; the [`crate::rows::DatagrepRows`] holds the
 //!    `Arc` that keeps it alive.
@@ -22,11 +20,12 @@
 //!
 //! ## The distinction this whole ABI exists to carry
 //!
-//! `Value::Null` → kind **1**. `Value::Absent` → kind **2**. Design §3.1:
-//! *"Field NOT PRESENT — distinct from `Null`; […] what makes a Mongo grid
-//! truthful rather than a wall of fake empties."* Arrow's validity bitmap
-//! cannot represent absence, so kind 2 is reachable only through the document
-//! lane — which is precisely why documents are deliberately not Arrow (§3.2).
+//! `Value::Null` → kind **1**. `Value::Absent` → kind **2**. A field that is
+//! *not present* is a different fact from a field that is explicitly `NULL`;
+//! keeping them apart is what makes a Mongo grid truthful rather than a wall of
+//! fake empties. Arrow's validity bitmap cannot represent absence, so kind 2 is
+//! reachable only through the document lane — which is precisely why documents
+//! are deliberately not Arrow.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -51,7 +50,7 @@ pub const KIND_NESTED: u8 = 3;
 pub enum Rendered<'a> {
     /// No text at all — `NULL` and `ABSENT` render as zero bytes and are told
     /// apart by their kind, so an empty string stays distinguishable from
-    /// both (the three-way distinction design §3.1 insists on).
+    /// both — value, `NULL`, and absent are three distinct facts.
     Empty(u8),
     /// Borrowed from a buffer the window keeps alive. Zero copy.
     Borrowed(&'a str, u8),
@@ -67,8 +66,8 @@ pub fn render_value<'a>(v: &'a Value, arena: &mut String) -> Rendered<'a> {
         Value::Absent => Rendered::Empty(KIND_ABSENT),
         // `Arc<str>`: already UTF-8, already alive for as long as the window
         // holds its `Arc<DocSegment>`. Borrow it. `Decimal` and `Json` are
-        // exact text the design forbids reformatting anyway ("Decimal and
-        // Json are already exact text — never reformat them").
+        // already exact text and must never be reformatted — re-rendering a
+        // decimal risks changing the number the server actually sent.
         Value::Str(s) | Value::Decimal(s) | Value::Json(s) => Rendered::Borrowed(s, KIND_VALUE),
         Value::Document(doc) => {
             let n = doc.len();
@@ -111,8 +110,8 @@ pub fn render_arrow<'a>(array: &'a dyn Array, row: usize, arena: &mut String) ->
         return Rendered::Empty(KIND_NULL);
     }
     match array.data_type() {
-        // (1) The zero-copy path, design §5.1's "single largest structural
-        // win": the bytes are already a `&str` in the Arrow buffer.
+        // (1) The zero-copy path — the single largest structural win here:
+        // the bytes are already a `&str` in the Arrow buffer.
         DataType::Utf8 => match array.as_any().downcast_ref::<arrow_array::StringArray>() {
             Some(a) => Rendered::Borrowed(a.value(row), KIND_VALUE),
             None => Rendered::Empty(KIND_VALUE),
@@ -127,9 +126,9 @@ pub fn render_arrow<'a>(array: &'a dyn Array, row: usize, arena: &mut String) ->
             }
         }
         // Dictionary-encoded strings: borrow the dictionary entry, not a copy.
-        // Design §5.1 — "Shape each distinct value once, key the shaped-run
-        // cache by dictionary index": handing back the *same pointer* for
-        // every row sharing a value is what lets the Swift side do that.
+        // Handing back the *same pointer* for every row sharing a value is
+        // what lets the Swift side shape each distinct value once and key its
+        // shaped-run cache by that pointer instead of re-shaping per row.
         DataType::Dictionary(key, value)
             if **key == DataType::Int32 && **value == DataType::Utf8 =>
         {
@@ -180,8 +179,8 @@ fn dictionary_str(array: &dyn Array, row: usize) -> Option<&str> {
 /// path above.
 ///
 /// Total by construction: an Arrow type this build's converter never emits
-/// becomes [`Value::Unsupported`] rather than panicking — the same "never lose
-/// bytes, never crash on a driver quirk" stance the design takes everywhere.
+/// becomes [`Value::Unsupported`] rather than panicking — never lose bytes,
+/// never crash on a driver quirk.
 pub fn arrow_cell_to_value(array: &dyn Array, row: usize) -> Value {
     if array.is_null(row) {
         return Value::Null;
@@ -373,7 +372,10 @@ mod tests {
             render_arrow(batch.column(1).as_ref(), 0, &mut arena),
             Rendered::Borrowed("hi", KIND_VALUE)
         ));
-        assert!(arena.is_empty(), "a Utf8 cell must be zero-copy (§5.1)");
+        assert!(
+            arena.is_empty(),
+            "a Utf8 cell must be zero-copy: nothing may reach the arena"
+        );
 
         assert!(matches!(
             render_arrow(batch.column(0).as_ref(), 0, &mut arena),

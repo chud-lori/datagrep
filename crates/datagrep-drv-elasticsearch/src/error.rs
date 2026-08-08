@@ -6,8 +6,7 @@
 //! **Nothing here ever logs or embeds credentials.** `map_reqwest_error`
 //! deliberately formats the error without its URL (a `reqwest::Error`'s
 //! `Display` includes the request URL, and a URL can carry `user:pass@`), so a
-//! connect failure can never leak a password into a log line or a UI toast
-//! (design §3.8).
+//! connect failure can never leak a password into a log line or a UI toast.
 
 use serde_json::Value as Json;
 
@@ -65,8 +64,8 @@ fn innermost(err: &(dyn std::error::Error + 'static)) -> String {
 /// `{"error": {"type": "...", "reason": "...", "root_cause": [...]}, "status": N}`;
 /// `error` is occasionally a bare string (older OpenSearch, some plugins), and
 /// on a proxy failure the body is not JSON at all. All three are handled, and
-/// the engine's own `type` is preserved verbatim as `DbError::Query::code`
-/// (design: "engine-native error code, preserved verbatim").
+/// the engine's own `type` is preserved verbatim as `DbError::Query::code`,
+/// so an error stays searchable against the engine's own documentation.
 pub fn map_status_error(status: u16, body: &str) -> DbError {
     let parsed: Option<Json> = serde_json::from_str(body).ok();
     let (code, message) = match parsed.as_ref().and_then(|j| j.get("error")) {

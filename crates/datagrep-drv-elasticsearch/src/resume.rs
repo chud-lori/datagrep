@@ -1,8 +1,7 @@
-//! The [`ResumeToken`] payload for an Elasticsearch scan — "ES
-//! `search_after` + PIT" is the design doc's own example of what a resume
-//! token is for (§3.1), and it is what makes idle auto-disconnect safe: the
-//! core can close the cursor, drop the connection to zero, and pick the scan
-//! up later from the token alone.
+//! The [`ResumeToken`] payload for an Elasticsearch scan: `search_after` plus
+//! a point-in-time is the textbook case a resume token exists for, and it is
+//! what makes idle auto-disconnect safe — the core can close the cursor, drop
+//! the connection to zero, and pick the scan up later from the token alone.
 //!
 //! The token is driver-private, so the encoding is simply JSON — versioned, so
 //! a token minted by a future build is rejected honestly instead of being

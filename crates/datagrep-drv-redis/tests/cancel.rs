@@ -1,6 +1,6 @@
-//! Cancellation of a Redis SCAN loop (design §3.3): "commands are atomic; a
-//! 'long query' is our own SCAN loop → just stop." No server round trip is
-//! needed to stop it — the cursor observes `CancelFlag` at its next
+//! Cancellation of a Redis SCAN loop. Redis commands are atomic, so the
+//! only long-running thing is the driver's own SCAN loop: stopping it needs
+//! no server round trip — the cursor observes `CancelFlag` at its next
 //! round-trip check and returns `DbError::Cancelled` promptly, and the
 //! *connection* must stay usable afterward (mirrors `datagrep-drv-sqlite`'s own
 //! cancellation test).

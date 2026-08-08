@@ -1,5 +1,4 @@
-//! [`PgCursor`] (ticket item 3) and the trivial `Ack` cursor for
-//! non-`SELECT` statements.
+//! [`PgCursor`] and the trivial `Ack` cursor for non-`SELECT` statements.
 
 use std::sync::Arc;
 
@@ -26,8 +25,8 @@ pub enum SessionOwnership {
     Borrowed,
 }
 
-/// A streaming cursor over one bound portal (design §3.2: pulls exactly one
-/// chunk per `next_batch`, driver picks the real size within `hint`).
+/// A streaming cursor over one bound portal: pulls exactly one chunk per
+/// `next_batch`, with the driver picking the real size within `hint`.
 ///
 /// A cursor holds its pooled session only until the portal is **drained**
 /// (short or empty batch), or until it is explicitly closed — not until the

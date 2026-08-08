@@ -1,6 +1,6 @@
 //! [`Auth`] — how [`crate::SshTunnel::connect`] proves identity to the SSH
-//! server (design §3.5: "Agent auth, `~/.ssh/config` including `ProxyJump`."
-//! — `ProxyJump` is deferred, see crate root docs).
+//! server: the running agent, a key file, or a password. (`~/.ssh/config` is
+//! read for host details; `ProxyJump` is deferred, see crate root docs.)
 
 use std::path::PathBuf;
 

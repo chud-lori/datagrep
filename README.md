@@ -17,6 +17,25 @@ one Rust engine. No Electron, no JVM.
 | MySQL / MariaDB | working |
 | Elasticsearch | working (read-only — no writes yet) |
 
+The macOS app reaches all six. The CLI currently registers PostgreSQL and SQLite
+only — the other four surface through the app.
+
+## Install
+
+Each [release](https://github.com/chud-lori/datagrep/releases) ships
+`datagrep-macos.dmg`: open it and drag `datagrep.app` onto the Applications
+shortcut. The installer script does the same and also installs the CLI:
+
+```
+curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh | bash -s -- --app
+```
+
+The app checks for a newer release once per launch and only notifies you — it
+never downloads or installs anything on its own, and the check can be turned off.
+datagrep is not notarized, so a browser-downloaded build needs one Ctrl-click →
+**Open** on first launch; installing via the script avoids that.
+
 ## Build
 
 ```
@@ -26,6 +45,26 @@ cd ui/macos && ./build-app.sh          # macOS app     → ui/macos/datagrep.app
 
 The app needs no Xcode — Command Line Tools are enough, since it builds with
 Swift Package Manager rather than `xcodebuild`.
+
+## In the app
+
+Connections are editable, and any of them can be marked read-only. The badge
+says how real that promise is: *enforced by the server* only when the engine
+itself refuses writes, *blocked by datagrep only* when the guard is our
+client-side classifier — it never claims more protection than exists.
+
+Click a table and the schema pane shows its columns with types, nullability and
+primary keys, its indexes, and row/size estimates. For MongoDB the fields are
+inferred from a sample, and the pane says so — a field missing from the sample
+may still exist in the collection.
+
+⌘Y opens the query history, searchable, over the same store the CLI's `history`
+command reads. The grid has a row-number gutter, and a result that stops at the
+500,000-row cap says "stopped at the 500,000-row limit — result incomplete"
+rather than showing a count that looks final.
+
+Not there yet: inline cell editing, autocomplete, an export UI, foreign-key
+click-through, ER diagrams.
 
 ## CLI quickstart
 

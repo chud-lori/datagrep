@@ -1,5 +1,5 @@
-//! The MongoShell parser (design §3.6: "~700-line parser, NOT a JS
-//! engine"). Parses exactly two surfaces:
+//! The MongoShell parser — a parser, not a JS engine. Parses exactly two
+//! surfaces:
 //!
 //! 1. `db.<collection>.<method>(<args>).<modifier>(<args>)...` — a method
 //!    chain, where `<collection>` may also be `getCollection("name")` for
@@ -13,9 +13,9 @@
 //!
 //! Anything that is actually JavaScript — a bare variable, `for`/`while`/
 //! `function`, `new X(...)`, arithmetic between values — is rejected with
-//! [`MongoError::UnsupportedJs`], the design doc's exact wording: *"datagrep
-//! supports query expressions, not arbitrary JavaScript — use a raw command
-//! document for anything else."* This is enforced structurally rather than
+//! [`MongoError::UnsupportedJs`]: datagrep supports query expressions, not
+//! arbitrary JavaScript, and the rejection points the user at a raw command
+//! document as the escape hatch. This is enforced structurally rather than
 //! by a JS-keyword blocklist: the grammar below simply has no production for
 //! any of those, so anything that isn't a recognized value/statement shape
 //! falls through to the same rejection.
@@ -322,15 +322,14 @@ impl<'s> Parser<'s> {
 
     /// `ObjectId("<24 hex chars>")`.
     ///
-    /// Deviation: the design doc's `Value::Unsupported{ raw: Bytes, .. }`
-    /// escape hatch (datagrep-api `value.rs`: "never lose bytes") is the more
-    /// literal fit for a 12-byte BSON ObjectId, but its `raw` field is
-    /// `bytes::Bytes`, a type datagrep-api does not re-export — using it would
-    /// require adding the `bytes` crate as a direct dependency, which this
-    /// ticket restricts against (deps: datagrep-api + thiserror only). Hex
-    /// encoding is bijective, so representing the id as
-    /// `Value::Str(<lowercase 24-hex-char string>)` loses no information;
-    /// it just isn't the raw 12 bytes.
+    /// Produced as `Value::Str` holding the lowercase 24-char hex form, not as
+    /// `Value::Unsupported { raw, .. }`. `Unsupported` is the more literal fit
+    /// for a 12-byte BSON ObjectId, but its `raw` field is `bytes::Bytes`, a
+    /// type datagrep-api does not re-export — using it would mean taking a
+    /// direct dependency on the `bytes` crate, and this crate deliberately
+    /// depends on nothing but datagrep-api and thiserror. Hex encoding is
+    /// bijective, so the string form loses no information; it just isn't the
+    /// raw 12 bytes.
     fn parse_object_id(&mut self) -> Result<Value, MongoError> {
         let (hex, at) = self.parse_ctor_string_arg()?;
         if hex.len() != 24 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {

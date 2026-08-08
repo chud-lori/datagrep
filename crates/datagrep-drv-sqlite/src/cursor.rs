@@ -1,6 +1,6 @@
 //! The async-facing [`Cursor`] — a thin, `Send`-only handle that does no I/O
 //! of its own. Every pull sends a `FetchBatch` to the connection's worker
-//! thread and awaits the reply (design §3.1, §3.4).
+//! thread and awaits the reply.
 
 use async_trait::async_trait;
 use datagrep_api::{Batch, Cursor, CursorStats, DbError, FetchHint, ResumeToken, Shape};

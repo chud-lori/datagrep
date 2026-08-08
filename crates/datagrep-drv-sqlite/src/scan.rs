@@ -1,6 +1,6 @@
 //! An open table scan, stepped incrementally across many `FetchBatch`
-//! worker commands (design §3.1 `Cursor::next_batch`, §3.2 "chunk 1 renders
-//! before chunk 2 is requested").
+//! worker commands, one per `Cursor::next_batch`: chunk 1 renders before
+//! chunk 2 is ever requested.
 //!
 //! ## Why this needs `unsafe`
 //! rusqlite's `Rows<'stmt>` borrows its `Statement<'stmt>` mutably. A
@@ -30,9 +30,9 @@ use rusqlite::types::ValueRef;
 use crate::error::map_sqlite_err;
 use crate::value::{logical_type_for_decl, sqlite_value_to_datagrep, SqlParam};
 
-/// One column's schema facts, gathered once right after `PREPARE` (design
-/// §3.1: never lie about a value — `logical` is a hint, not a promise about
-/// any individual cell; see `value.rs`).
+/// One column's schema facts, gathered once right after `PREPARE`. Never
+/// lie about a value: `logical` is a hint, not a promise about any
+/// individual cell (see `value.rs`).
 pub(crate) struct ColumnMeta {
     pub name: Arc<str>,
     pub logical: LogicalType,
@@ -124,7 +124,7 @@ impl<'conn> OpenScan<'conn> {
 
     /// Step the statement until `hint` is satisfied or the query is
     /// exhausted. `None` means the scan is over; a returned `Batch` is never
-    /// empty (design §3.2: chunk sizes are real, never phantom).
+    /// empty — chunk counts are real rows, never phantom progress.
     pub fn fetch_batch(&mut self, hint: FetchHint) -> Result<Option<Batch>, DbError> {
         if self.done {
             return Ok(None);
@@ -275,9 +275,10 @@ fn decode_resume(token: &ResumeToken) -> Result<Value, DbError> {
 }
 
 /// Compile the WHERE fragment continuing a single-sort-key scan past
-/// `token`. Multi-key resume is a documented gap (see module doc + design
-/// note in `driver.rs`): a correct multi-column keyset predicate needs
-/// direction-aware row-value comparison, deliberately not implemented here.
+/// `token`. Multi-key resume is a documented gap (see the module doc and
+/// the gap notes in `driver.rs`): a correct multi-column keyset predicate
+/// needs direction-aware row-value comparison, deliberately not implemented
+/// here.
 pub(crate) fn compile_resume_clause(
     order: &[SortKey],
     token: &ResumeToken,

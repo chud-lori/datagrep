@@ -1,8 +1,8 @@
 //! [`MySqlTransaction`]: the explicit, interactive transaction returned by
 //! [`crate::connection::MySqlConnection::begin`] — pinned to its
 //! connection's socket for its whole life because the backing actor holds
-//! the connection mutex for exactly that long (design §3.5: "a pool that
-//! silently moves a BEGIN to a different socket is a correctness bug").
+//! the connection mutex for exactly that long. Silently moving a BEGIN to a
+//! different socket would be a correctness bug, not a performance detail.
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};

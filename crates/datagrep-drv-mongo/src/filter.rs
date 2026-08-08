@@ -1,5 +1,6 @@
-//! `Predicate` -> BSON filter compilation (ticket item 2; design §3.8's
-//! NoSQL-injection rule).
+//! `Predicate` -> BSON filter compilation (ticket item 2), under datagrep's
+//! NoSQL-injection rule: a value can never become part of the query's
+//! structure.
 //!
 //! **The injection rule, concretely.** Every comparison compiles to an
 //! explicit operator form (`{field: {"$eq": v}}`, never the bare
@@ -8,7 +9,7 @@
 //! all start with `$`; once a value is nested one level inside `$eq`/`$in`/
 //! etc. it is compared as an opaque literal and never reinterpreted for its
 //! own embedded `$`-prefixed keys. So a parameter value shaped like
-//! `{"$ne": null}` — the design doc's canonical injection example — can
+//! `{"$ne": null}` — the canonical NoSQL-injection payload — can
 //! never promote itself to an operator: `value_to_bson` maps it to a
 //! `Bson::Document` exactly like any other value, and the wrapping `$eq`
 //! guarantees it is compared, not executed. Values are always taken from the
@@ -51,8 +52,8 @@ fn cmp_op(
     Ok(doc! { f: { op: bson } })
 }
 
-/// Compile a [`Predicate`] tree to a Mongo filter document (design §3.6's
-/// `Op::Scan { filter }`, compiled natively rather than translated text).
+/// Compile a [`Predicate`] tree to a Mongo filter document: `Op::Scan`'s
+/// filter is built natively as BSON, never translated into query text.
 pub fn compile_predicate(pred: &Predicate) -> Result<BsonDocument, DbError> {
     match pred {
         Predicate::Eq { field, value } => cmp_op(field, "$eq", value),
@@ -80,7 +81,7 @@ pub fn compile_predicate(pred: &Predicate) -> Result<BsonDocument, DbError> {
             let f = field_path_to_mongo(field);
             Ok(doc! { f: { "$exists": true } })
         }
-        // "present, but null" (design's `Predicate::IsNull` doc comment) —
+        // `Predicate::IsNull` means "present, but null" — whereas
         // Mongo's bare `{field: null}` also matches a field that is entirely
         // *absent* (its well-known null/missing conflation), so this is
         // compiled as an explicit conjunction to keep faith with the
@@ -107,7 +108,7 @@ fn compile_many(parts: &[Predicate]) -> Result<Vec<BsonDocument>, DbError> {
     parts.iter().map(compile_predicate).collect()
 }
 
-/// Translate SQL-style `%`/`_` wildcards (design's `Predicate::Like`) into an
+/// Translate `Predicate::Like`'s SQL-style `%`/`_` wildcards into an
 /// anchored regex, escaping every other regex metacharacter in the pattern so
 /// only the two wildcard characters carry special meaning.
 fn like_to_regex(pattern: &str) -> String {
@@ -129,7 +130,8 @@ fn like_to_regex(pattern: &str) -> String {
 }
 
 /// AND a keyset resume constraint (`_id > last`) into a compiled filter
-/// (design §3.5/ticket item 3: `find` resumes via `{_id: {$gt: last}}`).
+/// (ticket item 3: `find` resumes via `{_id: {$gt: last}}`, so a resumed
+/// scan can't re-yield or skip documents the way an offset would).
 pub fn and_keyset(filter: Option<BsonDocument>, last_id: Bson) -> BsonDocument {
     let keyset = doc! { "_id": { "$gt": last_id } };
     match filter {
@@ -156,7 +158,7 @@ mod tests {
         assert_eq!(compiled, doc! { "status": { "$eq": "active" } });
     }
 
-    /// The design doc's exact injection scenario: a parameter value shaped
+    /// The canonical NoSQL-injection scenario: a parameter value shaped
     /// like `{"$ne": null}` must never be able to rewrite the query
     /// structure. Compiling through `$eq` guarantees the attacker-controlled
     /// document only ever appears as $eq's literal operand, never as the

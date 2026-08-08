@@ -15,16 +15,15 @@
 //!                                       connection's default index
 //! ```
 //!
-//! # Parameters are bound into the parsed document, never spliced (§3.8)
+//! # Parameters are bound into the parsed document, never spliced
 //!
 //! `Request::Native { params }` values are substituted **after** the body has
 //! been parsed into JSON, by replacing any string that is exactly `"$1"`,
 //! `"$2"`, … with the typed value. Because the substitution happens on the
 //! tree rather than on the text, a parameter can never introduce a key, a
-//! clause, or a nesting level — the design doc's NoSQL-injection rule (§3.8
-//! risk 4) applied to this engine. A parameter is also never substituted into
-//! the request *path*, so it can never retarget the request at another
-//! endpoint.
+//! clause, or a nesting level — datagrep's NoSQL-injection rule in this
+//! engine's dialect. A parameter is also never substituted into the request
+//! *path*, so it can never retarget the request at another endpoint.
 
 use serde_json::Value as Json;
 
@@ -323,7 +322,7 @@ mod tests {
         }
     }
 
-    /// §3.8 risk 4, this engine's version: a parameter is substituted into the
+    /// Injection, this engine's version: a parameter is substituted into the
     /// parsed tree as a typed value, so it can never become a clause.
     #[test]
     fn a_parameter_can_never_inject_a_query_clause() {

@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Design §5.1, applied to the window instead of to a subcommand.
+/// The lazy-startup rule, applied to the window instead of to a subcommand.
 ///
 /// The CLI's rule is that nothing connects, opens the profile DB or initialises
 /// TLS until a subcommand actually needs it — which is why it cold-starts in

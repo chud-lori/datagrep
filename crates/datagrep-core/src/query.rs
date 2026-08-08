@@ -1,12 +1,13 @@
-//! Query lifecycle and cancellation (design §3.3).
+//! Query lifecycle and cancellation.
 //!
 //! `QueryMgr` is the wiring between the three tasks a running query is made of
 //! — cursor → [`crate::feeder`] → [`crate::store`] — plus the one piece of
-//! behaviour the design is most emphatic about:
+//! behaviour this module exists to guarantee:
 //!
-//! > "The stop button **always** returns control instantly (drop feeder, close
-//! > cursor, free store). The status line then tells the truth: *'stopped
-//! > receiving results; the server may still be executing this query.'*"
+//! **The stop button always returns control instantly** — drop the feeder,
+//! close the cursor, free the store — and the status line then tells the
+//! truth, e.g. "stopped receiving results; the server may still be executing
+//! this query."
 //!
 //! So [`QueryMgr::cancel`] is deliberately **not** `async`. It does the local
 //! half unconditionally and synchronously — cancel the query token, which stops
@@ -19,7 +20,7 @@
 //!
 //! Everything a frontend needs to follow a query is on one broadcast channel of
 //! [`QueryEvent`]s, fed by a supervisor task that watches the store's `watch`
-//! channel. No polling anywhere (§3.4).
+//! channel. Nothing here polls: state changes push.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -70,7 +71,8 @@ pub struct QueryStats {
     pub bytes: u64,
     /// Wall-clock from `execute` returning to the terminal state.
     pub elapsed_micros: u64,
-    /// Time to the first admitted chunk — the number P8 measures.
+    /// Time to the first admitted chunk — the latency the user actually feels,
+    /// since the grid can paint as soon as it lands.
     pub first_batch_micros: Option<u64>,
     /// Server-reported execution time, when the protocol carries one.
     pub server_elapsed_micros: Option<u64>,
@@ -80,7 +82,7 @@ pub struct QueryStats {
     pub affected: Option<u64>,
 }
 
-/// What a stop actually achieved, stated honestly (design §3.3).
+/// What a stop actually achieved, stated honestly.
 ///
 /// `local_stopped` is always `true` — that half never fails. `outcome` is
 /// `None` until the server half reports back, and stays `None` forever on an
@@ -161,7 +163,7 @@ pub enum QueryEvent {
     Accepted {
         qid: QueryId,
     },
-    /// The first chunk is in the store and the grid can paint (§5, P8).
+    /// The first chunk is in the store and the grid can paint.
     FirstBatch {
         qid: QueryId,
         micros: u64,
@@ -188,7 +190,7 @@ pub enum QueryEvent {
         qid: QueryId,
         message: Arc<str>,
     },
-    /// The truth about a stop, possibly arriving well after the button (§3.3).
+    /// The truth about a stop, possibly arriving well after the button.
     CancelOutcome {
         qid: QueryId,
         report: CancelReport,
@@ -229,8 +231,9 @@ pub struct QueryMgr {
 
 impl QueryMgr {
     /// A manager over a shared result budget. Every `QueryMgr` in a process
-    /// should share one [`GlobalBudget`] — that is what makes the 256 MB in
-    /// §3.2 a *process* number rather than a per-tab one.
+    /// should share one [`GlobalBudget`] — that is what makes the result
+    /// budget a *process* number rather than a per-tab one, so twenty open
+    /// tabs cannot each claim the whole allowance.
     pub fn new(policy: MemoryPolicy, budget: GlobalBudget) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
@@ -271,14 +274,15 @@ impl QueryMgr {
         let started = Instant::now();
         // An explicit `row_limit` is the caller saying "I want exactly this
         // many rows" — it lifts the grid's soft row cap up to that number, so
-        // `--limit 600000` is never silently clipped back to 500k. Spill
-        // (§3.2) keeps memory bounded either way.
+        // `--limit 600000` is never silently clipped back to 500k. Spill keeps
+        // memory bounded either way, so lifting the cap is safe.
         let row_limit = match &req {
             Request::Native { opts, .. } => opts.row_limit,
             Request::Op(_) => None,
         };
         // `execute` returns when the server accepts the request; it never waits
-        // for or buffers the result (design §3.1).
+        // for or buffers the result — that is what lets the UI show "running"
+        // immediately instead of freezing until the last row arrives.
         let cursor = conn.execute(req).await?;
         let shape = cursor.shape().clone();
 
@@ -324,7 +328,7 @@ impl QueryMgr {
 
     /// **The stop button.** Does the local half unconditionally and returns
     /// immediately; the server half is fired in the background and its outcome
-    /// arrives as [`QueryEvent::CancelOutcome`] (design §3.3).
+    /// arrives as [`QueryEvent::CancelOutcome`].
     ///
     /// Not `async` on purpose: there is no await between pressing stop and
     /// getting control back.
@@ -369,15 +373,16 @@ impl QueryMgr {
         self.store(qid).map(|s| s.state())
     }
 
-    /// Resolve a row window (design §3.2, §3.6). Asking for rows past the
-    /// frontier is what un-parks the feeder.
+    /// Resolve a row window. Asking for rows past the frontier is what un-parks
+    /// the feeder.
     pub async fn get_rows(&self, qid: QueryId, range: Range<u64>) -> Option<RowWindow> {
         let store = self.store(qid)?;
         Some(store.get_rows(range).await)
     }
 
     /// Forget a query and release everything it holds — the tab was closed.
-    /// This, not `cancel`, is what returns the memory (design §5, P7).
+    /// This, not `cancel`, is what returns the memory: a cancelled query keeps
+    /// the rows it already fetched so the user can still read them.
     pub fn close(&self, qid: QueryId) {
         let Some(query) = write(&self.queries).remove(&qid) else {
             return;
@@ -691,7 +696,7 @@ mod tests {
         h.sessions.shutdown();
     }
 
-    /// **§3.3 — the stop button returns instantly and tells the truth.**
+    /// **The stop button returns instantly and tells the truth.**
     ///
     /// `cancel` is synchronous: the local half (feeder aborted, cursor closed,
     /// store released) is done before it returns, and the server half is
@@ -759,7 +764,8 @@ mod tests {
     }
 
     /// On an engine with no server-side cancel the status line says so, in
-    /// exactly the words §3.3 specifies. No pretending.
+    /// plain words. We never claim to have killed a query we only stopped
+    /// listening to.
     #[tokio::test]
     async fn a_client_abandon_engine_says_the_server_may_still_be_running() {
         let h = harness(MockPlan {
@@ -805,8 +811,8 @@ mod tests {
         h.sessions.shutdown();
     }
 
-    /// **Gap 1 — an acknowledgement's affected-row count reaches the
-    /// frontend.** An INSERT produces `Shape::Ack { affected }` and no rows;
+    /// **An acknowledgement's affected-row count reaches the frontend.**
+    /// An INSERT produces `Shape::Ack { affected }` and no rows;
     /// the count must arrive in `QueryEvent::Done { stats }` (and in the
     /// store snapshot), not die between the driver and the store.
     #[tokio::test]

@@ -1,7 +1,5 @@
-//! Result spill to disk (design §3.2, §3.3).
-//!
-//! > "Spill: append-only Arrow IPC per result set in `$TMPDIR`, `unlink`ed
-//! > immediately after creation on Unix so a crash can't leak files."
+//! Result spill to disk: one append-only Arrow IPC file per result set in
+//! `$TMPDIR`, `unlink`ed immediately after creation on unix.
 //!
 //! Two properties are load-bearing and everything else here is subordinate to
 //! them:
@@ -16,12 +14,13 @@
 //!    Arrow IPC *file* with a footer — cannot be appended to while it is being
 //!    read, which is exactly what a streaming result set does.
 //!
-//! The per-chunk schema repetition costs a few hundred bytes per chunk. Design
-//! §3.2 calls this path "correctness over speed" and that is the trade taken.
+//! The per-chunk schema repetition costs a few hundred bytes per chunk. That
+//! overhead is accepted deliberately: this is the cold path, and correctness
+//! (append while reading, exact round-trip) matters more here than density.
 //!
-//! Spill I/O is blocking; callers run it on the blocking pool (§3.4). Every
-//! method here takes `&self` so an `Arc` clone can be moved into
-//! `spawn_blocking`.
+//! Spill I/O is blocking, so callers run it on the blocking pool rather than
+//! stalling an async worker thread. Every method here takes `&self` so an
+//! `Arc` clone can be moved into `spawn_blocking`.
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -131,7 +130,7 @@ impl SpillWriter {
             .write(true)
             .open(&path)?;
 
-        // §3.2: unlink immediately so a crash cannot leak the file. On unix the
+        // Unlink immediately so a crash cannot leak the file. On unix the
         // descriptor keeps the inode alive; the bytes vanish when we drop it.
         let unlink_on_drop = if cfg!(unix) {
             std::fs::remove_file(&path)?;
@@ -335,9 +334,9 @@ mod tests {
         rows_to_record_batch(&schema, rows)
     }
 
-    /// Test 8: batches written to the spill file come back byte-identical, in
-    /// any order — the property the windowed store depends on when a scroll
-    /// lands on a chunk that was evicted from memory (design §3.2).
+    /// Batches written to the spill file come back byte-identical, in any
+    /// order — the property the windowed store depends on when a scroll lands
+    /// on a chunk that was evicted from memory.
     #[test]
     fn spill_round_trip_is_exact() {
         let originals: Vec<RecordBatch> = (0..5).map(|i| sample(i * 100, 40)).collect();
@@ -363,8 +362,8 @@ mod tests {
         ));
     }
 
-    /// §3.2: the file must be nameless the moment it exists, so a crash cannot
-    /// leave gigabytes behind in `$TMPDIR`.
+    /// The file must be nameless the moment it exists, so a crash cannot leave
+    /// gigabytes behind in `$TMPDIR`.
     #[cfg(unix)]
     #[test]
     fn spill_file_is_unlinked_immediately() {

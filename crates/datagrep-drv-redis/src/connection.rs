@@ -1,19 +1,20 @@
-//! [`RedisConnection`]: the `Connection` impl (design §3.1 requirement 2).
+//! [`RedisConnection`]: the `datagrep-api` `Connection` impl.
 //!
 //! Three request doors, matching `datagrep-api`'s `Request` enum:
 //! - [`Request::Native`] — hand-typed redis-cli text. Split into one command
 //!   per line with `datagrep_lang::redis` (already built/tested — never
 //!   reimplemented here), each dispatched in turn. The *last* command's
 //!   reply becomes the returned cursor: `Shape::Ack` for `OK`/nil/integer
-//!   replies, `Shape::Pairs` otherwise (design §3.6: text is never
-//!   translated, only tokenized and dispatched).
+//!   replies, `Shape::Pairs` otherwise. Hand-typed text is never rewritten
+//!   or translated — only tokenized and dispatched as the user wrote it.
 //! - [`Request::Op`]`(Scan)` — the portable browse path. `SCAN`/`HSCAN`/
-//!   `SSCAN`/`ZSCAN` only, cursor-paged, **never `KEYS`** (design §5.2).
+//!   `SSCAN`/`ZSCAN` only, cursor-paged, **never `KEYS`** — `KEYS` blocks
+//!   the server for the length of the whole keyspace walk.
 //!   A 3-part path (one key) dispatches `TYPE` first and routes to the
 //!   right bounded reader — `RedisPairsCursor` for hash/set/zset,
 //!   `ListCursor` for a list, `StreamCursor` for a stream, or a one-shot
 //!   `GET` for a string — so a 1M-field hash pages instead of coming back
-//!   whole (design §3.1 requirement 2).
+//!   whole.
 //! - [`Request::Op`]`(Count)` — `DBSIZE` for the whole keyspace (exact,
 //!   O(1)); a per-key cardinality command for one key; a SCAN walk
 //!   (exact, cancellable) or a single-round SCAN extrapolation (estimate)
@@ -25,7 +26,7 @@
 //!   transactions (`begin`) are not offered — see that method's doc for why
 //!   those are different claims.
 //!
-//! Cancellation (design §3.3): every request gets a fresh [`CancelFlag`],
+//! Cancellation: every request gets a fresh [`CancelFlag`],
 //! stashed behind a mutex so a subsequently-obtained [`Canceller`] targets
 //! *this* request. Commands that block the connection waiting on the server
 //! (`BLPOP`, `WAIT`, `XREAD BLOCK`, …) additionally get their `CLIENT ID`
@@ -71,7 +72,7 @@ pub struct RedisConnection {
     /// The `CancelFlag` for whatever request is currently (or was most
     /// recently) dispatched. `execute` replaces it with a fresh flag before
     /// building a cursor — `CancelFlag` has no reset, so "uncancelled for
-    /// this request" can only mean "a new flag" (design §3.3).
+    /// this request" can only mean "a new flag".
     active_cancel: Mutex<CancelFlag>,
     blocking_client_id: BlockingClientId,
     closed: AtomicBool,
@@ -176,9 +177,9 @@ impl RedisConnection {
     /// statement of a `Request::Native` buffer and routes it through the
     /// same paging [`RedisPairsCursor`] the structured `Op::Scan` path
     /// uses, so a user who types `SCAN 0 MATCH user:*` by hand still gets a
-    /// resumable, bounded cursor instead of a single unpaged round trip
-    /// (design §3.1 requirement 2/3, §5.2). Returns `Ok(None)` for any other
-    /// command, which falls through to the generic one-shot dispatch.
+    /// resumable, bounded cursor instead of a single unpaged round trip.
+    /// Returns `Ok(None)` for any other command, which falls through to the
+    /// generic one-shot dispatch.
     fn native_scan_cursor(
         &self,
         args: &[String],
@@ -228,8 +229,8 @@ impl RedisConnection {
     /// Dispatch one already-built command. When `blocking` is set, learns
     /// this connection's `CLIENT ID` immediately beforehand and clears it
     /// immediately after, so `RedisCanceller` can `CLIENT KILL ID` it while
-    /// it's in flight and never target a stale id once it returns (design
-    /// §3.3, `canceller.rs`'s `blocking_client_id` doc).
+    /// it's in flight and never target a stale id once it returns
+    /// (`canceller.rs`'s `blocking_client_id` doc).
     async fn dispatch(
         &self,
         mgr: &mut redis::aio::ConnectionManager,
@@ -320,7 +321,7 @@ impl RedisConnection {
 
     /// `TYPE key` first, then route to the bounded reader for that type —
     /// never come back with the whole value in one shot for an aggregate
-    /// type (design §3.1 requirement 2). A missing key maps to
+    /// type. A missing key maps to
     /// [`Value::Absent`], never [`Value::Null`] (value.rs's own doc: this is
     /// exactly the caller who knows *why* it got a Nil).
     async fn key_value_cursor(
@@ -698,8 +699,8 @@ impl Connection for RedisConnection {
     /// writes, no savepoints, no partial rollback. Returning `Unsupported`
     /// here (rather than offering a `Transaction` that lies about what it
     /// can do) is what lets the UI grey the "begin transaction" button
-    /// instead of erroring at runtime (design §2.6; `driver.rs`'s
-    /// `REDIS_CAPS` doc comment).
+    /// instead of erroring at runtime (`driver.rs`'s `REDIS_CAPS` doc
+    /// comment).
     async fn begin(&self, _opts: TxOpts) -> Result<Box<dyn Transaction>, DbError> {
         Err(DbError::Unsupported {
             feature: "interactive transactions — Redis MULTI/EXEC is a single optimistic \
@@ -714,10 +715,9 @@ impl Connection for RedisConnection {
     /// refuses writes for the rest of the session (unlike SQLite's `PRAGMA
     /// query_only` or a Postgres `SET default_transaction_read_only`).
     /// `Enforcement::Client` is the honest answer: only `datagrep-lang`'s
-    /// classifier (layer 2 of design §3.8's three guardrails) stands
-    /// between a write command and the server, and the UI's read-only badge
-    /// must say exactly that rather than implying a server-side guarantee
-    /// that does not exist here.
+    /// client-side command classifier stands between a write command and the
+    /// server, and the UI's read-only badge must say exactly that rather
+    /// than implying a server-side guarantee that does not exist here.
     async fn set_read_only(&self, _on: bool) -> Result<Enforcement, DbError> {
         self.ensure_open()?;
         Ok(Enforcement::Client)
@@ -741,8 +741,8 @@ impl Connection for RedisConnection {
 /// (`LRANGE`, `SMEMBERS`, …) becomes index-keyed `Shape::Pairs` — the same
 /// convention `ListCursor` uses for its own rows; anything else becomes a
 /// single row keyed by the command name so no reply is ever dropped on the
-/// floor (design §3.1's "never lose bytes", extended here to "never lose a
-/// reply").
+/// floor — the crate's "never lose bytes" rule, extended here to "never
+/// lose a reply".
 fn native_reply_cursor(args: &[String], reply: redis::Value) -> Box<dyn Cursor> {
     let command = args.first().cloned().unwrap_or_default();
     let value = from_resp(reply);
@@ -954,9 +954,9 @@ fn mutation_affected(reply: redis::Value) -> Result<u64, DbError> {
 
 /// Wraps another cursor and stops once `limit` total rows have been
 /// emitted. Redis's SCAN family has no server-side `LIMIT` — `Op::Scan`'s
-/// `limit` (design §3.6) would otherwise be silently ignored, which the
-/// rest of this crate refuses to do for a filter; enforcing it client-side
-/// here keeps that same promise for a row cap.
+/// `limit` would otherwise be silently ignored, which the rest of this
+/// crate refuses to do for a filter; enforcing it client-side here keeps
+/// that same promise for a row cap.
 struct LimitedCursor {
     inner: Box<dyn Cursor>,
     remaining: u64,

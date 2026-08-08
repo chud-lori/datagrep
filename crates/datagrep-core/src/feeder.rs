@@ -1,4 +1,4 @@
-//! The feeder task — where the memory contract is actually enforced (§3.2).
+//! The feeder task — where the memory contract is actually enforced.
 //!
 //! ```text
 //! ┌──────────┐ next_batch(hint) ┌───────────┐ mpsc::channel(2) ┌────────────┐
@@ -20,9 +20,9 @@
 //!   `next_batch` second. So the number of chunks alive between driver and
 //!   store is exactly [`DATA_CHANNEL_BOUND`], never bound+1 — the feeder never
 //!   holds a fetched-but-unsendable chunk.
-//! - **Every await is inside a `select!` with the query's cancellation token**
-//!   (§3.4). There is no await in this file that a stop button cannot
-//!   interrupt, which is what makes §3.3's "always returns control instantly"
+//! - **Every await is inside a `select!` with the query's cancellation
+//!   token.** There is no await in this file that a stop button cannot
+//!   interrupt, which is what makes "stop always returns control instantly"
 //!   true rather than aspirational.
 
 use std::fmt;
@@ -38,11 +38,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::lock;
 
-/// **The bound of the data path, and the whole backpressure story (§3.2).**
+/// **The bound of the data path, and the whole backpressure story.**
 ///
-/// > "The `mpsc` bound of 2 is the whole backpressure story. The feeder can't
-/// > run more than two chunks ahead. \[…\] **If any channel in the data path is
-/// > unbounded, we have re-implemented DBeaver.**"
+/// A bound of 2 means the feeder can never run more than two chunks ahead of
+/// the store. If any channel in the data path were unbounded, a fast server
+/// feeding a slow consumer would pile the entire result set up inside this
+/// process — the "load it all into RAM and hope" behaviour datagrep exists to
+/// avoid. The bound is what pushes the stall back down the socket instead.
 ///
 /// Raising this raises the app's floor memory by one chunk per running query
 /// and buys nothing: chunk 1 already renders before chunk 2 is requested.
@@ -52,15 +54,15 @@ pub const DATA_CHANNEL_BOUND: usize = 2;
 /// stalled result set is never mysterious.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParkReason {
-    /// The bounded data channel is full — the store is behind (§3.2).
+    /// The bounded data channel is full — the store is behind.
     Backpressure,
-    /// The global result budget is exhausted; another result set must shrink
-    /// or close first (§3.2 `total_result_budget`).
+    /// The process-wide `total_result_budget` is exhausted; another result set
+    /// must shrink or close first.
     MemoryBudget,
     /// This query's own hot window is full and spill is unavailable or full.
     HotWindow,
     /// Nobody is looking: the viewport is far behind, so we stopped fetching
-    /// until `get_rows` asks for rows we do not have (§3.6 window resolver).
+    /// until `get_rows` asks for rows we do not have.
     ViewportIdle,
 }
 
@@ -85,11 +87,11 @@ pub enum FeedState {
     /// Deliberately not pulling; see [`ParkReason`].
     Parked(ParkReason),
     /// The soft row cap was reached. The result is intact and complete up to
-    /// the cap; the UI offers "[Load more] [Export all]" (§3.2).
+    /// the cap; the UI offers "[Load more] [Export all]".
     Capped,
     /// The cursor reported end of stream.
     Done,
-    /// The user stopped it (§3.3). Not a failure, and never dressed as one.
+    /// The user stopped it. Not a failure, and never dressed as one.
     Cancelled,
     /// The driver returned an error; the message is carried for the status
     /// line and the full [`DbError`] is available from
@@ -107,11 +109,14 @@ impl FeedState {
     }
 }
 
-/// Adaptive fetch-sizing policy (design §3.2).
+/// Adaptive fetch-sizing policy.
 ///
-/// > "Start at `caps.default_fetch_rows` \[…\]. After each batch target a
-/// > 40–120 ms wall-clock window and a 4 MB byte ceiling:
-/// > `next = clamp(prev * target_ms / actual_ms, 100, 100_000)`."
+/// Start at the connection's `caps.default_fetch_rows`, then after each batch
+/// aim for a 40–120 ms wall-clock window per chunk under a 4 MB byte ceiling:
+/// `next = clamp(prev * target_ms / actual_ms, 100, 100_000)`. A chunk much
+/// faster than the window wastes a round trip; a chunk much slower delays the
+/// first screenful and stretches how long a stop takes to land, since a pull
+/// in flight has to finish before the loop can react.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeederPolicy {
     /// First hint, from `Capabilities::default_fetch_rows` (PG 500,
@@ -150,7 +155,7 @@ impl Default for FeederPolicy {
 }
 
 impl FeederPolicy {
-    /// The design's policy seeded from a connection's advertised start size.
+    /// The default policy, seeded from a connection's advertised start size.
     pub fn for_fetch_rows(start_fetch_rows: u32) -> Self {
         Self {
             start_fetch_rows: start_fetch_rows.max(1),
@@ -232,7 +237,7 @@ impl FeederHandle {
         *lock(&self.ctl.stats)
     }
 
-    /// The row hint used for the most recent pull — the adaptive size (§3.2).
+    /// The row hint used for the most recent pull — the adaptive size.
     pub fn last_fetch_rows(&self) -> u32 {
         self.ctl.last_hint_rows.load(Ordering::SeqCst) as u32
     }
@@ -264,8 +269,9 @@ impl FeederHandle {
         self.ctl.paused.load(Ordering::SeqCst)
     }
 
-    /// The local half of a stop (§3.3): cancel the token so every await in the
-    /// task unwinds, and let it close the cursor. Returns immediately.
+    /// The local half of a stop: cancel the token so every await in the task
+    /// unwinds, and let it close the cursor. Returns immediately — it never
+    /// waits on the server, so the stop button is always instant.
     pub fn stop(&self) {
         self.cancel.cancel();
         // A parked feeder is waiting on the notify, not on the token.
@@ -284,17 +290,18 @@ impl FeederHandle {
 
 impl Drop for FeederHandle {
     /// Dropping the last handle to a feeder must not leave it pulling rows
-    /// nobody will ever read — that is the leak the whole design refuses.
+    /// nobody will ever read — that is a task leak that keeps burning the
+    /// socket, the server's resources, and our memory budget for nothing.
     fn drop(&mut self) {
         self.cancel.cancel();
         self.ctl.wake.notify_waiters();
     }
 }
 
-/// Spawn the feeder for one query (design §3.2).
+/// Spawn the feeder for one query.
 ///
 /// `cancel` should be the query's node in the session → connection → query
-/// token tree (§3.4); cancelling any ancestor stops this feeder too.
+/// token tree; cancelling any ancestor stops this feeder too.
 pub fn spawn_feeder(
     cursor: Box<dyn Cursor>,
     tx: mpsc::Sender<Batch>,
@@ -303,7 +310,8 @@ pub fn spawn_feeder(
 ) -> FeederHandle {
     assert!(
         tx.max_capacity() <= DATA_CHANNEL_BOUND,
-        "unbounded (or over-bounded) channel in the data path — design §3.2"
+        "unbounded (or over-bounded) channel in the data path: it would let the \
+         feeder queue chunks without limit and defeat backpressure"
     );
 
     let ctl = Arc::new(FeedCtl {
@@ -356,8 +364,8 @@ async fn run_feeder(
 
     let ending = pull_loop(&mut cursor, &tx, policy, &cancel, &ctl, &state).await;
 
-    // §3.3: the cursor is always released, on every exit path, so a cancelled
-    // query never leaves a server-side portal open.
+    // The cursor is always released, on every exit path, so a cancelled query
+    // never leaves a server-side portal open.
     if let Err(err) = cursor.close().await {
         tracing::warn!(%err, "closing cursor after feeder exit");
     }
@@ -560,7 +568,7 @@ mod tests {
         cond()
     }
 
-    /// **Test 1 — the test of the whole design (§3.2).**
+    /// **The backpressure test — the one that justifies the whole design.**
     ///
     /// An endless producer and a consumer that never reads. If the data path
     /// were unbounded the cursor would be called forever and RSS would track
@@ -623,8 +631,8 @@ mod tests {
         drop(feeder);
     }
 
-    /// **Test 2 — cancellation mid-stream (§3.3).** The feeder stops within one
-    /// batch, the state becomes `Cancelled`, and the cursor is closed so no
+    /// **Cancellation mid-stream.** The feeder stops within one batch, the
+    /// state becomes `Cancelled`, and the cursor is closed so no
     /// server-side portal is left open.
     #[tokio::test]
     async fn cancel_mid_stream_stops_within_one_batch_and_closes_the_cursor() {
@@ -685,9 +693,9 @@ mod tests {
         assert_eq!(feeder.state(), FeedState::Cancelled);
     }
 
-    /// **Test 3 — the soft row cap is honoured (§3.2).** `SELECT * FROM events`
-    /// on a 2 TB table stops at the cap with the banner state, instead of
-    /// streaming until something dies.
+    /// **The soft row cap is honoured.** `SELECT * FROM events` on a 2 TB
+    /// table stops at the cap with the banner state, instead of streaming
+    /// until something dies.
     #[tokio::test]
     async fn soft_row_cap_stops_the_stream() {
         let policy = FeederPolicy {
@@ -774,7 +782,8 @@ mod tests {
         assert_eq!(counters.cursor_closes(), 1);
     }
 
-    /// §3.2's adaptive sizing arithmetic, exactly as written in the design.
+    /// The adaptive sizing arithmetic, pinned exactly so a refactor cannot
+    /// quietly change how fast the fetch size moves.
     #[test]
     fn adaptive_fetch_sizing_matches_the_design_formula() {
         let p = FeederPolicy::default();

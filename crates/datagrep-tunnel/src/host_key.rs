@@ -1,10 +1,10 @@
-//! Host-key verification (design §3.8, security item 6: "SSH host-key
-//! pinning with an explicit change prompt").
+//! Host-key verification: pin the key on first use, and prompt explicitly if
+//! it ever changes.
 //!
 //! [`HostKeyPolicy`] is what [`crate::SshTunnel::connect`] consults during
 //! the handshake. [`TofuStore`] is the shipped implementation: trust On
 //! First Use, persisted to a flat file (`host:port base64-key`, one entry
-//! per pinned host — design brief's literal format). Three outcomes:
+//! per pinned host). Three outcomes:
 //!
 //! - **Known, matches** → the handshake proceeds silently.
 //! - **Unknown** → a [`HostKeyDecision`] is sent to whoever is listening on
@@ -82,7 +82,7 @@ impl HostKeyDecision {
 }
 
 /// Trust-on-first-use host key store, persisted as one `host:port
-/// base64-key` line per pinned host (design §3.8).
+/// base64-key` line per pinned host.
 pub struct TofuStore {
     path: PathBuf,
     // Raw SSH wire-format key bytes (`PublicKey::to_bytes`), keyed by the

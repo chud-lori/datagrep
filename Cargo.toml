@@ -9,7 +9,10 @@ rust-version = "1.80"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-# The full dependency set allowed in datagrep-api (design doc §3, crate rules).
+# The complete dependency set allowed in datagrep-api. The seam crate every
+# driver compiles against stays this small on purpose: adding a dependency here
+# adds it to every driver and to the FFI surface, so the list is a decision, not
+# a convenience.
 async-trait = "0.1"
 bitflags = { version = "2", features = ["serde"] }
 bytes = { version = "1", features = ["serde"] }
@@ -20,7 +23,7 @@ thiserror = "2"
 # Dev-only (tests). Never a runtime dependency of datagrep-api.
 serde_json = "1"
 
-# Release profile per design doc §5.1 / §9.5 / §9.9.
+# Release profile tuned for binary size and startup, both of which are budgeted.
 # panic stays "unwind": driver-panic isolation (a poisoned connection is evicted,
 # the app survives) and wgpu device-lost handling both depend on it.
 [profile.release]

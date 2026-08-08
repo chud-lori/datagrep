@@ -1,16 +1,15 @@
-//! Catalog: **lazy, one level per call** (design §3.1, §5.1).
+//! Catalog: **lazy, one level per call**.
 //!
-//! > "On connect issue **exactly one** cheap query: the database/schema list.
-//! > […] Nothing else. Expand-on-demand per node."
+//! On connect, issue **exactly one** cheap query: the database/schema list.
+//! Nothing else. Everything below that is expand-on-demand, per node.
 //!
 //! Neither function here recurses. `datagrep_catalog_children_json` is one
 //! `Catalog::children` call for one path, bounded by `ListOpts`; the
 //! disclosure triangle in the Swift outline view is what drives the next one.
 //!
-//! `enumeration` is the field that stops a `KEYS *` because someone clicked a
-//! triangle — design §3.1 calls it "the single most important catalog
-//! concept". Getting it into this ABI needs a detour; see
-//! [`enumeration_for_depth`].
+//! `enumeration` is the single most important concept in the catalog: it is
+//! what stops a `KEYS *` against prod because someone clicked a triangle.
+//! Getting it into this ABI needs a detour; see [`enumeration_for_depth`].
 
 use std::ffi::c_char;
 use std::sync::Arc;
@@ -155,7 +154,7 @@ async fn enumeration_for_depth(
 /// }
 /// ```
 ///
-/// Laziness contract (design §5.1): everything above — indexes included — is
+/// Laziness contract: everything above — indexes included — is
 /// fetched by the driver only when *this* call is made for *this* object,
 /// never during tree expansion and never on connect.
 ///
@@ -227,7 +226,8 @@ struct PromotedExtras {
     row_estimate: Option<i64>,
     size_bytes: Option<i64>,
     /// `inferred_schema` = "true" / `sampled_docs`: the honesty labels for
-    /// sampled engines (design risk #4: inference is never ground truth).
+    /// sampled engines — inference from a sample is never ground truth, and
+    /// the UI has to be able to say which one it is showing.
     inferred: bool,
     sampled_docs: Option<u64>,
     /// Everything else, in driver order.
@@ -334,7 +334,7 @@ fn detail_json(detail: &ObjectDetail) -> serde_json::Value {
             .collect()
     });
     // `null`, not `[]`: "this engine declares no schema" is a different fact
-    // from "this object has no columns" (design §3.1 `SCHEMA_DECLARED`).
+    // from "this object has no columns" (see the `SCHEMA_DECLARED` cap).
     // A sampled field list (Mongo) fills in only where nothing is declared,
     // and the top-level `inferred` flag is what keeps it honest.
     let columns = match (declared, &promoted.inferred_columns) {

@@ -1,5 +1,4 @@
-//! Error mapping and the deferred-TLS marker (design §3.1 seam, ticket note:
-//! "TLS deferred").
+//! Error mapping onto `datagrep_api::DbError`, plus the deferred-TLS marker.
 
 use datagrep_api::DbError;
 
@@ -9,8 +8,8 @@ use datagrep_api::DbError;
 /// the connection form is honest about what the engine supports) but
 /// `connect` fails fast with a clear "not yet implemented" error rather than
 /// silently downgrading to plaintext — a silent downgrade would be a security
-/// regression, and the design's own rule is "never lose bytes / never lie";
-/// the TLS analogue is "never silently drop encryption".
+/// regression. datagrep never loses bytes and never lies about them; the TLS
+/// analogue is never silently dropping encryption the user asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TlsMode {
     #[default]

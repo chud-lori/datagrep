@@ -1,7 +1,7 @@
 //! `datagrep-drv-mysql` — the MySQL/MariaDB driver behind `datagrep-api`'s
-//! `Driver` seam (design §3.1, §3.2, §3.3, §5.1).
+//! `Driver` seam.
 //!
-//! # Streaming (§3.2, §5.1 "Never buffer")
+//! # Streaming: never buffer a whole result
 //!
 //! `MySqlConnection::execute` never materializes a full result. Rows are
 //! pulled off the socket one at a time via `QueryResult::next()`, only while
@@ -22,7 +22,7 @@
 //! the in-flight result (see `actor.rs` module docs); the integration test
 //! `undrained_result_does_not_poison_connection` proves it.
 //!
-//! # Cancellation (§3.3)
+//! # Cancellation
 //!
 //! `KILL QUERY <connection_id>` from a second, pooled connection
 //! (`canceller.rs`); the pool opens no connection until the first cancel.
@@ -76,7 +76,7 @@
 //!   design, so this is the honest interpretation of `MULTI_STATEMENT`.
 //! - **Row identity for `EDITABLE_RESULTS` comes from column metadata**
 //!   (PRI_KEY_FLAG + single origin table), with a known composite-PK
-//!   partial-selection blind spot; the §3.8 exactly-one-row rollback in the
+//!   partial-selection blind spot; the exactly-one-row rollback in the
 //!   mutation path is the backstop (see `actor.rs::detect_identity`).
 //! - **`Op::Count { exact: false }` still runs a real `COUNT(*)`**; the
 //!   `table_rows` estimate is surfaced via `describe()` instead.

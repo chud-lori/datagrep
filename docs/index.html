@@ -143,6 +143,18 @@ cd ui/macos &amp;&amp; ./build-app.sh    <span class="c"># macOS app — no Xcod
         <h3>Free and open source</h3>
         <p>No tiers, no licence server, no account. It works offline, and the source is on <a href="https://github.com/chud-lori/datagrep">GitHub</a>.</p>
       </div>
+      <div class="card">
+        <h3>Schema, not just names</h3>
+        <p>Click a table and the detail pane shows its columns with types, nullability and primary keys, its indexes, and row&#8202;/&#8202;size estimates. For MongoDB the fields are inferred from a sample — and the pane says so, because a field missing from the sample may still exist in the collection.</p>
+      </div>
+      <div class="card">
+        <h3>Read-only that admits its limits</h3>
+        <p>Mark a connection read-only and the badge says exactly how real that promise is: <em>enforced by the server</em> only when the engine itself refuses writes, <em>blocked by datagrep only</em> when the guard is our client-side classifier. It never claims more protection than exists.</p>
+      </div>
+      <div class="card">
+        <h3>Query history, in both frontends</h3>
+        <p><kbd>&#8984;Y</kbd> opens every query you’ve run, searchable, in the app — the same history the CLI’s <code>history</code> command reads.</p>
+      </div>
     </div>
   </div>
 </section>
@@ -312,8 +324,8 @@ cd ui/macos &amp;&amp; ./build-app.sh    <span class="c"># macOS app — no Xcod
       </tbody>
     </table>
     <p class="foot">
-      The app is macOS-only today. In the CLI, PostgreSQL and SQLite are wired up now; the Redis and MongoDB
-      drivers currently surface through the app.
+      The app is macOS-only today, and it reaches all six engines. The CLI currently registers PostgreSQL and
+      SQLite only — Redis, MongoDB, MySQL&#8202;/&#8202;MariaDB and Elasticsearch surface through the app.
     </p>
   </div>
 </section>
@@ -322,7 +334,26 @@ cd ui/macos &amp;&amp; ./build-app.sh    <span class="c"># macOS app — no Xcod
 <section id="install">
   <div class="wrap">
     <p class="kicker">Install</p>
-    <h2>Build from source</h2>
+    <h2>Download, or build from source</h2>
+    <p class="section-intro">
+      Each <a href="https://github.com/chud-lori/datagrep/releases">release</a> ships
+      <code>datagrep-macos.dmg</code> — open it and drag <code>datagrep.app</code> onto the Applications shortcut.
+      The installer script does the same thing, and also installs the CLI:
+    </p>
+    <div class="step prose">
+      <div class="term">
+        <div class="term-title">terminal</div>
+        <pre><code>curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh | bash
+<span class="c"># → the CLI; add `-s -- --app` to install the app too</span></code></pre>
+      </div>
+      <p>
+        The app checks for a newer release once per launch and only tells you about it — it never downloads or
+        installs anything behind your back, and you can turn the check off. datagrep is not notarized (there is no
+        Apple Developer account behind it), so a browser-downloaded build needs one Ctrl-click → <strong>Open</strong>
+        on first launch; installing via the script avoids the prompt.
+      </p>
+    </div>
+    <h3>Build from source</h3>
     <p class="section-intro">
       Two commands, two artifacts. The macOS app needs <strong>no Xcode</strong> — the Command Line Tools are enough,
       because it builds with Swift Package Manager rather than <code>xcodebuild</code>.
@@ -421,7 +452,9 @@ SELECT * FROM events;</code></pre>
         nothing runs more than two chunks ahead. When the UI stops consuming — you stop scrolling — the driver stops
         reading its socket, the TCP window closes, and <em>the server stops producing</em>. Backpressure reaches all the
         way to the database, end to end. That is why memory stays flat at 174&nbsp;MB through a million-row result: the
-        rows you aren’t looking at simply never exist on your machine.
+        rows you aren’t looking at simply never exist on your machine. A row-number gutter keeps your place in the
+        stream, and when a result stops at the 500,000-row cap the grid says so in words — <em>“stopped at the
+        500,000-row limit — result incomplete”</em> — rather than showing a count that looks final.
       </p>
       <p>
         <strong>Schema browsing is lazy.</strong> Expanding a tree level costs one cheap query for that level — connecting
@@ -453,7 +486,7 @@ SELECT * FROM events;</code></pre>
       <li><strong>No inline cell editing.</strong> Every competitor in the table above has it. The plan is a staged-edit, review-before-commit model — because a naive implementation can update the wrong row, and that’s worse than not shipping it.</li>
       <li><strong>No autocomplete.</strong> Planned as a restrained, lazily indexed version — our study found a bad autocomplete generates more anger than none.</li>
       <li><strong>Elasticsearch is read-only</strong> — browsing and querying work, writes are not implemented.</li>
-      <li><strong>App-side gaps:</strong> no query-history panel (the CLI has <code>history</code> with search), no export UI (the CLI has <code>export</code>), no foreign-key click-through, no ER diagrams.</li>
+      <li><strong>App-side gaps:</strong> no export UI (the CLI has <code>export</code>), no foreign-key click-through, no ER diagrams.</li>
       <li><strong>macOS only.</strong> No Linux or Windows app today.</li>
     </ul>
     <p class="foot">
