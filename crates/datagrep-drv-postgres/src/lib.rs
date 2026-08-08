@@ -61,8 +61,9 @@
 //!   just its column list. `Op::Mutate` (which always runs read-write) is
 //!   unaffected. Documented in `connection.rs::execute_native_or_scan`.
 //! - **`Cursor::resume_token` always returns `None`** (ticket-specified for
-//!   v1): the portal dies with the wrapping transaction, which ends when the
-//!   cursor is dropped/closed, so there is nothing to resume into.
+//!   v1): the portal dies with the wrapping transaction, which ends as soon
+//!   as the cursor is drained, closed, or dropped, so there is nothing to
+//!   resume into.
 //! - **Postgres `NOTICE` messages are not surfaced** on `Batch::notices` —
 //!   the background `Connection` future's `AsyncMessage::Notice` stream
 //!   isn't wired up in v1.

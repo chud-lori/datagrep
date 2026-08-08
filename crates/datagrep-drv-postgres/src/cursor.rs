@@ -164,8 +164,8 @@ impl Cursor for PgCursor {
 
     fn resume_token(&self) -> Option<ResumeToken> {
         // v1: always None. The portal backing this cursor lives inside a
-        // transaction that ends when the cursor is dropped/closed (the
-        // ticket's own note) — there is nothing to resume *into*, since the
+        // transaction that ends as soon as the cursor is drained, closed or
+        // dropped — there is nothing to resume *into*, since the
         // server-side portal is gone the moment the wrapping transaction
         // commits or rolls back. Keyset-based resume (re-issuing `Op::Scan`
         // with a `resume` bound derived from the last row) is a `datagrep-core`
