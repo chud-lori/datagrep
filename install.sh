@@ -316,11 +316,11 @@ macOS Gatekeeper note — please read:
   datagrep is NOT notarized (no Apple Developer account); the app is ad-hoc
   signed. If macOS says on first launch:
 
-      "datagrep" cannot be opened because the developer cannot be verified.
+      "datagrep" Not Opened - Apple could not verify it is free of malware
+      (older macOS: "the developer cannot be verified").
 
-  the app is NOT broken. Either right-click (Ctrl-click) $PROG.app and choose
-  "Open" (then "Open" again — macOS remembers the choice), or clear the
-  quarantine flag:
+  the app is NOT broken. Open it once via System Settings > Privacy &
+  Security > "Open Anyway", or clear the quarantine flag yourself:
 
       xattr -dr com.apple.quarantine "$APPDIR/$PROG.app"
 

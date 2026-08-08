@@ -349,9 +349,22 @@ cd ui/macos &amp;&amp; ./build-app.sh    <span class="c"># macOS app — no Xcod
       </div>
       <p>
         The app checks for a newer release once per launch and only tells you about it — it never downloads or
-        installs anything behind your back, and you can turn the check off. datagrep is not notarized (there is no
-        Apple Developer account behind it), so a browser-downloaded build needs one Ctrl-click → <strong>Open</strong>
-        on first launch; installing via the script avoids the prompt.
+        installs anything behind your back, and you can turn the check off.
+      </p>
+      <p>
+        <strong>First launch from the DMG shows a warning.</strong> datagrep is not notarized — there is no Apple
+        Developer account behind it — so macOS says it “could not verify datagrep is free of malware”, and on recent
+        versions the only obvious button is <em>Move to Bin</em>. The app is fine; macOS simply cannot attribute it to
+        a registered developer. Open it once via
+        <strong>System Settings → Privacy &amp; Security → Open Anyway</strong>, or clear the download flag yourself:
+      </p>
+      <div class="term">
+        <div class="term-title">terminal</div>
+        <pre><code>xattr -dr com.apple.quarantine /Applications/datagrep.app</code></pre>
+      </div>
+      <p>
+        Ctrl-click → <strong>Open</strong> also worked on older macOS, but no longer does on macOS 15. Installing with
+        the script avoids all of this, because a file that was never downloaded by a browser is never quarantined.
       </p>
     </div>
     <h3>Build from source</h3>
