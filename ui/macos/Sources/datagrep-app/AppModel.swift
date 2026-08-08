@@ -372,6 +372,30 @@ final class AppModel: ObservableObject {
         if let n = ProcessInfo.processInfo.environment["DATAGREP_EDIT_FIXTURE"], !n.isEmpty {
             DispatchQueue.main.async { [weak self] in self?.editConnection(named: n) }
         }
+        // The sheet is its own window, so the app's `--screenshot` (which draws
+        // the main window) cannot see it. Same escape hatch as
+        // `DATAGREP_SCHEMA_SHOT`: render the view itself.
+        if let out = ProcessInfo.processInfo.environment["DATAGREP_EDIT_SHOT"] {
+            // A cached rep carries no window background of its own, so dark-mode
+            // label text would come out white on nothing. Pin the shot to aqua.
+            NSApp.appearance = NSAppearance(named: .aqua)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+                // `cacheDisplay`, not `ImageRenderer`: the sheet is full of
+                // AppKit-backed controls (TextField, Toggle, Picker) that an
+                // `ImageRenderer` draws as placeholder glyphs, which is exactly
+                // the part that has to be looked at.
+                let sheet = NSApp.windows.first { $0.isSheet && $0.isVisible }
+                if let content = sheet?.contentView,
+                    let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds)
+                {
+                    content.cacheDisplay(in: content.bounds, to: rep)
+                    if let png = rep.representation(using: .png, properties: [:]) {
+                        try? png.write(to: URL(fileURLWithPath: out))
+                    }
+                }
+                NSApp.terminate(nil)
+            }
+        }
 
         if let f = ProcessInfo.processInfo.environment["DATAGREP_SCHEMA_FIXTURE"],
             let text = try? String(contentsOfFile: f, encoding: .utf8),

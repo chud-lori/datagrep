@@ -62,7 +62,12 @@ struct SidebarView: View {
             Button("Edit Connection") { model.editActiveConnection() }
                 .keyboardShortcut("e", modifiers: .command)
                 .disabled(model.activeProfile.isEmpty)
-                .hidden()
+                // Not `.hidden()`: a hidden view is dropped from the responder
+                // chain in some releases and the shortcut goes with it.
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
         }
         .sheet(item: $model.editDraft) { draft in
             ConnectionEditorSheet(model: model, draft: draft)
@@ -248,8 +253,9 @@ private struct NodeLabel: View {
         .contextMenu {
             if node.isProfile {
                 Button("Set as Active Connection") { model.selectProfile(node.name) }
+                // No `.keyboardShortcut` here: ⌘E is already registered
+                // window-wide above, and registering it twice is ambiguous.
                 Button("Edit Connection…") { model.editConnection(named: node.name) }
-                    .keyboardShortcut("e", modifiers: .command)
                 Divider()
                 Toggle(
                     "Treat as Production",
