@@ -53,6 +53,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// The `MEASURE cold start` line is emitted from a forced first display, not
     /// from an `async` hop that would report a window that has not drawn yet.
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before the window exists, so the first frame is already in the right
+        // appearance and nothing flashes. The screenshot paths further down
+        // assign `NSApp.appearance` themselves and deliberately run after this,
+        // so they still win for the shot they are taking.
+        AppearanceMode.apply()
         buildMainMenu()
         Startup.mark("buildMainMenu")
 
@@ -293,6 +298,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         withAnimation(.smooth(duration: 0.22)) { model.showDetail.toggle() }
     }
 
+    /// Kept so the checkmark can be moved when the choice changes.
+    private var appearanceMenuItems: [NSMenuItem] = []
+
+    @objc func setAppearanceMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+            let mode = AppearanceMode(rawValue: raw)
+        else { return }
+        AppearanceMode.current = mode
+        AppearanceMode.apply(mode)
+        for item in appearanceMenuItems {
+            item.state = (item.representedObject as? String) == raw ? .on : .off
+        }
+    }
+
     @objc func toggleSidebar(_ sender: Any?) {
         withAnimation(.smooth(duration: 0.25)) { model.sidebarVisible.toggle() }
     }
@@ -381,6 +400,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             title: "Show Inspector", action: #selector(toggleDetail(_:)), keyEquivalent: "i")
         inspectorMenuItem.target = self
         viewMenu.addItem(inspectorMenuItem)
+
+        // Appearance lives in View rather than behind a Preferences window:
+        // there is no Preferences window yet, and inventing one to hold a
+        // single three-way choice would be more chrome than setting.
+        viewMenu.addItem(.separator())
+        let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
+        let appearanceMenu = NSMenu(title: "Appearance")
+        appearanceMenu.autoenablesItems = false
+        for mode in AppearanceMode.allCases {
+            let item = NSMenuItem(
+                title: mode.title, action: #selector(setAppearanceMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = (mode == AppearanceMode.current) ? .on : .off
+            appearanceMenu.addItem(item)
+        }
+        appearanceItem.submenu = appearanceMenu
+        appearanceMenuItems = appearanceMenu.items
+        viewMenu.addItem(appearanceItem)
+
         viewItem.submenu = viewMenu
         main.addItem(viewItem)
 
