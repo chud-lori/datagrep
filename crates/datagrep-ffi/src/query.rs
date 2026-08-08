@@ -568,10 +568,15 @@ pub unsafe extern "C" fn datagrep_query_free(q: *mut DatagrepQuery) {
             return;
         }
         // SAFETY: non-NULL (checked) and, per the contract, a pointer from
-        // `datagrep_query_run` not yet freed. Reclaiming the `Box` here is also
-        // what makes the header's ordering rule real: any `DatagrepRows` built
-        // from this query borrows buffers the query keeps alive, so freeing the
-        // query first would dangle them.
+        // `datagrep_query_run` not yet freed.
+        //
+        // The header's free-the-window-first rule is NOT about dangling
+        // buffers: a `DatagrepRows` holds `Arc` clones of the store's batches
+        // (`datagrep_core::store::WindowSlice`), so it stays valid on its own.
+        // The rule exists because this function closes the query, and a window
+        // outliving its closed query is a use the API does not define. Do not
+        // "simplify" it into a borrow — see `rows.rs`, which states the same
+        // invariant from the other side.
         let q = unsafe { Box::from_raw(q) };
         // Detach the callback before anything else: the Swift-owned `ctx` may
         // be freed the instant this returns, and firing into it would be a

@@ -88,7 +88,15 @@ impl DatagrepCore {
     /// bus) and quietly *succeeds* on a developer's Mac, leaving a junk
     /// credential in their login keychain on every run. Nothing these tests
     /// assert depends on a real keychain.
-    #[cfg(test)]
+    /// Gated on the `test-support` feature rather than `cfg(test)`: an
+    /// integration test in `tests/` compiles this crate as a dependency,
+    /// WITHOUT `cfg(test)`, so a `cfg(test)` constructor is invisible there.
+    /// `tests/hostile_input.rs` avoids the real keychain today only because
+    /// every profile it adds is a `sqlite://` URL with no secret field — the
+    /// first test to add `postgres://user:pw@host` would silently write a junk
+    /// credential into the developer's login keychain. Reachable here so that
+    /// stays a choice rather than an accident.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_store_in_memory_secrets(store: Store) -> Result<Self, String> {
         Self::build(store, SecretResolver::in_memory())
     }
@@ -407,7 +415,13 @@ pub unsafe extern "C" fn datagrep_core_free(core: *mut DatagrepCore) {
 /// Frees any `char*` this API returned.
 ///
 /// # Safety
-/// `s` must be NULL or a pointer this library returned, freed at most once.
+/// `s` must be NULL or an **owned** `char*` this library returned, freed at
+/// most once.
+///
+/// "Owned" is the whole contract, and the `char*` vs `const char*` split in
+/// `datagrep.h` is how to tell: `datagrep_rows_cell` returns a `const char*`
+/// borrowed from the row window's arena — interior, not NUL-terminated, and
+/// not separately allocated. Passing one here corrupts the heap.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_string_free(s: *mut c_char) {
     guard_quiet((), || {

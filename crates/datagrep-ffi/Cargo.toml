@@ -13,6 +13,13 @@ name = "datagrep_ffi"
 # `rlib` is also emitted so this crate's own integration tests can link it.
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Exposes `DatagrepCore::with_store_in_memory_secrets`, which serves keychain
+# refs from memory. Integration tests in `tests/` compile this crate without
+# `cfg(test)`, so a `cfg(test)`-only constructor is unreachable there and a
+# test that adds a password-bearing URL would hit the real OS keychain.
+test-support = ["datagrep-secrets/test-support"]
+
 [dependencies]
 datagrep-api = { path = "../datagrep-api" }
 datagrep-core = { path = "../datagrep-core" }

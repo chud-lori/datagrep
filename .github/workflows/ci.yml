@@ -73,15 +73,22 @@ jobs:
         with:
           tool: cargo-audit,cargo-deny
 
-      # The RustSec advisory database is a git clone that both tools share, and
-      # a cold clone costs more than the scans themselves. Key on run_id so the
-      # cache is rewritten every run and restore-keys picks up the most recent
-      # one; both tools `git pull` it on startup anyway, so a restored copy is
-      # refreshed rather than stale — the cache saves the clone, not the update.
+      # The RustSec advisory database is a git clone and a cold clone costs more
+      # than the scans themselves. The two tools do NOT share one directory:
+      # cargo-audit clones to ~/.cargo/advisory-db, cargo-deny to
+      # ~/.cargo/advisory-dbs (plural). Caching only the first leaves deny
+      # cold-cloning on every run, so both paths are listed.
+      #
+      # Key on run_id so the cache is rewritten every run and restore-keys picks
+      # up the most recent one; both tools `git pull` on startup anyway, so a
+      # restored copy is refreshed rather than stale — the cache saves the
+      # clone, not the update.
       - name: Cache RustSec advisory database
         uses: actions/cache@v4
         with:
-          path: ~/.cargo/advisory-db
+          path: |
+            ~/.cargo/advisory-db
+            ~/.cargo/advisory-dbs
           key: advisory-db-${{ github.run_id }}
           restore-keys: |
             advisory-db-

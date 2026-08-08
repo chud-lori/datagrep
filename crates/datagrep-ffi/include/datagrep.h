@@ -137,6 +137,10 @@ bool     datagrep_rows_pending(DatagrepRows*);      // true => not fetched yet, 
 
 // Cell text, borrowed — valid until datagrep_rows_free. NOT null-terminated:
 // use the returned length. UTF-8.
+//
+// NEVER pass this to datagrep_string_free(): it points into the window's arena
+// rather than being separately allocated, so freeing it corrupts the heap. The
+// `const char*` return type is the signal — only an owned `char*` is freeable.
 const char* datagrep_rows_cell(DatagrepRows*, uint64_t row, uint32_t col, size_t* len_out);
 
 // 0 = value, 1 = SQL NULL, 2 = ABSENT (field not present in the document),

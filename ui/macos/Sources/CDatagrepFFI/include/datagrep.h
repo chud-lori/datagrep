@@ -1,8 +1,11 @@
 /* datagrep C ABI — FROZEN. Do not edit without a matching change in crates/datagrep-ffi.
  *
  * Ownership rules (mirrored by the Swift wrappers in Sources/DatagrepKit):
- *   - every `char*` returned by value or via an out-param must be released
- *     with datagrep_string_free()
+ *   - every OWNED `char*` returned by value or via an out-param must be
+ *     released with datagrep_string_free(). Owned means `char*`; a
+ *     `const char*` is borrowed and must NOT be freed — datagrep_rows_cell
+ *     returns one, pointing into the row window's arena, and passing it to
+ *     datagrep_string_free() corrupts the heap.
  *   - every DatagrepCore, DatagrepQuery and DatagrepRows pointer must be released with its
  *     matching _free()
  *   - datagrep_rows_cell() returns a BORROWED, NOT nul-terminated pointer valid

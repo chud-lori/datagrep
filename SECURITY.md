@@ -76,12 +76,24 @@ those values across the C ABI into the Swift UI.
 - Every FFI entry point wraps its body in `catch_unwind`
   (`crates/datagrep-ffi/src/ffi_util.rs`). A Rust panic unwinding across the C
   ABI is undefined behaviour, so this is load-bearing, not defensive style.
-- Exactly one TLS stack. Every driver is rustls + ring, and `deny.toml` bans
+- One TLS stack, where there is one at all. The drivers that speak TLS —
+  Elasticsearch and MongoDB — use rustls + ring, and `deny.toml` bans
   `native-tls`/`openssl`/`openssl-sys` so a transitive default feature cannot
-  quietly add a second one with different defaults.
+  quietly add a second stack with different defaults.
 - Read-only mode reports whether it is *server-enforced* or *client-side*
-  (`ReadOnlyEnforcement`) rather than claiming a guarantee the server is not
-  actually making.
+  (`datagrep_api::Enforcement`) rather than claiming a guarantee the server is
+  not actually making.
+
+**Be clear about TLS, because this is the gap most likely to matter to you:**
+PostgreSQL and MySQL connections are **not encrypted**. The PostgreSQL driver
+implements no TLS at all and refuses any `sslmode` other than `disable`
+(`crates/datagrep-drv-postgres/src/driver.rs`); the MySQL driver compiles TLS
+out entirely (`mysql_async` `minimal` features). Both fail loudly rather than
+downgrading silently — an `sslmode=require` URL is rejected, not quietly
+honoured in plaintext — but the practical consequence stands: **do not connect
+datagrep to a PostgreSQL or MySQL server across an untrusted network without an
+SSH tunnel.** Tunnels are supported (`crates/datagrep-tunnel`) and are the
+supported answer until the drivers grow TLS.
 
 **What is not in place yet** (tracked in
 [issue #5](https://github.com/chud-lori/datagrep/issues/5)):
@@ -165,9 +177,15 @@ Two further properties of import worth knowing:
   listener fails closed — but a user who clicks through the prompt has pinned
   the attacker's key.
 
-**Not in place yet:** an import-time confirmation for `exec:` references, and a
-warning on `Replace`. Both are open work; until then the boxed rule above is
-the mitigation.
+**Not in place yet:** an import-time confirmation for `exec:` **and `env:`**
+references, and a warning on `Replace`. Both are open work; until then the
+boxed rule above is the mitigation.
+
+`env:` needs the same gate as `exec:` and for a quieter reason. An imported
+`secret_ref = "env:SOME_VAR"` pointed at a host the bundle also chose sends
+that variable's value to the attacker as the "credential" on first connect. No
+code runs, nothing looks wrong, and `validate_no_secrets` never sees it —
+because it inspects config *keys* and never `secret_ref` at all.
 
 ### Supply chain
 
