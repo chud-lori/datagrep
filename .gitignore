@@ -10,3 +10,6 @@ ui/macos/.bench
 ui/macos/*.app
 # scripts/make_dmg.sh output (same layout the release workflow uses)
 /dist
+
+# xtask is a standalone cargo project; its build dir is not covered by /target
+xtask/target/
