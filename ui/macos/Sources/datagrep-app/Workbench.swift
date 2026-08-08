@@ -303,107 +303,47 @@ private struct WorkbenchToolbar: ToolbarContent {
 
 // MARK: - new connection
 
-/// `datagrep_profiles_add` parses the URL and puts any inline password in the
-/// keychain, so this sheet is deliberately one text field: the URL is the
-/// profile format, and it is the thing that is committable to git.
+/// Add a connection by describing it — host, port, database, user, password —
+/// the way every other client asks, with the URL one disclosure away for
+/// anyone who already has one to paste.
+///
+/// The two representations are the same value (see `ConnectionForm`), and the
+/// same `ConnectionFieldsView` the Edit sheet uses is what draws them, so
+/// adding and editing a connection are visibly one design. `datagrep_profiles_add`
+/// still takes a URL and still lifts any password in it into the keychain
+/// before anything is written — that path is unchanged.
 struct NewConnectionSheet: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var form: ConnectionForm
 
-    private static let engines: [(id: String, scheme: String, example: String)] = [
-        ("postgres", "postgres://", "postgres://user@localhost/mydb"),
-        ("mysql", "mysql://", "mysql://user@localhost/mydb"),
-        ("sqlite", "sqlite://", "sqlite:///Users/me/data.db"),
-        ("redis", "redis://", "redis://localhost:6379"),
-        ("mongo", "mongodb://", "mongodb://localhost/mydb"),
-    ]
-
-    private var detectedDriver: String {
-        let u = model.newURL.lowercased()
-        return Self.engines.first { u.hasPrefix($0.scheme) }?.id ?? ""
+    init(model: AppModel) {
+        self.model = model
+        self.form = model.newForm
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 9) {
-                EngineIcon(detectedDriver, size: 22)
+                EngineIcon(form.engineID, size: 22)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("New Connection").font(.headline)
-                    Text(
-                        detectedDriver.isEmpty
-                            ? "Pick an engine, or paste a connection URL"
-                            : EngineStyle.displayName(for: detectedDriver)
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    Text(EngineStyle.displayName(for: form.engineID))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
 
-            // One tap fills in the scheme. Not a driver dropdown: the URL is
-            // the profile format, and a dropdown that disagreed with the URL
-            // would just be a second source of truth.
-            HStack(spacing: 6) {
-                ForEach(Self.engines, id: \.id) { e in
-                    Button {
-                        model.newURL = e.example
-                        if model.newName.isEmpty { model.newName = e.id }
-                    } label: {
-                        VStack(spacing: 4) {
-                            EngineIcon(e.id, size: 20)
-                            Text(EngineStyle.displayName(for: e.id))
-                                .font(.system(size: 9))
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(width: 74, height: 50)
-                        .background(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(
-                                    detectedDriver == e.id
-                                        ? Color.accentColor.opacity(0.16)
-                                        : Color(nsColor: .quaternaryLabelColor).opacity(0.3))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .strokeBorder(
-                                    detectedDriver == e.id
-                                        ? Color.accentColor : Color.clear, lineWidth: 1.5)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .animation(.smooth(duration: 0.18), value: detectedDriver)
+            EnginePicker(form: form)
 
-            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
-                GridRow {
-                    Text("Name").foregroundStyle(.secondary)
-                    TextField("local", text: $model.newName)
-                        .textFieldStyle(.roundedBorder)
-                }
-                GridRow {
-                    Text("URL").foregroundStyle(.secondary)
-                    TextField("sqlite:///Users/me/data.db", text: $model.newURL)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 11, design: .monospaced))
-                }
-            }
-            .frame(width: 430)
+            ConnectionFieldsView(form: form, name: $form.name)
 
-            Label(
-                "A password in the URL is moved into the macOS keychain before the profile is written — it never reaches disk in plain text.",
-                systemImage: "lock.fill"
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(width: 470, alignment: .leading)
+            ConnectionTestRow(state: model.newTest, enabled: form.isComplete) {
+                model.testNewConnection()
+            }
 
             if let err = model.newError {
-                Label(err, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(width: 470, alignment: .leading)
+                Callout(symbol: "exclamationmark.triangle.fill", tone: .error, text: err)
                     .transition(.opacity)
             }
 
@@ -411,15 +351,17 @@ struct NewConnectionSheet: View {
                 Spacer()
                 Button("Cancel") {
                     model.newError = nil
+                    model.newTest.clear()
                     model.showNewConnection = false
                 }
                 .keyboardShortcut(.cancelAction)
-                Button("Add") { model.addProfile(name: model.newName, url: model.newURL) }
+                Button("Add") { model.addProfileFromForm() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(model.newName.isEmpty || model.newURL.isEmpty)
+                    .disabled(form.name.isEmpty || !form.isComplete)
             }
         }
         .padding(20)
+        .frame(width: 512)
         .animation(.smooth(duration: 0.2), value: model.newError)
     }
 }
