@@ -257,7 +257,8 @@ async fn parse_and_split_url(
 ) -> Result<(&'static str, datagrep_api::ConnectionConfig, Option<String>), String> {
     let (driver_id, driver) = crate::drivers::driver_for_url(url).ok_or_else(|| {
         format!(
-            "could not tell which driver `{url}` is for (this build knows {})",
+            "could not tell which driver `{}` is for (this build knows {})",
+            datagrep_api::config::redact_url(url),
             crate::drivers::known_driver_ids().join(", ")
         )
     })?;
@@ -644,7 +645,8 @@ async fn test_connection(
     } else {
         let (id, driver) = crate::drivers::driver_for_url(url).ok_or_else(|| {
             format!(
-                "could not tell which driver `{url}` is for (this build knows {})",
+                "could not tell which driver `{}` is for (this build knows {})",
+                datagrep_api::config::redact_url(url),
                 crate::drivers::known_driver_ids().join(", ")
             )
         })?;
