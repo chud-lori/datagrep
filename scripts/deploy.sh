@@ -226,9 +226,21 @@ else
 fi
 
 # --- Commit + tag (LOCAL ONLY) -------------------------------------------
-blue "-> Committing"
+# Re-releasing at a version the files already carry is a legitimate case: the
+# first release, or a re-run after an aborted one. The bump is then a no-op,
+# `git commit` exits non-zero on an empty tree, and under `set -e` that used to
+# kill the script *before* tagging — printing "nothing to commit" and quietly
+# producing no tag and therefore no release.
 git add Cargo.toml Cargo.lock docs/latest.json "$BUILD_APP_SH" "$UPDATE_CHECK_SWIFT"
-git commit -m "Release $TAG"
+
+made_commit=false
+if git diff --cached --quiet; then
+  yellow "-> Nothing to commit; the files already carry $VERSION. Tagging HEAD."
+else
+  blue "-> Committing"
+  git commit -m "Release $TAG"
+  made_commit=true
+fi
 
 blue "-> Tagging"
 git tag -a "$TAG" -m "Release $TAG"
@@ -240,4 +252,10 @@ yellow "zip + DMG, uploads them, and re-asserts docs/latest.json):"
 echo
 echo "    git push origin main && git push origin $TAG"
 echo
-dim "To undo instead:  git tag -d $TAG && git reset --hard HEAD~1"
+if [ "$made_commit" = true ]; then
+  dim "To undo instead:  git tag -d $TAG && git reset --hard HEAD~1"
+else
+  # No release commit was made, so there is nothing to reset — and resetting
+  # here would throw away whatever unrelated commit HEAD points at.
+  dim "To undo instead:  git tag -d $TAG"
+fi
