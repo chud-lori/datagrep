@@ -94,7 +94,8 @@ crates/
   datagrep-tunnel/     SSH tunnels (in-process, no listening port)
 ui/macos/              the macOS app
 fixtures/              seeded benchmark datasets
-docs/                  design notes, testing, UX study
+notes/                 engineering notes — testing, UX study, reports
+                       (docs/ is left free for the GitHub Pages site)
 ```
 
 Rules that keep it honest: drivers never see Arrow or the UI, `datagrep-core`

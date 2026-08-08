@@ -106,9 +106,12 @@ pub fn spawn(
             }
         };
         run(txn, rx).await;
-        // `guard` (and with it, the lock on `self.client`) is held for the
-        // actor's whole lifetime — see the module doc: this is deliberate
-        // session pinning, not an oversight.
+        // `guard` (and with it, this one pooled session) is held for the
+        // actor's whole lifetime — see the module doc: deliberate session
+        // pinning, not an oversight. It is released here, when the actor
+        // returns; cursors ask for that explicitly via `ActorCmd::Rollback`
+        // as soon as their portal is drained, so an idle-but-alive cursor
+        // handle no longer holds a socket hostage.
     });
     tx
 }

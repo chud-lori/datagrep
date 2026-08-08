@@ -12,8 +12,28 @@ use datagrep_api::shape::{RowSchema, Shape};
 
 use crate::actor::{decode_rows, ActorCmd};
 
+/// Who owns the transaction this cursor's portal lives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionOwnership {
+    /// The cursor owns the transparent read-only transaction
+    /// [`crate::connection::PgConnection::execute`] wrapped around it, and
+    /// with it the pooled session that transaction pins. It must end that
+    /// transaction as soon as the portal is drained — see `pool.rs`.
+    Owned,
+    /// The portal lives inside a caller-visible
+    /// [`crate::transaction::PgTransaction`]. Draining the cursor must close
+    /// the portal but must never touch the caller's transaction.
+    Borrowed,
+}
+
 /// A streaming cursor over one bound portal (design §3.2: pulls exactly one
 /// chunk per `next_batch`, driver picks the real size within `hint`).
+///
+/// A cursor holds its pooled session only until the portal is **drained**
+/// (short or empty batch), or until it is explicitly closed — not until the
+/// handle is dropped. Holding it to drop was the deadlock reported in
+/// TEST-REPORT.md F2: a fully-read cursor still in scope blocked every later
+/// catalog lookup and query on the same connection, forever.
 pub struct PgCursor {
     cmd_tx: mpsc::Sender<ActorCmd>,
     portal_id: u64,
@@ -21,10 +41,17 @@ pub struct PgCursor {
     stats: CursorStats,
     exhausted: bool,
     closed: bool,
+    ownership: SessionOwnership,
+    released: bool,
 }
 
 impl PgCursor {
-    pub fn new(cmd_tx: mpsc::Sender<ActorCmd>, portal_id: u64, schema: RowSchema) -> Self {
+    pub fn new(
+        cmd_tx: mpsc::Sender<ActorCmd>,
+        portal_id: u64,
+        schema: RowSchema,
+        ownership: SessionOwnership,
+    ) -> Self {
         Self {
             cmd_tx,
             portal_id,
@@ -32,6 +59,44 @@ impl PgCursor {
             stats: CursorStats::default(),
             exhausted: false,
             closed: false,
+            ownership,
+            released: false,
+        }
+    }
+
+    /// Give the pooled session back. For an [`SessionOwnership::Owned`]
+    /// cursor that means rolling back the transparent read-only wrapper
+    /// transaction — which also drops the server-side `ACCESS SHARE` locks it
+    /// was holding, so a following `DROP TABLE` on the same relation does not
+    /// block. For a borrowed one it only closes the portal.
+    async fn release_session(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        match self.ownership {
+            SessionOwnership::Owned => {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                if self
+                    .cmd_tx
+                    .send(ActorCmd::Rollback { reply: reply_tx })
+                    .await
+                    .is_ok()
+                {
+                    // Wait for the rollback to land: the point is that the
+                    // *server* is done with this transaction before the next
+                    // statement runs, not merely that we asked.
+                    let _ = reply_rx.await;
+                }
+            }
+            SessionOwnership::Borrowed => {
+                let _ = self
+                    .cmd_tx
+                    .send(ActorCmd::CloseCursor {
+                        portal_id: self.portal_id,
+                    })
+                    .await;
+            }
         }
     }
 }
@@ -64,10 +129,12 @@ impl Cursor for PgCursor {
 
         if rows.is_empty() {
             self.exhausted = true;
+            self.release_session().await;
             return Ok(None);
         }
         // A short batch (fewer rows than requested) means the portal is
-        // drained; avoid one more pointless round trip next call.
+        // drained; avoid one more pointless round trip next call — and hand
+        // the pooled session straight back rather than waiting for drop.
         if rows.len() < max_rows as usize {
             self.exhausted = true;
         }
