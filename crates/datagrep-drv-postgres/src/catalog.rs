@@ -65,7 +65,7 @@ async fn require_current_database(client: &Client, db: &str) -> Result<(), DbErr
         .query_one("SELECT current_database()::text", &[])
         .await
         .map_err(map_pg_error)?;
-    let current: String = row.get(0);
+    let current: String = try_get_text(&row, 0)?;
     if current != db {
         return Err(DbError::Unsupported {
             feature: format!(
@@ -87,10 +87,32 @@ fn object_kind_of(relkind: &str) -> ObjectKind {
     }
 }
 
-/// `row.get()` **panics** on a type mismatch, which crashed the whole process
-/// on the `relkind` bug rather than surfacing a `DbError`. Catalog reads whose
-/// Postgres type we had to reason about go through here instead, so a future
-/// mismatch is a recoverable protocol error with the column index in it.
+/// `row.get()` **panics** on a type mismatch *and* on an out-of-range index,
+/// which crashed the whole process on the `relkind` bug rather than surfacing a
+/// `DbError`. Every catalog read goes through here instead.
+///
+/// The queries below are this driver's own SQL, so in principle the types are
+/// known — but "in principle" is exactly what the `relkind` bug disproved. The
+/// peer is whatever is answering on the Postgres wire: a version whose
+/// `pg_catalog` column changed type, a pooler, or something merely
+/// Postgres-shaped. None of those may be able to abort the process, so a
+/// mismatch becomes a recoverable protocol error naming the column.
+fn try_get<'a, T>(row: &'a tokio_postgres::Row, idx: usize) -> Result<T, DbError>
+where
+    T: tokio_postgres::types::FromSql<'a>,
+{
+    row.try_get::<_, T>(idx).map_err(|e| {
+        DbError::Protocol(format!(
+            "catalog query column {idx} did not decode as {} ({e}) — the server answered with a \
+             different shape than this pg_catalog query implies",
+            std::any::type_name::<T>()
+        ))
+    })
+}
+
+/// [`try_get`] for text columns, which carry the one mistake that actually
+/// happens: a `pg_catalog` column left without its `::text` cast is `"char"` or
+/// `name`, not `text`, and decodes as neither.
 fn try_get_text(row: &tokio_postgres::Row, idx: usize) -> Result<String, DbError> {
     row.try_get::<_, String>(idx).map_err(|e| {
         DbError::Protocol(format!(
@@ -244,9 +266,9 @@ impl Catalog for PgCatalog {
             )
             .await
             .map_err(map_pg_error)?;
-        for row in table_rows {
-            let name: String = row.get(0);
-            let schema: String = row.get(1);
+        for row in &table_rows {
+            let name = try_get_text(row, 0)?;
+            let schema = try_get_text(row, 1)?;
             out.push(Completion {
                 label: Arc::from(name),
                 kind: ObjectKind::Table,
@@ -263,8 +285,8 @@ impl Catalog for PgCatalog {
             )
             .await
             .map_err(map_pg_error)?;
-        for row in col_rows {
-            let name: String = row.get(0);
+        for row in &col_rows {
+            let name = try_get_text(row, 0)?;
             out.push(Completion {
                 label: Arc::from(name),
                 kind: ObjectKind::Column,
@@ -311,7 +333,10 @@ impl PgCatalog {
             )
             .await
             .map_err(map_pg_error)?;
-        let names: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
+        let names: Vec<String> = rows
+            .iter()
+            .map(|r| try_get_text(r, 0))
+            .collect::<Result<_, _>>()?;
         let last = names.last().cloned();
         let items = names
             .into_iter()
@@ -343,7 +368,10 @@ impl PgCatalog {
             )
             .await
             .map_err(map_pg_error)?;
-        let names: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
+        let names: Vec<String> = rows
+            .iter()
+            .map(|r| try_get_text(r, 0))
+            .collect::<Result<_, _>>()?;
         let last = names.last().cloned();
         let items = names
             .into_iter()
@@ -430,7 +458,10 @@ impl PgCatalog {
             )
             .await
             .map_err(map_pg_error)?;
-        let names: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
+        let names: Vec<String> = rows
+            .iter()
+            .map(|r| try_get_text(r, 0))
+            .collect::<Result<_, _>>()?;
         let last = names.last().cloned();
         let items = names
             .into_iter()
@@ -479,10 +510,10 @@ impl PgCatalog {
         let mut relkind = "r".to_string();
         let mut comment: Option<Arc<str>> = None;
         if let Some(row) = &size_row {
-            let reltuples: f64 = row.get(0);
+            let reltuples: f64 = try_get(row, 0)?;
             relkind = try_get_text(row, 1)?;
-            let size_bytes: i64 = row.get(2);
-            comment = row.get::<_, Option<String>>(3).map(Arc::from);
+            let size_bytes: i64 = try_get(row, 2)?;
+            comment = try_get::<Option<String>>(row, 3)?.map(Arc::from);
             extra.push((
                 Arc::from("row_estimate"),
                 Arc::from(format!("{}", reltuples.max(0.0) as i64)),
@@ -515,10 +546,10 @@ impl PgCatalog {
         let mut fields = Vec::with_capacity(col_rows.len());
         let mut defaults: Vec<(String, String)> = Vec::new();
         for row in &col_rows {
-            let name: String = row.get(0);
-            let oid: u32 = row.get(1);
-            let not_null: bool = row.get(2);
-            if let Some(default_expr) = row.get::<_, Option<String>>(3) {
+            let name = try_get_text(row, 0)?;
+            let oid: u32 = try_get(row, 1)?;
+            let not_null: bool = try_get(row, 2)?;
+            if let Some(default_expr) = try_get::<Option<String>>(row, 3)? {
                 defaults.push((name.clone(), default_expr));
             }
             let ty = tokio_postgres::types::Type::from_oid(oid);
@@ -580,7 +611,7 @@ impl PgCatalog {
             let mut idx = Vec::with_capacity(pk_row.len());
             let mut ok = true;
             for r in &pk_row {
-                let name: String = r.get(0);
+                let name = try_get_text(r, 0)?;
                 match fields.iter().position(|f| *f.name == name) {
                     Some(i) => idx.push(i as u32),
                     None => {
@@ -643,19 +674,19 @@ impl PgCatalog {
             .map_err(map_pg_error)?;
         let mut out: Vec<PgIndexInfo> = Vec::new();
         for row in &rows {
-            let name: String = row.get(0);
-            let column: String = row.get(7);
-            let descending: bool = row.get(8);
+            let name = try_get_text(row, 0)?;
+            let column = try_get_text(row, 7)?;
+            let descending: bool = try_get(row, 8)?;
             match out.last_mut() {
                 Some(last) if last.name == name => last.columns.push((column, descending)),
                 _ => out.push(PgIndexInfo {
                     name,
-                    unique: row.get(1),
-                    primary: row.get(2),
-                    method: row.get(3),
-                    filter: row.get(4),
-                    size_bytes: row.get(5),
-                    definition: row.get(6),
+                    unique: try_get(row, 1)?,
+                    primary: try_get(row, 2)?,
+                    method: try_get_text(row, 3)?,
+                    filter: try_get(row, 4)?,
+                    size_bytes: try_get(row, 5)?,
+                    definition: try_get_text(row, 6)?,
                     columns: vec![(column, descending)],
                 }),
             }
