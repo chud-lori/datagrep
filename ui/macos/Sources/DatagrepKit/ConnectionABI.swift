@@ -129,13 +129,25 @@ public enum ProfileABI {
         return unsafeBitCast(p, to: T.self)
     }
 
+    /// `datagrep_connection_test_json(core, name, url, err_out)`. Either
+    /// selector may be NULL; see the Rust doc comment.
+    public typealias TestFn = @convention(c) (
+        OpaquePointer?, UnsafePointer<CChar>?, UnsafePointer<CChar>?,
+        UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+    ) -> UnsafeMutablePointer<CChar>?
+
     static let update: UpdateFn? = lookup("datagrep_profiles_update", as: UpdateFn.self)
     static let fetch: GetFn? = lookup("datagrep_profiles_get_json", as: GetFn.self)
+    static let test: TestFn? = lookup("datagrep_connection_test_json", as: TestFn.self)
 
     /// Can this build save an edited connection at all?
     public static var canEdit: Bool { update != nil }
     /// Can it read one back field-by-field to pre-populate the sheet?
     public static var canPrefill: Bool { fetch != nil }
+    /// Can it dial a connection and report what answered? Same `dlsym` reason
+    /// as the two above: the stub engine has no such symbol, and a Test button
+    /// that links against nothing is worse than one that is not offered.
+    public static var canTest: Bool { test != nil }
 
     /// Exactly why the editor is disabled, in words a user can act on.
     public static var unavailableReason: String? {
@@ -167,12 +179,18 @@ public struct ProfileDetail: Sendable, Hashable {
     /// Keys the engine actually sent. The sheet greys out what it cannot round
     /// trip instead of showing an empty box that looks like a cleared value.
     public var reported: Set<String>
+    /// Host / port / database / user, rebuilt from the engine's parsed
+    /// `config`. `datagrep_profiles_get_json` reports no `url` key at all, so
+    /// this is the only way the editor learns what the connection points at —
+    /// without it the sheet can only say it cannot read the connection back.
+    public var fields: ConnectionFields?
 
     public init(
         name: String, url: String = "", driver: String = "", env: String = "dev",
         readOnly: Bool = false, confirmWrites: Bool = false, autoLimit: Int? = nil,
         idleTimeoutS: Int? = nil, color: String? = nil, hasSecret: Bool = false,
-        enforcement: ReadOnlyEnforcement = .unknown, reported: Set<String> = []
+        enforcement: ReadOnlyEnforcement = .unknown, reported: Set<String> = [],
+        fields: ConnectionFields? = nil
     ) {
         self.name = name
         self.url = url
@@ -186,6 +204,7 @@ public struct ProfileDetail: Sendable, Hashable {
         self.hasSecret = hasSecret
         self.enforcement = enforcement
         self.reported = reported
+        self.fields = fields
     }
 
     /// Decodes whatever subset of the documented shape is present. An engine
@@ -206,6 +225,16 @@ public struct ProfileDetail: Sendable, Hashable {
         d.enforcement = ReadOnlyEnforcement(
             abi: ProfileDetail.string(dict, "enforcement")
                 ?? ProfileDetail.string(dict, "read_only_enforcement"))
+        if let config = dict["config"] as? [String: Any] {
+            d.fields = ConnectionFields.fromConfig(driver: d.driver, config: config)
+            // The URL is derived, never stored, so an engine that stops
+            // reporting `config` degrades to the old "we do not know" wording
+            // instead of showing a URL assembled out of nothing.
+            if d.url.isEmpty, let rendered = d.fields?.url(), !rendered.isEmpty {
+                d.url = rendered
+                d.reported.insert("url")
+            }
+        }
         return d
     }
 
@@ -250,9 +279,79 @@ public struct ProfilePatch {
     }
 }
 
+/// What a Test Connection actually found. Built only from a handshake that
+/// succeeded — a failure is thrown, with the driver's own message, because
+/// "could not connect" with the reason removed is the thing the button exists
+/// to replace.
+public struct ConnectionTestResult: Sendable, Hashable {
+    public let driver: String
+    public let product: String
+    public let version: String
+    public let details: [(String, String)]
+    public let elapsedMs: UInt64
+
+    /// One line for the callout: what answered, and how long it took.
+    public var headline: String {
+        var s = product.isEmpty ? EngineStyle.displayName(for: driver) : product
+        if !version.isEmpty, version.lowercased() != "unknown" { s += " \(version)" }
+        return "Connected to \(s) in \(elapsedMs) ms"
+    }
+
+    public static func == (a: ConnectionTestResult, b: ConnectionTestResult) -> Bool {
+        a.driver == b.driver && a.product == b.product && a.version == b.version
+            && a.elapsedMs == b.elapsedMs && a.details.map(\.0) == b.details.map(\.0)
+            && a.details.map(\.1) == b.details.map(\.1)
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(driver)
+        hasher.combine(product)
+        hasher.combine(version)
+    }
+}
+
 // MARK: - calls
 
 extension DatagrepCoreHandle {
+    /// Dial once and report what answered. Blocking, and it opens a socket —
+    /// call it from a background queue, never the main one.
+    ///
+    /// Pass a saved profile's `name` to test what a query would really run
+    /// against (keychain secret included), or a `url` to test something that
+    /// has not been saved yet, which is what the New Connection sheet has.
+    public func testConnection(name: String? = nil, url: String? = nil) throws
+        -> ConnectionTestResult
+    {
+        guard let test = ProfileABI.test else {
+            throw DatagrepError(
+                "This build of the datagrep engine has no `datagrep_connection_test_json` call, so a connection cannot be tested from here. Update the engine."
+            )
+        }
+        let json = try datagrepTry { errOut in
+            // Both arguments are passed every time; the Rust side treats an
+            // empty string exactly as it treats NULL, so there is no nested
+            // optional-withCString dance to get wrong.
+            (name ?? "").withCString { n in
+                (url ?? "").withCString { u in takeOwnedString(test(raw, n, u, errOut)) }
+            }
+        }
+        guard let dict = jsonObject(json) as? [String: Any] else {
+            throw DatagrepError("datagrep_connection_test_json did not return an object")
+        }
+        let details = (dict["details"] as? [[Any]] ?? []).compactMap { pair -> (String, String)? in
+            guard pair.count == 2, let k = pair[0] as? String, let v = pair[1] as? String else {
+                return nil
+            }
+            return (k, v)
+        }
+        return ConnectionTestResult(
+            driver: dict["driver"] as? String ?? "",
+            product: dict["product"] as? String ?? "",
+            version: dict["version"] as? String ?? "",
+            details: details,
+            elapsedMs: (dict["elapsed_ms"] as? NSNumber)?.uint64Value ?? 0)
+    }
+
     /// Full detail for one profile, for pre-populating the editor.
     ///
     /// Falls back to the list call when `datagrep_profiles_get_json` is absent,
