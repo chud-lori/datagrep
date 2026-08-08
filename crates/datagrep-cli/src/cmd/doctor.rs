@@ -103,7 +103,7 @@ mod tests {
 
     #[tokio::test]
     async fn doctor_is_clean_with_zero_profiles() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         let args = DoctorArgs { profile: None };
         run(&ctx, &args).await.expect("doctor should not error");
     }
