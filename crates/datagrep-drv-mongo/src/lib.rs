@@ -35,12 +35,11 @@
 //!
 //! # Known `datagrep-api` gaps found while implementing this driver
 //!
-//! 1. **`Mutation::Update`/`Delete::key` carries `key: Vec<Value>` with no
-//!    field names**, the same gap `datagrep-drv-postgres` reports. For MongoDB
-//!    there is no `RowSchema::identity` at all on `Shape::Documents` to fall
-//!    back on, so the only sound reading is "the `_id` value" — this driver
-//!    requires `key.len() == 1` and refuses anything else
-//!    (`connection.rs::id_filter`).
+//! 1. **(Resolved.)** `Mutation::Update`/`Delete::key` now carries the row
+//!    identity as named `(FieldPath, Value)` pairs, so the filter compiles
+//!    directly from the mutation (`connection.rs::id_filter_from_key`) —
+//!    typically `{_id: …}`, with no "a single bare value must mean `_id`"
+//!    assumption left anywhere.
 //! 2. **No portable way to express "route reads to a secondary" or any
 //!    other genuinely server-enforced read-only mode** through
 //!    `Connection::set_read_only`. This driver returns `Enforcement::Client`

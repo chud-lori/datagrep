@@ -39,3 +39,6 @@ bytes = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# Tests parse the catalog's hand-emitted index/inferred-column JSON to pin
+# its shape. Dev-only on purpose — the driver's own runtime set is unchanged.
+serde_json = { workspace = true }

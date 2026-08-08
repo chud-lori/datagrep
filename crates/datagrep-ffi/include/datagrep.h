@@ -24,6 +24,27 @@ bool  datagrep_profiles_remove(DatagrepCore*, const char* name, char** err_out);
 // path_json is a JSON array of path segments, e.g. ["main"] or [] for roots.
 // Returns JSON: [{"name":..,"kind":..,"has_children":bool,"enumeration":"cheap"|"scan_only"|"paged"|"on_demand"}, ...]
 char* datagrep_catalog_children_json(DatagrepCore*, const char* profile, const char* path_json, char** err_out);
+// Full detail for one object. Fetched lazily — columns, indexes and stats are
+// read only when THIS call is made for THIS path, never on tree expansion.
+// Returns JSON:
+// {"path":[..],"name":..,"kind":..,"has_children":bool,"comment":string|null,
+//  "columns":[{"name":..,"ordinal":int,"native_type":string|null,
+//              "logical_type":string|null,"type":string,       // legacy alias
+//              "nullable":bool,"default":string|null,"primary_key":bool,
+//              "unique":bool,"indexed":bool,"auto_generated":bool,
+//              "presence_ratio":double}]                       // sampled engines only
+//            | null,                    // null = engine declares no schema
+//  "indexes":[{"name":..,"columns":[{"name":string|null,"order":"asc"|"desc"|null}],
+//              "unique":bool,"primary":bool,"type":"btree"|"gin"|"text"|..,
+//              "partial":bool,"filter":string|null,"size_bytes":i64|null,
+//              "definition":string|null,"sparse":bool,
+//              "expire_after_seconds":i64|null}]
+//            | null,                    // null = not reported; [] = none exist
+//  "row_estimate":i64|null,             // estimate, never a COUNT(*)
+//  "size_bytes":i64|null,
+//  "inferred":bool,                     // true = columns come from sampling
+//  "sampled_docs":u64|null,             // sample size behind `inferred`
+//  "extra":[[k,v],..]}                  // engine-specific display pairs
 char* datagrep_catalog_describe_json(DatagrepCore*, const char* profile, const char* path_json, char** err_out);
 
 // ---- query -----------------------------------------------------------

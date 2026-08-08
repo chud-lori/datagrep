@@ -24,14 +24,11 @@
 //!    bits on `datagrep_api::caps::Caps` (`crates/datagrep-api/src/caps.rs` defines
 //!    only ten flags). `driver::PG_CAPS` sets every flag that does exist and
 //!    applies to Postgres.
-//! 2. **`Mutation::Update`/`Delete` carry `key: Vec<Value>` with no field
-//!    names.** `sets: Vec<(FieldPath, Value)>` pairs each SET value with a
-//!    column, but the WHERE-clause identity values are bare, positional
-//!    `Value`s. This driver resolves the primary-key column order with a
-//!    live `pg_index` lookup per mutation (`connection.rs::resolve_key_fields`)
-//!    — correct, but an extra round trip a schema-aware caller shouldn't need
-//!    to force, and silently wrong if a future caller's positional order
-//!    doesn't match Postgres's own primary-key column order.
+//! 2. **(Resolved.)** `Mutation::Update`/`Delete` now carry their row
+//!    identity as named `(FieldPath, Value)` pairs — the same shape as
+//!    `sets` — so `sql::compile_mutation` builds the WHERE clause straight
+//!    from the mutation. The per-mutation live `pg_index` lookup this driver
+//!    used to need is gone.
 //! 3. **`RowSchema` has no nullability signal for prepared-statement
 //!    metadata.** Postgres's `RowDescription` (what `Statement::columns()`
 //!    is built from) never reports nullability, so `FieldFlags::NULLABLE` is

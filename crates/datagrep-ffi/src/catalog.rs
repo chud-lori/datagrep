@@ -115,7 +115,57 @@ async fn enumeration_for_depth(
     levels[depth.min(levels.len() - 1)].enumeration
 }
 
-/// Full detail for one object — columns, comment, engine-specific extras.
+/// Full detail for one object — columns, indexes, stats, comment,
+/// engine-specific extras.
+///
+/// ## Payload schema (one shape for every engine)
+///
+/// ```json
+/// {
+///   "path": ["main", "users"],
+///   "name": "users",
+///   "kind": "table",
+///   "has_children": true,
+///   "comment": "table comment" | null,
+///   "columns": [
+///     {"name": "id", "ordinal": 0,
+///      "native_type": "INTEGER" | null, "logical_type": "I64" | null,
+///      "type": "I64",                      // legacy alias of logical_type
+///      "nullable": false, "default": "18" | null,
+///      "primary_key": true, "unique": false, "indexed": true,
+///      "auto_generated": false,
+///      "presence_ratio": 0.66}              // sampled engines only
+///   ] | null,                               // null = engine declares no schema
+///   "indexes": [
+///     {"name": "idx_users_email",
+///      "columns": [{"name": "email", "order": "asc"|"desc"|null}],
+///      "unique": true, "primary": false,
+///      "type": "btree" | "gin" | "text" | "2dsphere" | …,
+///      "partial": false, "filter": "(deleted_at IS NULL)" | null,
+///      "size_bytes": 16384 | null,
+///      "definition": "CREATE UNIQUE INDEX …" | null,
+///      "sparse": false, "expire_after_seconds": 3600 | null}
+///   ] | null,                               // null = engine did not report;
+///                                           // [] = engine says there are none
+///   "row_estimate": 42 | null,              // estimate, never a COUNT(*)
+///   "size_bytes": 8192 | null,
+///   "inferred": false,                      // true = columns come from sampling
+///   "sampled_docs": 500 | null,             // sample size behind `inferred`
+///   "extra": [["k","v"], …]                 // remaining engine-specific pairs
+/// }
+/// ```
+///
+/// Laziness contract (design §5.1): everything above — indexes included — is
+/// fetched by the driver only when *this* call is made for *this* object,
+/// never during tree expansion and never on connect.
+///
+/// Columns and stats come from the driver's typed `ObjectDetail`; indexes,
+/// defaults, and inferred columns ride the `ObjectDetail::extra` string
+/// pairs under reserved keys (`indexes`, `column_defaults`,
+/// `inferred_columns`, `row_estimate`, `size_bytes`, `inferred_schema`,
+/// `sampled_docs`) because `datagrep-api` has no structured field for them yet —
+/// this function consumes those pairs and promotes them; unrecognized (or
+/// unparseable) pairs stay visible in `extra` rather than being dropped.
 ///
 /// **CoreApi gap.** `CoreApi` wraps `Catalog::children` (as `list_catalog`)
 /// but not `describe`/`infer_shape`/`complete`, so this goes through
@@ -161,40 +211,152 @@ async fn describe(core: &CoreInner, profile: &str, path: ObjectPath) -> Result<S
         .map_err(|e| format!("could not encode the object detail: {e}"))
 }
 
+/// The reserved `ObjectDetail::extra` keys promoted out of the pair list by
+/// [`detail_json`], separated from the display-only pairs that pass through.
+#[derive(Default)]
+struct PromotedExtras {
+    /// `indexes`: a JSON array (`[]` is an honest "none"; absent = engine
+    /// did not report).
+    indexes: Option<serde_json::Value>,
+    /// `inferred_columns`: sample-derived column list, same shape as the
+    /// declared one, used only when the engine declares no schema.
+    inferred_columns: Option<serde_json::Value>,
+    /// `column_defaults`: `{column: default SQL text}` merged into `columns`.
+    column_defaults: serde_json::Map<String, serde_json::Value>,
+    /// `row_estimate` / `size_bytes`: integer strings promoted to numbers.
+    row_estimate: Option<i64>,
+    size_bytes: Option<i64>,
+    /// `inferred_schema` = "true" / `sampled_docs`: the honesty labels for
+    /// sampled engines (design risk #4: inference is never ground truth).
+    inferred: bool,
+    sampled_docs: Option<u64>,
+    /// Everything else, in driver order.
+    rest: Vec<(String, String)>,
+}
+
+fn promote_extras(extra: &[(std::sync::Arc<str>, std::sync::Arc<str>)]) -> PromotedExtras {
+    let mut out = PromotedExtras::default();
+    for (k, v) in extra {
+        // A value that fails to parse falls through into `rest`: better an
+        // ugly-but-visible pair than a silently dropped fact.
+        let mut unparsed = true;
+        match k.as_ref() {
+            "indexes" => {
+                if let Ok(val @ serde_json::Value::Array(_)) = serde_json::from_str(v) {
+                    out.indexes = Some(val);
+                    unparsed = false;
+                }
+            }
+            "inferred_columns" => {
+                if let Ok(val @ serde_json::Value::Array(_)) = serde_json::from_str(v) {
+                    out.inferred_columns = Some(val);
+                    unparsed = false;
+                }
+            }
+            "column_defaults" => {
+                if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(v) {
+                    out.column_defaults = map;
+                    unparsed = false;
+                }
+            }
+            "row_estimate" => {
+                if let Ok(n) = v.parse::<i64>() {
+                    out.row_estimate = Some(n);
+                    unparsed = false;
+                }
+            }
+            "size_bytes" => {
+                if let Ok(n) = v.parse::<i64>() {
+                    out.size_bytes = Some(n);
+                    unparsed = false;
+                }
+            }
+            "inferred_schema" => {
+                out.inferred = v.as_ref() == "true";
+                unparsed = false;
+            }
+            "sampled_docs" => {
+                if let Ok(n) = v.parse::<u64>() {
+                    out.sampled_docs = Some(n);
+                    unparsed = false;
+                }
+            }
+            _ => {}
+        }
+        if unparsed {
+            out.rest.push((k.to_string(), v.to_string()));
+        }
+    }
+    out
+}
+
 /// The describe payload's shape is this crate's to choose — the frozen header
 /// pins the children JSON but leaves describe open. Hand-shaped rather than
 /// `serde(ObjectDetail)` so the Swift side sees `"nullable": true` instead of
-/// a bitflags integer it would have to decode.
+/// a bitflags integer it would have to decode. The full schema is documented
+/// on [`datagrep_catalog_describe_json`].
 fn detail_json(detail: &ObjectDetail) -> serde_json::Value {
-    let columns: Vec<_> = detail
-        .schema
-        .iter()
-        .flat_map(|s| s.fields.iter())
-        .map(|f| {
-            json!({
-                "name": f.name,
-                "type": format!("{:?}", f.logical),
-                "native_type": f.native_type,
-                "nullable": f.flags.contains(FieldFlags::NULLABLE),
-                "primary_key": f.flags.contains(FieldFlags::PRIMARY_KEY),
-                "unique": f.flags.contains(FieldFlags::UNIQUE),
-                "auto_generated": f.flags.contains(FieldFlags::AUTO_GENERATED),
-                "indexed": f.flags.contains(FieldFlags::INDEXED),
+    let promoted = promote_extras(&detail.extra);
+
+    // Declared columns from the typed RowSchema, enriched with the ordinal,
+    // the default expression (merged by name from `column_defaults`), and
+    // the identity: a driver may report the primary key as
+    // `RowSchema::identity` without also setting the per-field flag, and the
+    // two must agree in the payload.
+    let declared: Option<Vec<serde_json::Value>> = detail.schema.as_ref().map(|s| {
+        let identity: Vec<usize> = s
+            .identity
+            .as_ref()
+            .map(|i| i.field_indices.iter().map(|&i| i as usize).collect())
+            .unwrap_or_default();
+        s.fields
+            .iter()
+            .enumerate()
+            .map(|(ordinal, f)| {
+                let logical = format!("{:?}", f.logical);
+                json!({
+                    "name": f.name,
+                    "ordinal": ordinal,
+                    "native_type": f.native_type,
+                    "logical_type": logical,
+                    // Legacy alias kept for existing consumers of the
+                    // pre-index payload.
+                    "type": logical,
+                    "nullable": f.flags.contains(FieldFlags::NULLABLE),
+                    "default": promoted.column_defaults.get(f.name.as_ref()),
+                    "primary_key": f.flags.contains(FieldFlags::PRIMARY_KEY)
+                        || identity.contains(&ordinal),
+                    "unique": f.flags.contains(FieldFlags::UNIQUE),
+                    "auto_generated": f.flags.contains(FieldFlags::AUTO_GENERATED),
+                    "indexed": f.flags.contains(FieldFlags::INDEXED),
+                })
             })
-        })
-        .collect();
+            .collect()
+    });
+    // `null`, not `[]`: "this engine declares no schema" is a different fact
+    // from "this object has no columns" (design §3.1 `SCHEMA_DECLARED`).
+    // A sampled field list (Mongo) fills in only where nothing is declared,
+    // and the top-level `inferred` flag is what keeps it honest.
+    let columns = match (declared, &promoted.inferred_columns) {
+        (Some(cols), _) => serde_json::Value::Array(cols),
+        (None, Some(inferred)) => inferred.clone(),
+        (None, None) => serde_json::Value::Null,
+    };
+
     json!({
         "path": detail.node.path.parts().iter().map(|p| p.to_string()).collect::<Vec<_>>(),
         "name": leaf_name(&detail.node),
         "kind": kind_str(detail.node.kind),
         "has_children": detail.node.has_children,
         "comment": detail.node.comment,
-        // `null`, not `[]`: "this engine declares no schema" is a different
-        // fact from "this object has no columns" (design §3.1
-        // `SCHEMA_DECLARED`), and the detail pane should be able to say so.
-        "columns": detail.schema.as_ref().map(|_| columns),
-        "extra": detail
-            .extra
+        "columns": columns,
+        "indexes": promoted.indexes,
+        "row_estimate": promoted.row_estimate,
+        "size_bytes": promoted.size_bytes,
+        "inferred": promoted.inferred,
+        "sampled_docs": promoted.sampled_docs,
+        "extra": promoted
+            .rest
             .iter()
             .map(|(k, v)| json!([k, v]))
             .collect::<Vec<_>>(),
@@ -274,6 +436,152 @@ mod tests {
             "main.users"
         );
         assert!(object_path("nonsense").is_err());
+    }
+
+    fn detail_with(
+        schema: Option<datagrep_api::shape::RowSchema>,
+        extra: Vec<(&str, &str)>,
+    ) -> ObjectDetail {
+        ObjectDetail {
+            node: ObjectNode {
+                path: ObjectPath::new(vec![Arc::from("main"), Arc::from("users")]),
+                kind: ObjectKind::Table,
+                has_children: true,
+                comment: None,
+            },
+            schema,
+            extra: extra
+                .into_iter()
+                .map(|(k, v)| (Arc::from(k), Arc::from(v)))
+                .collect(),
+        }
+    }
+
+    fn users_schema() -> datagrep_api::shape::RowSchema {
+        use datagrep_api::shape::{FieldDef, Identity, LogicalType, RowSchema};
+        RowSchema {
+            fields: vec![
+                FieldDef {
+                    name: Arc::from("id"),
+                    logical: LogicalType::I64,
+                    flags: FieldFlags::empty(),
+                    native_type: Some(Arc::from("INTEGER")),
+                },
+                FieldDef {
+                    name: Arc::from("age"),
+                    logical: LogicalType::I64,
+                    flags: FieldFlags::NULLABLE,
+                    native_type: Some(Arc::from("INTEGER")),
+                },
+            ],
+            // Identity names `id` as the key without the per-field flag set —
+            // the payload must reconcile the two spellings.
+            identity: Some(Identity {
+                field_indices: vec![0],
+            }),
+        }
+    }
+
+    /// The full describe contract: reserved extras are promoted (and removed
+    /// from `extra`), defaults merge into columns by name, ordinals appear,
+    /// and identity-only primary keys still flag their column.
+    #[test]
+    fn detail_json_promotes_reserved_extras_into_the_documented_shape() {
+        let detail = detail_with(
+            Some(users_schema()),
+            vec![
+                (
+                    "indexes",
+                    r#"[{"name":"idx_a","columns":[{"name":"age","order":"asc"}],"unique":true,"primary":false,"type":"btree","partial":false,"filter":null,"size_bytes":null,"definition":null,"sparse":false,"expire_after_seconds":null}]"#,
+                ),
+                ("column_defaults", r#"{"age":"18"}"#),
+                ("row_estimate", "42"),
+                ("size_bytes", "8192"),
+                ("engine", "sqlite"),
+            ],
+        );
+        let v = detail_json(&detail);
+
+        assert_eq!(v["indexes"][0]["name"], "idx_a");
+        assert_eq!(v["indexes"][0]["unique"], true);
+        assert_eq!(v["row_estimate"], 42);
+        assert_eq!(v["size_bytes"], 8192);
+        assert_eq!(v["inferred"], false);
+        assert_eq!(v["sampled_docs"], serde_json::Value::Null);
+
+        let cols = v["columns"].as_array().expect("declared columns");
+        assert_eq!(cols[0]["name"], "id");
+        assert_eq!(cols[0]["ordinal"], 0);
+        assert_eq!(
+            cols[0]["primary_key"], true,
+            "identity indices count as primary even without the field flag"
+        );
+        assert_eq!(cols[0]["default"], serde_json::Value::Null);
+        assert_eq!(cols[1]["name"], "age");
+        assert_eq!(cols[1]["default"], "18");
+        assert_eq!(cols[1]["logical_type"], "I64");
+        assert_eq!(cols[1]["type"], "I64", "legacy alias kept");
+
+        // Promoted pairs leave `extra`; unrecognized ones stay.
+        let extra = v["extra"].as_array().expect("extra array");
+        assert_eq!(extra.len(), 1);
+        assert_eq!(extra[0][0], "engine");
+    }
+
+    /// A schemaless engine's sampled field list becomes `columns` — but only
+    /// with `inferred: true` and `sampled_docs` alongside, so no UI can
+    /// present inference as ground truth.
+    #[test]
+    fn detail_json_uses_inferred_columns_only_without_a_declared_schema() {
+        let detail = detail_with(
+            None,
+            vec![
+                ("inferred_schema", "true"),
+                ("sampled_docs", "500"),
+                (
+                    "inferred_columns",
+                    r#"[{"name":"_id","ordinal":0,"native_type":null,"logical_type":"ObjectId","nullable":false,"default":null,"primary_key":true,"unique":true,"indexed":true,"auto_generated":false,"presence_ratio":1.0}]"#,
+                ),
+                ("indexes", "[]"),
+            ],
+        );
+        let v = detail_json(&detail);
+        assert_eq!(v["inferred"], true);
+        assert_eq!(v["sampled_docs"], 500);
+        assert_eq!(v["columns"][0]["name"], "_id");
+        assert_eq!(
+            v["indexes"],
+            serde_json::json!([]),
+            "an empty array is 'none', distinct from null 'not reported'"
+        );
+    }
+
+    /// No reserved keys at all — the legacy payload: `columns`/`indexes`
+    /// null, stats null, extras passed through untouched.
+    #[test]
+    fn detail_json_without_reserved_extras_reports_null_not_fabrication() {
+        let detail = detail_with(None, vec![("type", "string"), ("ttl_seconds", "no expiry")]);
+        let v = detail_json(&detail);
+        assert_eq!(v["columns"], serde_json::Value::Null);
+        assert_eq!(v["indexes"], serde_json::Value::Null);
+        assert_eq!(v["row_estimate"], serde_json::Value::Null);
+        assert_eq!(v["inferred"], false);
+        assert_eq!(v["extra"].as_array().map(Vec::len), Some(2));
+    }
+
+    /// A malformed reserved value must stay visible in `extra`, never be
+    /// silently dropped.
+    #[test]
+    fn detail_json_keeps_unparseable_reserved_pairs_in_extra() {
+        let detail = detail_with(
+            None,
+            vec![("indexes", "not json"), ("row_estimate", "many")],
+        );
+        let v = detail_json(&detail);
+        assert_eq!(v["indexes"], serde_json::Value::Null);
+        assert_eq!(v["row_estimate"], serde_json::Value::Null);
+        let extra = v["extra"].as_array().expect("extra array");
+        assert_eq!(extra.len(), 2, "both malformed pairs stay visible");
     }
 
     #[test]

@@ -39,8 +39,9 @@ use async_trait::async_trait;
 
 use datagrep_api::{
     Batch, CancelFlag, Canceller, Capabilities, Caps, Catalog, Connection, Cursor, CursorStats,
-    DbError, Enforcement, FetchHint, Mutation, MutationBatch, ObjectPath, Op, PathSeg, Payload,
-    Predicate, Request, ResumeToken, ServerInfo, Shape, Transaction, TxOpts, Value, ValueKind,
+    DbError, Enforcement, FetchHint, FieldPath, Mutation, MutationBatch, ObjectPath, Op, PathSeg,
+    Payload, Predicate, Request, ResumeToken, ServerInfo, Shape, Transaction, TxOpts, Value,
+    ValueKind,
 };
 
 use datagrep_lang::Language;
@@ -799,13 +800,13 @@ fn find_option_value(args: &[String], option: &str) -> Option<String> {
         .cloned()
 }
 
-/// Resolve the redis key a `Mutation` targets. The row-identity `key: Vec<Value>`
-/// (mirroring the SQL drivers' PK convention) wins when given as a single
-/// string/bytes value; otherwise the last segment of `path` is used — the
-/// two conventions a caller might reasonably follow, both honored rather
-/// than forcing one (deviation noted in the crate report: `datagrep-api` does
-/// not pin down which one is canonical for a flat keyspace).
-fn mutation_key(path: &ObjectPath, key: &[Value]) -> Result<String, DbError> {
+/// Resolve the redis key a `Mutation` targets. Redis's row identity *is* the
+/// key itself, so the mutation's named identity (`key: Vec<(FieldPath,
+/// Value)>`) must hold exactly one pair whose value is the key text — the
+/// field name is documentation ("key") in a flat keyspace, not a lookup. An
+/// empty identity falls back to the last segment of `path`, the catalog's
+/// own coordinate for a single key.
+fn mutation_key(path: &ObjectPath, key: &[(FieldPath, Value)]) -> Result<String, DbError> {
     match key {
         [] => path
             .parts()
@@ -816,8 +817,8 @@ fn mutation_key(path: &ObjectPath, key: &[Value]) -> Result<String, DbError> {
                           the Redis key"
                     .into(),
             }),
-        [Value::Str(s)] => Ok(s.to_string()),
-        [Value::Bytes(b)] => {
+        [(_, Value::Str(s))] => Ok(s.to_string()),
+        [(_, Value::Bytes(b))] => {
             std::str::from_utf8(b)
                 .map(|s| s.to_string())
                 .map_err(|_| DbError::Unsupported {
@@ -1111,10 +1112,21 @@ mod tests {
         ]);
         assert_eq!(mutation_key(&path, &[]).unwrap(), "user:42");
         assert_eq!(
-            mutation_key(&path, &[Value::Str(Arc::from("override"))]).unwrap(),
+            mutation_key(
+                &path,
+                &[(FieldPath::field("key"), Value::Str(Arc::from("override")))]
+            )
+            .unwrap(),
             "override"
         );
-        assert!(mutation_key(&path, &[Value::I64(1), Value::I64(2)]).is_err());
+        assert!(mutation_key(
+            &path,
+            &[
+                (FieldPath::field("a"), Value::I64(1)),
+                (FieldPath::field("b"), Value::I64(2)),
+            ]
+        )
+        .is_err());
     }
 
     #[test]

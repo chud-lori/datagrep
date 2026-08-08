@@ -1,20 +1,9 @@
-//! The window-by-window execution loop shared by `query` and `export`.
+//! The window-by-window execution loop behind `query`.
 //!
-//! **CoreApi gap, stated up front** (design §3.2/§5.1: "export streams
-//! driver→Arrow→writer→disk with a fixed buffer, never touching grid state
-//! \[...\] 'Export all' ≠ 'load all'" — export is supposed to never go
-//! through the result store). `CoreApi` exposes exactly one way to run a
-//! statement and read its rows: [`datagrep_core::CoreApi::run_query`] +
-//! [`datagrep_core::CoreApi::get_rows`], and `get_rows` answers out of
-//! `datagrep_core::store::ResultStore` — there is no lower-level façade method
-//! that hands a frontend a raw `Cursor`/`Batch` stream bypassing the store.
-//! Since the ticket is explicit that `CoreApi` is the *only* entry point
-//! ("Do not reach around it into drivers"), `export` in this crate is built
-//! on the same path as `query`. It still never accumulates more than one
-//! window's rows in *this process* (this function's job), and the store
-//! itself is bounded and spills (never the unbounded buffering the design
-//! warns about) — but it is not the zero-result-store path the design
-//! describes, and that seam belongs in `datagrep-core`, not here.
+//! (`export` used to share this loop for lack of a store-free seam; it now
+//! rides [`datagrep_core::CoreApi::run_export`], the §3.2/§5.1 endpoint that
+//! streams driver chunks straight to the writer without touching the result
+//! store — see `cmd::export`.)
 //!
 //! Row buffering here is intentionally shaped like the design's own pipeline
 //! (§3.2): ask for one bounded [`FETCH_WINDOW`]-row slice, convert and hand
@@ -58,6 +47,9 @@ pub(crate) static MAX_ROWS_PER_BATCH: AtomicUsize = AtomicUsize::new(0);
 pub(crate) struct RunOutcome {
     pub rows_shown: u64,
     pub cancelled: bool,
+    /// Affected-row count from an `Ack`-shaped statement (INSERT/UPDATE/DDL),
+    /// read from the store snapshot (`StoreState::affected`).
+    pub affected: Option<u64>,
 }
 
 /// Drive one already-started query (`qid`) to completion, streaming rows into
@@ -66,8 +58,8 @@ pub(crate) struct RunOutcome {
 /// - `limit` stops early once `rows_shown` reaches it (client-side — see
 ///   `query.rs`'s module docs on the `ExecOpts.row_limit` gap).
 /// - `deadline` stops early once passed (same gap, for `@timeout`/`--timeout`).
-/// - `on_progress(rows_shown, elapsed)` is called after every window — `export`
-///   uses it to print rows/sec to stderr; `query` ignores it.
+/// - `on_progress(rows_shown, elapsed)` is called after every window; `query`
+///   ignores it (the hook predates `export`'s move to `CoreApi::run_export`).
 pub(crate) async fn stream_result(
     ctx: &Context,
     qid: QueryId,
@@ -181,25 +173,33 @@ async fn stream_result_inner(
         }
     }
 
+    // An Ack-shaped statement (INSERT/UPDATE/DDL) carries its affected-row
+    // count in the store snapshot (`StoreState::affected`) — read it before
+    // the caller closes the query.
+    let state = ctx.core.queries().state(qid);
+    let affected = state.as_ref().and_then(|s| s.affected);
     if !started {
         sink.start(&columns)?;
         if note.is_none() {
-            note = Some(
-                "no column data available for this statement (0 rows, or an Ack-shaped \
-                 result — see README.md \"CoreApi gaps\": affected-row counts don't reach \
-                 CoreApi today)"
-                    .to_string(),
-            );
+            if let Some(message) = state.as_ref().and_then(|s| s.ack_message.clone()) {
+                // The engine said something about the acknowledgement (e.g.
+                // which count strategy ran) — show it verbatim.
+                note = Some(message.to_string());
+            } else if affected.is_none() {
+                note = Some("no rows returned by this statement".to_string());
+            }
         }
     }
     sink.finish(&Summary {
         rows_shown,
         note: note.clone(),
+        affected,
     })?;
 
     Ok(RunOutcome {
         rows_shown,
         cancelled,
+        affected,
     })
 }
 

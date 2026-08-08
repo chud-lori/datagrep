@@ -140,6 +140,54 @@ impl MongoCatalog {
         Ok(schema)
     }
 
+    /// All indexes of one collection via `listIndexes` (the official
+    /// driver's typed `list_indexes`), with per-index on-disk sizes taken
+    /// from the `collStats` reply the caller already paid for.
+    async fn list_index_entries(
+        &self,
+        db: &str,
+        coll: &str,
+        index_sizes: Option<&BsonDocument>,
+    ) -> Result<Vec<MongoIndexInfo>, DbError> {
+        let collection = self.client.database(db).collection::<BsonDocument>(coll);
+        let mut cursor = collection.list_indexes().await.map_err(map_mongo_error)?;
+        let mut out = Vec::new();
+        while cursor.advance().await.map_err(map_mongo_error)? {
+            let model = cursor.deserialize_current().map_err(map_mongo_error)?;
+            let name = model
+                .options
+                .as_ref()
+                .and_then(|o| o.name.clone())
+                .unwrap_or_default();
+            let size_bytes = index_sizes
+                .and_then(|sizes| sizes.get(&name))
+                .and_then(bson_as_i64);
+            let opts = model.options.as_ref();
+            out.push(MongoIndexInfo {
+                // `_id_` is unique by definition even though `listIndexes`
+                // does not spell it out, and it is the closest thing a
+                // collection has to a primary key.
+                unique: opts.and_then(|o| o.unique).unwrap_or(false) || name == "_id_",
+                primary: name == "_id_",
+                sparse: opts.and_then(|o| o.sparse).unwrap_or(false),
+                filter_json: opts
+                    .and_then(|o| o.partial_filter_expression.as_ref())
+                    .map(document_json),
+                expire_after_seconds: opts
+                    .and_then(|o| o.expire_after)
+                    .map(|d| d.as_secs() as i64),
+                keys: model
+                    .keys
+                    .iter()
+                    .map(|(k, v)| (k.clone(), key_order(v)))
+                    .collect(),
+                name,
+                size_bytes,
+            });
+        }
+        Ok(out)
+    }
+
     async fn sample(
         &self,
         db: &str,
@@ -269,16 +317,35 @@ impl Catalog for MongoCatalog {
                     .map_err(map_mongo_error)?;
                 let mut extra = vec![(Arc::from("inferred_schema"), Arc::from("true"))];
                 for (key, label) in [
-                    ("count", "document_count"),
+                    ("count", "row_estimate"),
                     ("size", "size_bytes"),
                     ("storageSize", "storage_size_bytes"),
                     ("avgObjSize", "avg_document_size_bytes"),
-                    ("nindexes", "index_count"),
                 ] {
                     if let Some(v) = result.get(key) {
                         extra.push((Arc::from(label), Arc::from(display_number(v))));
                     }
                 }
+                // Real indexes via `listIndexes`, fetched here and only here —
+                // on the explicit `describe()` of this one collection (design
+                // §5.1: lazy; never during tree expansion, never on connect).
+                // Sizes come from the `collStats` reply already in hand.
+                let index_sizes = result.get_document("indexSizes").ok();
+                let indexes = self.list_index_entries(db, coll, index_sizes).await?;
+                extra.push((Arc::from("indexes"), Arc::from(indexes_json(&indexes))));
+                // The field list is *inferred from a sample* (`$sample`,
+                // cached per collection) — Mongo declares no schema, and the
+                // payload says so explicitly (`inferred_schema`/`sampled_docs`)
+                // so no UI can present inference as ground truth.
+                let inferred = self.inferred(db, coll).await?;
+                extra.push((
+                    Arc::from("sampled_docs"),
+                    Arc::from(inferred.sampled.to_string()),
+                ));
+                extra.push((
+                    Arc::from("inferred_columns"),
+                    Arc::from(inferred_columns_json(&inferred)),
+                ));
                 Ok(ObjectDetail {
                     node: ObjectNode {
                         path: path.clone(),
@@ -288,7 +355,8 @@ impl Catalog for MongoCatalog {
                     },
                     // `SCHEMA_DECLARED` is false: Mongo has no server-declared
                     // schema, so `describe()` never fabricates a `RowSchema`
-                    // here — inference is a separate, explicitly-labeled call.
+                    // here — the sampled field list rides in `extra` under
+                    // `inferred_columns`, labeled as inference.
                     schema: None,
                     extra,
                 })
@@ -404,6 +472,202 @@ impl Catalog for MongoCatalog {
     }
 }
 
+/// One index of a collection, flattened from the driver's `IndexModel` for
+/// [`indexes_json`] — kept as a plain struct so the JSON shape is unit
+/// testable without a server.
+struct MongoIndexInfo {
+    name: String,
+    /// Key order as declared. `MongoKeyOrder::Other` carries the non-b-tree
+    /// key kinds (`"text"`, `"2dsphere"`, `"hashed"`, …).
+    keys: Vec<(String, MongoKeyOrder)>,
+    unique: bool,
+    primary: bool,
+    sparse: bool,
+    /// `partialFilterExpression`, already rendered to JSON text.
+    filter_json: Option<String>,
+    /// TTL (`expireAfterSeconds`).
+    expire_after_seconds: Option<i64>,
+    size_bytes: Option<i64>,
+}
+
+enum MongoKeyOrder {
+    Ascending,
+    Descending,
+    Other(String),
+}
+
+fn key_order(v: &Bson) -> MongoKeyOrder {
+    let numeric = match v {
+        Bson::Int32(n) => Some(f64::from(*n)),
+        Bson::Int64(n) => Some(*n as f64),
+        Bson::Double(f) => Some(*f),
+        _ => None,
+    };
+    match (numeric, v) {
+        (Some(n), _) if n < 0.0 => MongoKeyOrder::Descending,
+        (Some(_), _) => MongoKeyOrder::Ascending,
+        (None, Bson::String(s)) => MongoKeyOrder::Other(s.clone()),
+        (None, other) => MongoKeyOrder::Other(other.to_string()),
+    }
+}
+
+/// The engine-independent index JSON shape (see the datagrep-ffi describe
+/// contract): `[{name, columns:[{name, order}], unique, primary, type,
+/// partial, filter, size_bytes, definition, sparse, expire_after_seconds}]`.
+///
+/// Mongo specifics: a special key kind (`text`, `2dsphere`, `hashed`)
+/// becomes the index's `type` and that key's `order` is `null` (direction is
+/// a b-tree concept); everything else is `"btree"`, which is what a regular
+/// Mongo index is. `definition` is `null` — Mongo has no DDL text to show.
+fn indexes_json(indexes: &[MongoIndexInfo]) -> String {
+    let entries: Vec<String> = indexes
+        .iter()
+        .map(|ix| {
+            let cols: Vec<String> = ix
+                .keys
+                .iter()
+                .map(|(name, order)| {
+                    let order = match order {
+                        MongoKeyOrder::Ascending => "\"asc\"".to_string(),
+                        MongoKeyOrder::Descending => "\"desc\"".to_string(),
+                        MongoKeyOrder::Other(_) => "null".to_string(),
+                    };
+                    format!("{{\"name\":{},\"order\":{}}}", json_str(name), order)
+                })
+                .collect();
+            let ty = ix
+                .keys
+                .iter()
+                .find_map(|(_, order)| match order {
+                    MongoKeyOrder::Other(kind) => Some(kind.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("btree");
+            format!(
+                "{{\"name\":{},\"columns\":[{}],\"unique\":{},\"primary\":{},\
+                 \"type\":{},\"partial\":{},\"filter\":{},\"size_bytes\":{},\
+                 \"definition\":null,\"sparse\":{},\"expire_after_seconds\":{}}}",
+                json_str(&ix.name),
+                cols.join(","),
+                ix.unique,
+                ix.primary,
+                json_str(ty),
+                ix.filter_json.is_some(),
+                ix.filter_json.as_deref().unwrap_or("null"),
+                ix.size_bytes
+                    .map_or_else(|| "null".to_string(), |n| n.to_string()),
+                ix.sparse,
+                ix.expire_after_seconds
+                    .map_or_else(|| "null".to_string(), |n| n.to_string()),
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+/// The sampled field list in the same column shape declared-schema engines
+/// use, so the UI needs one renderer — with `presence_ratio` carrying the
+/// honesty (a field seen in 60% of sampled documents is not a column).
+fn inferred_columns_json(schema: &InferredSchema) -> String {
+    let entries: Vec<String> = schema
+        .root
+        .iter()
+        .enumerate()
+        .map(|(ordinal, (name, trie))| {
+            let mut types: Vec<(LogicalType, u64)> = trie.types.clone();
+            types.sort_by(|a, b| b.1.cmp(&a.1));
+            let non_null: Vec<String> = types
+                .iter()
+                .filter(|(ty, _)| *ty != LogicalType::Null)
+                .map(|(ty, _)| format!("{ty:?}"))
+                .collect();
+            let logical = if non_null.is_empty() {
+                "Null".to_string()
+            } else {
+                non_null.join(" | ")
+            };
+            let nullable = trie.present < schema.sampled
+                || types.iter().any(|(ty, _)| *ty == LogicalType::Null);
+            let is_id = name.as_ref() == "_id";
+            format!(
+                "{{\"name\":{},\"native_type\":null,\"logical_type\":{},\
+                 \"nullable\":{},\"default\":null,\"primary_key\":{},\"unique\":{},\
+                 \"indexed\":{},\"auto_generated\":false,\"ordinal\":{},\
+                 \"presence_ratio\":{:.4}}}",
+                json_str(name),
+                json_str(&logical),
+                nullable,
+                is_id,
+                is_id,
+                is_id,
+                ordinal,
+                trie.presence_ratio(schema.sampled),
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+/// A BSON document as JSON text, covering the types a
+/// `partialFilterExpression` realistically contains; anything exotic
+/// degrades to its display string rather than lying or failing.
+fn document_json(doc: &BsonDocument) -> String {
+    let entries: Vec<String> = doc
+        .iter()
+        .map(|(k, v)| format!("{}:{}", json_str(k), bson_json(v)))
+        .collect();
+    format!("{{{}}}", entries.join(","))
+}
+
+fn bson_json(v: &Bson) -> String {
+    match v {
+        Bson::Null => "null".to_string(),
+        Bson::Boolean(b) => b.to_string(),
+        Bson::Int32(n) => n.to_string(),
+        Bson::Int64(n) => n.to_string(),
+        Bson::Double(f) if f.is_finite() => format!("{f}"),
+        Bson::String(s) => json_str(s),
+        Bson::Array(items) => {
+            let inner: Vec<String> = items.iter().map(bson_json).collect();
+            format!("[{}]", inner.join(","))
+        }
+        Bson::Document(d) => document_json(d),
+        other => json_str(&other.to_string()),
+    }
+}
+
+fn bson_as_i64(v: &Bson) -> Option<i64> {
+    match v {
+        Bson::Int32(n) => Some(i64::from(*n)),
+        Bson::Int64(n) => Some(*n),
+        Bson::Double(f) => Some(*f as i64),
+        _ => None,
+    }
+}
+
+/// Minimal JSON string encoding. Hand-rolled on purpose: drivers keep
+/// `serde_json` out of their runtime dependency set (see the workspace
+/// dependency notes), and the catalog only ever needs to *emit* JSON here.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn display_number(b: &Bson) -> String {
     match b {
         Bson::Int32(n) => n.to_string(),
@@ -500,5 +764,146 @@ mod tests {
         assert_eq!(display_number(&Bson::Int32(5)), "5");
         assert_eq!(display_number(&Bson::Int64(9)), "9");
         let _ = Value::I64(0); // keep datagrep_api::Value import used in this module
+    }
+
+    /// The index JSON shape, pinned by parsing (serde_json is dev-only):
+    /// compound key order and 1/-1 directions survive, TTL rides in
+    /// `expire_after_seconds`, partial filters ride in `filter`, and special
+    /// key kinds become the index `type` with `order: null`.
+    #[test]
+    fn indexes_json_has_the_cross_engine_shape() {
+        let indexes = vec![
+            MongoIndexInfo {
+                name: "_id_".into(),
+                keys: vec![("_id".into(), key_order(&Bson::Int32(1)))],
+                unique: true,
+                primary: true,
+                sparse: false,
+                filter_json: None,
+                expire_after_seconds: None,
+                size_bytes: Some(20480),
+            },
+            MongoIndexInfo {
+                name: "user_created".into(),
+                keys: vec![
+                    ("user_id".into(), key_order(&Bson::Int32(1))),
+                    ("created_at".into(), key_order(&Bson::Int32(-1))),
+                ],
+                unique: false,
+                primary: false,
+                sparse: true,
+                filter_json: Some(document_json(
+                    &doc! { "status": "active", "retries": { "$gt": 3 } },
+                )),
+                expire_after_seconds: Some(3600),
+                size_bytes: None,
+            },
+            MongoIndexInfo {
+                name: "title_text".into(),
+                keys: vec![("title".into(), key_order(&Bson::String("text".into())))],
+                unique: false,
+                primary: false,
+                sparse: false,
+                filter_json: None,
+                expire_after_seconds: None,
+                size_bytes: Some(4096),
+            },
+        ];
+        let parsed: serde_json::Value =
+            serde_json::from_str(&indexes_json(&indexes)).expect("indexes_json emits valid JSON");
+        let list = parsed.as_array().expect("a JSON array");
+        assert_eq!(list.len(), 3);
+        for entry in list {
+            for key in [
+                "name",
+                "columns",
+                "unique",
+                "primary",
+                "type",
+                "partial",
+                "filter",
+                "size_bytes",
+                "definition",
+                "sparse",
+                "expire_after_seconds",
+            ] {
+                assert!(entry.get(key).is_some(), "missing {key}: {entry}");
+            }
+        }
+        assert_eq!(list[0]["primary"], true);
+        assert_eq!(list[0]["unique"], true, "_id_ is unique by definition");
+        assert_eq!(list[0]["size_bytes"], 20480);
+
+        let compound = &list[1];
+        assert_eq!(compound["columns"][0]["name"], "user_id");
+        assert_eq!(compound["columns"][0]["order"], "asc");
+        assert_eq!(compound["columns"][1]["name"], "created_at");
+        assert_eq!(compound["columns"][1]["order"], "desc");
+        assert_eq!(compound["expire_after_seconds"], 3600);
+        assert_eq!(compound["sparse"], true);
+        assert_eq!(compound["partial"], true);
+        assert_eq!(compound["filter"]["status"], "active");
+        assert_eq!(compound["filter"]["retries"]["$gt"], 3);
+
+        assert_eq!(list[2]["type"], "text");
+        assert_eq!(
+            list[2]["columns"][0]["order"],
+            serde_json::Value::Null,
+            "a text key has no direction; inventing one would be wrong"
+        );
+        assert_eq!(indexes_json(&[]), "[]");
+    }
+
+    /// The inferred field list keeps the declared-column JSON shape but says
+    /// it is inference: heterogeneous types stay visible and the presence
+    /// ratio rides along.
+    #[test]
+    fn inferred_columns_json_labels_inference_honestly() {
+        let mut root: Vec<(Arc<str>, FieldTrie)> = Vec::new();
+        record_doc(
+            &mut root,
+            &doc! { "_id": 1_i32, "name": "a", "age": 30_i32 },
+        );
+        record_doc(&mut root, &doc! { "_id": 2_i32, "name": "b" });
+        record_doc(
+            &mut root,
+            &doc! { "_id": 3_i32, "name": "c", "age": "thirty" },
+        );
+        let schema = InferredSchema { sampled: 3, root };
+        let parsed: serde_json::Value = serde_json::from_str(&inferred_columns_json(&schema))
+            .expect("inferred_columns_json emits valid JSON");
+        let list = parsed.as_array().expect("a JSON array");
+        assert_eq!(list.len(), 3);
+
+        let id = &list[0];
+        assert_eq!(id["name"], "_id");
+        assert_eq!(id["primary_key"], true);
+        assert_eq!(id["nullable"], false);
+        assert_eq!(id["ordinal"], 0);
+        assert_eq!(id["presence_ratio"], 1.0);
+
+        let age = list
+            .iter()
+            .find(|c| c["name"] == "age")
+            .expect("age column");
+        assert_eq!(
+            age["logical_type"], "I64 | Str",
+            "heterogeneous types stay visible, not coerced to a majority"
+        );
+        assert_eq!(age["nullable"], true, "absent in one sampled doc");
+        assert!((age["presence_ratio"].as_f64().unwrap() - 2.0 / 3.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn bson_json_escapes_and_nests() {
+        assert_eq!(bson_json(&Bson::String("a\"b".into())), r#""a\"b""#);
+        assert_eq!(bson_json(&Bson::Null), "null");
+        assert_eq!(bson_json(&Bson::Boolean(true)), "true");
+        let doc = doc! { "arr": [1_i32, "two"], "f": 1.5 };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&bson_json(&Bson::Document(doc))).expect("valid JSON");
+        assert_eq!(parsed["arr"][0], 1);
+        assert_eq!(parsed["arr"][1], "two");
+        assert_eq!(parsed["f"], 1.5);
     }
 }

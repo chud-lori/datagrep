@@ -29,6 +29,7 @@
 
 pub mod api;
 pub mod convert;
+pub mod export;
 pub mod feeder;
 pub mod query;
 pub mod registry;
@@ -42,6 +43,7 @@ pub mod testing;
 
 pub use api::{CoreApi, Profile, ProfileId};
 pub use convert::{rows_to_record_batch, BatchConverter};
+pub use export::{run_export_on, ExportSink, ExportStats, SinkFlow, EXPORT_FETCH_HINT};
 pub use feeder::{
     spawn_feeder, FeedState, FeederHandle, FeederPolicy, ParkReason, DATA_CHANNEL_BOUND,
 };

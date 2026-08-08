@@ -55,7 +55,7 @@ pub async fn run(ctx: &Context, args: &QueryArgs) -> Result<(), CliError> {
 
     let mut file_out;
     let mut stdout_out;
-    let out: &mut dyn Write = match &args.out {
+    let out: &mut (dyn Write + Send) = match &args.out {
         Some(path) => {
             file_out = std::io::BufWriter::new(std::fs::File::create(path)?);
             &mut file_out
@@ -141,7 +141,12 @@ pub async fn run(ctx: &Context, args: &QueryArgs) -> Result<(), CliError> {
                 text: stmt_text.to_string(),
                 started_at: datagrep_profiles::now_ms(),
                 duration_ms: Some(started_at.elapsed().as_millis() as i64),
-                row_count: run.as_ref().ok().map(|o| o.rows_shown as i64),
+                // For an Ack-shaped statement the meaningful count is the
+                // affected rows, not the (always-zero) rows shown.
+                row_count: run
+                    .as_ref()
+                    .ok()
+                    .map(|o| o.affected.unwrap_or(o.rows_shown) as i64),
                 status,
                 error: run.as_ref().err().map(|e| e.message.clone()),
             })

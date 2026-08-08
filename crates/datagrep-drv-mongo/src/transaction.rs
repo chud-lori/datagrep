@@ -29,7 +29,7 @@ use tokio::sync::Mutex;
 use datagrep_api::driver::{Cursor, Transaction};
 use datagrep_api::error::DbError;
 use datagrep_api::request::{DdlOp, Mutation, MutationBatch, Op, Request};
-use datagrep_api::value::Value;
+use datagrep_api::value::{FieldPath, Value};
 
 use datagrep_lang::mongo::{parse, MongoStatement, ParsedMongo};
 
@@ -248,16 +248,10 @@ impl MongoTransaction {
     }
 }
 
-fn id_filter(key: &[Value]) -> Result<BsonDocument, DbError> {
-    match key {
-        [only] => Ok(doc! { "_id": value_to_bson_for_field("_id", only)? }),
-        other => Err(DbError::Unsupported {
-            feature: format!(
-                "MongoDB row identity is always a single _id value; got {} key value(s)",
-                other.len()
-            ),
-        }),
-    }
+/// See [`crate::connection::id_filter_from_key`]: the row identity is named
+/// pairs, compiled directly — no `_id` guessing.
+fn id_filter(key: &[(FieldPath, Value)]) -> Result<BsonDocument, DbError> {
+    crate::connection::id_filter_from_key(key)
 }
 
 #[async_trait]
@@ -298,9 +292,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn id_filter_requires_exactly_one_key_value() {
-        assert!(id_filter(&[Value::I64(1), Value::I64(2)]).is_err());
+    fn id_filter_compiles_named_keys_and_refuses_an_empty_identity() {
+        // Empty identity: refused, never guessed at (design §3.8).
         assert!(id_filter(&[]).is_err());
-        assert!(id_filter(&[Value::I64(1)]).is_ok());
+        // The named field is what reaches the filter — no `_id` assumption.
+        let f = id_filter(&[(FieldPath::field("_id"), Value::I64(1))]).unwrap();
+        assert_eq!(f, doc! { "_id": 1_i64 });
+        // Composite named identities compile too, one entry per field.
+        let f = id_filter(&[
+            (FieldPath::field("tenant"), Value::I64(7)),
+            (FieldPath::field("slug"), Value::Str(Arc::from("a"))),
+        ])
+        .unwrap();
+        assert_eq!(f, doc! { "tenant": 7_i64, "slug": "a" });
     }
 }

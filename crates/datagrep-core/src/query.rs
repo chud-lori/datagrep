@@ -75,6 +75,9 @@ pub struct QueryStats {
     /// Server-reported execution time, when the protocol carries one.
     pub server_elapsed_micros: Option<u64>,
     pub spilled_bytes: u64,
+    /// Affected-row count from an `Ack`-shaped result (INSERT/UPDATE/DDL).
+    /// `None` for row-producing results and for engines that don't report one.
+    pub affected: Option<u64>,
 }
 
 /// What a stop actually achieved, stated honestly (design §3.3).
@@ -482,6 +485,7 @@ fn emit_terminal(
         first_batch_micros: state.first_batch_micros,
         server_elapsed_micros: cursor.server_elapsed_micros,
         spilled_bytes: state.spilled_bytes,
+        affected: state.affected,
     };
     match &state.phase {
         StorePhase::Capped => {
@@ -790,6 +794,45 @@ mod tests {
             .expect("CancelOutcome");
         assert_eq!(outcome.outcome, Some(CancelOutcome::ClientAbandoned));
         assert!(outcome.message.contains("may still be executing"));
+        h.queries.shutdown();
+        h.sessions.shutdown();
+    }
+
+    /// **Gap 1 — an acknowledgement's affected-row count reaches the
+    /// frontend.** An INSERT produces `Shape::Ack { affected }` and no rows;
+    /// the count must arrive in `QueryEvent::Done { stats }` (and in the
+    /// store snapshot), not die between the driver and the store.
+    #[tokio::test]
+    async fn an_ack_result_reports_its_affected_rows_in_done() {
+        let h = harness(MockPlan {
+            payload: crate::testing::MockPayload::Ack { affected: Some(2) },
+            batches: Some(1),
+            ..MockPlan::default()
+        });
+        let mut events = h.queries.subscribe();
+        let qid = h
+            .queries
+            .run(
+                h.lease().await,
+                Request::native("insert into t values (1),(2)"),
+            )
+            .await
+            .expect("run");
+
+        let seen = drain_until(&mut events, 3_000, |e| matches!(e, QueryEvent::Done { .. })).await;
+        let done = seen
+            .iter()
+            .find_map(|e| match e {
+                QueryEvent::Done { stats, .. } => Some(*stats),
+                _ => None,
+            })
+            .expect("Done event");
+        assert_eq!(done.affected, Some(2), "affected count lost before Done");
+        assert_eq!(done.rows, 0, "an Ack has no rows");
+
+        // The snapshot carries it too, for frontends that read state directly.
+        let state = h.queries.state(qid).expect("state");
+        assert_eq!(state.affected, Some(2));
         h.queries.shutdown();
         h.sessions.shutdown();
     }

@@ -376,6 +376,14 @@ pub struct StoreState {
     /// [`BatchConverter::coerced`]). Non-zero means a driver bug; it is shown,
     /// not swallowed.
     pub coerced: u64,
+    /// Affected-row count from an `Ack`-shaped result (INSERT/UPDATE/DDL —
+    /// `Shape::Ack { affected, .. }`). An acknowledgement carries no rows, so
+    /// without this field the count would die between the driver and the
+    /// frontend and every INSERT would read "(0 rows)".
+    pub affected: Option<u64>,
+    /// The engine's own acknowledgement message, when the shape carried one
+    /// (e.g. which count strategy a driver ran). Shown, never embellished.
+    pub ack_message: Option<Arc<str>>,
     /// Non-fatal server messages collected from every chunk.
     pub notices: Vec<datagrep_api::driver::Notice>,
     /// Schema evolution the driver reported mid-stream (§3.1). Append-only and
@@ -396,6 +404,8 @@ impl StoreState {
             spilled_bytes: 0,
             first_batch_micros: None,
             coerced: 0,
+            affected: None,
+            ack_message: None,
             notices: Vec::new(),
             schema_deltas: Vec::new(),
             chunks: Vec::new(),
@@ -755,6 +765,17 @@ async fn run_store(
 ) {
     let started = Instant::now();
     let mut converter = table_converter(&shape);
+
+    // An acknowledgement's whole payload lives in its *shape* (§3.1): publish
+    // it before consuming the (empty) stream so the count reaches every
+    // snapshot, not just the terminal one.
+    if let Shape::Ack { affected, message } = &shape {
+        let (affected, message) = (*affected, message.clone());
+        shared.publish(|s| {
+            s.affected = affected;
+            s.ack_message = message;
+        });
+    }
 
     loop {
         let batch = tokio::select! {

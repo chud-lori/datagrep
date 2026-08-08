@@ -6,6 +6,7 @@
 //! `Value` into the SQL string itself.
 
 use std::fmt::Write as _;
+#[cfg(test)]
 use std::sync::Arc;
 
 use datagrep_api::{DbError, FieldPath, ObjectPath, PathSeg, Predicate, SortKey, Value};
@@ -291,15 +292,10 @@ pub struct MutationSql {
 /// Compile one `Mutation` into `UPDATE ... SET ... WHERE <pk> = $n [...] `,
 /// `INSERT INTO ... VALUES (...)`, or `DELETE FROM ... WHERE <pk> = $n [...]`.
 ///
-/// `key_fields` names the identity columns `key` is positional against — see
-/// the crate-level gap note: [`datagrep_api::request::Mutation`] carries `key` as
-/// bare `Vec<Value>` with no accompanying field names, so the caller
-/// (`connection.rs`) must resolve them (via a catalog lookup) before calling
-/// this function.
-pub fn compile_mutation(
-    m: &datagrep_api::Mutation,
-    key_fields: &[Arc<str>],
-) -> Result<MutationSql, DbError> {
+/// The row identity arrives as named `(FieldPath, Value)` pairs on the
+/// mutation itself (the same shape as `sets`), so the WHERE clause compiles
+/// directly — no `pg_index` lookup, no positional convention.
+pub fn compile_mutation(m: &datagrep_api::Mutation) -> Result<MutationSql, DbError> {
     use datagrep_api::Mutation;
     let mut pb = ParamBuilder::default();
     match m {
@@ -342,7 +338,7 @@ pub fn compile_mutation(
                 let ph = pb.push(value.clone());
                 set_parts.push(format!("{col} = {ph}"));
             }
-            let where_clause = key_where(key_fields, key, &mut pb)?;
+            let where_clause = key_where(key, &mut pb)?;
             let sql = format!(
                 "UPDATE {table} SET {} WHERE {where_clause}",
                 set_parts.join(", ")
@@ -354,7 +350,7 @@ pub fn compile_mutation(
         }
         Mutation::Delete { path, key } => {
             let table = quote_object_path(path)?;
-            let where_clause = key_where(key_fields, key, &mut pb)?;
+            let where_clause = key_where(key, &mut pb)?;
             let sql = format!("DELETE FROM {table} WHERE {where_clause}");
             Ok(MutationSql {
                 sql,
@@ -364,28 +360,17 @@ pub fn compile_mutation(
     }
 }
 
-fn key_where(
-    key_fields: &[Arc<str>],
-    key_values: &[Value],
-    pb: &mut ParamBuilder,
-) -> Result<String, DbError> {
-    if key_fields.len() != key_values.len() {
-        return Err(DbError::Unsupported {
-            feature: format!(
-                "row identity has {} column(s) but {} key value(s) were supplied",
-                key_fields.len(),
-                key_values.len()
-            ),
-        });
-    }
-    if key_fields.is_empty() {
+/// The named row identity as `"col" = $n AND …`. An empty key is refused —
+/// we never guess which row to affect (design §3.8).
+fn key_where(key: &[(FieldPath, Value)], pb: &mut ParamBuilder) -> Result<String, DbError> {
+    if key.is_empty() {
         return Err(DbError::Unsupported {
             feature: "mutation with no row identity — refuse to guess which row to affect".into(),
         });
     }
-    let mut parts = Vec::with_capacity(key_fields.len());
-    for (name, value) in key_fields.iter().zip(key_values) {
-        let col = quote_ident(name)?;
+    let mut parts = Vec::with_capacity(key.len());
+    for (field, value) in key {
+        let col = field_path_expr(field)?;
         let ph = pb.push(value.clone());
         parts.push(format!("{col} = {ph}"));
     }

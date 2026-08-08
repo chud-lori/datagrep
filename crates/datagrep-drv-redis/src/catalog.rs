@@ -53,6 +53,9 @@ pub(crate) const NO_PREFIX_BUCKET: &str = "(no prefix)";
 /// How many keys `children()` samples per page and `complete()` asks for.
 const SAMPLE_COUNT: u32 = 200;
 
+/// What `describe()` reports for a key's `indexes` extra: none, truthfully.
+const EMPTY_INDEXES_JSON: &str = "[]";
+
 pub struct RedisCatalog {
     manager: redis::aio::ConnectionManager,
 }
@@ -195,7 +198,13 @@ impl RedisCatalog {
             .await
             .ok();
 
-        let mut extra = vec![(Arc::from("type"), Arc::from(ty.as_str()))];
+        // Redis has no secondary indexes on plain keys — an honest, empty
+        // `[]` (the cross-engine describe contract's "none", as opposed to
+        // an absent key meaning "not reported"). Never fabricated.
+        let mut extra = vec![
+            (Arc::from("indexes"), Arc::from(EMPTY_INDEXES_JSON)),
+            (Arc::from("type"), Arc::from(ty.as_str())),
+        ];
         extra.push((
             Arc::from("ttl_seconds"),
             Arc::from(if ttl < 0 {
@@ -493,6 +502,14 @@ mod tests {
     fn prefix_at_caret_includes_colons() {
         assert_eq!(prefix_at_caret("SCAN 0 MATCH user:12", 21), "user:12");
         assert_eq!(prefix_at_caret("", 0), "");
+    }
+
+    /// Redis's whole index story for the cross-engine describe contract:
+    /// a literal empty JSON array — present (so the UI can say "none"
+    /// rather than "not reported"), and never a fabricated entry.
+    #[test]
+    fn key_describe_reports_an_honest_empty_index_array() {
+        assert_eq!(EMPTY_INDEXES_JSON, "[]");
     }
 
     #[test]

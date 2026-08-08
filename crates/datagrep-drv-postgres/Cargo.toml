@@ -30,3 +30,6 @@ bytes = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# Tests parse the catalog's hand-emitted index/default JSON to pin its shape.
+# Dev-only on purpose — the driver itself still carries no serde_json.
+serde_json = { workspace = true }

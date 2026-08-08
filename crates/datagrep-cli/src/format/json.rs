@@ -47,7 +47,7 @@ impl<W: Write> JsonArraySink<W> {
     }
 }
 
-impl<W: Write> RowSink for JsonArraySink<W> {
+impl<W: Write + Send> RowSink for JsonArraySink<W> {
     fn start(&mut self, columns: &[String]) -> io::Result<()> {
         self.columns = columns.to_vec();
         self.out.write_all(b"[")
@@ -85,7 +85,7 @@ impl<W: Write> NdjsonSink<W> {
     }
 }
 
-impl<W: Write> RowSink for NdjsonSink<W> {
+impl<W: Write + Send> RowSink for NdjsonSink<W> {
     fn start(&mut self, columns: &[String]) -> io::Result<()> {
         self.columns = columns.to_vec();
         Ok(())
@@ -127,6 +127,7 @@ mod tests {
             sink.finish(&Summary {
                 rows_shown: 2,
                 note: None,
+                affected: None,
             })
             .unwrap();
         }
@@ -153,6 +154,7 @@ mod tests {
             sink.finish(&Summary {
                 rows_shown: 2,
                 note: None,
+                affected: None,
             })
             .unwrap();
         }
@@ -170,6 +172,7 @@ mod tests {
             sink.finish(&Summary {
                 rows_shown: 0,
                 note: None,
+                affected: None,
             })
             .unwrap();
         }

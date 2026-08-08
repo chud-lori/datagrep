@@ -1,7 +1,7 @@
 //! One module per `datagrep` subcommand (ticket: "FOLLOW WHAT cli.rs DECLARES").
-//! `streaming` is the shared window-by-window execution loop `query` and
-//! `export` both drive — see its module docs for the CoreApi gap it works
-//! around.
+//! `streaming` is the window-by-window execution loop `query` drives;
+//! `export` streams through `CoreApi::run_export` (the store-free §3.2/§5.1
+//! path) instead.
 
 pub mod catalog;
 pub mod doctor;
@@ -25,7 +25,7 @@ use crate::format::{csv, json, table, RowSink};
 /// way those formats show "a new result set started").
 pub(crate) fn build_sink<'w>(
     format: OutputFormat,
-    out: &'w mut dyn Write,
+    out: &'w mut (dyn Write + Send),
     leading_blank: bool,
 ) -> Box<dyn RowSink + 'w> {
     match format {

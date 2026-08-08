@@ -27,7 +27,7 @@ impl<W: Write> CsvSink<W> {
     }
 }
 
-impl<W: Write> RowSink for CsvSink<W> {
+impl<W: Write + Send> RowSink for CsvSink<W> {
     fn start(&mut self, columns: &[String]) -> io::Result<()> {
         for (i, col) in columns.iter().enumerate() {
             write_csv_field(&mut self.out, self.delim, col, i == 0)?;
@@ -94,6 +94,7 @@ mod tests {
             sink.finish(&Summary {
                 rows_shown: owned.len() as u64,
                 note: None,
+                affected: None,
             })
             .unwrap();
         }
@@ -121,6 +122,7 @@ mod tests {
         sink.finish(&Summary {
             rows_shown: 2,
             note: None,
+            affected: None,
         })
         .unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "a\r\n\r\n\r\n");
@@ -136,6 +138,7 @@ mod tests {
         sink.finish(&Summary {
             rows_shown: 1,
             note: None,
+            affected: None,
         })
         .unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "a\tb\r\n1\t2\r\n");

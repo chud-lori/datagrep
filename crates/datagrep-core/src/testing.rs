@@ -91,6 +91,9 @@ pub enum MockPayload {
     Rows,
     /// `Shape::Documents` values — the non-Arrow lane (design §3.2).
     Docs,
+    /// `Shape::Ack` — a statement acknowledgement (INSERT/DDL). Emits
+    /// `Payload::Empty` chunks; the affected count travels in the shape.
+    Ack { affected: Option<u64> },
 }
 
 /// Everything configurable about the mock stack. `Default` is a small, finite,
@@ -395,6 +398,10 @@ impl MockCursor {
         let shape = match plan.payload {
             MockPayload::Rows => Shape::Table(Arc::new(mock_row_schema())),
             MockPayload::Docs => Shape::Documents { root_hint: None },
+            MockPayload::Ack { affected } => Shape::Ack {
+                affected,
+                message: None,
+            },
         };
         Self {
             plan,
@@ -461,7 +468,11 @@ impl Cursor for MockCursor {
             }
         }
 
-        let n = self.plan.rows_per_batch.min(hint.max_rows.max(1) as usize);
+        let n = match self.plan.payload {
+            // An acknowledgement chunk carries no rows.
+            MockPayload::Ack { .. } => 0,
+            _ => self.plan.rows_per_batch.min(hint.max_rows.max(1) as usize),
+        };
         let start = self.rows_emitted;
         let payload = match self.plan.payload {
             MockPayload::Rows => {
@@ -470,6 +481,7 @@ impl Cursor for MockCursor {
             MockPayload::Docs => {
                 Payload::Docs((0..n as u64).map(|k| self.doc(start + k)).collect())
             }
+            MockPayload::Ack { .. } => Payload::Empty,
         };
 
         let batch = Batch {

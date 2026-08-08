@@ -407,10 +407,11 @@ impl PgCatalog {
         let client = guard.as_ref().ok_or(DbError::Closed)?;
 
         // One cheap query for size facts (design item 5: "reltuples estimate
-        // + pg_relation_size").
+        // + pg_relation_size") plus the table comment.
         let size_row = client
             .query_opt(
-                "SELECT c.reltuples::float8, c.relkind, pg_relation_size(c.oid) \
+                "SELECT c.reltuples::float8, c.relkind, pg_relation_size(c.oid), \
+                 obj_description(c.oid, 'pg_class') \
                  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
                  WHERE n.nspname = $1 AND c.relname = $2",
                 &[&schema.as_ref(), &table.as_ref()],
@@ -419,23 +420,35 @@ impl PgCatalog {
             .map_err(map_pg_error)?;
         let mut extra = Vec::new();
         let mut relkind = "r".to_string();
+        let mut comment: Option<Arc<str>> = None;
         if let Some(row) = &size_row {
             let reltuples: f64 = row.get(0);
             relkind = row.get(1);
             let size_bytes: i64 = row.get(2);
+            comment = row.get::<_, Option<String>>(3).map(Arc::from);
             extra.push((
-                Arc::from("estimated_rows"),
+                Arc::from("row_estimate"),
                 Arc::from(format!("{}", reltuples.max(0.0) as i64)),
             ));
             extra.push((Arc::from("size_bytes"), Arc::from(size_bytes.to_string())));
         }
 
-        // Columns + types, for the declared RowSchema (`SCHEMA_DECLARED`).
+        // Indexes — fetched here and only here, on the explicit `describe()`
+        // of this one relation (design §5.1: lazy; never during tree
+        // expansion, never on connect). One catalog-only query.
+        let indexes = self.list_indexes(client, schema, table).await?;
+        extra.push((Arc::from("indexes"), Arc::from(indexes_json(&indexes))));
+
+        // Columns + types + default expressions, for the declared RowSchema
+        // (`SCHEMA_DECLARED`).
         let col_rows = client
             .query(
-                "SELECT a.attname, a.atttypid, a.attnotnull FROM pg_attribute a \
+                "SELECT a.attname, a.atttypid, a.attnotnull, \
+                 pg_get_expr(d.adbin, d.adrelid) \
+                 FROM pg_attribute a \
                  JOIN pg_class c ON c.oid = a.attrelid \
                  JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
                  WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped \
                  ORDER BY a.attnum",
                 &[&schema.as_ref(), &table.as_ref()],
@@ -443,10 +456,14 @@ impl PgCatalog {
             .await
             .map_err(map_pg_error)?;
         let mut fields = Vec::with_capacity(col_rows.len());
+        let mut defaults: Vec<(String, String)> = Vec::new();
         for row in &col_rows {
             let name: String = row.get(0);
             let oid: u32 = row.get(1);
             let not_null: bool = row.get(2);
+            if let Some(default_expr) = row.get::<_, Option<String>>(3) {
+                defaults.push((name.clone(), default_expr));
+            }
             let ty = tokio_postgres::types::Type::from_oid(oid);
             let logical = ty
                 .as_ref()
@@ -456,12 +473,36 @@ impl PgCatalog {
             if !not_null {
                 flags |= FieldFlags::NULLABLE;
             }
+            // Index-derived flags, from the same single index query above:
+            // `INDEXED` = leading key column of some index (the position a
+            // lookup can use); `UNIQUE` = single-column unique index;
+            // `PRIMARY_KEY` = member of the primary-key index.
+            let leading =
+                |ix: &PgIndexInfo| ix.columns.first().is_some_and(|(col, _)| col == &name);
+            if indexes.iter().any(leading) {
+                flags |= FieldFlags::INDEXED;
+            }
+            if indexes
+                .iter()
+                .any(|ix| ix.unique && ix.columns.len() == 1 && leading(ix))
+            {
+                flags |= FieldFlags::UNIQUE;
+            }
+            if indexes
+                .iter()
+                .any(|ix| ix.primary && ix.columns.iter().any(|(col, _)| col == &name))
+            {
+                flags |= FieldFlags::PRIMARY_KEY;
+            }
             fields.push(FieldDef {
                 name: Arc::from(name),
                 logical,
                 flags,
                 native_type: ty.as_ref().map(|t| Arc::from(t.name())),
             });
+        }
+        if let Some(json) = column_defaults_json(&defaults) {
+            extra.push((Arc::from("column_defaults"), Arc::from(json)));
         }
 
         let pk_row = client
@@ -506,11 +547,163 @@ impl PgCatalog {
                     _ => ObjectKind::Table,
                 },
                 has_children: true,
-                comment: None,
+                comment,
             },
             schema: Some(RowSchema { fields, identity }),
             extra,
         })
+    }
+
+    /// All indexes of one relation: `pg_index` joined to `pg_class`/`pg_am`,
+    /// one row per key column (`generate_series` over `indnkeyatts`), grouped
+    /// client-side. `pg_get_indexdef(oid)` gives the whole definition,
+    /// `pg_get_indexdef(oid, n, true)` the nth key column's text (which also
+    /// covers expression indexes), `pg_get_expr(indpred, …)` the partial
+    /// predicate, and `pg_relation_size` the on-disk size — all catalog-only,
+    /// never touching the table's rows.
+    async fn list_indexes(
+        &self,
+        client: &Client,
+        schema: &Arc<str>,
+        table: &Arc<str>,
+    ) -> Result<Vec<PgIndexInfo>, DbError> {
+        let rows = client
+            .query(
+                "SELECT ci.relname, i.indisunique, i.indisprimary, am.amname, \
+                 pg_get_expr(i.indpred, i.indrelid), \
+                 pg_relation_size(i.indexrelid), \
+                 pg_get_indexdef(i.indexrelid), \
+                 pg_get_indexdef(i.indexrelid, g.n, true), \
+                 (i.indoption[g.n - 1] & 1) <> 0 \
+                 FROM pg_index i \
+                 JOIN pg_class c ON c.oid = i.indrelid \
+                 JOIN pg_namespace ns ON ns.oid = c.relnamespace \
+                 JOIN pg_class ci ON ci.oid = i.indexrelid \
+                 JOIN pg_am am ON am.oid = ci.relam \
+                 CROSS JOIN LATERAL generate_series(1, i.indnkeyatts::int4) AS g(n) \
+                 WHERE ns.nspname = $1 AND c.relname = $2 \
+                 ORDER BY ci.relname, g.n",
+                &[&schema.as_ref(), &table.as_ref()],
+            )
+            .await
+            .map_err(map_pg_error)?;
+        let mut out: Vec<PgIndexInfo> = Vec::new();
+        for row in &rows {
+            let name: String = row.get(0);
+            let column: String = row.get(7);
+            let descending: bool = row.get(8);
+            match out.last_mut() {
+                Some(last) if last.name == name => last.columns.push((column, descending)),
+                _ => out.push(PgIndexInfo {
+                    name,
+                    unique: row.get(1),
+                    primary: row.get(2),
+                    method: row.get(3),
+                    filter: row.get(4),
+                    size_bytes: row.get(5),
+                    definition: row.get(6),
+                    columns: vec![(column, descending)],
+                }),
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// One index of a relation, grouped from the per-key-column query in
+/// [`PgCatalog::list_indexes`]. `columns` is `(text, descending)` in key
+/// order; `descending` comes from `indoption` bit 0 and is only meaningful
+/// for b-tree — [`indexes_json`] nulls it out for other access methods.
+struct PgIndexInfo {
+    name: String,
+    unique: bool,
+    primary: bool,
+    method: String,
+    filter: Option<String>,
+    size_bytes: i64,
+    definition: String,
+    columns: Vec<(String, bool)>,
+}
+
+/// The engine-independent index JSON shape (see the datagrep-ffi describe
+/// contract): `[{name, columns:[{name, order}], unique, primary, type,
+/// partial, filter, size_bytes, definition, sparse, expire_after_seconds}]`.
+fn indexes_json(indexes: &[PgIndexInfo]) -> String {
+    let entries: Vec<String> = indexes
+        .iter()
+        .map(|ix| {
+            let ordered = ix.method == "btree";
+            let cols: Vec<String> = ix
+                .columns
+                .iter()
+                .map(|(name, desc)| {
+                    let order = match (ordered, desc) {
+                        (false, _) => "null",
+                        (true, true) => "\"desc\"",
+                        (true, false) => "\"asc\"",
+                    };
+                    format!("{{\"name\":{},\"order\":{}}}", json_str(name), order)
+                })
+                .collect();
+            format!(
+                "{{\"name\":{},\"columns\":[{}],\"unique\":{},\"primary\":{},\
+                 \"type\":{},\"partial\":{},\"filter\":{},\"size_bytes\":{},\
+                 \"definition\":{},\"sparse\":false,\"expire_after_seconds\":null}}",
+                json_str(&ix.name),
+                cols.join(","),
+                ix.unique,
+                ix.primary,
+                json_str(&ix.method),
+                ix.filter.is_some(),
+                json_opt_str(ix.filter.as_deref()),
+                ix.size_bytes,
+                json_str(&ix.definition),
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+/// `{"col": "<default expression>"}`; `None` when no column has a default.
+fn column_defaults_json(defaults: &[(String, String)]) -> Option<String> {
+    if defaults.is_empty() {
+        return None;
+    }
+    let entries: Vec<String> = defaults
+        .iter()
+        .map(|(name, expr)| format!("{}:{}", json_str(name), json_str(expr)))
+        .collect();
+    Some(format!("{{{}}}", entries.join(",")))
+}
+
+/// Minimal JSON string encoding. Hand-rolled on purpose: this crate's
+/// dependency policy keeps `serde_json` out of drivers (see the `Cargo.toml`
+/// note on `tokio-postgres` features), and the catalog only ever needs to
+/// *emit* a handful of strings/bools.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn json_opt_str(s: Option<&str>) -> String {
+    match s {
+        Some(s) => json_str(s),
+        None => "null".to_string(),
     }
 }
 
@@ -524,6 +717,98 @@ mod tests {
         assert_eq!(prefix_at_caret("SELECT foo.b", 12), "b");
         assert_eq!(prefix_at_caret("SELECT ", 7), "");
         assert_eq!(prefix_at_caret("", 0), "");
+    }
+
+    /// The index JSON shape, pinned by parsing (serde_json is dev-only):
+    /// cross-engine keys all present, b-tree key order/direction kept,
+    /// non-btree methods get `order: null`, and partial predicates ride in
+    /// `filter`.
+    #[test]
+    fn indexes_json_has_the_cross_engine_shape() {
+        let indexes = vec![
+            PgIndexInfo {
+                name: "users_pkey".into(),
+                unique: true,
+                primary: true,
+                method: "btree".into(),
+                filter: None,
+                size_bytes: 16384,
+                definition: "CREATE UNIQUE INDEX users_pkey ON public.users USING btree (id)"
+                    .into(),
+                columns: vec![("id".into(), false)],
+            },
+            PgIndexInfo {
+                name: "idx_users_active_email".into(),
+                unique: false,
+                primary: false,
+                method: "btree".into(),
+                filter: Some("(deleted_at IS NULL)".into()),
+                size_bytes: 8192,
+                definition: "CREATE INDEX idx_users_active_email ON public.users \
+                             USING btree (email DESC, created_at) WHERE (deleted_at IS NULL)"
+                    .into(),
+                columns: vec![("email".into(), true), ("created_at".into(), false)],
+            },
+            PgIndexInfo {
+                name: "idx_users_tags".into(),
+                unique: false,
+                primary: false,
+                method: "gin".into(),
+                filter: None,
+                size_bytes: 4096,
+                definition: "CREATE INDEX idx_users_tags ON public.users USING gin (tags)".into(),
+                columns: vec![("tags".into(), false)],
+            },
+        ];
+        let parsed: serde_json::Value =
+            serde_json::from_str(&indexes_json(&indexes)).expect("indexes_json emits valid JSON");
+        let list = parsed.as_array().expect("a JSON array");
+        assert_eq!(list.len(), 3);
+        for entry in list {
+            for key in [
+                "name",
+                "columns",
+                "unique",
+                "primary",
+                "type",
+                "partial",
+                "filter",
+                "size_bytes",
+                "definition",
+                "sparse",
+                "expire_after_seconds",
+            ] {
+                assert!(entry.get(key).is_some(), "missing {key}: {entry}");
+            }
+        }
+        assert_eq!(list[0]["primary"], true);
+        assert_eq!(list[0]["unique"], true);
+        assert_eq!(list[0]["columns"][0]["order"], "asc");
+        assert_eq!(list[1]["partial"], true);
+        assert_eq!(list[1]["filter"], "(deleted_at IS NULL)");
+        assert_eq!(list[1]["columns"][0]["name"], "email");
+        assert_eq!(list[1]["columns"][0]["order"], "desc");
+        assert_eq!(list[1]["columns"][1]["order"], "asc");
+        assert_eq!(list[2]["type"], "gin");
+        assert_eq!(
+            list[2]["columns"][0]["order"],
+            serde_json::Value::Null,
+            "direction is a btree concept; inventing ASC for GIN would be wrong"
+        );
+        assert_eq!(indexes_json(&[]), "[]");
+    }
+
+    #[test]
+    fn column_defaults_json_is_none_when_empty_and_escapes_when_not() {
+        assert_eq!(column_defaults_json(&[]), None);
+        let json = column_defaults_json(&[
+            ("id".into(), "nextval('users_id_seq'::regclass)".into()),
+            ("note".into(), "'say \"hi\"'::text".into()),
+        ])
+        .expect("two defaults");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed["id"], "nextval('users_id_seq'::regclass)");
+        assert_eq!(parsed["note"], "'say \"hi\"'::text");
     }
 
     #[test]

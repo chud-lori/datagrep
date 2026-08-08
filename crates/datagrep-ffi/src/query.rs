@@ -113,6 +113,10 @@ struct QueryInner {
     /// header's `columns` field simply cannot be filled for an empty result
     /// set today.
     columns: Vec<(String, String)>,
+    /// Affected-row count from an `Ack`-shaped statement (INSERT/UPDATE/DDL),
+    /// mirrored from `StoreState::affected` so the GUI can say
+    /// "N rows affected" instead of an empty grid.
+    affected: Option<u64>,
     /// The user pressed stop, possibly before the query was even accepted.
     cancel_requested: bool,
     /// Latest known report — pending at first, resolved once the server
@@ -354,6 +358,7 @@ fn absorb(shared: &Arc<QueryShared>, state: &StoreState) {
     let mut inner = shared.lock();
     inner.rows = state.rows;
     inner.phase = Some(state.phase.clone());
+    inner.affected = state.affected;
     if inner.columns.is_empty() {
         inner.columns = columns_of(state);
     }
@@ -632,6 +637,11 @@ pub unsafe extern "C" fn datagrep_query_status_json(
             let payload = json!({
                 "state": state,
                 "rows_loaded": inner.rows,
+                // Affected-row count for an Ack-shaped statement (INSERT/
+                // UPDATE/DDL); null for row-producing results. Additive to
+                // the frozen header's documented shape — the GUI renders
+                // "N rows affected" from this.
+                "affected_rows": inner.affected,
                 "elapsed_ms": elapsed_ms,
                 "error": error,
                 "columns": inner

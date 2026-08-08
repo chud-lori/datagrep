@@ -9,10 +9,10 @@
 //!    positional params; `Predicate` compiles to a real `WHERE`), but
 //!    `datagrep_api::Caps` only defines the flags listed below. Reported upward
 //!    rather than silently invented.
-//! 2. **`Mutation::Update`/`Delete` carry `key: Vec<Value>` with no column
-//!    names.** Resolved by convention in `connection.rs`: values are matched
-//!    positionally against the table's declared `PRIMARY KEY`, in
-//!    `PRAGMA table_info`'s own composite-key order.
+//! 2. **(Resolved.)** `Mutation::Update`/`Delete` now carry their row
+//!    identity as named `(FieldPath, Value)` pairs, so `connection.rs`
+//!    compiles the WHERE clause directly from the mutation — the old
+//!    positional `PRAGMA table_info` primary-key convention is gone.
 //! 3. **`Catalog::describe` takes no `ListOpts`**, so there is no per-call
 //!    signal for "include the expensive row count." Resolved conservatively:
 //!    `describe()` never runs `COUNT(*)` at all (see `catalog.rs`); a caller

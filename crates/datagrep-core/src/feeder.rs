@@ -503,7 +503,8 @@ async fn pull_loop(
 }
 
 /// Rows in a chunk, per its payload shape. `Ack`/`Empty` results carry none.
-fn payload_rows(batch: &Batch) -> usize {
+/// Shared with the store-free export path ([`crate::export`]).
+pub(crate) fn payload_rows(batch: &Batch) -> usize {
     use datagrep_api::driver::Payload;
     match &batch.payload {
         Payload::Rows(rows) => rows.len(),

@@ -477,13 +477,11 @@ fn handle_execute<'conn>(
     Ok(ExecOutcome::Cursor { id, schema })
 }
 
-/// datagrep-api's `Mutation::Update`/`Delete` carry `key: Vec<Value>` with no
-/// column names attached (see the gap noted in `driver.rs`'s module doc).
-/// This driver resolves it by convention: the values are matched
-/// positionally against the table's declared `PRIMARY KEY` columns, in
-/// their composite-key order (`PRAGMA table_info`'s own `pk` ordering) —
-/// the one unambiguous, engine-defined column order available without a
-/// schema handle passed alongside the mutation.
+/// `Mutation::Update`/`Delete` carry their row identity as **named**
+/// `(FieldPath, Value)` pairs (the same shape as `sets`), so the WHERE
+/// clause compiles directly from the mutation — no `PRAGMA table_info`
+/// lookup, no positional primary-key convention. The one-row invariant
+/// (design §3.8) is still enforced by [`expect_exactly_one`].
 fn handle_mutate(
     conn: &rusqlite::Connection,
     batch: &MutationBatch,
@@ -512,37 +510,24 @@ fn handle_mutate(
     })
 }
 
+/// Compile the named row identity into `"col" = ? AND …`. The field names
+/// come from the mutation itself (`key: Vec<(FieldPath, Value)>`); an empty
+/// key is refused — we never guess which row to affect (design §3.8).
 fn keyed_where(
-    conn: &rusqlite::Connection,
-    path: &datagrep_api::ObjectPath,
-    key: &[Value],
+    key: &[(datagrep_api::FieldPath, Value)],
     params: &mut Vec<Value>,
 ) -> Result<String, DbError> {
-    let pk_cols = crate::catalog::primary_key_columns(conn, path)?;
-    if pk_cols.is_empty() {
+    if key.is_empty() {
         return Err(DbError::Unsupported {
-            feature: format!(
-                "`{path}` has no declared PRIMARY KEY — cannot compile a row-identity WHERE clause"
-            ),
+            feature: "mutation with no row identity — refuse to guess which row to affect"
+                .to_string(),
         });
     }
-    if pk_cols.len() != key.len() {
-        return Err(DbError::Query {
-            code: None,
-            message: format!(
-                "mutation key has {} value(s) but `{path}` has {} primary key column(s)",
-                key.len(),
-                pk_cols.len()
-            ),
-            position: None,
-        });
-    }
-    let clauses = pk_cols
+    let clauses = key
         .iter()
-        .zip(key.iter())
-        .map(|(col, value)| {
+        .map(|(field, value)| {
             params.push(value.clone());
-            Ok::<_, DbError>(format!("{} = ?", quote_ident(col)?))
+            Ok::<_, DbError>(format!("{} = ?", crate::compile::field_ident(field)?))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(clauses.join(" AND "))
@@ -592,7 +577,7 @@ fn apply_mutation(conn: &rusqlite::Connection, m: &Mutation) -> Result<u64, DbEr
                     Ok::<_, DbError>(format!("{f} = ?"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let where_sql = keyed_where(conn, path, key, &mut params)?;
+            let where_sql = keyed_where(key, &mut params)?;
             let sql = format!(
                 "UPDATE {table} SET {} WHERE {where_sql}",
                 set_sql.join(", ")
@@ -608,7 +593,7 @@ fn apply_mutation(conn: &rusqlite::Connection, m: &Mutation) -> Result<u64, DbEr
         Mutation::Delete { path, key } => {
             let table = crate::compile::compile_object_path(path)?;
             let mut params: Vec<Value> = Vec::new();
-            let where_sql = keyed_where(conn, path, key, &mut params)?;
+            let where_sql = keyed_where(key, &mut params)?;
             let sql = format!("DELETE FROM {table} WHERE {where_sql}");
             let mut stmt = conn.prepare(&sql).map_err(map_sqlite_err)?;
             let bound: Vec<SqlParam<'_>> = params.iter().map(SqlParam).collect();

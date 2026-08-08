@@ -143,13 +143,18 @@ pub struct MutationBatch {
     pub mutations: Vec<Mutation>,
 }
 
-/// One generated write. `key` is the full row identity ([`crate::Identity`]):
-/// each mutation must affect exactly one row or the batch rolls back (§3.8).
+/// One generated write. `key` is the full row identity ([`crate::Identity`])
+/// as **named** field/value pairs — the same shape as `sets` — so a driver
+/// never has to reverse-engineer which columns the values belong to (no
+/// `pg_index` lookups, no `PRAGMA table_info` positional conventions, no
+/// "assume `_id`"). Each mutation must affect exactly one row or the batch
+/// rolls back (§3.8).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Mutation {
     Update {
         path: ObjectPath,
-        key: Vec<Value>,
+        /// Row identity: identity fields paired with this row's values.
+        key: Vec<(FieldPath, Value)>,
         sets: Vec<(FieldPath, Value)>,
     },
     Insert {
@@ -159,7 +164,8 @@ pub enum Mutation {
     },
     Delete {
         path: ObjectPath,
-        key: Vec<Value>,
+        /// Row identity: identity fields paired with this row's values.
+        key: Vec<(FieldPath, Value)>,
     },
 }
 
@@ -202,6 +208,39 @@ mod tests {
         };
         assert_eq!(p.clone(), p);
         assert_ne!(p, nested);
+    }
+
+    #[test]
+    fn mutation_key_carries_field_names_and_round_trips_through_serde() {
+        // The row identity names its fields, exactly like `sets` — a driver
+        // must never have to guess which column a key value belongs to.
+        let op = Op::Mutate(MutationBatch {
+            mutations: vec![
+                Mutation::Update {
+                    path: ObjectPath::new(vec![Arc::from("app"), Arc::from("users")]),
+                    key: vec![
+                        (FieldPath::field("tenant"), Value::I64(7)),
+                        (FieldPath::field("id"), Value::I64(42)),
+                    ],
+                    sets: vec![(FieldPath::field("name"), Value::Str(Arc::from("amy")))],
+                },
+                Mutation::Delete {
+                    path: ObjectPath::new(vec![Arc::from("app"), Arc::from("users")]),
+                    key: vec![(FieldPath::field("id"), Value::I64(43))],
+                },
+            ],
+        });
+        let json = serde_json::to_string(&op).unwrap();
+        let back: Op = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, op);
+        let Op::Mutate(batch) = back else {
+            panic!("expected Op::Mutate")
+        };
+        let Mutation::Update { key, .. } = &batch.mutations[0] else {
+            panic!("expected Update")
+        };
+        assert_eq!(key[0].0, FieldPath::field("tenant"));
+        assert_eq!(key[1].1, Value::I64(42));
     }
 
     #[test]

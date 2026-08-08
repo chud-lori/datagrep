@@ -196,7 +196,7 @@ impl<W: Write> TableSink<W> {
     }
 }
 
-impl<W: Write> RowSink for TableSink<W> {
+impl<W: Write + Send> RowSink for TableSink<W> {
     fn start(&mut self, columns: &[String]) -> io::Result<()> {
         self.columns = columns.to_vec();
         Ok(())
@@ -222,6 +222,15 @@ impl<W: Write> RowSink for TableSink<W> {
         if !self.header_written {
             self.widths = Some(self.compute_widths(&[]));
             self.write_header()?;
+        }
+        // An acknowledgement (INSERT/UPDATE/DDL) has no rows to show; the
+        // honest footer is its affected count, not "(0 rows shown)".
+        if let (0, Some(n)) = (summary.rows_shown, summary.affected) {
+            let plural = if n == 1 { "" } else { "s" };
+            return match &summary.note {
+                Some(note) => writeln!(self.out, "({n} row{plural} affected — {note})"),
+                None => writeln!(self.out, "({n} row{plural} affected)"),
+            };
         }
         let plural = if summary.rows_shown == 1 { "" } else { "s" };
         match &summary.note {
@@ -256,6 +265,7 @@ mod tests {
             sink.finish(&Summary {
                 rows_shown: rows.len() as u64,
                 note: note.map(str::to_string),
+                affected: None,
             })
             .unwrap();
         }
@@ -326,6 +336,7 @@ mod tests {
             sink.finish(&Summary {
                 rows_shown: 1,
                 note: None,
+                affected: None,
             })
             .unwrap();
         }
@@ -351,6 +362,7 @@ mod tests {
             sink.finish(&Summary {
                 rows_shown: 0,
                 note: Some("statement acknowledged".into()),
+                affected: None,
             })
             .unwrap();
         }
@@ -368,6 +380,7 @@ mod tests {
             sink.finish(&Summary {
                 rows_shown: 1,
                 note: None,
+                affected: None,
             })
             .unwrap();
         }

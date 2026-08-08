@@ -152,8 +152,7 @@ impl PgConnection {
 
         let mut total_affected = 0u64;
         for m in &batch.mutations {
-            let key_fields = self.resolve_key_fields(m).await?;
-            let compiled = sql::compile_mutation(m, &key_fields)?;
+            let compiled = sql::compile_mutation(m)?;
             let (reply_tx, reply_rx) = oneshot::channel();
             if cmd_tx
                 .send(ActorCmd::Execute {
@@ -216,51 +215,6 @@ impl PgConnection {
         {
             let _ = reply_rx.await;
         }
-    }
-
-    /// Resolve the identity column names a `Mutation::Update`/`Delete`'s
-    /// positional `key: Vec<Value>` refers to.
-    ///
-    /// Gap: `datagrep_api::request::Mutation` carries `key` as bare values with no
-    /// field names (unlike `sets`, which pairs each value with a
-    /// `FieldPath`) — see the crate report. We recover the primary key
-    /// column order with a live `pg_index` lookup each call; this is extra
-    /// round trips on the write path but never guesses silently.
-    async fn resolve_key_fields(&self, m: &Mutation) -> Result<Vec<Arc<str>>, DbError> {
-        let (path, key_len) = match m {
-            Mutation::Update { path, key, .. } => (path, key.len()),
-            Mutation::Delete { path, key } => (path, key.len()),
-            Mutation::Insert { .. } => return Ok(Vec::new()),
-        };
-        let table = sql::quote_object_path(path)?;
-        let guard = self.client.lock().await;
-        let client = guard.as_ref().ok_or(DbError::Closed)?;
-        let rows = client
-            .query(
-                &format!(
-                    "SELECT a.attname FROM pg_index i \
-                     JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
-                     WHERE i.indrelid = {table}::regclass AND i.indisprimary \
-                     ORDER BY array_position(i.indkey, a.attnum)"
-                ),
-                &[],
-            )
-            .await
-            .map_err(map_pg_error)?;
-        drop(guard);
-        let names: Vec<Arc<str>> = rows
-            .iter()
-            .map(|r| Arc::from(r.get::<_, String>(0)))
-            .collect();
-        if names.len() != key_len {
-            return Err(DbError::Unsupported {
-                feature: format!(
-                    "resolved {} primary key column(s) for {path} but the mutation supplied {key_len} key value(s)",
-                    names.len()
-                ),
-            });
-        }
-        Ok(names)
     }
 }
 

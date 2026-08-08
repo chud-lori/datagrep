@@ -17,11 +17,15 @@ use crate::value_text::CellText;
 
 /// What every writer needs to know once a result set ends, to render an
 /// honest trailer/summary (ticket: "say how many rows were shown vs total").
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Summary {
     pub rows_shown: u64,
     /// `None` when the result finished normally (nothing was withheld).
     pub note: Option<String>,
+    /// Affected-row count from an `Ack`-shaped statement (INSERT/UPDATE/DDL).
+    /// When set, the human footer reads "N rows affected" instead of
+    /// "(0 rows shown)".
+    pub affected: Option<u64>,
 }
 
 /// One row, as columns paired with their already-classified [`CellText`].
@@ -32,7 +36,10 @@ pub type Row = Vec<CellText>;
 /// this one window (or one row, for the non-table formats) at a time; no
 /// implementation is allowed to accumulate the full result (design §3.2,
 /// ticket "NEVER accumulate the whole result in a Vec before printing").
-pub trait RowSink {
+///
+/// `Send` because `export` hands a sink adapter across
+/// `datagrep_core::CoreApi::run_export`'s (`Send`) sink seam.
+pub trait RowSink: Send {
     /// Called once per statement, before any rows. `columns` is empty for a
     /// non-tabular result (an `Ack`-shaped statement, e.g. DDL).
     fn start(&mut self, columns: &[String]) -> io::Result<()>;

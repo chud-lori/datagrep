@@ -1,0 +1,34 @@
+[package]
+name = "datagrep-drv-mysql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MySQL/MariaDB driver for datagrep: mysql_async streaming over the datagrep-api seam (design §3.1, §3.2, §3.3)."
+
+[dependencies]
+datagrep-api = { path = "../datagrep-api" }
+# Statement splitting (MySQL `;`, backticks, `#` comments, DELIMITER) comes
+# from datagrep-lang — consumed, not reimplemented (ticket rule).
+datagrep-lang = { path = "../datagrep-lang" }
+
+# Native async MySQL client. Default features trimmed: we do not need
+# flate2 backends beyond the default, nor bigdecimal/chrono/time decoding —
+# values are decoded manually from `mysql_async::Value` + column metadata
+# into datagrep_api::Value (DECIMAL stays a string, design risk #4).
+mysql_async = { version = "0.37", default-features = false, features = [
+    "minimal",
+] }
+
+tokio = { version = "1", features = ["rt", "sync", "net", "time", "macros"] }
+futures-util = "0.3"
+
+thiserror = { workspace = true }
+tracing = "0.1"
+
+# Required to implement datagrep-api's #[async_trait] traits.
+async-trait = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

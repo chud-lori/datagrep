@@ -8,7 +8,8 @@ mod common;
 use std::sync::Arc;
 
 use datagrep_api::{
-    FetchHint, Mutation, MutationBatch, ObjectPath, Op, Payload, Request, Shape, Value, ValueKind,
+    FetchHint, FieldPath, Mutation, MutationBatch, ObjectPath, Op, Payload, Request, Shape, Value,
+    ValueKind,
 };
 
 fn key_path(key: &str) -> ObjectPath {
@@ -330,11 +331,17 @@ async fn op_mutate_set_hset_del_are_atomic_and_report_native_counts() {
         mutations: vec![
             Mutation::Delete {
                 path: ObjectPath::new(vec![Arc::from("0")]),
-                key: vec![Value::Str(Arc::from("datagreptest:mut:str"))],
+                key: vec![(
+                    FieldPath::field("key"),
+                    Value::Str(Arc::from("datagreptest:mut:str")),
+                )],
             },
             Mutation::Delete {
                 path: ObjectPath::new(vec![Arc::from("0")]),
-                key: vec![Value::Str(Arc::from("datagreptest:mut:h"))],
+                key: vec![(
+                    FieldPath::field("key"),
+                    Value::Str(Arc::from("datagreptest:mut:h")),
+                )],
             },
         ],
     };

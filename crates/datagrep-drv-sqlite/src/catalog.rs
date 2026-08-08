@@ -32,6 +32,8 @@ pub(crate) struct ColumnInfo {
     /// 0 = not part of the primary key; otherwise its 1-based position
     /// within a composite primary key, per SQLite's own `pk` column.
     pub pk_position: i64,
+    /// The default expression's SQL text (`dflt_value`), verbatim.
+    pub default_value: Option<String>,
 }
 
 /// Shared with `connection.rs`'s `Op::Mutate`/identity-detection path so
@@ -64,20 +66,23 @@ pub(crate) fn table_info(
         let name: String = row.get(1).map_err(map_sqlite_err)?;
         let decl_type: Option<String> = row.get(2).map_err(map_sqlite_err)?;
         let not_null: i64 = row.get(3).map_err(map_sqlite_err)?;
+        let default_value: Option<String> = row.get(4).map_err(map_sqlite_err)?;
         let pk_position: i64 = row.get(5).map_err(map_sqlite_err)?;
         out.push(ColumnInfo {
             name,
             decl_type: decl_type.filter(|s| !s.is_empty()),
             not_null: not_null != 0,
             pk_position,
+            default_value,
         });
     }
     Ok(out)
 }
 
-/// Primary-key columns of `path`, in composite-key order — the convention
-/// this driver uses to interpret `Mutation::Update`/`Delete`'s positional
-/// `key: Vec<Value>` (see the datagrep-api gap noted in `driver.rs`).
+/// Primary-key columns of `path`, in composite-key order — used by
+/// `connection.rs::detect_identity` to report `RowSchema::identity` for a
+/// browsed table (mutation WHERE clauses now come from the mutation's own
+/// named key, not from this lookup).
 pub(crate) fn primary_key_columns(
     conn: &rusqlite::Connection,
     path: &ObjectPath,
@@ -88,7 +93,7 @@ pub(crate) fn primary_key_columns(
     Ok(cols.into_iter().map(|c| c.name).collect())
 }
 
-fn row_schema_from_table_info(columns: &[ColumnInfo]) -> RowSchema {
+fn row_schema_from_table_info(columns: &[ColumnInfo], indexes: &[IndexInfo]) -> RowSchema {
     let pk_indices: Vec<u32> = columns
         .iter()
         .enumerate()
@@ -104,6 +109,25 @@ fn row_schema_from_table_info(columns: &[ColumnInfo]) -> RowSchema {
             }
             if c.pk_position > 0 {
                 flags |= FieldFlags::PRIMARY_KEY;
+            }
+            // `INDEXED` = leading column of some index (the only position a
+            // lookup can actually use); `UNIQUE` = a single-column unique
+            // index on exactly this column. Both derived from the same
+            // `PRAGMA index_list`/`index_xinfo` pass `describe()` already
+            // paid for — no extra queries.
+            let leading = |ix: &IndexInfo| {
+                ix.columns
+                    .first()
+                    .is_some_and(|col| col.name.as_deref() == Some(c.name.as_str()))
+            };
+            if indexes.iter().any(leading) {
+                flags |= FieldFlags::INDEXED;
+            }
+            if indexes
+                .iter()
+                .any(|ix| ix.unique && ix.columns.len() == 1 && leading(ix))
+            {
+                flags |= FieldFlags::UNIQUE;
             }
             FieldDef {
                 name: Arc::from(c.name.as_str()),
@@ -398,6 +422,16 @@ fn describe_path(conn: &rusqlite::Connection, path: &ObjectPath) -> Result<Objec
                 });
             }
             let ty = object_kind(conn, db, table)?;
+            // Indexes are listed here and only here — on an explicit
+            // `describe()` of this one table (design §5.1: lazy; never on
+            // tree expansion, never on connect). `PRAGMA index_list` +
+            // `index_xinfo` are metadata-only and O(indexes), not O(rows).
+            let indexes = list_indexes(conn, db, table)?;
+            let mut extra = vec![(Arc::from("indexes"), Arc::from(indexes_json(&indexes)))];
+            let defaults = column_defaults_json(&cols);
+            if let Some(defaults) = defaults {
+                extra.push((Arc::from("column_defaults"), Arc::from(defaults)));
+            }
             // Row count is deliberately NOT included here: `COUNT(*)` on
             // SQLite has no cheap estimate (no trustworthy `reltuples`
             // equivalent) and can be O(table size) — running it on every
@@ -412,8 +446,8 @@ fn describe_path(conn: &rusqlite::Connection, path: &ObjectPath) -> Result<Objec
                     has_children: true,
                     comment: None,
                 },
-                schema: Some(row_schema_from_table_info(&cols)),
-                extra: vec![],
+                schema: Some(row_schema_from_table_info(&cols, &indexes)),
+                extra,
             })
         }
         _ => Err(DbError::Query {
@@ -434,6 +468,188 @@ fn object_kind(conn: &rusqlite::Connection, db: &str, table: &str) -> Result<Obj
         Some("view") => ObjectKind::View,
         _ => ObjectKind::Table,
     })
+}
+
+/// One key column of an index, from `PRAGMA index_xinfo` (`key = 1` rows).
+struct IndexColumn {
+    /// `None` for the rowid (`cid = -1`) and for expression columns
+    /// (`cid = -2`) — SQLite has no cheap name for either; the `definition`
+    /// SQL is where the reader sees the expression text.
+    name: Option<String>,
+    descending: bool,
+}
+
+/// One index of a table, from `PRAGMA index_list` + `index_xinfo` +
+/// `sqlite_master.sql`.
+struct IndexInfo {
+    name: String,
+    unique: bool,
+    /// `index_list.origin`: `"c"` = CREATE INDEX, `"u"` = UNIQUE constraint,
+    /// `"pk"` = PRIMARY KEY constraint.
+    origin: String,
+    partial: bool,
+    columns: Vec<IndexColumn>,
+    /// The verbatim `CREATE INDEX …` statement; `None` for indexes SQLite
+    /// created implicitly (constraint-backed ones have no stored SQL).
+    definition: Option<String>,
+}
+
+/// All indexes of `db.table`, one `PRAGMA index_list` plus one
+/// `PRAGMA index_xinfo` per index. `PRAGMA` cannot bind parameters, so every
+/// interpolated identifier goes through [`quote_ident`], which rejects
+/// NUL-embedded (silently truncating) names outright.
+fn list_indexes(
+    conn: &rusqlite::Connection,
+    db: &str,
+    table: &str,
+) -> Result<Vec<IndexInfo>, DbError> {
+    let qdb = quote_ident(db)?;
+    let sql = format!("PRAGMA {qdb}.index_list({})", quote_ident(table)?);
+    let mut stmt = conn.prepare(&sql).map_err(map_sqlite_err)?;
+    let mut rows = stmt.query([]).map_err(map_sqlite_err)?;
+    let mut heads: Vec<(String, bool, String, bool)> = Vec::new();
+    while let Some(row) = rows.next().map_err(map_sqlite_err)? {
+        // index_list columns: seq, name, unique, origin, partial
+        let name: String = row.get("name").map_err(map_sqlite_err)?;
+        let unique: i64 = row.get("unique").map_err(map_sqlite_err)?;
+        let origin: String = row.get("origin").map_err(map_sqlite_err)?;
+        let partial: i64 = row.get("partial").map_err(map_sqlite_err)?;
+        heads.push((name, unique != 0, origin, partial != 0));
+    }
+    drop(rows);
+    drop(stmt);
+
+    let mut out = Vec::with_capacity(heads.len());
+    for (name, unique, origin, partial) in heads {
+        let xsql = format!("PRAGMA {qdb}.index_xinfo({})", quote_ident(&name)?);
+        let mut xstmt = conn.prepare(&xsql).map_err(map_sqlite_err)?;
+        let mut xrows = xstmt.query([]).map_err(map_sqlite_err)?;
+        let mut columns = Vec::new();
+        while let Some(row) = xrows.next().map_err(map_sqlite_err)? {
+            // index_xinfo columns: seqno, cid, name, desc, coll, key
+            let key: i64 = row.get("key").map_err(map_sqlite_err)?;
+            if key == 0 {
+                continue; // trailing rowid/aux columns, not index keys
+            }
+            let col_name: Option<String> = row.get("name").map_err(map_sqlite_err)?;
+            let descending: i64 = row.get("desc").map_err(map_sqlite_err)?;
+            columns.push(IndexColumn {
+                name: col_name,
+                descending: descending != 0,
+            });
+        }
+        drop(xrows);
+        drop(xstmt);
+
+        // Auto-created constraint indexes (`sqlite_autoindex_*`) sit in
+        // `sqlite_master` with a NULL `sql`; a missing row is treated the
+        // same rather than failing the whole describe.
+        let dsql =
+            format!("SELECT sql FROM {qdb}.sqlite_master WHERE type = 'index' AND name = ?1");
+        let definition: Option<String> = {
+            use rusqlite::OptionalExtension;
+            conn.query_row(&dsql, [name.as_str()], |r| r.get::<_, Option<String>>(0))
+                .optional()
+                .map_err(map_sqlite_err)?
+                .flatten()
+        };
+        out.push(IndexInfo {
+            name,
+            unique,
+            origin,
+            partial,
+            columns,
+            definition,
+        });
+    }
+    Ok(out)
+}
+
+/// The engine-independent index JSON shape (see the datagrep-ffi describe
+/// contract): `[{name, columns:[{name, order}], unique, primary, type,
+/// partial, filter, size_bytes, definition, sparse, expire_after_seconds}]`.
+///
+/// SQLite specifics, stated honestly: every SQLite index is a b-tree;
+/// per-index size needs the optional `dbstat` vtab, so `size_bytes` is
+/// `null`; the partial predicate has no PRAGMA of its own, so `partial` is a
+/// boolean and the `WHERE` clause is visible only in `definition`.
+fn indexes_json(indexes: &[IndexInfo]) -> String {
+    let entries: Vec<String> = indexes
+        .iter()
+        .map(|ix| {
+            let cols: Vec<String> = ix
+                .columns
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{{\"name\":{},\"order\":{}}}",
+                        json_opt_str(c.name.as_deref()),
+                        if c.descending { "\"desc\"" } else { "\"asc\"" },
+                    )
+                })
+                .collect();
+            format!(
+                "{{\"name\":{},\"columns\":[{}],\"unique\":{},\"primary\":{},\
+                 \"type\":\"btree\",\"partial\":{},\"filter\":null,\"size_bytes\":null,\
+                 \"definition\":{},\"sparse\":false,\"expire_after_seconds\":null}}",
+                json_str(&ix.name),
+                cols.join(","),
+                ix.unique,
+                ix.origin == "pk",
+                ix.partial,
+                json_opt_str(ix.definition.as_deref()),
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+/// `{"col": "<default SQL text>"}` for every column that has one; `None`
+/// when no column does (so `describe()` doesn't emit an empty `{}` pair).
+fn column_defaults_json(columns: &[ColumnInfo]) -> Option<String> {
+    let entries: Vec<String> = columns
+        .iter()
+        .filter_map(|c| {
+            c.default_value
+                .as_deref()
+                .map(|d| format!("{}:{}", json_str(&c.name), json_str(d)))
+        })
+        .collect();
+    if entries.is_empty() {
+        None
+    } else {
+        Some(format!("{{{}}}", entries.join(",")))
+    }
+}
+
+/// Minimal JSON string encoding. Hand-rolled on purpose: this crate's
+/// dependency policy keeps `serde_json` out of drivers (see `Cargo.toml`),
+/// and the catalog only ever needs to *emit* a handful of strings/bools.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn json_opt_str(s: Option<&str>) -> String {
+    match s {
+        Some(s) => json_str(s),
+        None => "null".to_string(),
+    }
 }
 
 fn infer_shape_impl(
@@ -529,5 +745,159 @@ mod tests {
         assert_eq!(current_word("SELECT * FROM use", 18), "use");
         assert_eq!(current_word("SELECT * FROM ", 14), "");
         assert_eq!(current_word("x", 1), "x");
+    }
+
+    #[test]
+    fn json_str_escapes_quotes_backslashes_and_control_chars() {
+        assert_eq!(json_str("plain"), r#""plain""#);
+        assert_eq!(json_str("a\"b\\c"), r#""a\"b\\c""#);
+        assert_eq!(json_str("l1\nl2\t\r"), r#""l1\nl2\t\r""#);
+        assert_eq!(json_str("\u{1}"), "\"\\u0001\"");
+        assert_eq!(json_opt_str(None), "null");
+    }
+
+    fn memory_conn_with_indexes() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().expect("open :memory:");
+        conn.execute_batch(
+            "CREATE TABLE users (\
+                 id INTEGER PRIMARY KEY,\
+                 email TEXT NOT NULL,\
+                 age INTEGER DEFAULT 18,\
+                 deleted_at TEXT\
+             );\
+             CREATE UNIQUE INDEX idx_users_email ON users(email);\
+             CREATE INDEX idx_users_age_desc ON users(age DESC, email)\
+                 WHERE deleted_at IS NULL;",
+        )
+        .expect("schema setup");
+        conn
+    }
+
+    /// The full shape contract for one engine, verified by *parsing* the
+    /// emitted JSON (with serde_json, dev-only) rather than substring poking:
+    /// every entry carries the cross-engine keys, key order and direction
+    /// are right, and the unique/partial facts land where the UI looks.
+    #[test]
+    fn describe_emits_index_json_with_the_cross_engine_shape() {
+        let conn = memory_conn_with_indexes();
+        let path = ObjectPath::new(vec![Arc::from("main"), Arc::from("users")]);
+        let detail = describe_path(&conn, &path).expect("describe users");
+
+        let raw = detail
+            .extra
+            .iter()
+            .find(|(k, _)| k.as_ref() == "indexes")
+            .map(|(_, v)| v.to_string())
+            .expect("describe() must attach an `indexes` extra");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("indexes is valid JSON");
+        let list = parsed.as_array().expect("indexes is a JSON array");
+        assert_eq!(list.len(), 2, "{raw}");
+
+        for entry in list {
+            for key in [
+                "name",
+                "columns",
+                "unique",
+                "primary",
+                "type",
+                "partial",
+                "filter",
+                "size_bytes",
+                "definition",
+                "sparse",
+                "expire_after_seconds",
+            ] {
+                assert!(
+                    entry.get(key).is_some(),
+                    "index entry missing {key}: {entry}"
+                );
+            }
+            assert_eq!(entry["type"], "btree");
+            assert_eq!(entry["size_bytes"], serde_json::Value::Null);
+        }
+
+        let email = list
+            .iter()
+            .find(|e| e["name"] == "idx_users_email")
+            .expect("unique email index listed");
+        assert_eq!(email["unique"], true);
+        assert_eq!(email["primary"], false);
+        assert_eq!(email["partial"], false);
+        assert_eq!(email["columns"][0]["name"], "email");
+        assert_eq!(email["columns"][0]["order"], "asc");
+        assert!(email["definition"]
+            .as_str()
+            .expect("CREATE INDEX sql present")
+            .contains("UNIQUE INDEX"));
+
+        let age = list
+            .iter()
+            .find(|e| e["name"] == "idx_users_age_desc")
+            .expect("compound partial index listed");
+        assert_eq!(age["unique"], false);
+        assert_eq!(age["partial"], true, "WHERE-claused index is partial");
+        let cols = age["columns"].as_array().expect("columns array");
+        assert_eq!(cols.len(), 2, "compound index keeps key order");
+        assert_eq!(cols[0]["name"], "age");
+        assert_eq!(cols[0]["order"], "desc");
+        assert_eq!(cols[1]["name"], "email");
+        assert_eq!(cols[1]["order"], "asc");
+    }
+
+    #[test]
+    fn describe_reports_defaults_and_index_flags_on_columns() {
+        let conn = memory_conn_with_indexes();
+        let path = ObjectPath::new(vec![Arc::from("main"), Arc::from("users")]);
+        let detail = describe_path(&conn, &path).expect("describe users");
+
+        let defaults = detail
+            .extra
+            .iter()
+            .find(|(k, _)| k.as_ref() == "column_defaults")
+            .map(|(_, v)| v.to_string())
+            .expect("age has a default, so the pair must exist");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&defaults).expect("column_defaults is valid JSON");
+        assert_eq!(parsed["age"], "18");
+        assert!(parsed.get("email").is_none(), "no default, no key");
+
+        let schema = detail.schema.expect("declared schema");
+        let email = schema
+            .fields
+            .iter()
+            .find(|f| f.name.as_ref() == "email")
+            .expect("email field");
+        assert!(email.flags.contains(FieldFlags::INDEXED));
+        assert!(
+            email.flags.contains(FieldFlags::UNIQUE),
+            "single-column unique index marks the column unique"
+        );
+        let age = schema
+            .fields
+            .iter()
+            .find(|f| f.name.as_ref() == "age")
+            .expect("age field");
+        assert!(
+            age.flags.contains(FieldFlags::INDEXED),
+            "leading column of the compound index"
+        );
+        assert!(!age.flags.contains(FieldFlags::UNIQUE));
+    }
+
+    /// A table with no indexes still reports `indexes` — as an honest `[]`,
+    /// which the UI renders as "none" (distinct from "not reported").
+    #[test]
+    fn a_table_without_indexes_reports_an_empty_array() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open :memory:");
+        conn.execute_batch("CREATE TABLE bare (v);").expect("setup");
+        let path = ObjectPath::new(vec![Arc::from("main"), Arc::from("bare")]);
+        let detail = describe_path(&conn, &path).expect("describe bare");
+        let raw = detail
+            .extra
+            .iter()
+            .find(|(k, _)| k.as_ref() == "indexes")
+            .map(|(_, v)| v.to_string())
+            .expect("indexes extra present even when empty");
+        assert_eq!(raw, "[]");
     }
 }

@@ -116,19 +116,12 @@ crate's build instructions: "do not reach around it into drivers"). Building
 a real frontend against it surfaced gaps worth fixing in `datagrep-core`, in
 descending order of impact:
 
-1. **No store-free execution path, so `export` cannot honor design
-   §3.2/§5.1's "export never goes through the result store."** `CoreApi`
-   exposes exactly one way to run a statement and read rows —
-   `run_query`/`get_rows` — and `get_rows` always answers out of
-   `datagrep_core::store::ResultStore`. There is no lower-level façade (e.g. a
-   raw `Cursor`/`Batch` stream) a frontend can drive directly. `datagrep export`
-   in this crate is therefore built on the identical path `datagrep query` uses.
-   It still never accumulates more than one bounded window's rows in *this
-   process* (see `cmd/streaming.rs`), and the store itself is bounded and
-   spills rather than buffering unboundedly — but it is not the
-   store-bypassing path the design describes. This is the gap most worth
-   closing; it is the one place this crate's behavior diverges from a
-   named design invariant rather than from an omission.
+1. **(Resolved.)** `CoreApi::run_export` now exists — the store-free
+   streaming endpoint design §3.2/§5.1 calls for. `datagrep export` drives it
+   (`cmd/export.rs`): each driver chunk is converted, written to the format
+   sink, and dropped before the next pull; nothing is admitted to any
+   `ResultStore`, and `CoreApi::result_bytes` stays at zero for the whole
+   export (asserted by `export_of_200k_rows_never_grows_the_result_store`).
 
 2. **`ExecOpts.row_limit`/`timeout`/`read_only_assert` are declared but never
    read.** `grep` across `datagrep-drv-postgres` and `datagrep-drv-sqlite` for
@@ -142,17 +135,11 @@ descending order of impact:
    honestly on every `Request` so a driver that starts reading it gets real
    values for free.
 
-3. **DDL/DML acknowledgement never reaches `CoreApi`.** `Shape::Ack {
-   affected, message }` exists in `datagrep-api`, and both drivers' `AckCursor`
-   *carry* an affected-row count — but `AckCursor::next_batch` returns
-   `Batch::default()` (`Payload::Empty`), and `datagrep_core::store::convert()`
-   only ever admits `Payload::Rows`/`Docs`/`Pairs`. An `Ack` chunk is
-   silently dropped before it reaches `ResultStore`, so `StoreState` never
-   carries the count. From the CLI's perspective, `DELETE FROM t` that
-   removes 500 rows is indistinguishable from `SELECT * FROM t WHERE
-   1=0` — both show as "0 rows, no columns." `datagrep query` says so explicitly
-   in its footer note rather than pretending otherwise; see `git log` on
-   `cmd/streaming.rs` for the exact wording.
+3. **(Resolved.)** `Shape::Ack { affected, message }` is now published into
+   `StoreState::affected`/`ack_message` by the store's writer task and
+   carried into `QueryStats::affected` on `QueryEvent::Done`. `datagrep query`
+   prints "N rows affected" for an INSERT/UPDATE/DDL statement instead of
+   "(0 rows shown)" (`cmd/streaming.rs`, `format::Summary::affected`).
 
 4. **No way to learn a `Shape::Table` result's columns when it has zero
    rows.** Column names arrive baked into the first admitted `RecordBatch`

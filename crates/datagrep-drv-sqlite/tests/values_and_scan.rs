@@ -210,11 +210,11 @@ async fn op_mutate_insert_update_delete_round_trip() {
         Value::Str(Arc::from("first"))
     );
 
-    // Update, keyed by the declared PRIMARY KEY (`id`).
+    // Update, keyed by the named row identity.
     conn.execute(Request::Op(Op::Mutate(MutationBatch {
         mutations: vec![Mutation::Update {
             path: path.clone(),
-            key: vec![Value::I64(1)],
+            key: vec![(FieldPath::field("id"), Value::I64(1))],
             sets: vec![(FieldPath::field("v"), Value::Str(Arc::from("second")))],
         }],
     })))
@@ -229,7 +229,7 @@ async fn op_mutate_insert_update_delete_round_trip() {
     conn.execute(Request::Op(Op::Mutate(MutationBatch {
         mutations: vec![Mutation::Delete {
             path,
-            key: vec![Value::I64(1)],
+            key: vec![(FieldPath::field("id"), Value::I64(1))],
         }],
     })))
     .await
@@ -247,4 +247,86 @@ async fn op_mutate_insert_update_delete_round_trip() {
         panic!("expected Rows")
     };
     assert_eq!(rows[0][0], Value::I64(0));
+}
+
+/// **Gap 2 — the named row identity is authoritative.** A composite key whose
+/// pairs arrive in a *different order* than the table's declared PRIMARY KEY
+/// still targets the right row, because each value names its own column. The
+/// old positional convention (`PRAGMA table_info` pk order) would have
+/// swapped `tenant` and `id` here and matched nothing.
+#[tokio::test]
+async fn named_key_mutation_round_trips_regardless_of_declared_pk_order() {
+    let conn = common::connect_memory().await;
+    conn.execute(Request::native(
+        "CREATE TABLE t(tenant INTEGER, id INTEGER, v TEXT, PRIMARY KEY (tenant, id))",
+    ))
+    .await
+    .unwrap();
+    conn.execute(Request::native(
+        "INSERT INTO t(tenant, id, v) VALUES (1, 2, 'a'), (2, 1, 'b')",
+    ))
+    .await
+    .unwrap();
+
+    let path = datagrep_api::ObjectPath::new(vec![Arc::from("t")]);
+    // Key pairs deliberately in (id, tenant) order — reversed from the
+    // declared (tenant, id). Positional matching would hit row (1, 2);
+    // named matching must hit row (tenant=2, id=1).
+    conn.execute(Request::Op(Op::Mutate(MutationBatch {
+        mutations: vec![Mutation::Update {
+            path: path.clone(),
+            key: vec![
+                (FieldPath::field("id"), Value::I64(1)),
+                (FieldPath::field("tenant"), Value::I64(2)),
+            ],
+            sets: vec![(FieldPath::field("v"), Value::Str(Arc::from("updated")))],
+        }],
+    })))
+    .await
+    .expect("named-key update failed");
+
+    assert_eq!(
+        first_row(&*conn, "SELECT v FROM t WHERE tenant = 2 AND id = 1").await[0],
+        Value::Str(Arc::from("updated")),
+        "the named key must select by field name, not position"
+    );
+    assert_eq!(
+        first_row(&*conn, "SELECT v FROM t WHERE tenant = 1 AND id = 2").await[0],
+        Value::Str(Arc::from("a")),
+        "the other row must be untouched"
+    );
+
+    // Delete through the same named identity, then prove the affected count
+    // arrives in the Ack shape (Gap 1's driver half).
+    let cursor = conn
+        .execute(Request::Op(Op::Mutate(MutationBatch {
+            mutations: vec![Mutation::Delete {
+                path,
+                key: vec![
+                    (FieldPath::field("tenant"), Value::I64(2)),
+                    (FieldPath::field("id"), Value::I64(1)),
+                ],
+            }],
+        })))
+        .await
+        .expect("named-key delete failed");
+    match cursor.shape() {
+        Shape::Ack { affected, .. } => assert_eq!(*affected, Some(1)),
+        other => panic!("expected Ack, got {other:?}"),
+    }
+
+    // An empty identity is refused, never guessed at (design §3.8).
+    let err = match conn
+        .execute(Request::Op(Op::Mutate(MutationBatch {
+            mutations: vec![Mutation::Delete {
+                path: datagrep_api::ObjectPath::new(vec![Arc::from("t")]),
+                key: vec![],
+            }],
+        })))
+        .await
+    {
+        Err(err) => err,
+        Ok(_) => panic!("an empty row identity must be rejected"),
+    };
+    assert!(err.to_string().contains("row identity"), "got: {err}");
 }

@@ -779,21 +779,13 @@ impl MongoConnection {
         }
     }
 
-    /// `Mutation::Update`/`Delete::key` is a positional `Vec<Value>` with no
-    /// field names (a `datagrep-api` gap shared with `datagrep-drv-postgres` — see the
-    /// crate report). For MongoDB there is no `RowSchema::identity` at all
-    /// on `Shape::Documents`, so the only sound reading is "the `_id`
-    /// value" — refused outright rather than guessed at for anything else.
-    fn id_filter(&self, key: &[Value]) -> Result<BsonDocument, DbError> {
-        match key {
-            [only] => Ok(doc! { "_id": value_to_bson_for_field("_id", only)? }),
-            other => Err(DbError::Unsupported {
-                feature: format!(
-                    "MongoDB row identity is always a single _id value; got {} key value(s)",
-                    other.len()
-                ),
-            }),
-        }
+    /// `Mutation::Update`/`Delete::key` carries the row identity as named
+    /// `(FieldPath, Value)` pairs, so the filter compiles directly from the
+    /// mutation — typically `{_id: …}`, but any caller-named field(s) work.
+    /// The old "assume a single bare value means `_id`" guess is gone. An
+    /// empty identity is refused, never guessed at (design §3.8).
+    fn id_filter(&self, key: &[(FieldPath, Value)]) -> Result<BsonDocument, DbError> {
+        id_filter_from_key(key)
     }
 
     async fn execute_explain(
@@ -941,6 +933,26 @@ pub(crate) fn is_write_method(method_lower: &str) -> bool {
         || method_lower.starts_with("findoneandupdate")
         || method_lower.starts_with("findoneanddelete")
         || method_lower.starts_with("findoneandreplace")
+}
+
+/// Compile a mutation's named row identity (`key: Vec<(FieldPath, Value)>`)
+/// into a filter document — one entry per named field, typically just
+/// `{_id: …}`. Shared by [`MongoConnection`] and `transaction.rs`. An empty
+/// identity is refused: we never guess which document to affect (§3.8).
+pub(crate) fn id_filter_from_key(key: &[(FieldPath, Value)]) -> Result<BsonDocument, DbError> {
+    if key.is_empty() {
+        return Err(DbError::Unsupported {
+            feature: "mutation with no row identity — refuse to guess which document to affect"
+                .into(),
+        });
+    }
+    let mut filter = BsonDocument::new();
+    for (field, value) in key {
+        let f = crate::filter::field_path_to_mongo(field);
+        let bson = crate::value::value_to_bson_for_field(&f, value)?;
+        filter.insert(f, bson);
+    }
+    Ok(filter)
 }
 
 pub(crate) fn as_bson_doc(v: &Value) -> Result<BsonDocument, DbError> {

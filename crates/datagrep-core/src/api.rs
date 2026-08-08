@@ -232,6 +232,26 @@ impl CoreApi {
         self.queries.run(lease, req).await
     }
 
+    /// **The export endpoint** (design §3.2/§5.1): run `req` and stream its
+    /// result **straight into `sink`, never through the result store**.
+    ///
+    /// > "Export is a separate streaming endpoint that runs its own cursor at
+    /// > full fetch size straight to a file, never through the store."
+    ///
+    /// One driver chunk is in flight at a time; nothing is admitted to any
+    /// store, so [`CoreApi::result_bytes`] does not move no matter how many
+    /// rows are exported. See [`crate::export`] for the sink contract.
+    pub async fn run_export(
+        &self,
+        id: ProfileId,
+        req: Request,
+        sink: &mut dyn crate::export::ExportSink,
+    ) -> Result<crate::export::ExportStats, DbError> {
+        let session = self.session(id)?;
+        let lease = session.acquire().await?;
+        crate::export::run_export_on(&lease, req, sink).await
+    }
+
     /// Resolve a row window (§3.2, §3.6). Asking for rows beyond what has been
     /// fetched is what resumes the feeder — scrolling is the pull signal.
     pub async fn get_rows(&self, qid: QueryId, range: Range<u64>) -> Result<RowWindow, DbError> {
