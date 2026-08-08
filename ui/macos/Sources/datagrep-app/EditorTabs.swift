@@ -67,12 +67,15 @@ final class EditorTabsModel: ObservableObject {
     @Published var tabs: [EditorTab] = []
     @Published var activeID: String?
     @Published var connections: [EditorConnectionOption] = []
+    /// Named queries on disk that are not currently open in a tab.
+    @Published var savedQueries: [SavedQueryRecord] = []
 
     var onActivate: ((EditorTab) -> Void)?
     var onClose: ((EditorTab) -> Void)?
     var onNew: (() -> Void)?
     var onSave: ((EditorTab) -> Void)?
     var onBind: ((EditorTab, String?) -> Void)?
+    var onOpenSaved: ((SavedQueryRecord) -> Void)?
 
     var active: EditorTab? { tabs.first { $0.id == activeID } }
 
@@ -112,16 +115,26 @@ struct EditorTabBar: View {
                 .padding(.horizontal, 2)
             }
 
-            Button {
-                model.onNew?()
+            // Closing a named tab keeps its .sql on disk, so there has to be a
+            // way back to it. This is that way.
+            Menu {
+                Button("New Query Tab") { model.onNew?() }
+                if !model.savedQueries.isEmpty {
+                    Section("Saved Queries") {
+                        ForEach(model.savedQueries, id: \.id) { record in
+                            Button(record.name ?? record.id) { model.onOpenSaved?(record) }
+                        }
+                    }
+                }
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 20, height: 18)
             }
-            .buttonStyle(.plain)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
             .foregroundStyle(.secondary)
-            .help("New query tab  ⌘T")
+            .help("New query tab (⌘T), or reopen a saved query")
 
             Divider().frame(height: 16)
 

@@ -2,13 +2,52 @@ import AppKit
 import DatagrepKit
 import SwiftUI
 
-/// The inspector on the right of the results grid.
+/// The inspector on the right of the results grid. It has two modes and one
+/// switch between them.
 ///
-/// A nested cell (`datagrep_rows_cell_kind == 3`) draws as a chip like `{4 fields}`;
-/// clicking the chip asks the ABI for `datagrep_rows_cell_detail_json` and shows the
-/// whole value here, pretty-printed. The grid never holds this text — it is
-/// fetched for the one cell that was clicked, and dropped when the panel closes.
+/// * **Schema** — what the selected table/collection/key *is*: columns, indexes,
+///   stats. Driven by `datagrep_catalog_describe_json`; see `SchemaPane`.
+/// * **Cell** — what one nested value *contains*. A nested cell
+///   (`datagrep_rows_cell_kind == 3`) draws as a chip like `{4 fields}`; clicking
+///   it asks the ABI for `datagrep_rows_cell_detail_json` and shows the whole
+///   value here, pretty-printed.
+///
+/// The switch is non-destructive on purpose: each mode keeps its own state, so
+/// flipping to the schema and back does not throw away the cell you were
+/// reading, and it never re-issues a load.
 struct DetailPanel: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            modeSwitch
+            Divider()
+            if model.inspectorMode == .schema {
+                SchemaPane(model: model)
+            } else {
+                CellDetailPane(model: model)
+            }
+        }
+        // A material, not a flat fill: the inspector reads as a floating
+        // layer above the results pane, matching the status bar treatment.
+        .background(.ultraThinMaterial)
+    }
+
+    /// Always both segments, always visible. A switch that appears and
+    /// disappears with content is a switch the user cannot learn.
+    private var modeSwitch: some View {
+        Picker("", selection: $model.inspectorMode) {
+            Label("Schema", systemImage: "tablecells").tag(InspectorMode.schema)
+            Label("Cell", systemImage: "curlybraces").tag(InspectorMode.cell)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+}
+
+private struct CellDetailPane: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
@@ -32,9 +71,6 @@ struct DetailPanel: View {
             Divider()
             legend
         }
-        // A material, not a flat fill: the inspector reads as a floating
-        // layer above the results pane, matching the status bar treatment.
-        .background(.ultraThinMaterial)
     }
 
     private var header: some View {

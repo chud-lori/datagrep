@@ -157,12 +157,41 @@ public final class SavedQueryStore: @unchecked Sendable {
         for id in session.order {
             if let entry = byID[id], seen.insert(id).inserted { ordered.append(entry) }
         }
+        // Anything the session forgot: reopen it only if it is a *scratch* tab.
+        // Unsaved work has nowhere else to live, so a lost or truncated
+        // session.json must never be able to strand it. A named query does have
+        // somewhere else to live — the saved list — so it stays closed rather
+        // than forcing its way back into the tab bar every launch.
         for id in discovered.sorted() {
-            if let entry = byID[id], seen.insert(id).inserted { ordered.append(entry) }
+            guard let entry = byID[id], entry.0.isScratch, seen.insert(id).inserted else { continue }
+            ordered.append(entry)
         }
 
         let active = session.activeID.flatMap { seen.contains($0) ? $0 : nil }
         return (ordered, active ?? ordered.first?.0.id)
+    }
+
+    /// Every named query on disk, for an "open a saved query" list. Closing a
+    /// named tab removes it from the session but never from the folder — the
+    /// `.sql` file is the artefact the user asked us to keep.
+    public func allSaved() -> [SavedQueryRecord] {
+        let files =
+            (try? FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil)) ?? []
+        var out: [SavedQueryRecord] = []
+        for url in files where url.pathExtension == "json" {
+            guard url.lastPathComponent != "session.json" else { continue }
+            guard let data = try? Data(contentsOf: url),
+                let record = try? Self.decoder.decode(SavedQueryRecord.self, from: data),
+                record.name != nil
+            else { continue }
+            out.append(record)
+        }
+        return out.sorted { ($0.name ?? "") < ($1.name ?? "") }
+    }
+
+    public func text(for record: SavedQueryRecord) -> String? {
+        try? String(contentsOf: sqlURL(for: record), encoding: .utf8)
     }
 
     public func loadSession() -> EditorSession {

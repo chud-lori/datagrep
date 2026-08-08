@@ -87,6 +87,49 @@ final class CatalogNode: ObservableObject, Identifiable {
     var isPreviewable: Bool {
         ["table", "collection", "view", "key", "hash", "string"].contains(kind)
     }
+
+    /// Objects `describe()` has something to say about. Databases and schemas
+    /// are deliberately excluded: selecting one would spend a round trip to be
+    /// told its name back. Redis keys are in — `describe_key` is a `TYPE` plus a
+    /// `MEMORY USAGE`, and it is the only structure Redis will ever report.
+    var isDescribable: Bool {
+        !isProfile
+            && [
+                "table", "collection", "view", "key", "hash", "string", "list", "set", "zset",
+                "stream",
+            ].contains(kind)
+    }
+
+    /// Identity for the schema cache. The path is already unique within a
+    /// profile, and `\u{1}` cannot occur in an identifier.
+    var schemaCacheKey: String {
+        ([profile] + path).joined(separator: "\u{1}")
+    }
+}
+
+/// What the inspector is showing. Two modes, one pane — and switching between
+/// them throws neither away.
+enum InspectorMode: String, Hashable {
+    case cell, schema
+}
+
+/// The object the schema pane is pointed at. Held as plain values rather than a
+/// `CatalogNode` reference so a reloaded tree cannot leave the pane holding a
+/// node that is no longer in it.
+struct SchemaTarget: Equatable {
+    let profile: String
+    let path: [String]
+    let name: String
+    let kind: String
+    var cacheKey: String { ([profile] + path).joined(separator: "\u{1}") }
+    var breadcrumb: String { path.joined(separator: " › ") }
+}
+
+enum SchemaLoad {
+    case idle
+    case loading
+    case loaded(SchemaDetail)
+    case failed(String)
 }
 
 /// The whole application state. Everything published here is written on the
@@ -119,6 +162,12 @@ final class AppModel: ObservableObject {
     @Published var detailTitle: String = ""
     @Published var detailBody: String = ""
     @Published var showDetail = false
+
+    /// The inspector's two modes. Cell detail and schema hold their own state;
+    /// flipping between them is a view change, never a load.
+    @Published var inspectorMode: InspectorMode = .cell
+    @Published var schemaTarget: SchemaTarget?
+    @Published var schemaLoad: SchemaLoad = .idle
 
     // New-connection sheet.
     @Published var showNewConnection = false
@@ -192,6 +241,12 @@ final class AppModel: ObservableObject {
     private var core: DatagrepCoreHandle?
     private var query: DatagrepQueryHandle?
 
+    /// One entry per object the user has looked at. Dropped wholesale when the
+    /// profile list changes — a schema is only true of the connection it came
+    /// from. Nothing evicts it on a timer; a describe payload is a few KB.
+    private var schemaCache: [String: SchemaDetail] = [:]
+    private var schemaGeneration = 0
+
     // MARK: - boot
 
     func boot() {
@@ -201,6 +256,10 @@ final class AppModel: ObservableObject {
             self.detailBody =
                 Self.prettify(window.detailJSON(absoluteRow: UInt64(row), col: col))
                 ?? "(no detail available)"
+            // Clicking a chip is an unambiguous request for the cell, so the
+            // inspector switches to it — the loaded schema stays put behind
+            // the mode switch, one click away.
+            self.inspectorMode = .cell
             withAnimation(.smooth(duration: 0.22)) { self.showDetail = true }
         }
         results.onHiddenColumnsChanged = { [weak self] n in
@@ -240,6 +299,35 @@ final class AppModel: ObservableObject {
         }
         refreshFootprint()
         refreshDirectives()
+
+        if let f = ProcessInfo.processInfo.environment["DATAGREP_SCHEMA_FIXTURE"],
+            let text = try? String(contentsOfFile: f, encoding: .utf8),
+            let d = SchemaDetail.decode(text, fallbackName: "fixture", fallbackKind: "table")
+        {
+            schemaTarget = SchemaTarget(
+                profile: "local_pg", path: d.path.isEmpty ? [d.name] : d.path, name: d.name,
+                kind: d.kind)
+            schemaLoad = .loaded(d)
+            inspectorMode = .schema
+            showDetail = true
+        }
+        if let out = ProcessInfo.processInfo.environment["DATAGREP_SCHEMA_SHOT"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                guard let self else { return }
+                let renderer = ImageRenderer(
+                    content: DetailPanel(model: self)
+                        .frame(width: 380, height: 860)
+                        .background(Color(nsColor: .windowBackgroundColor)))
+                renderer.scale = 2
+                if let img = renderer.nsImage, let tiff = img.tiffRepresentation,
+                    let rep = NSBitmapImageRep(data: tiff),
+                    let png = rep.representation(using: .png, properties: [:])
+                {
+                    try? png.write(to: URL(fileURLWithPath: out))
+                }
+                NSApp.terminate(nil)
+            }
+        }
     }
 
     // MARK: - profiles
@@ -248,6 +336,11 @@ final class AppModel: ObservableObject {
     /// dropped with it — profiles changed, so the tree below them is stale.
     func reloadProfiles() {
         guard let core else { return }
+        // The tree below the profiles is about to be dropped; the schemas that
+        // came out of it go with it.
+        schemaCache.removeAll()
+        schemaTarget = nil
+        schemaLoad = .idle
         do {
             let profiles = try core.profiles()
             roots = profiles.map { p in
@@ -375,6 +468,79 @@ final class AppModel: ObservableObject {
     func select(_ node: CatalogNode) {
         activeProfile = node.profile
         if let root = roots.first(where: { $0.profile == node.profile }) { activeEnv = root.env }
+        if node.isDescribable { showSchema(for: node) }
+    }
+
+    // MARK: - schema, one describe() per object, cached
+
+    /// Point the inspector at an object and make sure its schema is there.
+    ///
+    /// A cache hit is synchronous and costs no round trip, so re-selecting a
+    /// table the user already looked at is instant and silent. A miss goes to
+    /// `catalogQueue`; `describe()` can open a connection and talk to a server,
+    /// and the main thread is never allowed to wait on that.
+    func showSchema(for node: CatalogNode, force: Bool = false) {
+        let target = SchemaTarget(
+            profile: node.profile, path: node.path, name: node.name, kind: node.kind)
+        showSchema(target, force: force)
+    }
+
+    func showSchema(_ target: SchemaTarget, force: Bool = false) {
+        schemaTarget = target
+        inspectorMode = .schema
+        if !showDetail { withAnimation(.smooth(duration: 0.22)) { showDetail = true } }
+
+        if force {
+            schemaCache.removeValue(forKey: target.cacheKey)
+        } else if let hit = schemaCache[target.cacheKey] {
+            schemaLoad = .loaded(hit)
+            return
+        }
+
+        guard let core else {
+            schemaLoad = .failed("the engine core is not open")
+            return
+        }
+        schemaLoad = .loading
+        // Every in-flight describe carries the generation it was issued in. A
+        // slow answer for a table the user has already clicked away from is
+        // dropped instead of overwriting the pane.
+        schemaGeneration &+= 1
+        let generation = schemaGeneration
+        catalogQueue.async { [weak self] in
+            var detail: SchemaDetail?
+            var failure: String?
+            do {
+                let json = try core.describe(profile: target.profile, path: target.path)
+                // Decoding happens here too — it is the caller's JSON parse, not
+                // the main thread's.
+                detail = SchemaDetail.decode(
+                    json, fallbackName: target.name, fallbackKind: target.kind)
+                if detail == nil { failure = "describe() returned something that is not an object" }
+            } catch {
+                failure = "\(error)"
+            }
+            DispatchQueue.main.async {
+                guard let self, self.schemaGeneration == generation else { return }
+                if let detail {
+                    self.schemaCache[target.cacheKey] = detail
+                    self.schemaLoad = .loaded(detail)
+                } else {
+                    self.schemaLoad = .failed(failure ?? "describe() failed")
+                }
+            }
+        }
+    }
+
+    /// Explicit refresh — the only thing that invalidates a cached schema.
+    func refreshSchema() {
+        guard let schemaTarget else { return }
+        showSchema(schemaTarget, force: true)
+    }
+
+    func showCellDetail() {
+        inspectorMode = .cell
+        if !showDetail { withAnimation(.smooth(duration: 0.22)) { showDetail = true } }
     }
 
     func preview(_ node: CatalogNode) {

@@ -18,6 +18,64 @@ struct StatusBar: View {
         }
     }
 
+    /// The `@limit N` directive stopped the result at exactly N rows — the
+    /// grid holds the first N of a possibly longer result (this is what every
+    /// "Preview 500 Rows" produces, via its injected `-- @limit 500`). If the
+    /// result came back UNDER the limit, the limit never bit and there is
+    /// nothing to announce.
+    private var limitHit: Int? {
+        guard model.state == .done, let lim = model.directives.limit, lim > 0,
+            model.rowsLoaded >= UInt64(lim)
+        else { return nil }
+        return lim
+    }
+
+    /// A partial result must not print a row count that looks final (the
+    /// RedisInsight lesson: silently incomplete views read as "the data does
+    /// not exist"). Three honest forms:
+    ///   capped / limit-hit  ->  "first N rows"
+    ///   total unknown       ->  "≥ N rows"
+    ///   complete            ->  "N rows"
+    private var rowCountText: String {
+        let n = model.rowsLoaded.formatted()
+        if model.state == .capped || limitHit != nil { return "first \(n) rows" }
+        return model.totalKnown ? "\(n) rows" : "≥ \(n) rows"
+    }
+
+    private var rowCountHelp: String {
+        if model.state == .capped {
+            return "the engine stopped storing rows at its cap — this is not the whole result"
+        }
+        if limitHit != nil {
+            return "the statement ran with an @limit directive — this is not the whole result"
+        }
+        if !model.totalKnown {
+            return
+                "≥ because this engine streams without reporting a total — more rows may exist than have been loaded"
+        }
+        return "row count reported by the engine"
+    }
+
+    /// The unmissable version, in words, next to the count: plain, specific
+    /// phrasing rather than a vague badge.
+    private var incompleteNotice: (text: String, icon: String, help: String)? {
+        if model.state == .capped {
+            return (
+                "stopped at \(model.rowsLoaded.formatted())-row limit — result incomplete",
+                "exclamationmark.triangle.fill",
+                "the engine's soft row cap ended this result early; rows beyond this point exist but were not fetched — narrow the query to see them"
+            )
+        }
+        if let lim = limitHit {
+            return (
+                "showing first \(lim.formatted()) rows of more (@limit)",
+                "arrow.down.to.line",
+                "an @limit \(lim) directive stopped this result at \(lim.formatted()) rows — the full result may be longer; raise or remove the @limit to fetch more"
+            )
+        }
+        return nil
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             Circle().fill(dotColor).frame(width: 7, height: 7)
@@ -26,9 +84,17 @@ struct StatusBar: View {
                 .monospaced()
                 .foregroundStyle(.secondary)
 
-            Text("\(model.totalKnown ? "" : "≥ ")\(model.rowsLoaded.formatted()) rows")
+            Text(rowCountText)
                 .monospaced()
                 .foregroundStyle(.secondary)
+                .help(rowCountHelp)
+
+            if let notice = incompleteNotice {
+                Label(notice.text, systemImage: notice.icon)
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+                    .help(notice.help)
+            }
 
             Text("\(model.elapsedMs) ms")
                 .monospaced()

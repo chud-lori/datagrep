@@ -118,6 +118,13 @@ private struct NodeLabel: View {
 
     private var isActive: Bool { node.isProfile && node.name == model.activeProfile }
 
+    /// The object the inspector is currently describing. Selection in this tree
+    /// is otherwise invisible — a schema pane with no indication of *which*
+    /// table it belongs to is a pane you have to guess at.
+    private var isInspected: Bool {
+        !node.isProfile && model.schemaTarget?.cacheKey == node.schemaCacheKey
+    }
+
     var body: some View {
         HStack(spacing: 7) {
             if node.isProfile {
@@ -161,8 +168,8 @@ private struct NodeLabel: View {
         .background(
             RoundedRectangle(cornerRadius: 5, style: .continuous)
                 .fill(
-                    isActive
-                        ? Color.accentColor.opacity(0.16)
+                    isActive || isInspected
+                        ? Color.accentColor.opacity(isInspected && !isActive ? 0.12 : 0.16)
                         : (hovering ? Color.secondary.opacity(0.11) : Color.clear))
         )
         .contentShape(Rectangle())
@@ -184,8 +191,16 @@ private struct NodeLabel: View {
                     model.selectProfile(node.name)
                     model.removeActiveProfile()
                 }
-            } else if node.isPreviewable {
-                Button("Preview 500 Rows") { model.preview(node) }
+            } else {
+                if node.isDescribable {
+                    Button("Show Schema") { model.showSchema(for: node) }
+                    Button("Refresh Schema") { model.showSchema(for: node, force: true) }
+                        .help("Re-read the columns and indexes from the server")
+                }
+                if node.isPreviewable {
+                    if node.isDescribable { Divider() }
+                    Button("Preview 500 Rows") { model.preview(node) }
+                }
             }
         }
         .help(node.subtitle ?? node.kind)

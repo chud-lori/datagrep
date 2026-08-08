@@ -162,9 +162,32 @@ final class GridTableView: NSTableView {
         onFocusChanged?()
     }
 
+    /// Gutter click: select the whole row. Routed through the SAME block model
+    /// as every other selection gesture — anchor on the first column, focus on
+    /// the last, which `spansAllColumns` then renders as a plain row highlight.
+    /// No parallel selection path exists for the gutter to diverge from.
+    func selectWholeRow(_ row: Int, extend: Bool) {
+        guard numberOfRows > 0, numberOfColumns > 0 else { return }
+        let r = max(0, min(numberOfRows - 1, row))
+        window?.makeFirstResponder(self)
+        var range: GridCellRange
+        if extend, let existing = cellRange {
+            range = existing
+            range.anchorColumn = 0
+            range.extend(toRow: r, column: numberOfColumns - 1)
+        } else {
+            range = GridCellRange(row: r, column: 0)
+            range.extend(toRow: r, column: numberOfColumns - 1)
+        }
+        apply(range, scroll: false)
+    }
+
     /// Only the rows on screen are ever decorated: the block may be 20 000 rows
     /// tall, but at most a viewport of row views exists to paint it.
     func refreshSelectionDecorations() {
+        // The gutter emphasises selected row numbers, so it repaints with the
+        // rows. One small strip, redrawn only on selection changes — never idle.
+        enclosingScrollView?.verticalRulerView?.needsDisplay = true
         let vis = rows(in: visibleRect)
         guard vis.length > 0 else { return }
         for r in vis.lowerBound..<vis.upperBound {
@@ -403,6 +426,7 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
 {
     let tableView = GridTableView()
     private let scrollView = NSScrollView()
+    private let rowNumberRuler = GridRowNumberRuler(scrollView: nil, orientation: .verticalRuler)
 
     private(set) var pager: RowPager?
     private var rowCount: Int = 0
@@ -480,6 +504,19 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         scrollView.backgroundColor = .textBackgroundColor
         scrollView.scrollerStyle = .overlay
 
+        // The row-number gutter. A vertical RULER, not a table column, which is
+        // what pins it against horizontal scrolling and keeps it out of every
+        // copy path (those enumerate `tableColumns` only) — see
+        // GridRowNumberRuler for the full rationale.
+        rowNumberRuler.grid = tableView
+        rowNumberRuler.clientView = tableView
+        rowNumberRuler.onSelectRow = { [weak self] row, extend in
+            self?.tableView.selectWholeRow(row, extend: extend)
+        }
+        scrollView.hasVerticalRuler = true
+        scrollView.verticalRulerView = rowNumberRuler
+        scrollView.rulersVisible = true
+
         root.addSubview(scrollView)
         NSLayoutConstraint.activate([
             scrollView.topAnchor.constraint(equalTo: root.topAnchor),
@@ -497,6 +534,7 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         self.pager?.invalidateAll()
         self.pager = pager
         rowCount = 0
+        rowNumberRuler.update(rowCount: 0)
         tableView.resetSelection()
         onSelectionChanged?(nil)
         didSizeColumns = false
@@ -514,6 +552,7 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         pager?.invalidateAll()
         pager = nil
         rowCount = 0
+        rowNumberRuler.update(rowCount: 0)
         tableView.resetSelection()
         onSelectionChanged?(nil)
         for c in tableView.tableColumns { tableView.removeTableColumn(c) }
@@ -532,6 +571,9 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         let newCount = Int(status.rowsLoaded)
         let grew = newCount != rowCount
         rowCount = newCount
+        // Gutter width follows the magnitude of the row count (1,000,000 must
+        // not clip). Derived from the count alone — no row fetch involved.
+        if grew { rowNumberRuler.update(rowCount: newCount) }
         isStreaming = !status.state.isTerminal
         resultIsCapped = status.state == .capped
 

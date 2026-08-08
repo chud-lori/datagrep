@@ -236,6 +236,10 @@ final class GridCellView: NSView {
 
     override var toolTip: String? {
         get {
+            // A skeleton is configured as (.value, "") — without this guard it
+            // would answer "empty string", which is precisely the pending-vs-
+            // empty confusion the skeleton bar exists to prevent.
+            if isPending { return "loading — this row has not been fetched yet" }
             switch kind {
             case .absent: return "ABSENT — this field is not present in the document"
             case .null: return "NULL"

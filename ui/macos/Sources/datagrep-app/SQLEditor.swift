@@ -396,6 +396,34 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     /// Re-reads the profile list. Call after profiles are added or removed.
     func refreshConnections() {
         tabs.connections = profilesProvider?() ?? fallbackConnections()
+        refreshSavedList()
+    }
+
+    /// Named queries on disk that are not already open in a tab.
+    private func refreshSavedList() {
+        let open = Set(tabs.tabs.map(\.id))
+        tabs.savedQueries = store.allSaved().filter { !open.contains($0.id) }
+    }
+
+    /// Reopens a saved query, or just focuses it when it is already open.
+    private func openSaved(_ record: SavedQueryRecord) {
+        loadViewIfNeeded()
+        if let existing = tabs.tabs.first(where: { $0.id == record.id }) {
+            activate(existing)
+            return
+        }
+        guard let text = store.text(for: record) else { return }
+        flushActive()
+        let tab = EditorTab(
+            id: record.id, name: record.name, connection: record.connection, text: text,
+            selectedRange: NSRange(location: record.cursorLocation, length: record.cursorLength),
+            isDirty: false)
+        tabs.tabs.append(tab)
+        tabs.activeID = tab.id
+        load(tab)
+        persistSession()
+        refreshSavedList()
+        focus()
     }
 
     /// With no provider installed the picker still has to name the profiles a
@@ -412,6 +440,7 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         tabs.onClose = { [weak self] tab in self?.close(tab) }
         tabs.onNew = { [weak self] in self?.newTab() }
         tabs.onSave = { [weak self] _ in self?.saveActiveTab() }
+        tabs.onOpenSaved = { [weak self] record in self?.openSaved(record) }
         tabs.onBind = { [weak self] tab, name in
             guard let self else { return }
             tab.connection = name
@@ -451,7 +480,11 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         guard let idx = tabs.tabs.firstIndex(where: { $0.id == tab.id }) else { return }
         if tab.id == tabs.activeID { flushActive() }
         tabs.tabs.remove(at: idx)
-        store.delete(tab.record)
+        // A named query is a file the user asked us to keep, so closing its tab
+        // must not delete it — it drops out of the session and stays in the
+        // saved list. Only an untitled scratch tab is discarded, because
+        // closing it is the only way the user has to say "throw this away".
+        if tab.name == nil { store.delete(tab.record) }
 
         if tabs.tabs.isEmpty {
             // Never leave the user staring at no editor at all.
@@ -464,6 +497,7 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
             load(next)
         }
         persistSession()
+        refreshSavedList()
     }
 
     private func selectTab(at index: Int) -> Bool {
@@ -487,6 +521,7 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         tab.isDirty = false
         store.save(tab.record, text: tab.text)
         persistSession()
+        refreshSavedList()
     }
 
     /// First few words of the first statement, so the dialog opens with
@@ -616,7 +651,11 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     // MARK: - key equivalents
 
     private func handleKeyEquivalent(_ event: NSEvent) -> Bool {
-        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Caps Lock and the function/numeric-pad bits ride along on ordinary
+        // keystrokes; only the intent-carrying modifiers may differ from ⌘.
+        let mods = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .subtracting([.capsLock, .function, .numericPad])
         guard mods == .command, let key = event.charactersIgnoringModifiers?.lowercased() else {
             return false
         }
