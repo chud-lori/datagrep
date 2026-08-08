@@ -70,7 +70,15 @@ pub fn driver_for_url(url: &str) -> Option<(&'static str, Arc<dyn datagrep_api::
         "mongodb"
     } else if url.starts_with("mysql://") || url.starts_with("mariadb://") {
         "mysql"
-    } else if url.starts_with("elasticsearch://") {
+    } else if url.starts_with("elasticsearch://")
+        || url.starts_with("http://")
+        || url.starts_with("https://")
+    {
+        // `ElasticsearchDriver::parse_url` accepts all three spellings, and
+        // http(s) is the form every Elasticsearch tool prints — a profile URL
+        // copied out of Kibana or curl has to land somewhere. No other engine
+        // in this build claims an HTTP scheme, so this stays unambiguous; the
+        // day one does, the scheme alone stops being enough to route on.
         "elasticsearch"
     } else {
         return None;
@@ -125,6 +133,21 @@ mod tests {
             driver_for_url("mongodb://h/db").map(|(i, _)| i),
             Some("mongodb")
         );
+        for url in [
+            "elasticsearch://localhost:9200",
+            "http://localhost:9200",
+            "https://es.example.com:9243",
+        ] {
+            assert_eq!(
+                driver_for_url(url).map(|(i, _)| i),
+                Some("elasticsearch"),
+                "{url}"
+            );
+            // Routing and parsing must agree: a URL this maps to a driver the
+            // driver then rejects is a worse failure than not mapping it.
+            let (_, driver) = driver_for_url(url).expect("routed");
+            assert!(driver.parse_url(url).is_ok(), "{url}");
+        }
     }
 
     #[test]

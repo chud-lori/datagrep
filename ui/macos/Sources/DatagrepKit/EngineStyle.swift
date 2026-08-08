@@ -115,6 +115,10 @@ public enum EngineStyle {
         case "sqlite": return "internaldrive.fill"
         case "redis": return "bolt.fill"
         case "mongo": return "leaf.fill"
+        // No brand artwork shipped for Elastic, so this glyph is what the
+        // engine looks like everywhere — a magnifier, because a search index
+        // is what it is, and nothing else in `NodeStyle` uses one.
+        case "elasticsearch": return "magnifyingglass.circle.fill"
         default: return "cylinder.fill"
         }
     }
@@ -126,6 +130,7 @@ public enum EngineStyle {
         case "sqlite": return Color(red: 0.541, green: 0.541, blue: 0.557)  // #8A8A8E
         case "redis": return Color(red: 0.863, green: 0.220, blue: 0.176)  // #DC382D
         case "mongo": return Color(red: 0.278, green: 0.635, blue: 0.282)  // #47A248
+        case "elasticsearch": return Color(red: 0.000, green: 0.749, blue: 0.702)  // #00BFB3
         default: return Color.secondary
         }
     }
@@ -137,6 +142,9 @@ public enum EngineStyle {
         case "sqlite": return "SQLite"
         case "redis": return "Redis"
         case "mongo": return "MongoDB"
+        // One driver, two products — the handshake decides which, so the name
+        // shown before a connection exists has to cover both.
+        case "elasticsearch": return "Elasticsearch"
         default: return driverID
         }
     }
@@ -151,6 +159,12 @@ public enum EngineStyle {
 
     /// Driver ids arrive from the engine (`postgres`, `sqlite`, `redis`, …) but
     /// URLs and human typing bring variants; fold them once, here.
+    ///
+    /// Public because `ConnectionEngines` matches a saved profile's driver
+    /// against its own engine list, and a second folding table would be exactly
+    /// the "two definitions of what an engine is" this type exists to prevent.
+    public static func canonicalID(_ id: String) -> String { normalise(id) }
+
     private static func normalise(_ id: String) -> String {
         let s = id.lowercased()
         if s.hasPrefix("postgres") || s == "pg" || s == "psql" { return "postgres" }
@@ -158,6 +172,7 @@ public enum EngineStyle {
         if s.hasPrefix("sqlite") { return "sqlite" }
         if s.hasPrefix("redis") || s.hasPrefix("rediss") { return "redis" }
         if s.hasPrefix("mongo") { return "mongo" }
+        if s.hasPrefix("elastic") || s.hasPrefix("opensearch") { return "elasticsearch" }
         return s
     }
 }
