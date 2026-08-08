@@ -52,7 +52,23 @@ var targets: [Target] = [
                     // links the system libz. The stub build has no flate2, which is
                     // why omitting this only fails against the real FFI.
                     "-lz",
-                ]),
+                ]
+                    // The half of the ABI reached by `dlsym` (see
+                    // `ProfileABI`) has NO Swift call site, so nothing in this
+                    // package leaves an undefined symbol for the linker to
+                    // resolve — and a static archive only contributes the
+                    // members that resolve one. Without these the symbols are
+                    // simply never pulled out of libdatagrep_ffi.a, every
+                    // `dlsym` returns NULL, and the app quietly reports that
+                    // the engine cannot edit or test a connection while the
+                    // code for both sits in the archive unused. `-u` forces
+                    // each one in. Verify with:
+                    //   nm -g datagrep.app/Contents/MacOS/datagrep | grep _datagrep_
+                    + [
+                        "datagrep_profiles_update", "datagrep_profiles_get_json",
+                        "datagrep_profiles_add_json", "datagrep_connection_info_json",
+                        "datagrep_connection_test_json",
+                    ].flatMap { ["-Xlinker", "-u", "-Xlinker", "_\($0)"] }),
                 .linkedFramework("Security"),
                 .linkedFramework("CoreFoundation"),
                 .linkedFramework("SystemConfiguration"),
