@@ -343,11 +343,9 @@ mod tests {
     fn untagged_or_missing_tasks_select_nothing() {
         assert!(task_ids_with_opaque_id(&json!({}), "x").is_empty());
         assert!(task_ids_with_opaque_id(&json!({"tasks": []}), "x").is_empty());
-        assert!(task_ids_with_opaque_id(
-            &json!({"tasks": [{"node": "n", "id": 1}]}),
-            "x"
-        )
-        .is_empty());
+        assert!(
+            task_ids_with_opaque_id(&json!({"tasks": [{"node": "n", "id": 1}]}), "x").is_empty()
+        );
     }
 
     #[test]

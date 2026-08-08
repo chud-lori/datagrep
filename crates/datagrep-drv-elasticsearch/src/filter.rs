@@ -110,22 +110,28 @@ impl Ctx {
             notices.push(Notice {
                 severity: NoticeSeverity::Warning,
                 code: Some(Arc::from("es.filter.array_index_dropped")),
-                message: Arc::from(format!(
-                    "array index segments were dropped from filter path(s) {}: Elasticsearch \
+                message: Arc::from(
+                    format!(
+                        "array index segments were dropped from filter path(s) {}: Elasticsearch \
                      flattens arrays at index time, so this matches ANY element, not a position",
-                    self.dropped_index_paths.join(", ")
-                ).as_str()),
+                        self.dropped_index_paths.join(", ")
+                    )
+                    .as_str(),
+                ),
             });
         }
         if !self.null_conflated_paths.is_empty() {
             notices.push(Notice {
                 severity: NoticeSeverity::Warning,
                 code: Some(Arc::from("es.filter.null_is_absent")),
-                message: Arc::from(format!(
+                message: Arc::from(
+                    format!(
                     "`is null` on {} compiled to `must_not exists`: Elasticsearch does not index \
                      JSON nulls, so a stored null and an absent field are indistinguishable here",
                     self.null_conflated_paths.join(", ")
-                ).as_str()),
+                )
+                    .as_str(),
+                ),
             });
         }
         notices
@@ -332,7 +338,10 @@ mod tests {
             values: vec![Value::Str(Arc::from("a")), lookup_attempt],
         });
         let terms = &compiled["terms"]["tag"];
-        assert!(terms.is_array(), "terms operand must be an array, got {terms}");
+        assert!(
+            terms.is_array(),
+            "terms operand must be an array, got {terms}"
+        );
         assert_eq!(terms.as_array().unwrap().len(), 2);
         // The lookup-shaped object is just element 1 of the array.
         assert_eq!(terms[1]["index"], json!("secrets"));

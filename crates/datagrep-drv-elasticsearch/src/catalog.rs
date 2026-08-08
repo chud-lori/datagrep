@@ -56,7 +56,10 @@ pub struct EsCatalog {
 }
 
 impl EsCatalog {
-    pub fn new(http: Arc<EsHttp>, mapping_cache: Arc<Mutex<HashMap<String, Arc<FieldTypes>>>>) -> Self {
+    pub fn new(
+        http: Arc<EsHttp>,
+        mapping_cache: Arc<Mutex<HashMap<String, Arc<FieldTypes>>>>,
+    ) -> Self {
         Self {
             http,
             mapping_cache,
@@ -380,7 +383,10 @@ fn record_source(
         } else {
             format!("{prefix}.{k}")
         };
-        let idx = match root.iter().position(|(name, _)| name.as_ref() == k.as_str()) {
+        let idx = match root
+            .iter()
+            .position(|(name, _)| name.as_ref() == k.as_str())
+        {
             Some(i) => i,
             None => {
                 root.push((Arc::from(k.as_str()), FieldTrie::default()));
@@ -457,9 +463,7 @@ pub fn encode_index_expression(expr: &str) -> Result<String, DbError> {
 
 fn not_found_is_empty_array(err: DbError) -> Result<Json, DbError> {
     match &err {
-        DbError::Query { code, .. }
-            if code.as_deref() == Some("index_not_found_exception") =>
-        {
+        DbError::Query { code, .. } if code.as_deref() == Some("index_not_found_exception") => {
             Ok(Json::Array(Vec::new()))
         }
         _ => Err(err),
@@ -574,7 +578,8 @@ impl Catalog for EsCatalog {
                 let (fields, indexes) = describe_arrays(&types);
 
                 let mut extra: Vec<(Arc<str>, Arc<str>)> = Vec::new();
-                let mut push = |k: &str, v: String| extra.push((Arc::from(k), Arc::from(v.as_str())));
+                let mut push =
+                    |k: &str, v: String| extra.push((Arc::from(k), Arc::from(v.as_str())));
                 push("field_count", types.len().to_string());
                 if let Some(n) = stat_number(&stats, &["_all", "primaries", "docs", "count"]) {
                     push("document_count", n.to_string());
@@ -783,7 +788,10 @@ mod tests {
     /// to retarget the request.
     #[test]
     fn index_expressions_cannot_escape_their_path_segment() {
-        assert_eq!(encode_index_expression("logs-2026.08").unwrap(), "logs-2026.08");
+        assert_eq!(
+            encode_index_expression("logs-2026.08").unwrap(),
+            "logs-2026.08"
+        );
         assert_eq!(encode_index_expression("logs*").unwrap(), "logs*");
         assert_eq!(encode_index_expression("a,b").unwrap(), "a,b");
         assert_eq!(
@@ -819,7 +827,10 @@ mod tests {
         };
         let page = paginate_by_name(nodes.clone(), &opts);
         assert_eq!(
-            page.items.iter().map(|n| n.path.to_string()).collect::<Vec<_>>(),
+            page.items
+                .iter()
+                .map(|n| n.path.to_string())
+                .collect::<Vec<_>>(),
             vec!["a", "b"]
         );
         let token = page.next.expect("more pages");
@@ -833,18 +844,16 @@ mod tests {
             },
         );
         assert_eq!(
-            page2.items.iter().map(|n| n.path.to_string()).collect::<Vec<_>>(),
+            page2
+                .items
+                .iter()
+                .map(|n| n.path.to_string())
+                .collect::<Vec<_>>(),
             vec!["c", "d"]
         );
 
         // The final page reports no continuation.
-        let last = paginate_by_name(
-            nodes,
-            &ListOpts {
-                limit: 100,
-                ..opts
-            },
-        );
+        let last = paginate_by_name(nodes, &ListOpts { limit: 100, ..opts });
         assert_eq!(last.items.len(), 5);
         assert!(last.next.is_none());
     }
@@ -895,7 +904,12 @@ mod tests {
         let mut root: Vec<(Arc<str>, FieldTrie)> = Vec::new();
         record_source(&mut root, &ordered(r#"{"name":"a","age":30}"#), "", &types);
         record_source(&mut root, &ordered(r#"{"name":"b"}"#), "", &types);
-        record_source(&mut root, &ordered(r#"{"name":"c","age":"thirty"}"#), "", &types);
+        record_source(
+            &mut root,
+            &ordered(r#"{"name":"c","age":"thirty"}"#),
+            "",
+            &types,
+        );
 
         let name = &root.iter().find(|(n, _)| n.as_ref() == "name").unwrap().1;
         let age = &root.iter().find(|(n, _)| n.as_ref() == "age").unwrap().1;
@@ -919,7 +933,11 @@ mod tests {
             "",
             &types,
         );
-        let addr = &root.iter().find(|(n, _)| n.as_ref() == "address").unwrap().1;
+        let addr = &root
+            .iter()
+            .find(|(n, _)| n.as_ref() == "address")
+            .unwrap()
+            .1;
         assert_eq!(addr.types, vec![(LogicalType::Document, 1)]);
         assert_eq!(addr.children.len(), 2);
         assert_eq!(&*addr.children[0].0, "city");

@@ -1,32 +1,107 @@
 # datagrep
 
-A lightweight, multi-paradigm database client (SQL + NoSQL) built to a published
-resource budget — *the client you don't have to close to get your laptop back.*
+A lightweight database client for SQL and NoSQL in one app — *the client you don't
+have to close to get your laptop back.*
 
-Full design: see the design doc (one level above this repo). The performance budget lives
-in [`budget.toml`](budget.toml) (machine-readable transcription of design §5, for CI).
+Native macOS app (SwiftUI + AppKit) and a CLI, both over one Rust engine.
 
-## Workspace layout
+## Engines
 
-```
-datagrep/
-  budget.toml        performance budget (design §5) as TOML, for future CI gates
-  crates/
-    datagrep-api/    THE STABLE SEAM (design §3.1): Driver / Connection / Cursor /
-                     Catalog / Value / Shape / Capabilities. No tokio, no Arrow,
-                     no reqwest — ~5 small deps by rule.
-    ...              datagrep-core, drivers, frontends slot in here (built separately;
-                     the workspace globs crates/*)
-```
+| Engine | Status |
+|---|---|
+| PostgreSQL | working |
+| SQLite | working |
+| Redis | working |
+| MongoDB | working |
+| MySQL / MariaDB | in progress |
+| Elasticsearch | in progress |
 
-Crate rules that keep it honest (design §3): drivers never see Arrow or the UI;
-`datagrep-core` never names a concrete driver; no `if driver_id == …` above `datagrep-api` —
-any such branch is a missing capability flag.
-
-## Build & test
+## Build
 
 ```
-cargo build
-cargo test
-cargo clippy -- -D warnings
+cargo build --release                  # engine + CLI  → target/release/datagrep
+cd ui/macos && ./build-app.sh          # macOS app     → ui/macos/datagrep.app
 ```
+
+The app needs no Xcode — Command Line Tools are enough, since it builds with
+Swift Package Manager rather than `xcodebuild`.
+
+## CLI quickstart
+
+```console
+$ datagrep profiles add local "sqlite:///tmp/app.db"
+created profile `local` (sqlite)
+
+$ datagrep query --profile local -c "SELECT id, name, note FROM users ORDER BY id"
+id  | name  | note
+----+-------+----------
+1   | alice | NULL
+2   | bob   |
+3   | carol | likes SQL
+(3 rows)
+
+$ datagrep export --profile local -c "SELECT * FROM events" --format csv -o events.csv
+$ datagrep query --profile prod -f report.sql --format json | jq '.[].email'
+```
+
+`NULL` (row 1) renders differently from an empty string (row 2), and differently
+again from a field that is *absent* from a document — three distinct facts that
+most clients collapse into one blank cell.
+
+Commands: `query`, `export`, `profiles`, `catalog`, `history`, `doctor`.
+A password in a connection URL is moved to the OS keychain on import; profiles
+store only a reference to it.
+
+## Block directives
+
+Any statement can carry per-block settings as comments:
+
+```sql
+-- @limit 200
+-- @timeout 30s
+-- @connection staging
+-- @readonly
+SELECT * FROM events;
+```
+
+## How it stays small
+
+Results stream. The driver, a bounded channel, and the result store form a
+pipeline where nothing runs more than two chunks ahead — so when the UI stops
+consuming, the driver stops reading its socket, the TCP window closes, and the
+server stops producing. A million-row result never becomes a million resident
+rows.
+
+Schema browsing is lazy: one cheap query per level you expand, never a crawl of
+the whole catalog on connect.
+
+The performance budget is machine-readable in [`budget.toml`](budget.toml) and
+enforced by [`ci/gates.sh`](ci/gates.sh).
+
+## Layout
+
+```
+crates/
+  datagrep-api/        the stable seam: Driver / Connection / Cursor / Catalog /
+                       Value / Shape / Capabilities. ~5 small deps, by rule.
+  datagrep-core/       streaming pipeline, result store, sessions, query lifecycle
+  datagrep-lang/       SQL splitting, highlighting, Mongo shell + Redis parsing
+  datagrep-drv-*/      one crate per engine
+  datagrep-ffi/        C ABI the macOS app links against
+  datagrep-cli/        the terminal frontend
+  datagrep-profiles/   connection store, query history (SQLite)
+  datagrep-secrets/    keychain / env / exec credential resolution
+  datagrep-tunnel/     SSH tunnels (in-process, no listening port)
+ui/macos/              the macOS app
+fixtures/              seeded benchmark datasets
+docs/                  design notes, testing, UX study
+```
+
+Rules that keep it honest: drivers never see Arrow or the UI, `datagrep-core`
+never names a concrete driver, and `if driver_id == …` above `datagrep-api` is
+banned — any such branch means a missing capability flag.
+
+## Testing
+
+`cargo test --workspace` runs everything that needs no server.
+See [`docs/testing.md`](docs/testing.md) for the live-engine suites.

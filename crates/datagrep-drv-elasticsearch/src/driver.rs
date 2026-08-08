@@ -255,7 +255,11 @@ impl Driver for ElasticsearchDriver {
             .await
             .map_err(|_| DbError::Timeout)??;
 
-        let (product, version, mut details) = classify_root(&root);
+        let crate::http::RootInfo {
+            product,
+            version,
+            mut details,
+        } = classify_root(&root);
         let page_mode = choose_page_mode(product, &version);
         let async_search = want_async && has_async_search(product, &version);
 
@@ -349,11 +353,7 @@ fn secret(cfg: &ResolvedConfig, key: &str) -> Option<String> {
 pub fn build_base_url(cfg: &ResolvedConfig) -> Result<String, DbError> {
     let host = str_field(cfg, "host")?
         .filter(|h| !h.is_empty())
-        .ok_or_else(|| {
-            DbError::Config(ConfigError::MissingField {
-                key: "host".into(),
-            })
-        })?;
+        .ok_or_else(|| DbError::Config(ConfigError::MissingField { key: "host".into() }))?;
     let port = num_field(cfg, "port")?.unwrap_or(9200.0) as u16;
     let tls = bool_field(cfg, "tls")?.unwrap_or(false);
     let scheme = if tls { "https" } else { "http" };
@@ -448,9 +448,11 @@ fn parse_es_url(url: &str) -> Result<ConnectionConfig, ConfigError> {
     }
     // IPv6 literals arrive as `[::1]:9200`.
     let (host, port) = if let Some(rest) = hostport.strip_prefix('[') {
-        let (h, tail) = rest.split_once(']').ok_or_else(|| ConfigError::InvalidUrl {
-            reason: "unterminated IPv6 literal".into(),
-        })?;
+        let (h, tail) = rest
+            .split_once(']')
+            .ok_or_else(|| ConfigError::InvalidUrl {
+                reason: "unterminated IPv6 literal".into(),
+            })?;
         (h.to_string(), tail.strip_prefix(':').map(str::to_string))
     } else {
         match hostport.split_once(':') {
@@ -505,7 +507,10 @@ fn parse_es_url(url: &str) -> Result<ConnectionConfig, ConfigError> {
         // A single trailing segment is the default index; anything deeper is a
         // reverse-proxy path prefix.
         if path.contains('/') {
-            values.insert("path_prefix".to_string(), ConfigValue::Str(path.to_string()));
+            values.insert(
+                "path_prefix".to_string(),
+                ConfigValue::Str(path.to_string()),
+            );
         } else {
             values.insert("index".to_string(), ConfigValue::Str(path.to_string()));
         }
@@ -663,13 +668,14 @@ mod tests {
         assert_eq!(cfg.values.get("port"), Some(&ConfigValue::Num(9243.0)));
 
         let cfg = d.parse_url("http://[::1]:9201/logs").unwrap();
-        assert_eq!(cfg.values.get("host"), Some(&ConfigValue::Str("::1".into())));
+        assert_eq!(
+            cfg.values.get("host"),
+            Some(&ConfigValue::Str("::1".into()))
+        );
         assert_eq!(cfg.values.get("port"), Some(&ConfigValue::Num(9201.0)));
 
         // A password with reserved characters survives the round trip.
-        let cfg = d
-            .parse_url("http://u:p%40ss%3Aword@h:9200")
-            .unwrap();
+        let cfg = d.parse_url("http://u:p%40ss%3Aword@h:9200").unwrap();
         assert_eq!(
             cfg.values.get("password"),
             Some(&ConfigValue::Str("p@ss:word".into()))
@@ -788,11 +794,7 @@ mod tests {
         assert_eq!(build_auth(&resolved(&[])).unwrap().scheme(), "none");
         // A selected mode with no credential is a per-field error, not a
         // silent downgrade to anonymous.
-        assert!(build_auth(&resolved(&[(
-            "auth",
-            ConfigValue::Str("api_key".into())
-        )]))
-        .is_err());
+        assert!(build_auth(&resolved(&[("auth", ConfigValue::Str("api_key".into()))])).is_err());
     }
 
     #[test]
@@ -825,7 +827,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("{key} missing from the form"));
             assert!(field.secret, "{key} must never enter ConnectionConfig");
         }
-        assert!(schema.fields.iter().any(|f| &*f.key == "host" && f.required));
+        assert!(schema
+            .fields
+            .iter()
+            .any(|f| &*f.key == "host" && f.required));
     }
 
     #[test]

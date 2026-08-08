@@ -96,7 +96,9 @@ impl Auth {
     pub fn basic(user: &str, password: &str) -> Self {
         let raw = format!("{user}:{password}");
         Auth::Basic(Arc::from(
-            base64::engine::general_purpose::STANDARD.encode(raw).as_str(),
+            base64::engine::general_purpose::STANDARD
+                .encode(raw)
+                .as_str(),
         ))
     }
 
@@ -228,7 +230,10 @@ impl EsHttp {
             .use_rustls_tls()
             .connect_timeout(request_timeout)
             .pool_idle_timeout(Duration::from_secs(30))
-            .user_agent(concat!("datagrep-drv-elasticsearch/", env!("CARGO_PKG_VERSION")));
+            .user_agent(concat!(
+                "datagrep-drv-elasticsearch/",
+                env!("CARGO_PKG_VERSION")
+            ));
         if accept_invalid_certs {
             // Opt-in only, and surfaced in `ServerInfo` so a connection that
             // skipped verification always says so.
@@ -379,10 +384,19 @@ impl EsHttp {
     }
 }
 
+/// What the `GET /` handshake told us.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootInfo {
+    pub product: Product,
+    pub version: String,
+    /// Display pairs for `ServerInfo::details` — shown, never branched on.
+    pub details: Vec<(Arc<str>, Arc<str>)>,
+}
+
 /// Classify the `GET /` response into a product and version, plus the display
 /// pairs `ServerInfo` carries. Split out from the network call so it is unit
 /// testable against both engines' real root documents.
-pub fn classify_root(root: &Json) -> (Product, String, Vec<(Arc<str>, Arc<str>)>) {
+pub fn classify_root(root: &Json) -> RootInfo {
     let version = root.get("version");
     let distribution = version
         .and_then(|v| v.get("distribution"))
@@ -413,7 +427,11 @@ pub fn classify_root(root: &Json) -> (Product, String, Vec<(Arc<str>, Arc<str>)>
             push(key, v);
         }
     }
-    (product, number, details)
+    RootInfo {
+        product,
+        version: number,
+        details,
+    }
 }
 
 /// Parse `major.minor` out of a version string, tolerating suffixes
@@ -489,29 +507,39 @@ mod tests {
 
     #[test]
     fn classify_distinguishes_products_by_distribution_not_version_number() {
-        let (p, v, details) = classify_root(&es_root());
+        let RootInfo {
+            product: p,
+            version: v,
+            details,
+        } = classify_root(&es_root());
         assert_eq!(p, Product::Elasticsearch);
         assert_eq!(v, "8.15.0");
         assert!(details
             .iter()
             .any(|(k, v)| &**k == "distribution" && &**v == "elasticsearch"));
 
-        let (p, v, details) = classify_root(&opensearch_root());
+        let RootInfo {
+            product: p,
+            version: v,
+            details,
+        } = classify_root(&opensearch_root());
         assert_eq!(p, Product::OpenSearch);
         assert_eq!(v, "2.11.0");
         assert!(details
             .iter()
             .any(|(k, v)| &**k == "distribution" && &**v == "opensearch"));
-        assert!(details
-            .iter()
-            .any(|(k, _)| &**k == "lucene_version"));
+        assert!(details.iter().any(|(k, _)| &**k == "lucene_version"));
     }
 
     #[test]
     fn classify_survives_a_root_document_it_has_never_seen() {
-        let (p, v, _) = classify_root(&serde_json::json!({}));
-        assert_eq!(p, Product::Elasticsearch, "no distribution field => ES");
-        assert_eq!(v, "unknown");
+        let info = classify_root(&serde_json::json!({}));
+        assert_eq!(
+            info.product,
+            Product::Elasticsearch,
+            "no distribution field => ES"
+        );
+        assert_eq!(info.version, "unknown");
     }
 
     #[test]
@@ -561,11 +589,7 @@ mod tests {
         assert!(!dbg.contains("ZWxhc3RpYzpodW50ZXIy"), "b64 leaked: {dbg}");
         assert_eq!(dbg, "Auth::basic(\"••••\")");
 
-        for a in [
-            Auth::api_key("id:key"),
-            Auth::bearer("tok"),
-            Auth::None,
-        ] {
+        for a in [Auth::api_key("id:key"), Auth::bearer("tok"), Auth::None] {
             let dbg = format!("{a:?}");
             assert!(!dbg.contains("key") || dbg.contains("api_key"));
             assert!(dbg.contains("••••"));
@@ -591,10 +615,7 @@ mod tests {
             Auth::api_key("YWJjOmRlZg==").header_value().unwrap(),
             "ApiKey YWJjOmRlZg=="
         );
-        assert_eq!(
-            Auth::bearer("t0k").header_value().unwrap(),
-            "Bearer t0k"
-        );
+        assert_eq!(Auth::bearer("t0k").header_value().unwrap(), "Bearer t0k");
         assert!(Auth::None.header_value().is_none());
     }
 

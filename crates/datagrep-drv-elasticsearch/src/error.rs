@@ -157,14 +157,23 @@ mod tests {
     #[test]
     fn auth_and_throttle_statuses_map_to_their_own_variants() {
         assert!(matches!(
-            map_status_error(401, r#"{"error":{"type":"security_exception","reason":"missing authentication credentials"}}"#),
+            map_status_error(
+                401,
+                r#"{"error":{"type":"security_exception","reason":"missing authentication credentials"}}"#
+            ),
             DbError::Auth(_)
         ));
         assert!(matches!(
-            map_status_error(429, r#"{"error":{"type":"circuit_breaking_exception","reason":"too much"}}"#),
+            map_status_error(
+                429,
+                r#"{"error":{"type":"circuit_breaking_exception","reason":"too much"}}"#
+            ),
             DbError::ResourceExhausted(_)
         ));
-        assert!(matches!(map_status_error(504, "gateway timeout"), DbError::Timeout));
+        assert!(matches!(
+            map_status_error(504, "gateway timeout"),
+            DbError::Timeout
+        ));
     }
 
     #[test]
@@ -172,7 +181,11 @@ mod tests {
         let html = "<html>".to_string() + &"x".repeat(10_000) + "</html>";
         match map_status_error(502, &html) {
             DbError::Query { message, .. } => {
-                assert!(message.len() < 600, "body must be truncated, got {}", message.len());
+                assert!(
+                    message.len() < 600,
+                    "body must be truncated, got {}",
+                    message.len()
+                );
                 assert!(message.ends_with('…'));
             }
             other => panic!("expected Query, got {other:?}"),

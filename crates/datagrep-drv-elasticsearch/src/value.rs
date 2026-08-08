@@ -112,9 +112,7 @@ impl FieldTypes {
 
     /// Every mapped path, in no particular order.
     pub fn paths(&self) -> impl Iterator<Item = (&str, EsType, &Arc<str>)> {
-        self.types
-            .iter()
-            .map(|(p, (t, n))| (p.as_str(), *t, n))
+        self.types.iter().map(|(p, (t, n))| (p.as_str(), *t, n))
     }
 
     /// Flatten an Elasticsearch `_mapping` response's `properties` object into
@@ -285,7 +283,11 @@ pub fn value_to_json(value: &Value) -> Json {
             // parser accepts numerically.
             Json::Number((*micros / 1_000).into())
         }
-        Value::Interval { months, days, nanos } => serde_json::json!({
+        Value::Interval {
+            months,
+            days,
+            nanos,
+        } => serde_json::json!({
             "months": months, "days": days, "nanos": nanos
         }),
         Value::Uuid(bytes) => Json::String(format_uuid(bytes)),
@@ -458,7 +460,8 @@ mod tests {
     fn unmapped_numbers_still_split_integral_from_fractional() {
         let empty = FieldTypes::new();
         let json: Json = serde_json::from_str(r#"{"a": 7, "b": 7.5, "c": -3}"#).unwrap();
-        let Value::Document(doc) = json_to_value(&OrderedJson::from_serde(&json), "", &empty) else {
+        let Value::Document(doc) = json_to_value(&OrderedJson::from_serde(&json), "", &empty)
+        else {
             panic!("expected document")
         };
         assert_eq!(doc.get("a"), Some(&Value::I64(7)));
@@ -515,12 +518,21 @@ mod tests {
     #[test]
     fn nested_objects_and_arrays_preserve_structure_and_key_order() {
         let m = mapping();
-        let json: Json =
-            serde_json::from_str(r#"{"address":{"city":"sg","geo":[1.5,2.5]},"tags":["a","b"]}"#)
-                .unwrap();
-        let Value::Document(doc) = json_to_value(&OrderedJson::from_serde(&json), "", &m) else {
+        // Parsed with the order-preserving parser, and deliberately written
+        // reverse-alphabetically so a BTreeMap-backed parse would be caught.
+        let json = OrderedJson::parse(
+            r#"{"zebra":1,"address":{"city":"sg","geo":[1.5,2.5]},"tags":["a","b"]}"#,
+        )
+        .unwrap();
+        let Value::Document(doc) = json_to_value(&json, "", &m) else {
             panic!("expected document")
         };
+        let top: Vec<&str> = doc.iter().map(|(k, _)| &**k).collect();
+        assert_eq!(
+            top,
+            vec!["zebra", "address", "tags"],
+            "_source key order is the wire order, not alphabetical"
+        );
         let city: FieldPath = "address.city".parse().unwrap();
         assert_eq!(doc.get_path(&city), Some(&Value::Str(Arc::from("sg"))));
         let tag1: FieldPath = "tags[1]".parse().unwrap();
@@ -564,7 +576,10 @@ mod tests {
     fn value_to_json_maps_documents_and_arrays_structurally() {
         let doc = Document::from_fields(vec![
             (Arc::from("a"), Value::I64(1)),
-            (Arc::from("b"), Value::Array(Arc::from(vec![Value::Bool(false)]))),
+            (
+                Arc::from("b"),
+                Value::Array(Arc::from(vec![Value::Bool(false)])),
+            ),
         ]);
         assert_eq!(
             value_to_json(&Value::Document(Arc::new(doc))),

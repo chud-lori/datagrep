@@ -28,7 +28,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value as Json};
@@ -164,14 +163,11 @@ impl EsConnection {
     /// loading are never duplicated.
     async fn open_scan(
         &self,
-        index: String,
-        body: Json,
-        user_sort: Vec<Json>,
-        limit: Option<u64>,
-        notices: Vec<Notice>,
-        timeout: Option<Duration>,
+        spec: ScanSpec,
         resume: Option<&datagrep_api::driver::ResumeToken>,
     ) -> Result<Box<dyn Cursor>, DbError> {
+        let ScanSpec { index, timeout, .. } = &spec;
+        let (index, timeout) = (index.clone(), *timeout);
         // The mapping drives the precision rules and the native type names on
         // schema deltas. It is best-effort: a caller with read access to the
         // documents but not to the mapping still gets a correct, if less
@@ -190,7 +186,7 @@ impl EsConnection {
             return Ok(Box::new(SearchCursor::from_resume(
                 self.http.clone(),
                 resume,
-                user_sort,
+                spec.user_sort.clone(),
                 types,
                 self.inflight.clone(),
                 self.async_search,
@@ -227,14 +223,7 @@ impl EsConnection {
 
         Ok(Box::new(SearchCursor::new(
             self.http.clone(),
-            ScanSpec {
-                index,
-                body,
-                user_sort,
-                limit,
-                notices,
-                timeout,
-            },
+            spec,
             self.page_mode,
             DEFAULT_KEEP_ALIVE.to_string(),
             pit_id,
@@ -276,9 +265,18 @@ impl EsConnection {
                     other => vec![other],
                 })
                 .unwrap_or_default();
-            let limit = opts.row_limit;
             return self
-                .open_scan(index, body, user_sort, limit, Vec::new(), opts.timeout, None)
+                .open_scan(
+                    ScanSpec {
+                        index,
+                        body,
+                        user_sort,
+                        limit: opts.row_limit,
+                        notices: Vec::new(),
+                        timeout: opts.timeout,
+                    },
+                    None,
+                )
                 .await;
         }
 
@@ -299,33 +297,38 @@ impl EsConnection {
                 opts.timeout,
             )
             .await?;
-        Ok(Box::new(DocsCursor::new(vec![crate::value::json_to_value(
-            &response,
-            "",
-            &FieldTypes::new(),
-        )])))
+        Ok(Box::new(DocsCursor::new(vec![
+            crate::value::json_to_value(&response, "", &FieldTypes::new()),
+        ])))
     }
 
-    async fn execute_scan(
-        &self,
-        path: &ObjectPath,
-        filter: Option<&datagrep_api::request::Predicate>,
-        order: &[datagrep_api::request::SortKey],
-        project: Option<&Vec<datagrep_api::value::FieldPath>>,
-        limit: Option<u64>,
-        resume: Option<&datagrep_api::driver::ResumeToken>,
-        opts: &ExecOpts,
-    ) -> Result<Box<dyn Cursor>, DbError> {
+    /// Takes the whole `Op::Scan` rather than its seven fields: the compiler
+    /// then keeps this in step with the `Op` definition, and there is one
+    /// place that knows how a scan is spelled.
+    async fn execute_scan(&self, op: &Op, opts: &ExecOpts) -> Result<Box<dyn Cursor>, DbError> {
+        let Op::Scan {
+            path,
+            filter,
+            order,
+            project,
+            limit,
+            resume,
+        } = op
+        else {
+            return Err(DbError::Unsupported {
+                feature: format!("{} routed to the scan path", op_name(op)),
+            });
+        };
         let index = self.resolve_index(path.parts().first().map(|p| &**p));
         let mut notices = Vec::new();
         let mut body = serde_json::Map::new();
 
-        if let Some(filter) = filter {
+        if let Some(filter) = filter.as_ref() {
             let compiled = compile_predicate(filter)?;
             notices.extend(compiled.notices);
             body.insert("query".into(), compiled.query);
         }
-        if let Some(fields) = project {
+        if let Some(fields) = project.as_ref() {
             let includes: Vec<Json> = fields
                 .iter()
                 .map(|f| Json::String(crate::filter::field_path_to_es(f).0))
@@ -333,16 +336,17 @@ impl EsConnection {
             body.insert("_source".into(), json!({ "includes": includes }));
         }
         let user_sort = compile_sort(order)?;
-        let limit = limit.or(opts.row_limit);
 
         self.open_scan(
-            index,
-            Json::Object(body),
-            user_sort,
-            limit,
-            notices,
-            opts.timeout,
-            resume,
+            ScanSpec {
+                index,
+                body: Json::Object(body),
+                user_sort,
+                limit: limit.or(opts.row_limit),
+                notices,
+                timeout: opts.timeout,
+            },
+            resume.as_ref(),
         )
         .await
     }
@@ -588,36 +592,19 @@ impl Connection for EsConnection {
     async fn execute(&self, req: Request) -> Result<Box<dyn Cursor>, DbError> {
         self.check_open()?;
         match &req {
-            Request::Native { text, params, opts } => {
-                self.execute_native(text, params, opts).await
-            }
+            Request::Native { text, params, opts } => self.execute_native(text, params, opts).await,
             Request::Op(op) => {
                 let opts = ExecOpts::default();
                 match op {
-                    Op::Scan {
-                        path,
-                        filter,
-                        order,
-                        project,
-                        limit,
-                        resume,
-                    } => {
-                        self.execute_scan(
-                            path,
-                            filter.as_ref(),
-                            order,
-                            project.as_ref(),
-                            *limit,
-                            resume.as_ref(),
-                            &opts,
-                        )
-                        .await
-                    }
+                    Op::Scan { .. } => self.execute_scan(op, &opts).await,
                     Op::Count {
                         path,
                         filter,
                         exact,
-                    } => self.execute_count(path, filter.as_ref(), *exact, &opts).await,
+                    } => {
+                        self.execute_count(path, filter.as_ref(), *exact, &opts)
+                            .await
+                    }
                     Op::Explain { inner, analyze } => {
                         self.execute_explain(inner, *analyze, &opts).await
                     }
@@ -739,7 +726,10 @@ mod tests {
             "POST /_bulk",
             "POST /_reindex\n{}",
         ] {
-            assert!(!is_read_request(&console(text)), "{text} must not be a read");
+            assert!(
+                !is_read_request(&console(text)),
+                "{text} must not be a read"
+            );
             let err = refuse_if_write(&console(text)).unwrap_err();
             assert!(matches!(err, DbError::Unsupported { .. }));
             assert!(
@@ -753,7 +743,9 @@ mod tests {
     /// substring of an index name.
     #[test]
     fn the_allow_list_matches_whole_path_segments_only() {
-        assert!(!is_read_request(&console("POST /_search_index_backup/_doc\n{}")));
+        assert!(!is_read_request(&console(
+            "POST /_search_index_backup/_doc\n{}"
+        )));
         assert!(!is_read_request(&console("POST /my_search/_doc\n{}")));
         assert!(is_read_request(&console("POST /my_search/_search\n{}")));
     }

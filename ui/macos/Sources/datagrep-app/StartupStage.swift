@@ -31,19 +31,21 @@ import SwiftUI
 final class StartupStage: ObservableObject {
     static let shared = StartupStage()
 
-    /// False until the window has been painted at least once.
-    @Published private(set) var contentReady = false
+    /// False until the window has been painted at least once. Everything gated
+    /// on it — the toolbar controls, the inspector column, the editor and the
+    /// grid — is chrome the user cannot act on during the first frame anyway.
+    @Published private(set) var contentReady: Bool
 
-    private init() {}
+    private init() {
+        // Measurement escape hatch: `--no-deferred-content` builds the whole
+        // window on the critical path, the way the app did before this change,
+        // so the before/after cold-start numbers come out of one binary instead
+        // of two builds that might differ in other ways.
+        contentReady = ProcessInfo.processInfo.arguments.contains("--no-deferred-content")
+    }
 
     func markContentReady() {
         guard !contentReady else { return }
         contentReady = true
     }
-
-    /// Test/measurement escape hatch: `--no-deferred-content` builds everything
-    /// on the critical path, the way the app did before, so the before/after
-    /// numbers can be produced from one binary.
-    static let deferralDisabled: Bool =
-        ProcessInfo.processInfo.arguments.contains("--no-deferred-content")
 }

@@ -50,9 +50,7 @@ impl OrderedJson {
     /// behaviour so call sites read the same.
     pub fn get(&self, key: &str) -> Option<&OrderedJson> {
         match self {
-            OrderedJson::Object(fields) => {
-                fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
-            }
+            OrderedJson::Object(fields) => fields.iter().find(|(k, _)| k == key).map(|(_, v)| v),
             _ => None,
         }
     }
@@ -250,8 +248,7 @@ mod tests {
 
     #[test]
     fn nested_objects_keep_their_own_order() {
-        let parsed =
-            OrderedJson::parse(r#"{"outer":{"zulu":1,"alpha":2},"first":true}"#).unwrap();
+        let parsed = OrderedJson::parse(r#"{"outer":{"zulu":1,"alpha":2},"first":true}"#).unwrap();
         let outer_keys: Vec<&str> = parsed
             .get("outer")
             .unwrap()

@@ -47,6 +47,7 @@ struct Workbench: View {
 
 private struct DetailArea: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var stage = StartupStage.shared
 
     var body: some View {
         VSplitView {
@@ -84,16 +85,22 @@ private struct DetailArea: View {
             }
         }
         .overlay(alignment: .top) { ProdStripe(isProd: model.isProd) }
-        .inspector(isPresented: $model.showDetail) {
-            DetailPanel(model: model)
-                .inspectorColumnWidth(min: 260, ideal: 380, max: 720)
-        }
+        // Deferred with the rest of the chrome — see `StartupStage`. Attaching
+        // `.inspector` costs ~35 ms of view-graph construction for a column that
+        // starts hidden, which is 14% of the 250 ms budget spent on something
+        // nobody can see yet.
+        .modifier(DeferredInspector(model: model))
         .animation(.smooth(duration: 0.22), value: model.isRunning)
         .animation(.smooth(duration: 0.22), value: model.showsGrid)
         .animation(.smooth(duration: 0.2), value: model.isError)
         .navigationTitle(model.activeProfile.isEmpty ? "datagrep" : model.activeProfile)
         .navigationSubtitle(model.connectionSubtitle)
-        .toolbar { WorkbenchToolbar(model: model) }
+        // The single most expensive thing in the window at launch (~80 ms of
+        // the ~330 ms it used to take). The toolbar's *background* is a window
+        // property and is painted from the first frame either way, so what is
+        // deferred is the controls inside an already-correct bar — no reflow,
+        // no height change.
+        .toolbar { if stage.contentReady { WorkbenchToolbar(model: model) } }
         .toolbarBackground(.visible, for: .windowToolbar)
     }
 }
@@ -115,7 +122,7 @@ private struct EditorPane: View {
     var body: some View {
         Chrome.pane(
             Group {
-                if stage.contentReady || StartupStage.deferralDisabled {
+                if stage.contentReady {
                     SQLEditorView(controller: model.editor)
                 } else {
                     Color.clear
@@ -136,7 +143,7 @@ private struct ResultsPane: View {
     var body: some View {
         Chrome.pane(
             ZStack {
-                if stage.contentReady || StartupStage.deferralDisabled {
+                if stage.contentReady {
                     ResultsGridView(controller: model.results)
                         .opacity(model.showsGrid ? 1 : 0)
                 }
@@ -145,6 +152,26 @@ private struct ResultsPane: View {
                 }
             }
         )
+    }
+}
+
+/// `.inspector` is a structural modifier, so it cannot be added and removed
+/// freely — doing that mid-session would re-identify the whole detail subtree.
+/// It is attached exactly once, in the same state change that attaches the
+/// editor and the grid, and never detached again.
+private struct DeferredInspector: ViewModifier {
+    @ObservedObject var model: AppModel
+    @ObservedObject var stage = StartupStage.shared
+
+    func body(content: Content) -> some View {
+        if stage.contentReady {
+            content.inspector(isPresented: $model.showDetail) {
+                DetailPanel(model: model)
+                    .inspectorColumnWidth(min: 260, ideal: 380, max: 720)
+            }
+        } else {
+            content
+        }
     }
 }
 

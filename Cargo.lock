@@ -1024,6 +1024,7 @@ dependencies = [
  "datagrep-api",
  "datagrep-core",
  "datagrep-drv-mongo",
+ "datagrep-drv-mysql",
  "datagrep-drv-postgres",
  "datagrep-drv-redis",
  "datagrep-drv-sqlite",

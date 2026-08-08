@@ -95,22 +95,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         FileHandle.standardError.write(
             Data(String(format: "MEASURE cold start exec -> window: %.0f ms\n", ms).utf8))
 
-        // Everything below here is off the critical path.
+        // Everything below here is off the critical path, in two more turns of
+        // the run loop so neither of them blocks the other: chrome, then engine.
+        DispatchQueue.main.async { [weak self] in self?.finishChrome() }
+    }
+
+    /// Turn 2: the chrome the first frame did without — toolbar controls, the
+    /// inspector column, the editor's `NSTextView` and the grid's `NSTableView`.
+    /// Nothing here can move the window's layout, so it fills in rather than
+    /// reflows.
+    ///
+    /// It runs BEFORE `model.boot()` on purpose: the controls are what makes the
+    /// window look finished, and the connection list arriving a frame later is
+    /// the part a user reads as "loading", not the part they read as "broken".
+    private func finishChrome() {
+        StartupStage.shared.markContentReady()
+        // Flipping the flag only invalidates the view; forcing the redraw here
+        // keeps the cost inside this run-loop turn instead of smearing it into
+        // whichever turn happens to draw next.
+        window.contentView?.displayIfNeeded()
+        Startup.mark("toolbar + inspector + editor + grid attached")
+
         DispatchQueue.main.async { [weak self] in self?.finishBooting() }
     }
 
-    /// Runs on the first run-loop turn after the window is up. Ordered by how
-    /// soon the user can notice it is missing.
+    /// Turn 3: the engine. `DatagrepCore` (tokio runtime), `profiles.sqlite`,
+    /// the profile list and the editor's session restore — the only things here
+    /// that touch a socket, a database or the disk, and none of them are between
+    /// `exec` and first paint any more.
     private func finishBooting() {
         model.boot()
-        Startup.mark("model.boot() — core + profiles + editor text")
-
-        // Turn 3: the NSTextView and the NSTableView get built into panes that
-        // are already on screen at their final size. `boot()` has already forced
-        // the editor's `loadView` via `setText`, so this is mostly SwiftUI
-        // adopting an existing controller.
-        StartupStage.shared.markContentReady()
-        Startup.mark("editor + grid attached")
+        Startup.mark("model.boot() — core + profiles + editor session")
 
         // The window chrome follows the connection, not a timer: this fires only
         // when one of these three values actually changes.

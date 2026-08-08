@@ -15,7 +15,7 @@ use datagrep_api::driver::ResumeToken;
 use datagrep_api::error::DbError;
 
 /// Bump when the payload's meaning changes; never reuse a version number.
-const TOKEN_VERSION: u32 = 1;
+pub const TOKEN_VERSION: u32 = 1;
 
 /// What has to survive a disconnect for a scan to continue exactly where it
 /// stopped.
@@ -57,27 +57,35 @@ pub enum ResumeMode {
 }
 
 impl EsResume {
-    pub fn new(
-        mode: ResumeMode,
-        index: String,
-        id: String,
-        keep_alive: String,
-        sort: Vec<Json>,
-        body: Json,
-        delivered: u64,
-        remaining: Option<u64>,
-    ) -> Self {
+    /// A token for the current format version. Fields are public and set by
+    /// the caller; only `v` is fixed here so no construction site can forget
+    /// to stamp the version.
+    pub fn current(mode: ResumeMode, index: String, id: String, keep_alive: String) -> Self {
         Self {
             v: TOKEN_VERSION,
             mode,
             index,
             id,
             keep_alive,
-            sort,
-            body,
-            delivered,
-            remaining,
+            sort: Vec::new(),
+            body: Json::Null,
+            delivered: 0,
+            remaining: None,
         }
+    }
+
+    /// The `search_after` position and the body needed to reproduce the scan.
+    pub fn at(mut self, sort: Vec<Json>, body: Json) -> Self {
+        self.sort = sort;
+        self.body = body;
+        self
+    }
+
+    /// Row-budget bookkeeping, so an `Op::Scan { limit }` survives a resume.
+    pub fn counted(mut self, delivered: u64, remaining: Option<u64>) -> Self {
+        self.delivered = delivered;
+        self.remaining = remaining;
+        self
     }
 
     pub fn encode(&self) -> Option<ResumeToken> {
@@ -87,7 +95,9 @@ impl EsResume {
 
     pub fn decode(token: &ResumeToken) -> Result<Self, DbError> {
         let parsed: Self = serde_json::from_slice(&token.0).map_err(|e| {
-            DbError::Protocol(format!("resume token is not a valid elasticsearch token: {e}"))
+            DbError::Protocol(format!(
+                "resume token is not a valid elasticsearch token: {e}"
+            ))
         })?;
         if parsed.v != TOKEN_VERSION {
             return Err(DbError::Protocol(format!(
@@ -110,16 +120,17 @@ mod tests {
     use serde_json::json;
 
     fn sample() -> EsResume {
-        EsResume::new(
+        EsResume::current(
             ResumeMode::Pit,
             "events-2026.08".to_string(),
             "u961LAEwaW5kZXgtMDAx".to_string(),
             "5m".to_string(),
+        )
+        .at(
             vec![json!(1723075200000_i64), json!(4294967298_i64)],
             json!({ "query": { "term": { "level": { "value": "error" } } } }),
-            1500,
-            Some(98_500),
         )
+        .counted(1500, Some(98_500))
     }
 
     #[test]
@@ -142,16 +153,13 @@ mod tests {
 
     #[test]
     fn scroll_tokens_round_trip_too_and_stay_distinguishable_from_pit() {
-        let scroll = EsResume::new(
+        let scroll = EsResume::current(
             ResumeMode::Scroll,
             "logs".into(),
             "DXF1ZXJ5QW5kRmV0Y2gBAAAAAAAAAD4WYm9laVYtZndUQlNsdDcwakFMNjU1QQ==".into(),
             "1m".into(),
-            Vec::new(),
-            json!({}),
-            0,
-            None,
-        );
+        )
+        .at(Vec::new(), json!({}));
         let back = EsResume::decode(&scroll.encode().unwrap()).unwrap();
         assert_eq!(back.mode, ResumeMode::Scroll);
         assert!(back.sort.is_empty(), "scroll carries position in its id");

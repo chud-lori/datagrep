@@ -132,13 +132,15 @@ pub fn parse(
 
     let mut body = match body_text {
         None => None,
-        Some(text) => Some(serde_json::from_str::<Json>(text).map_err(|e| DbError::Query {
-            code: None,
-            message: format!("request body is not valid JSON: {e}"),
-            // `serde_json` reports a 1-based line/column; the byte offset of
-            // the body inside the original text is the honest anchor we have.
-            position: Some(cleaned.len().saturating_sub(text.len()) as u32),
-        })?),
+        Some(text) => Some(
+            serde_json::from_str::<Json>(text).map_err(|e| DbError::Query {
+                code: None,
+                message: format!("request body is not valid JSON: {e}"),
+                // `serde_json` reports a 1-based line/column; the byte offset of
+                // the body inside the original text is the honest anchor we have.
+                position: Some(cleaned.len().saturating_sub(text.len()) as u32),
+            })?,
+        ),
     };
 
     if let Some(body) = body.as_mut() {
@@ -311,7 +313,9 @@ mod tests {
         }
         let err = parse("GET /i/_search\n{not json}", None, &[]).unwrap_err();
         match err {
-            DbError::Query { message, position, .. } => {
+            DbError::Query {
+                message, position, ..
+            } => {
                 assert!(message.contains("not valid JSON"));
                 assert!(position.is_some());
             }
@@ -326,9 +330,7 @@ mod tests {
         // The attacker supplies a value that, if string-spliced, would close
         // the term and open a `match_all` — and, as a document, would be a
         // whole query clause.
-        let hostile_text = Value::Str(Arc::from(
-            r#"x"}},{"match_all":{}},{"term":{"y":{"value":"#,
-        ));
+        let hostile_text = Value::Str(Arc::from(r#"x"}},{"match_all":{}},{"term":{"y":{"value":"#));
         let mut req = parse(
             r#"GET /i/_search
 {"query":{"bool":{"filter":[{"term":{"user":{"value":"$1"}}}]}}}"#,
@@ -347,16 +349,23 @@ mod tests {
         );
         // And the structure around it is byte-identical to what was typed.
         assert_eq!(
-            filters[0]["term"]["user"].as_object().unwrap().keys().collect::<Vec<_>>(),
+            filters[0]["term"]["user"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
             vec!["value"]
         );
     }
 
     #[test]
     fn an_object_parameter_lands_as_an_operand_not_as_structure() {
-        let hostile = Value::Document(Arc::new(datagrep_api::value::Document::from_fields(
-            vec![(Arc::from("match_all"), Value::Document(Arc::new(datagrep_api::value::Document::new())))],
-        )));
+        let hostile = Value::Document(Arc::new(datagrep_api::value::Document::from_fields(vec![
+            (
+                Arc::from("match_all"),
+                Value::Document(Arc::new(datagrep_api::value::Document::new())),
+            ),
+        ])));
         let req = parse(
             r#"{"query":{"term":{"f":{"value":"$1"}}}}"#,
             Some("i"),
@@ -366,14 +375,25 @@ mod tests {
         let body = req.body.unwrap();
         // `f`'s options object still has exactly one key.
         assert_eq!(
-            body["query"]["term"]["f"].as_object().unwrap().keys().collect::<Vec<_>>(),
+            body["query"]["term"]["f"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
             vec!["value"]
         );
         // The attacker's document is the compared *value*, one level deeper.
-        assert_eq!(body["query"]["term"]["f"]["value"], json!({"match_all": {}}));
+        assert_eq!(
+            body["query"]["term"]["f"]["value"],
+            json!({"match_all": {}})
+        );
         // And the query has not sprouted a second clause.
         assert_eq!(
-            body["query"].as_object().unwrap().keys().collect::<Vec<_>>(),
+            body["query"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
             vec!["term"]
         );
     }
@@ -397,14 +417,16 @@ mod tests {
         let f = &req.body.unwrap()["query"]["bool"]["filter"];
         assert_eq!(f[0]["term"]["a"]["value"], json!("s"));
         assert_eq!(f[1]["range"]["b"]["gte"], json!(42));
-        assert!(f[1]["range"]["b"]["gte"].is_number(), "typed, not stringified");
+        assert!(
+            f[1]["range"]["b"]["gte"].is_number(),
+            "typed, not stringified"
+        );
         assert_eq!(f[2]["terms"]["c"], json!([true, "s"]));
     }
 
     #[test]
     fn a_missing_parameter_is_an_error_not_a_literal_dollar_string() {
-        let err = parse(r#"{"query":{"term":{"a":{"value":"$3"}}}}"#, Some("i"), &[])
-            .unwrap_err();
+        let err = parse(r#"{"query":{"term":{"a":{"value":"$3"}}}}"#, Some("i"), &[]).unwrap_err();
         assert!(err.to_string().contains("$3"));
         // …and supplying params with no body at all is also refused.
         assert!(parse("GET /_cluster/health", None, &[Value::I64(1)]).is_err());
@@ -437,7 +459,12 @@ mod tests {
     fn placeholders_are_never_taken_from_the_path() {
         // `$1` in a path is not a placeholder — it stays literal, so a
         // parameter can never retarget the request at another endpoint.
-        let req = parse("GET /$1/_search\n{}", None, &[Value::Str(Arc::from("other"))]).unwrap();
+        let req = parse(
+            "GET /$1/_search\n{}",
+            None,
+            &[Value::Str(Arc::from("other"))],
+        )
+        .unwrap();
         assert_eq!(req.path, "/$1/_search");
     }
 }

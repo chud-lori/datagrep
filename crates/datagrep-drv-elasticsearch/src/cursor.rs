@@ -144,11 +144,7 @@ impl SearchCursor {
             severity: NoticeSeverity::Info,
             code: Some(Arc::from("es.pagination")),
             message: Arc::from(
-                format!(
-                    "streaming with {} (keep_alive {keep_alive})",
-                    mode.as_str()
-                )
-                .as_str(),
+                format!("streaming with {} (keep_alive {keep_alive})", mode.as_str()).as_str(),
             ),
         });
         let remaining = spec.limit;
@@ -390,7 +386,8 @@ impl SearchCursor {
             .and_then(OrderedJson::as_str)
             .map(str::to_string);
         if let Some(id) = &async_id {
-            self.set_inflight(Some(opaque.clone()), Some(id.clone())).await;
+            self.set_inflight(Some(opaque.clone()), Some(id.clone()))
+                .await;
         }
 
         let mut current = submitted;
@@ -730,17 +727,10 @@ impl Cursor for SearchCursor {
             // Nothing has been read yet: there is no position to resume from.
             return None;
         }
-        EsResume::new(
-            mode,
-            self.spec.index.clone(),
-            id,
-            self.keep_alive.clone(),
-            self.last_sort.clone(),
-            self.spec.body.clone(),
-            self.delivered,
-            self.remaining,
-        )
-        .encode()
+        EsResume::current(mode, self.spec.index.clone(), id, self.keep_alive.clone())
+            .at(self.last_sort.clone(), self.spec.body.clone())
+            .counted(self.delivered, self.remaining)
+            .encode()
     }
 
     fn stats(&self) -> CursorStats {
@@ -1073,7 +1063,10 @@ mod tests {
             json!({ "_shard_doc": "asc" }),
             "_shard_doc is the only globally unique PIT tiebreaker"
         );
-        assert!(body.get("search_after").is_none(), "first page has no cursor");
+        assert!(
+            body.get("search_after").is_none(),
+            "first page has no cursor"
+        );
 
         // After a page, the next request carries search_after.
         cursor.last_sort = vec![json!(1723075200000_i64), json!(42)];
@@ -1133,7 +1126,10 @@ mod tests {
             Arc::from("datagrep-test"),
             None,
         );
-        assert_eq!(rebuilt.page_body(100)["search_after"], json!([1723075200000_i64, 42]));
+        assert_eq!(
+            rebuilt.page_body(100)["search_after"],
+            json!([1723075200000_i64, 42])
+        );
         assert_eq!(rebuilt.page_body(100)["pit"]["id"], json!("pit-id-1"));
         assert_eq!(rebuilt.delivered, 500);
     }
@@ -1141,8 +1137,7 @@ mod tests {
     #[test]
     fn schema_deltas_are_emitted_once_per_new_source_field_with_the_native_type() {
         let mut cursor = offline_cursor(PageMode::Pit);
-        let first =
-            cursor.track_schema(&OrderedJson::parse(r#"{"n":1,"price":2.5}"#).unwrap());
+        let first = cursor.track_schema(&OrderedJson::parse(r#"{"n":1,"price":2.5}"#).unwrap());
         assert_eq!(first.len(), 2);
         match &first[0] {
             SchemaDelta::AddColumn { field } => {

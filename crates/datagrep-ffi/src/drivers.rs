@@ -26,6 +26,7 @@ pub fn register_drivers(core: &CoreApi) {
     });
     core.register_driver("redis", || Arc::new(datagrep_drv_redis::RedisDriver::new()));
     core.register_driver("mongodb", || Arc::new(datagrep_drv_mongo::MongoDriver::new()));
+    core.register_driver("mysql", || Arc::new(datagrep_drv_mysql::MySqlDriver::new()));
 }
 
 /// A standalone `Driver` by registry id, for the two things `CoreApi` has no
@@ -42,6 +43,7 @@ pub fn driver_for(id: &str) -> Option<Arc<dyn datagrep_api::Driver>> {
         "postgres" => Some(Arc::new(datagrep_drv_postgres::PostgresDriver::new())),
         "redis" => Some(Arc::new(datagrep_drv_redis::RedisDriver::new())),
         "mongodb" => Some(Arc::new(datagrep_drv_mongo::MongoDriver::new())),
+        "mysql" => Some(Arc::new(datagrep_drv_mysql::MySqlDriver::new())),
         _ => None,
     }
 }
@@ -57,6 +59,8 @@ pub fn driver_for_url(url: &str) -> Option<(&'static str, Arc<dyn datagrep_api::
         "redis"
     } else if url.starts_with("mongodb://") || url.starts_with("mongodb+srv://") {
         "mongodb"
+    } else if url.starts_with("mysql://") || url.starts_with("mariadb://") {
+        "mysql"
     } else {
         return None;
     };
@@ -66,7 +70,7 @@ pub fn driver_for_url(url: &str) -> Option<(&'static str, Arc<dyn datagrep_api::
 /// Registry ids this build knows about — the message
 /// [`driver_for_url`] failures quote back at the user.
 pub fn known_driver_ids() -> &'static [&'static str] {
-    &["sqlite", "postgres", "redis", "mongodb"]
+    &["sqlite", "postgres", "redis", "mongodb", "mysql"]
 }
 
 #[cfg(test)]
@@ -113,6 +117,6 @@ mod tests {
         register_drivers(&core);
         let mut ids: Vec<String> = core.drivers().iter().map(|s| s.to_string()).collect();
         ids.sort();
-        assert_eq!(ids, ["mongodb", "postgres", "redis", "sqlite"]);
+        assert_eq!(ids, ["mongodb", "mysql", "postgres", "redis", "sqlite"]);
     }
 }
