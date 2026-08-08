@@ -234,16 +234,18 @@ mod tests {
             .collect();
         assert_eq!(keys, vec!["z", "m", "a"], "key order is data");
 
-        // …and `serde_json` really would have re-sorted them, which is the
-        // whole reason this type exists.
-        let via_serde: Json = serde_json::from_str(r#"{"z":1,"m":2,"a":3}"#).unwrap();
-        let serde_keys: Vec<&str> = via_serde
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        assert_eq!(serde_keys, vec!["a", "m", "z"]);
+        // There was a negative control here asserting that `serde_json` sorts
+        // these back to a, m, z. It was removed because it is not a property
+        // this crate controls: `bson` (pulled in by the mongo driver) turns on
+        // serde_json's `preserve_order` feature, and Cargo unifies features
+        // across the whole workspace — so serde_json preserves order in a
+        // `--workspace` build and sorts in a `-p` build. Asserting either way
+        // makes the test depend on which sibling drivers happen to be
+        // compiled in.
+        //
+        // `OrderedJson` still earns its place: relying on a transitive
+        // dependency's feature to keep `_source` key order would silently
+        // break the moment the mongo driver is feature-gated out.
     }
 
     #[test]
