@@ -104,4 +104,4 @@ banned — any such branch means a missing capability flag.
 ## Testing
 
 `cargo test --workspace` runs everything that needs no server.
-See [`docs/testing.md`](docs/testing.md) for the live-engine suites.
+See [`notes/testing.md`](notes/testing.md) for the live-engine suites.

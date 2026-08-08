@@ -65,8 +65,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         window = NSWindow(contentViewController: host)
         Startup.mark("NSWindow(contentViewController:) — SwiftUI loadView")
-        window.setContentSize(NSSize(width: 1180, height: 760))
-        window.contentMinSize = NSSize(width: 900, height: 560)
+        // `--window-size 960x600` opens at a chosen size instead of 1180×760.
+        // A measurement affordance, in the same family as `--screenshot`: the
+        // status bar has to degrade gracefully at widths this machine's screen
+        // cannot be dragged to on demand, and "I could not look at it" is not
+        // an answer. It relaxes contentMinSize only as far as it has to.
+        let size = Self.requestedWindowSize() ?? NSSize(width: 1180, height: 760)
+        window.setContentSize(size)
+        window.contentMinSize = NSSize(
+            width: min(900, size.width), height: min(560, size.height))
         window.title = "datagrep"
         Startup.mark("NSWindow size + title")
         window.styleMask.insert(.fullSizeContentView)
@@ -76,7 +83,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.tabbingMode = .disallowed
         window.delegate = self
         Startup.mark("toolbar style + delegate")
-        window.setFrameAutosaveName("datagrep.main")
+        if let size = Self.requestedWindowSize() {
+            // No autosave name under `--window-size`: a measurement run must not
+            // write a test frame into the size the user's real window reopens at.
+            window.setContentSize(size)
+        } else {
+            window.setFrameAutosaveName("datagrep.main")
+        }
         window.center()
         Startup.mark("frame autosave + center")
 
@@ -226,6 +239,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    /// `--window-size 960x600`, or nil for the default frame.
+    private static func requestedWindowSize() -> NSSize? {
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "--window-size"), i + 1 < args.count else { return nil }
+        let parts = args[i + 1].lowercased().split(separator: "x")
+        guard parts.count == 2, let w = Double(parts[0]), let h = Double(parts[1]),
+            w > 200, h > 150
+        else { return nil }
+        return NSSize(width: w, height: h)
+    }
 
     /// §3.8 layer 1. `titlebarAppearsTransparent` means the window background
     /// *is* the titlebar background, so one property paints the whole chrome.
