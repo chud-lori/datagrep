@@ -64,11 +64,18 @@ final class EditorTab: ObservableObject, Identifiable {
 /// Tab list + which one is frontmost. The controller owns this and installs the
 /// command closures; the SwiftUI bar only ever calls them.
 final class EditorTabsModel: ObservableObject {
+    /// The tabs of the **currently scoped connection** — not every tab open in
+    /// the app. `SQLEditorController` owns the full set and republishes this
+    /// slice whenever the scope changes.
     @Published var tabs: [EditorTab] = []
     @Published var activeID: String?
     @Published var connections: [EditorConnectionOption] = []
     /// Named queries on disk that are not currently open in a tab.
     @Published var savedQueries: [SavedQueryRecord] = []
+    /// The connection these tabs belong to, or nil when no connection is
+    /// selected. Drives the welcome state's wording and the engine mark on the
+    /// chips.
+    @Published var scope: String?
 
     var onActivate: ((EditorTab) -> Void)?
     var onClose: ((EditorTab) -> Void)?
@@ -76,19 +83,22 @@ final class EditorTabsModel: ObservableObject {
     var onSave: ((EditorTab) -> Void)?
     var onBind: ((EditorTab, String?) -> Void)?
     var onOpenSaved: ((SavedQueryRecord) -> Void)?
+    /// The welcome state's second action. Owned by `AppModel`, which is the
+    /// only thing that can put the New Connection sheet up.
+    var onNewConnection: (() -> Void)?
+    /// Picking a connection from the welcome state.
+    var onPickConnection: ((String) -> Void)?
 
     var active: EditorTab? { tabs.first { $0.id == activeID } }
 
     var activeIndex: Int? { tabs.firstIndex { $0.id == activeID } }
 
-    /// Lowest unused number, so closing "Untitled 2" frees the name again
-    /// instead of marching the counter upward forever.
-    func nextUntitledNumber() -> Int {
-        let used = Set(tabs.filter { $0.name == nil }.map(\.untitledNumber))
-        var n = 1
-        while used.contains(n) { n += 1 }
-        return n
+    /// The engine of one connection, for the mark on a tab chip.
+    func driver(for connection: String?) -> String {
+        guard let connection else { return "" }
+        return connections.first { $0.name == connection }?.driver ?? ""
     }
+
 }
 
 // MARK: - the bar
@@ -107,6 +117,7 @@ struct EditorTabBar: View {
                     ForEach(model.tabs) { tab in
                         EditorTabChip(
                             tab: tab,
+                            driver: model.driver(for: tab.connection ?? model.scope),
                             isActive: tab.id == model.activeID,
                             activate: { model.onActivate?(tab) },
                             close: { model.onClose?(tab) })
@@ -148,6 +159,10 @@ struct EditorTabBar: View {
 
 private struct EditorTabChip: View {
     @ObservedObject var tab: EditorTab
+    /// The engine of the connection this editor belongs to. Empty for an
+    /// editor that belongs to none, which draws no mark at all rather than a
+    /// generic cylinder that would read as "some database".
+    let driver: String
     let isActive: Bool
     let activate: () -> Void
     let close: () -> Void
@@ -156,6 +171,12 @@ private struct EditorTabChip: View {
 
     var body: some View {
         HStack(spacing: 5) {
+            // 12 pt: the chip is 22 pt tall and the brand marks are square, so
+            // anything larger crowds the title and pushes the close dot off the
+            // end. Small, but these are logos — shape and colour still read.
+            if !driver.isEmpty {
+                EngineIcon(driver, size: 12)
+            }
             Text(tab.displayTitle)
                 .font(.system(size: 11, weight: isActive ? .semibold : .regular))
                 .lineLimit(1)
@@ -194,6 +215,115 @@ private struct EditorTabChip: View {
         .onTapGesture(perform: activate)
         .onHover { hovering = $0 }
         .help(tab.name.map { "\($0)  ·  ⌘S saves" } ?? "Unsaved scratch tab — ⌘S names it")
+    }
+}
+
+/// What fills the editor pane when the scoped connection has no editor open.
+///
+/// This is what the app shows on a fresh launch, instead of manufacturing an
+/// "Untitled 1" pre-filled with a sample statement in a dialect that is very
+/// probably not the one you connected to. An editor is a thing the user makes;
+/// until they make one there is nothing to edit, and saying so — with the two
+/// buttons that end the state right there — is more honest than a buffer of
+/// boilerplate they have to select and delete first.
+///
+/// Same restraint as `ResultsEmptyState`: one symbol, one line, one sentence,
+/// and the shortcut spelled out.
+struct EditorWelcomeState: View {
+    @ObservedObject var model: EditorTabsModel
+
+    private var reopenable: [SavedQueryRecord] {
+        model.savedQueries.filter { $0.connection == model.scope }
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "square.and.pencil")
+                .font(.system(size: 26, weight: .light))
+                .foregroundStyle(.tertiary)
+
+            VStack(spacing: 3) {
+                Text(model.scope.map { "No editor open for \($0)" } ?? "No editor open")
+                    .font(.callout.weight(.medium))
+                Text(
+                    model.scope == nil
+                        ? "Editors belong to a connection. Add one, or pick one in the sidebar, and its editors appear here."
+                        : "Editors belong to a connection, so this one keeps its own. ⌘T opens a new editor for it."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 420)
+            }
+
+            HStack(spacing: 8) {
+                if model.scope != nil {
+                    Button { model.onNew?() } label: {
+                        Label("New SQL Editor", systemImage: "plus")
+                    }
+                    .controlSize(.small)
+                }
+                Button { model.onNewConnection?() } label: {
+                    Label("New Connection…", systemImage: "externaldrive.badge.plus")
+                }
+                .controlSize(.small)
+            }
+
+            if !reopenable.isEmpty {
+                VStack(spacing: 4) {
+                    Text("Editors you made earlier")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    // Horizontal, and capped: this is a shortcut back into
+                    // recent work, not a file browser. The connection's own
+                    // context menu lists all of them.
+                    HStack(spacing: 6) {
+                        ForEach(reopenable.prefix(4), id: \.id) { record in
+                            Button(record.name ?? "Untitled") { model.onOpenSaved?(record) }
+                                .buttonStyle(.link)
+                                .font(.caption)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+                .padding(.top, 2)
+            } else if model.scope == nil, !model.connections.isEmpty {
+                VStack(spacing: 4) {
+                    Text("Connections")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    HStack(spacing: 6) {
+                        ForEach(model.connections.prefix(4)) { option in
+                            Button {
+                                model.onPickConnection?(option.name)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    EngineIcon(option.driver, size: 12)
+                                    Text(option.name).font(.caption).lineLimit(1)
+                                }
+                            }
+                            .buttonStyle(.link)
+                        }
+                    }
+                }
+                .padding(.top, 2)
+            }
+
+            // The two things the old boilerplate buffer was really there to
+            // teach, kept — as a note, not as text in someone's document.
+            Text("⌘⏎ runs the statement under the caret · -- @limit and -- @timeout set per-statement limits")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 480)
+                .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(20)
+        .background(Color(nsColor: .textBackgroundColor))
     }
 }
 
