@@ -37,6 +37,13 @@ DMG_PATH="${DMG_PATH:-${DIST_DIR}/${APP_NAME}-macos.dmg}"
 TEMP_DMG="${DIST_DIR}/${APP_NAME}-temp.dmg"
 STAGE_DIR="${DIST_DIR}/dmg-staging"
 BG_IMAGE="${REPO_ROOT}/assets/dmg_background.png" # optional — plain layout without it
+BG_IMAGE_2X="${REPO_ROOT}/assets/dmg_background@2x.png"  # optional Retina half of the TIFF
+# A Finder-built .DS_Store, baked once on a Mac and committed. CI runners have
+# no Finder, so the AppleScript layout below is skipped there and the window
+# would otherwise open with no background and default icon placement — i.e. the
+# released DMG would never carry the layout a developer sees locally. Rebake
+# after changing any geometry: DMG_BAKE_DS_STORE=1 ./scripts/make_dmg.sh
+BAKED_DS_STORE="${REPO_ROOT}/assets/dmg_DS_Store"
 
 # Window bounds / icon geometry. If a background image is ever added it must
 # match WIN_W x WIN_H.
@@ -73,7 +80,17 @@ ln -s /Applications "$STAGE_DIR/Applications"
 HAVE_BG=0
 if [[ -f "$BG_IMAGE" ]]; then
   mkdir -p "$STAGE_DIR/.background"
-  cp "$BG_IMAGE" "$STAGE_DIR/.background/background.png"
+  # Ship a multi-resolution TIFF when the @2x art exists: a 600x400 PNG is
+  # visibly soft on a Retina display, and tiffutil (a macOS built-in, so this
+  # adds no dependency) packs both scales into one file that Finder picks from.
+  if [[ -f "$BG_IMAGE_2X" ]] && command -v tiffutil >/dev/null 2>&1 &&
+    tiffutil -cathidpicheck "$BG_IMAGE" "$BG_IMAGE_2X" \
+      -out "$STAGE_DIR/.background/background.tiff" >/dev/null 2>&1; then
+    BG_FILE="background.tiff"
+  else
+    cp "$BG_IMAGE" "$STAGE_DIR/.background/background.png"
+    BG_FILE="background.png"
+  fi
   HAVE_BG=1
 fi
 
@@ -104,9 +121,25 @@ SKIP_LAYOUT="${SKIP_LAYOUT:-}"
 if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ] || [ ! -t 0 ]; then
   SKIP_LAYOUT="1"
 fi
+# The tty test above is a proxy for "a Finder is around", and it is wrong when a
+# Mac drives this from a pipe or an agent shell — which is exactly when the
+# layout needs baking. This forces the real thing.
+if [ -n "${DMG_FORCE_LAYOUT:-}" ]; then
+  SKIP_LAYOUT=""
+fi
 
 if [ -n "$SKIP_LAYOUT" ]; then
-  echo "-> skipping Finder window layout (CI / non-interactive shell)"
+  # No Finder here, but the layout can still ship: a .DS_Store baked on a Mac
+  # carries the window bounds, icon size, icon positions and the background
+  # reference, and Finder reads it as-is. Without this the released DMG looks
+  # nothing like the one a developer builds locally.
+  if [ -f "$BAKED_DS_STORE" ]; then
+    echo "-> no Finder here; installing the baked .DS_Store layout"
+    cp "$BAKED_DS_STORE" "/Volumes/${VOLNAME}/.DS_Store"
+  else
+    echo "-> skipping Finder window layout (no Finder, and no baked .DS_Store)"
+    echo "   bake one on a Mac: DMG_BAKE_DS_STORE=1 ./scripts/make_dmg.sh"
+  fi
 else
   echo "-> applying Finder window layout via AppleScript"
   # Each fragile call is wrapped in `try` so a single failure (e.g. macOS
@@ -133,7 +166,7 @@ tell application "Finder"
         end try
         if $HAVE_BG is 1 then
             try
-                set background picture of viewOptions to file ".background:background.png"
+                set background picture of viewOptions to file ".background:${BG_FILE}"
             end try
         end if
         try
@@ -153,6 +186,18 @@ fi
 # Make sure .DS_Store makes it to disk before unmount.
 sync
 sleep 1
+
+# Capture the Finder-built layout so headless builds can reuse it. Deliberately
+# opt-in: it is a binary asset, and overwriting it from a run whose AppleScript
+# only half-applied would ship a broken layout everywhere.
+if [ -n "${DMG_BAKE_DS_STORE:-}" ] && [ -z "$SKIP_LAYOUT" ]; then
+  if [ -f "/Volumes/${VOLNAME}/.DS_Store" ]; then
+    cp "/Volumes/${VOLNAME}/.DS_Store" "$BAKED_DS_STORE"
+    echo "-> baked layout to $BAKED_DS_STORE ($(du -h "$BAKED_DS_STORE" | cut -f1))"
+  else
+    echo "   warning: no .DS_Store on the volume — nothing baked" >&2
+  fi
+fi
 
 # Retry detach — even with -force, the first attempt can race a still-open
 # file handle (Spotlight / fseventsd), especially on CI runners.
