@@ -10,6 +10,9 @@ Run after changing either file:
 
     python3 scripts/make_dmg_background.py
 
+The .DS_Store does not need rebaking for a pure artwork change — it references
+the background by filename, not by content.
+
 Needs Pillow. If it is missing the DMG still builds — make_dmg.sh treats the
 background as optional and falls back to Finder's default arrangement.
 """
@@ -24,18 +27,18 @@ APP_X, APP_Y = 175, 200
 LINK_X, LINK_Y = 425, 200
 ICON_SIZE = 128
 
-# Mid-dark slate, not light and not near-black, on purpose. Finder draws icon
-# labels in the *viewer's* appearance — black in light mode, white in dark, each
-# with a contrasting shadow. A light background loses the white labels and a
-# near-black one loses the black ones; this tone keeps both legible and matches
-# the app icon's tile so the DMG and the icon read as one product.
-TOP = (59, 65, 73)
-BOTTOM = (42, 47, 54)
-ACCENT = (111, 181, 133)
-TEXT = (242, 243, 245)
-MUTED = (174, 180, 188)
-FAINT = (124, 131, 140)
-ROWS = (230, 232, 235)
+# Light, and not up for debate: Finder renders the icon labels ("datagrep",
+# "Applications") in BLACK over a DMG background picture, regardless of whether
+# the viewer is in light or dark mode. A dark background was tried first and the
+# labels were practically invisible against it. Anything here must keep black
+# text readable, so the palette stays near-white with dark ink drawn on top.
+TOP = (252, 252, 253)
+BOTTOM = (237, 239, 242)
+# The site's light-mode accent — 5.1:1 on white, so the arrow stays visible.
+ACCENT = (46, 125, 79)
+INK = (28, 33, 38)
+MUTED = (91, 100, 110)
+FAINT = (150, 158, 167)
 
 HELVETICA = "/System/Library/Fonts/Helvetica.ttc"
 
@@ -64,60 +67,13 @@ def draw(scale: int) -> Image.Image:
     def s(v: float) -> float:
         return v * scale
 
-    # --- brand mark: the grep lens over rows, same idea as the app icon ------
-    # Positioned from the mark's own bounding box in the icon's 1024-unit space
-    # (x 148..884, y 300..784) rather than by eye, so the wordmark beside it
-    # cannot end up overlapping when the scale changes.
-    BB_X0, BB_Y0, BB_X1, BB_Y1 = 148, 300, 884, 784
-    mark_h = s(27)
-    k = mark_h / (BB_Y1 - BB_Y0)
-    mark_w = (BB_X1 - BB_X0) * k
-    mark_x, mark_y = s(40), s(27)  # top-left of the bounding box
+    # No logo mark here on purpose: the app's own 128px icon sits in this window
+    # a few pixels below, so a second copy of it read as clutter and collided
+    # with the wordmark.
+    d.text((s(40), s(40)), "datagrep", font=font(round(s(20)), index=1), fill=INK, anchor="lm")
 
-    def ix(v: float) -> float:
-        return mark_x + (v - BB_X0) * k
-
-    def iy(v: float) -> float:
-        return mark_y + (v - BB_Y0) * k
-
-    def bg_at(y: float) -> tuple:
-        """The gradient's own colour at a given y, for the lens halo.
-
-        A flat fill here reads as a visible disc, because the backdrop behind it
-        is a gradient rather than the icon's solid tile.
-        """
-        t = min(max(y / max(h - 1, 1), 0.0), 1.0)
-        return tuple(round(TOP[i] + (BOTTOM[i] - TOP[i]) * t) for i in range(3))
-
-    for ry, rw in ((300, 520), (548, 440), (672, 260)):
-        d.rounded_rectangle(
-            [ix(148), iy(ry), ix(148 + rw), iy(ry + 88)], radius=(iy(88) - iy(0)) / 2, fill=ROWS
-        )
-    d.rounded_rectangle(
-        [ix(148), iy(424), ix(148 + 320), iy(424 + 88)],
-        radius=(iy(88) - iy(0)) / 2,
-        fill=ACCENT,
-    )
-    d.ellipse(
-        [ix(720 - 182), iy(620 - 182), ix(720 + 182), iy(620 + 182)], fill=bg_at(iy(620))
-    )
-    lw = max(1, round(52 * k))
-    d.ellipse(
-        [ix(720 - 130), iy(620 - 130), ix(720 + 130), iy(620 + 130)], outline=ROWS, width=lw
-    )
-    d.line([ix(814), iy(714), ix(884), iy(784)], fill=ROWS, width=lw)
-
-    d.text(
-        (mark_x + mark_w + s(11), mark_y + mark_h / 2),
-        "datagrep",
-        font=font(round(s(19)), index=1),
-        fill=TEXT,
-        anchor="lm",
-    )
-
-    # --- the one instruction ------------------------------------------------
-    # Drawn into the image so it reads regardless of how Finder's own labels
-    # land against the viewer's appearance.
+    # The one instruction. Drawn into the image rather than left to Finder, so
+    # it is always legible and always says the same thing.
     d.text(
         (w / 2, s(96)),
         "Drag datagrep into your Applications folder",
@@ -136,14 +92,13 @@ def draw(scale: int) -> Image.Image:
     head_w, head_h = s(22), s(13)
     x0 = mid_x - length / 2
     tip = mid_x + length / 2
-    d.rounded_rectangle(
-        [x0, mid_y - s(3), tip - head_w, mid_y + s(3)], radius=s(3), fill=ACCENT
-    )
+    d.rounded_rectangle([x0, mid_y - s(3), tip - head_w, mid_y + s(3)], radius=s(3), fill=ACCENT)
     d.polygon(
         [(tip - head_w, mid_y - head_h), (tip, mid_y), (tip - head_w, mid_y + head_h)],
         fill=ACCENT,
     )
 
+    # Sits below the icon labels, which Finder draws at roughly y=270-290.
     d.text(
         (w / 2, s(352)),
         "Every database in one native app",
