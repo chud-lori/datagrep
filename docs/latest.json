@@ -1,7 +1,7 @@
 {
-  "version": "0.2.0",
-  "tag": "v0.2.0",
-  "release_url": "https://github.com/chud-lori/datagrep/releases/tag/v0.2.0",
-  "release_notes_url": "https://github.com/chud-lori/datagrep/releases/tag/v0.2.0",
+  "version": "0.3.0",
+  "tag": "v0.3.0",
+  "release_url": "https://github.com/chud-lori/datagrep/releases/tag/v0.3.0",
+  "release_notes_url": "https://github.com/chud-lori/datagrep/releases/tag/v0.3.0",
   "install_url": "https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh"
 }

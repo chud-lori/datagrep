@@ -77,7 +77,7 @@ final class UpdateCheck: ObservableObject {
     /// Used only when the process has no bundle Info.plist (bare `swift build`
     /// binary). Inside datagrep.app, CFBundleShortVersionString wins.
     /// scripts/deploy.sh bumps this literal — keep it on its own line.
-    static let fallbackVersion = "0.2.0"
+    static let fallbackVersion = "0.3.0"
 
     /// Non-nil when the manifest advertises a strictly newer version than the
     /// one running (and the user hasn't skipped it). Set at most once per
