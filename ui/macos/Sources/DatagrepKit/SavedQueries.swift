@@ -2,15 +2,19 @@ import Foundation
 
 /// On-disk shape of one editor tab.
 ///
-/// The C ABI (`crates/datagrep-ffi/include/datagrep.h`) exposes profiles,
-/// catalog, query and rows — and nothing else. There is no
-/// `datagrep_saved_query_*` / `datagrep_editor_tab_*` entry point, so the
-/// `saved_query` and `editor_tab` tables in `datagrep-profiles` are simply not
-/// reachable from Swift today. That is fine: saved queries belong in plain
-/// files — git-friendly, not a proprietary store — so this writes exactly that,
-/// a `.sql` file you can open in any editor plus a small JSON sidecar holding
-/// the things SQL cannot carry (which connection the tab is bound to, and where
-/// the caret was).
+/// **This is the one editor-tab store.** The C ABI
+/// (`crates/datagrep-ffi/include/datagrep.h`) exposes profiles, catalog, query
+/// and rows and nothing else, so `datagrep-profiles`' `editor_tab` table has
+/// never been reachable from Swift and nothing has ever written a row to it;
+/// its Rust side has been removed rather than left as a second, dead store the
+/// next reader has to work out the status of. (The empty table itself stays in
+/// the schema: dropping it would mean a destructive migration of a database
+/// that holds the user's real connections, to reclaim nothing.)
+///
+/// Plain files are the deliberate choice, not a fallback: a saved query is a
+/// `.sql` file you can open in any editor and commit to git, plus a small JSON
+/// sidecar holding the things SQL cannot carry — which connection the tab
+/// belongs to, and where the caret was.
 ///
 /// One file pair per tab, never one big blob: a half-written blob loses every
 /// tab, a half-written sidecar loses one tab's caret position.
@@ -20,8 +24,11 @@ public struct SavedQueryRecord: Codable, Sendable, Equatable {
     /// `nil` for an untitled scratch tab. Scratch tabs are persisted too —
     /// losing unsaved SQL because the app crashed is not acceptable.
     public var name: String?
-    /// Profile name this tab runs against. `nil` = inherit the window's
-    /// current connection.
+    /// The profile this editor **belongs to**. Tabs are scoped by it: selecting
+    /// a connection shows that connection's editors and no others. `nil` means
+    /// the editor belongs to no connection — where tabs written before editors
+    /// were scoped land, and where a statement runs against whatever the window
+    /// has selected.
     public var connection: String?
     public var cursorLocation: Int
     public var cursorLength: Int
@@ -56,15 +63,68 @@ public struct SavedQueryRecord: Codable, Sendable, Equatable {
     }
 }
 
-/// Tab order and which tab was frontmost. Separate from the per-tab sidecars so
-/// that rewriting the order (a cheap, frequent event) never rewrites SQL.
+/// Tab order and which tab was frontmost **in each connection**. Separate from
+/// the per-tab sidecars so that rewriting the order (a cheap, frequent event)
+/// never rewrites SQL.
+///
+/// Editors belong to a connection, so "which tab is frontmost" is a question
+/// per connection and not per window: switching from the MySQL connection to
+/// the Postgres one has to bring back the Postgres tab that was open, not
+/// whichever tab happened to be last touched anywhere.
+///
+/// `order` stays one global list. A tab's position is a property of the tab,
+/// not of the connection it is currently filed under, so rebinding one does not
+/// shuffle the rest.
 public struct EditorSession: Codable, Sendable, Equatable {
     public var order: [String]
-    public var activeID: String?
+    /// Frontmost tab per connection name. `Self.unbound` is the key for tabs
+    /// that belong to no connection.
+    public var activeByConnection: [String: String]
+    /// The connection whose tabs were showing.
+    public var activeConnection: String?
 
-    public init(order: [String] = [], activeID: String? = nil) {
+    /// The key for tabs with no connection — the scope a pre-scoping
+    /// `session.json` restores into, and the one a window with no connection
+    /// selected shows.
+    public static let unbound = ""
+
+    public init(
+        order: [String] = [], activeByConnection: [String: String] = [:],
+        activeConnection: String? = nil
+    ) {
         self.order = order
-        self.activeID = activeID
+        self.activeByConnection = activeByConnection
+        self.activeConnection = activeConnection
+    }
+
+    /// Hand-rolled so a `session.json` written before tabs were scoped — one
+    /// global `{"order":[…],"activeID":"…"}` — still restores every tab
+    /// instead of being discarded as undecodable. Losing someone's open SQL to
+    /// a schema change is not a trade this store is allowed to make.
+    private enum CodingKeys: String, CodingKey {
+        case order, activeByConnection, activeConnection, activeID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        order = try c.decodeIfPresent([String].self, forKey: .order) ?? []
+        activeByConnection =
+            try c.decodeIfPresent([String: String].self, forKey: .activeByConnection) ?? [:]
+        activeConnection = try c.decodeIfPresent(String.self, forKey: .activeConnection)
+        if activeByConnection.isEmpty,
+            let legacy = try c.decodeIfPresent(String.self, forKey: .activeID)
+        {
+            activeByConnection[Self.unbound] = legacy
+        }
+    }
+
+    /// `activeID` is decode-only — it is the shape this store used to write and
+    /// writing it again would keep a second, stale answer alive in the file.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(order, forKey: .order)
+        try c.encode(activeByConnection, forKey: .activeByConnection)
+        try c.encodeIfPresent(activeConnection, forKey: .activeConnection)
     }
 }
 
@@ -132,7 +192,8 @@ public final class SavedQueryStore: @unchecked Sendable {
     ///
     /// A bare `.sql` with no sidecar is ignored: without one there is no id, no
     /// connection and no caret, and inventing them would be guessing.
-    public func load() -> (tabs: [(record: SavedQueryRecord, text: String)], activeID: String?) {
+    public func load() -> (tabs: [(record: SavedQueryRecord, text: String)], session: EditorSession)
+    {
         let session = loadSession()
         var byID: [String: (SavedQueryRecord, String)] = [:]
         var discovered: [String] = []
@@ -167,8 +228,31 @@ public final class SavedQueryStore: @unchecked Sendable {
             ordered.append(entry)
         }
 
-        let active = session.activeID.flatMap { seen.contains($0) ? $0 : nil }
-        return (ordered, active ?? ordered.first?.0.id)
+        // Drop remembered frontmost tabs that are no longer on disk, so a
+        // scope never restores pointing at a tab that cannot be loaded.
+        var cleaned = session
+        cleaned.activeByConnection = session.activeByConnection.filter { seen.contains($0.value) }
+        return (ordered, cleaned)
+    }
+
+    /// Every tab on disk, named and scratch alike.
+    ///
+    /// This is what the connection's "Open Editor" menu lists: an editor the
+    /// user made for a connection and then closed still belongs to it, and
+    /// offering only the *named* ones would hide most of them.
+    public func allRecords() -> [SavedQueryRecord] {
+        let files =
+            (try? FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil)) ?? []
+        var out: [SavedQueryRecord] = []
+        for url in files where url.pathExtension == "json" {
+            guard url.lastPathComponent != "session.json" else { continue }
+            guard let data = try? Data(contentsOf: url),
+                let record = try? Self.decoder.decode(SavedQueryRecord.self, from: data)
+            else { continue }
+            out.append(record)
+        }
+        return out
     }
 
     /// Every named query on disk, for an "open a saved query" list. Closing a
