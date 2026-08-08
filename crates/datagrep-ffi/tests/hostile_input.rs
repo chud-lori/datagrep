@@ -92,11 +92,21 @@ fn null_string_arguments_are_errors_with_messages() {
 
     // SAFETY: `c` is live throughout; the NULLs are exactly what is under test.
     unsafe {
-        assert!(!datagrep_profiles_add(c, ptr::null(), ok.as_ptr(), &mut err));
+        assert!(!datagrep_profiles_add(
+            c,
+            ptr::null(),
+            ok.as_ptr(),
+            &mut err
+        ));
         assert!(take(err).is_some_and(|m| m.contains("name")), "name NULL");
 
         err = ptr::null_mut();
-        assert!(!datagrep_profiles_add(c, ok.as_ptr(), ptr::null(), &mut err));
+        assert!(!datagrep_profiles_add(
+            c,
+            ok.as_ptr(),
+            ptr::null(),
+            &mut err
+        ));
         assert!(take(err).is_some_and(|m| m.contains("url")), "url NULL");
 
         err = ptr::null_mut();
@@ -192,7 +202,10 @@ fn an_embedded_nul_truncates_and_the_tail_never_reaches_the_store() {
 
         let list = take(datagrep_profiles_list_json(c, &mut err)).expect("a list");
         assert!(list.contains("\"good\""), "list was {list}");
-        assert!(!list.contains("evil"), "the tail past the NUL leaked: {list}");
+        assert!(
+            !list.contains("evil"),
+            "the tail past the NUL leaked: {list}"
+        );
 
         datagrep_core_free(c);
     }
@@ -297,8 +310,13 @@ fn malformed_json_arguments_are_errors_not_panics() {
             err = ptr::null_mut();
 
             let fresh = CString::new(format!("fresh-{}", text.len())).unwrap();
-            let ok =
-                datagrep_profiles_add_json(c, fresh.as_ptr(), url.as_ptr(), json.as_ptr(), &mut err);
+            let ok = datagrep_profiles_add_json(
+                c,
+                fresh.as_ptr(),
+                url.as_ptr(),
+                json.as_ptr(),
+                &mut err,
+            );
             assert!(!ok, "options_json {text:?} must be refused");
             assert!(take(err).is_some(), "options_json {text:?} gave no message");
             err = ptr::null_mut();
@@ -448,7 +466,12 @@ fn a_stale_err_out_slot_is_nulled_on_success() {
     // life holding a dangling-looking value to prove the success path clears it.
     unsafe {
         let mut err: *mut c_char = 0xdead_beef_usize as *mut c_char;
-        assert!(datagrep_profiles_add(c, name.as_ptr(), url.as_ptr(), &mut err));
+        assert!(datagrep_profiles_add(
+            c,
+            name.as_ptr(),
+            url.as_ptr(),
+            &mut err
+        ));
         assert!(err.is_null(), "success must NULL a stale err_out slot");
         datagrep_core_free(c);
     }

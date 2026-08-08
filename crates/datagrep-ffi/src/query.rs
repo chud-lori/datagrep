@@ -488,7 +488,11 @@ fn request_for(sql: &str, read_only: bool) -> datagrep_api::Request {
 /// classifies as `Write`/`Ddl`/`Admin`, naming the profile so the user knows
 /// *which* setting refused them. Engines with no classifier pass through —
 /// their protection level is reported as `"none"`, never silently claimed.
-fn refuse_writes(profile: &str, driver_id: &str, stmt: &str) -> Result<(), String> {
+///
+/// `pub` because it is a safety claim rather than an implementation detail:
+/// "a write is actually refused under read-only" is only worth stating if it
+/// can be checked from outside, per driver, without a live server.
+pub fn refuse_writes(profile: &str, driver_id: &str, stmt: &str) -> Result<(), String> {
     let Some(language) = language_for_driver(driver_id) else {
         return Ok(());
     };
@@ -536,7 +540,7 @@ fn split_statements(driver_id: &str, sql: &str) -> Vec<String> {
 
 /// The language a profile's engine speaks. One line per driver, like
 /// [`crate::drivers::register_drivers`].
-pub(crate) fn language_for_driver(id: &str) -> Option<LanguageId> {
+pub fn language_for_driver(id: &str) -> Option<LanguageId> {
     match id {
         "sqlite" => Some(LanguageId::Sql(datagrep_api::SqlDialect::Sqlite)),
         "postgres" => Some(LanguageId::Sql(datagrep_api::SqlDialect::Postgres)),

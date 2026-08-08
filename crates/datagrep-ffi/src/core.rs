@@ -299,7 +299,7 @@ impl CoreInner {
 ///   the server itself would accept a write (Redis, or not yet connected).
 /// - `"none"` — nothing enforces it and the UI must say so (an engine this
 ///   build cannot classify statements for).
-pub(crate) fn read_only_json(
+pub fn read_only_json(
     read_only: bool,
     driver_id: &str,
     reported: Option<Enforcement>,

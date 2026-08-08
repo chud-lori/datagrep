@@ -45,6 +45,25 @@
 //! Every entry point is wrapped in [`std::panic::catch_unwind`]. A panic
 //! becomes an error string, never an unwind across the ABI (which is UB).
 //! The workspace release profile keeps `panic = "unwind"`, so this works.
+//!
+//! ## What Miri can and cannot check here
+//!
+//! Worth stating so nobody reads a green Miri run as covering more than it
+//! does. Miri *can* run the modules where the raw pointer arithmetic actually
+//! lives — [`rows`], [`cells`] and [`ffi_util`] — because their unit tests
+//! build a [`rows::DatagrepRows`] directly and never leave Rust:
+//!
+//! ```text
+//! cargo +nightly miri test -p datagrep-ffi --lib rows:: cells:: ffi_util::
+//! ```
+//!
+//! Miri *cannot* run anything that goes through [`core::datagrep_core_new`],
+//! which is every entry point: the profile store is SQLite, i.e. calls into a
+//! C library, and Miri has no way to execute foreign code. The multi-threaded
+//! tokio runtime is out of reach for the same reason. So the entry points are
+//! covered by `tests/hostile_input.rs` under a normal build, and the pointer
+//! math is what Miri is for — the two do not overlap, and neither substitutes
+//! for the other.
 
 #![warn(rust_2018_idioms)]
 // Inside an `unsafe fn` the whole body is an unsafe context by default, so a
