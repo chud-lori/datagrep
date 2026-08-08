@@ -118,7 +118,9 @@ check_writable() {
     [ -w "$1" ] || die "$1 is not writable. Re-run with sudo yourself, or use --user / --prefix DIR."
   else
     parent=$(dirname -- "$1")
-    [ -d "$parent" ] && [ -w "$parent" ] || die "cannot create $1. Re-run with sudo yourself, or use --user / --prefix DIR."
+    if [ ! -d "$parent" ] || [ ! -w "$parent" ]; then
+      die "cannot create $1. Re-run with sudo yourself, or use --user / --prefix DIR."
+    fi
   fi
 }
 

@@ -57,7 +57,8 @@ jobs:
   # fast. The real-FFI link (libdatagrep_ffi.a) is exercised by release.yml.
   macos-app:
     name: swift build (macos-14)
-    runs-on: macos-14
+    # macos-14 ships Swift 5.10; Package.swift needs tools 6.1, which is on macos-15.
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4

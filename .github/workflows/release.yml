@@ -43,7 +43,10 @@ permissions:
 jobs:
   build-macos:
     name: build (macos)
-    runs-on: macos-14 # Apple silicon; cross-compiles x86_64 — never macos-13, see header.
+    # Apple silicon; cross-compiles x86_64 — never macos-13, see header.
+    # macos-15 (not -14) because this job also runs build-app.sh, and
+    # Package.swift declares swift-tools-version 6.1 — macos-14 ships 5.10.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
