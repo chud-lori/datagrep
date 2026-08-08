@@ -48,7 +48,19 @@ and only one of them is about Elasticsearch:
 update/delete. Do not chase Elasticvue's breadth — index admin, snapshots,
 mapping edits and reindex are cluster administration, and Elasticvue itself does
 the two most important ones (document editing, deep paging) in ways we should
-deliberately not copy.
+deliberately not copy. Elasticvue's own 223-respondent survey ranks the REST
+console #1 by a 1.6× margin and document CRUD #2, with ILM/ingest/shard
+relocation at 1–3 votes each — independent confirmation of exactly this
+ordering (§2.4).
+
+**Two things to weigh before committing.** (1) There is a real counter-argument
+from Elasticvue's maintainer that manual document editing is a rarer need than
+people claim, and that most "editing" requests are really requests for a
+formatted JSON *view* (§2.4). That is an argument for stopping P0-3 at
+single-document update/delete, which is what this plan does. (2) **On ES ≥ 9.4,
+optimistic concurrency is off by default for time-series indices** and lost
+updates there are *silent* rather than a 409 (§3.2.3) — the write path must
+detect index mode and disable editing, not discover this in production.
 
 **Worth stating loudly, because it surprised me:** the driver is *not*
 read-only today. `EsConnection::execute_native` refuses writes only when
@@ -98,6 +110,19 @@ immediately:
   `_update` partial document a JSON null **sets the field to null**; it does not
   remove it. "Clear this cell" is therefore ambiguous and must not be resolved
   by accident.
+- **`map_status_error` will mis-label timeouts on ES 9.** It maps `408|504 →
+  Timeout` and `429 → ResourceExhausted` (`error.rs:98–109`). ES 9.0's breaking
+  changes moved server-side timeouts from 5xx to **429**
+  ([#116026](https://github.com/elastic/elasticsearch/pull/116026)), so on a 9.x
+  cluster a timeout now surfaces as "resource exhausted". Small, real,
+  independent of everything else in this plan.
+- **Error bodies on ES ≥ 8.18 can contain the whole document.**
+  `?include_source_on_error` was added for create/index/update/bulk and
+  **defaults to `true`**
+  ([#120725](https://github.com/elastic/elasticsearch/pull/120725)). `error.rs`
+  goes to real trouble not to leak credentials into logs; once we generate
+  writes, a parse-failure body may carry the user's document. Set
+  `include_source_on_error=false` on generated writes, or bound what is logged.
 - `field_path_to_es` drops `PathSeg::Index` (`filter.rs:68–84`). Combined with
   the fact that `{"doc": …}` **replaces arrays wholesale** rather than merging
   them, editing one element of an array field is inexpressible. It must be
@@ -137,10 +162,20 @@ Four things stand out, all verified:
    results; same for `seq_no_primary_term`; control searches for `_doc` and
    `_bulk` return hits, so the search works). `_update` appears only as the
    Tauri auto-updater plugin. **Every document save is a blind full-document
-   `PUT` overwrite with no concurrency guard.** The edit UI
-   (`src/components/search/EditDocument.vue`) is a modal with a raw JSON editor
-   of the document and one "Update" button — no diff, no confirmation, no
-   conflict handling.
+   `PUT` overwrite with no concurrency guard** — last write wins, silently.
+   The sharpest version of this: `EditDocument.ts` *reads* `_seq_no` and
+   `_primary_term` off the document and renders them beside the editor as
+   display-only metadata, then issues the `PUT` **without them**. The values are
+   in hand and unused. The edit UI is a modal with a raw JSON editor of
+   `_source` and one "Update" button, and `updateDocument()` carries **no
+   confirmation step** — the click fires the write. No diff, no conflict
+   handling.
+
+   Confirmation coverage across the app is inconsistent in a way worth learning
+   from: index delete, delete-by-query, close (single row), alias delete and
+   snapshot *delete* all confirm; **forcemerge, reindex, clone, alias add,
+   snapshot *restore* and document update do not**, and bulk close/open skip the
+   confirmation that the single-row version has.
 3. **Every write hardcodes `?refresh=true`** — `index()`, `delete()`,
    `docsBulkDelete()`, `deleteByQuery()`. That forces a segment refresh on the
    shard on every single save.
@@ -149,11 +184,28 @@ Four things stand out, all verified:
    (`src/consts.ts:31`), and `max_result_window` appears nowhere in the repo —
    so deep paging simply 400s past 10 000.
 
-Genuinely good ideas it has: named multi-cluster switching, a REST console with
-**saved queries and history** (`RestQuerySavedQueriesList.vue`,
-`RestQueryHistoryList.vue`), a starter list of request examples
-(`REST_QUERY_EXAMPLES` in `consts.ts`), and chunking multi-index operations at
+Genuinely good ideas it has: named multi-cluster switching; a REST console with
+**tabs, saved queries, history capped at 1 000 entries, curated examples, and
+auto-parsing of pasted Kibana-console syntax into method/path/body**
+(`RestQueryForm.ts`); and chunking multi-index operations at
 `MAX_INDICES_PER_REQUEST = 16` so it never builds a 4 KB URL.
+
+Three more absences worth recording, because they bound what "feature parity"
+would even mean: **`QueryBuilder.vue` is a stub containing literally
+`<h1 />`** — the visual query builder was never built; **index templates are
+read-only** (no create/edit/delete); and **create-index takes name + shards +
+replicas only**, no mappings or settings JSON. There is also **no read-only
+mode, by stated policy** — the FAQ answers the request flatly: *"No. Users will
+always be able to change things by using the REST API."* datagrep already does
+better here (`Enforcement::Client` plus the allow-list classifier at
+`connection.rs:561–585`), and should say so.
+
+**Scale is its weak point, and we partly share the weakness.** Indices and
+shards are fetched whole and filtered/paginated **client-side** — the structural
+cause of the large-cluster sluggishness in its tracker (#354: 18 071 shards made
+*Test connection* fail outright). Our own `_cat/indices` listing pages
+client-side too (`lib.rs:123–128`, stated as a deviation). Theirs is worse
+because it is also unbounded, but this is not a stone we can throw hard.
 
 ### 2.2 Kibana Dev Tools Console — the console reference
 
@@ -168,15 +220,49 @@ containing a `}` breaks any naive brace counter.
 
 ### 2.3 Contrast
 
-- **Dejavu** (`appbaseio/dejavu`, 8 468 stars, pushed 2026-07-02 — active):
-  distinctive as a spreadsheet-style data browser with in-place cell editing and
-  data import, rather than an admin console. Whether it uses optimistic
-  concurrency is **unverified**.
-- **Cerebro** (`lmenezes/cerebro`, 5 613 stars, **last pushed 2024-02-12**):
-  cluster/shard admin plus a REST console. Effectively dormant — not a live
-  reference in 2026.
+- **Dejavu** (`appbaseio/dejavu`, 8 468 stars): a spreadsheet-style data browser
+  with in-place cell editing and CSV/JSON/NDJSON import, rather than an admin
+  console. Its `pushed_at` of 2026-07-02 is dependabot noise; real feature work
+  is bursty (3.10.0 in 2025-09, 3.8.3 in 2024-09). **Its full-document Update
+  button has been broken on ES 8 since 2022**
+  ([#450](https://github.com/appbaseio/dejavu/issues/450)): it `GET`s the
+  document *including metadata fields* and `PUT`s it back verbatim, so ES 8
+  rejects it with `Field [_ignored] is a metadata field and cannot be added
+  inside a document`. A read-modify-write with no metadata stripping and no
+  optimistic concurrency — the same class of mistake as Elasticvue's, unfixed
+  for three years. Direct lesson for §3.3: **write back only `_source`, never
+  the envelope.**
+- **Cerebro** (`lmenezes/cerebro`, 5 613 stars): **last substantive commit
+  2021-07-03** — the 2024 `pushed_at` is a dependabot branch. Five years
+  dormant, 207 open issues, AngularJS 1.8 (itself EOL), and it now fails to
+  start on modern JDKs
+  ([#600](https://github.com/lmenezes/cerebro/issues/600)). "Is this project
+  alive?" ([#591](https://github.com/lmenezes/cerebro/issues/591)) is open. ES 8
+  support ([#567](https://github.com/lmenezes/cerebro/issues/567)) has been
+  open and unassigned since 2022. **Not a live reference in 2026**; its detailed
+  feature list is **unverified** and was not worth chasing.
 
-### 2.4 What users actually complain about
+### 2.4 What users actually want — and the counter-argument
+
+**The best prioritisation evidence found anywhere in this research** is
+Elasticvue's own 2021 feature survey,
+[#55](https://github.com/cars10/elasticvue/issues/55), 223 respondents: the
+**REST console is the #1 ask (23 votes), by a 1.6× margin over second place**;
+**document CRUD is #2 (14 votes)**; ILM, ingest pipelines and shard relocation
+drew **1–3 votes each**. That is independent confirmation of this plan's
+ranking: console/language work first (P0-2), document editing second (P0-3),
+cluster administration last or never (§8). Most respondents also run Kibana —
+these tools are a complement to it, not a replacement.
+
+**The honest counter-argument, from the maintainer himself**
+([#225](https://github.com/cars10/elasticvue/issues/225)): *"why is editing such
+a big usecase for you? I have never worked with an elasticsearch deployment
+where i would manually edit documents"* — and per that thread most people asking
+for "editing" actually wanted a **formatted JSON view**, not an editor. Worth
+sitting with before spending 9–12 days. It does not change the ranking (the
+console work is P0 on its own merits and needs no editing story), but it is a
+real argument for scoping P0-3 to single-document update/delete and stopping
+there, rather than pushing on to bulk and insert.
 
 From `github.com/cars10/elasticvue/issues` sorted by comments:
 
@@ -193,15 +279,34 @@ From `github.com/cars10/elasticvue/issues` sorted by comments:
   **[#323](https://github.com/cars10/elasticvue/issues/323)**,
   **[#358](https://github.com/cars10/elasticvue/issues/358)** — shards/nodes/
   indices views degrade or go blank on closed indices and when an alias call
-  fails. Admin screens are where the bugs are.
+  fails. Admin screens are where the bugs are. #358's cause is visible in the
+  source and is a **direct lesson for P1-4**: `ClusterIndices.ts` does
+  `Promise.all([catIndices, indexGetAlias('*')])`, so one failing alias call
+  takes out the entire index listing. Health/metadata enrichment must degrade
+  per-source, never all-or-nothing — our catalog already has this instinct
+  (`not_found_is_empty_array` at `catalog.rs:118–120`) and should keep it.
+- **[#332](https://github.com/cars10/elasticvue/issues/332)** — a *default*
+  changed in v1.11.0 to `"fields": ["*","*.*"]`, spiked node CPU and, in a
+  user's words, *"seriously affect[ed] elasticsearch cluster stability"*;
+  reverted in 1.11.1. A cautionary tale about what a browse tool's defaults cost
+  on someone else's production cluster.
+- **[#338](https://github.com/cars10/elasticvue/issues/338)** — navigating away
+  aborts in-flight requests, cancelling long reindexes midway. Another argument
+  for keeping reindex out (§8).
 - **[#316](https://github.com/cars10/elasticvue/issues/316)** — "Prompt for
   username/password". Credential handling; datagrep already solves this via
   `datagrep-secrets` + the keychain.
 - **[#307](https://github.com/cars10/elasticvue/issues/307)** — security user/role
   management. See §8.
 
-Reddit/HN sentiment beyond this was **not systematically verified** — treat the
-issue tracker as the evidence base.
+**Reddit is genuinely unresearched, not empty** — r/elasticsearch was
+unreachable on every attempted path (crawler blocked; `old.reddit.com` 403).
+**Hacker News has nothing to cite**: exactly one Elasticvue submission
+([39012130](https://news.ycombinator.com/item?id=39012130)), 1 point, 1 comment
+— which recommends Cerebro instead. Treat the issue trackers and the survey as
+the entire evidence base, and do not repeat the common claims that "Kibana is
+too heavy to install just for a console" or that people object to Elastic's
+licensing: **no primary source was found for either.**
 
 ---
 
@@ -306,7 +411,7 @@ whatever is there. So the honest framing is:
 | Insert with a user-supplied id | `PUT /<index>/_doc/<id>?op_type=create` | 409s instead of silently overwriting. **Never a bare `PUT`** — that is Elasticvue's blind overwrite. |
 | Insert with no id | `POST /<index>/_doc` | Server generates the id. |
 | Set a field to null | `{"doc": {"f": null}}` | `Value::Null` in `sets`. |
-| Remove a field | scripted `ctx._source.remove('f')` | `Value::Absent` in `sets`. **P1** — until then, refuse `Absent` in `sets` rather than let `value_to_json` turn it into a null (`value.rs:266`). |
+| Remove a field | scripted `ctx._source.remove('f')` | `Value::Absent` in `sets`. **P1** — until then, refuse `Absent` in `sets` rather than let `value_to_json` turn it into a null (`value.rs:266`). **Constraint:** the docs are explicit that *"If both `doc` and `script` are specified, then `doc` is ignored"* — so a mutation that both sets and removes fields must compile to **one script**, not `doc` + `script`. That is what makes P1-3 a day rather than an hour. |
 | Edit an array element | — | **Refuse.** `{"doc": …}` replaces arrays wholesale and `field_path_to_es` already drops `PathSeg::Index`. Reuse the existing refusal message from `filter.rs:95–100`. |
 
 **Routing is part of identity.** An index using custom routing needs `routing=`
@@ -331,7 +436,7 @@ include unit tests at the density the crate already runs (120 unit tests for
 
 | # | Item | Days | Notes / risk |
 |---|---|---|---|
-| **P0-1** | Request `seq_no_primary_term: true` on scans; carry `_seq_no`, `_primary_term`, `_routing` through the hit envelope | **0.5** | Blocks P0-3. Adds two keys to every emitted hit; unit tests asserting the exact envelope key list (`cursor.rs:1054`) will need updating. Low risk. |
+| **P0-1** | Request `seq_no_primary_term: true` on scans; carry `_seq_no`, `_primary_term`, `_routing` through the hit envelope; detect time-series index mode | **0.5–1** | Blocks P0-3. Adds two keys to every emitted hit; unit tests asserting the exact envelope key list (`cursor.rs:1054`) will need updating. The index-mode check (§3.2.3) is the part that is not trivial — on ES 9.4+ a TSDB index returns *sentinel* seq-nos, so "we got a number back" is not proof the guard will work. |
 | **P0-2** | `LanguageId::EsDsl` in `datagrep-lang`: split / classify / highlight / context_at; driver adopts it | **3–4** | Fully independent — ships alone and is worth shipping alone. See §6. Also fixes a silent bug: ES connections get no `@limit`/`@timeout`/`@readonly` block directives today. |
 | **P0-3** | Guarded single-document `Op::Mutate` (update + delete), `refresh=wait_for`, halt-and-report, `EDITABLE_RESULTS` on | **3–4** driver + **1** live-ES integration tests | Depends on P0-1 and P0-4. The integration suite currently seeds fixtures with a raw `reqwest` client *precisely because* nothing in the write path is vouched for (`tests/README.md:125–131`); that can now go through the seam. |
 | **P0-4** | `datagrep-api`: `Shape::Documents.identity`, `Mutation::{Update,Delete}.expect`, `Caps::ATOMIC_BATCH`, `DbError::Conflict` | **1.5–2** | Touches five other drivers. Mostly `expect: vec![]` plus an `Unsupported` guard where a driver can't honour a precondition. See §5. |
@@ -341,9 +446,9 @@ include unit tests at the density the crate already runs (120 unit tests for
 | # | Item | Days | Notes |
 |---|---|---|---|
 | P1-1 | Insert (`op_type=create` / `POST /_doc`) | 1 | Straightforward once P0-3 lands. |
-| P1-2 | Compile a multi-document batch to one `_bulk` NDJSON; parse per-item `status`/`error`; report per item | 2–3 | N round trips → 1. Bulk supports per-item `if_seq_no`, so the guard survives. Bulk is **not** atomic — the response carries `errors: true` plus a per-item status, which is exactly the halt-and-report shape. Real risk: the NDJSON body must not be pretty-printed and needs `application/x-ndjson`; our `EsHttp` only sends parsed JSON today. |
+| P1-2 | Compile a multi-document batch to one `_bulk` NDJSON; parse per-item `status`/`error`; report per item | 2–3 | N round trips → 1, and one refresh-listener slot per shard instead of N. Bulk carries `if_seq_no`/`if_primary_term` on the *action line*, so the guard survives (note `retry_on_conflict` is also an action-line field there, not a query param — and we do not want it, per §3.2.6). Bulk is **not** atomic: HTTP is **200 even when items fail**; the signal is top-level `errors: true` plus per-item `status`, which is exactly the halt-and-report shape. Risks: the body must be `application/x-ndjson`, must **not** be pretty-printed, and must end in `\n` — our `EsHttp` only sends parsed JSON today; the 100 MB `http.max_content_length` ceiling applies; and **ES 9.0 tightened bulk action parsing into a hard error** ([#115923](https://github.com/elastic/elasticsearch/pull/115923)), so previously-tolerated sloppiness now fails. `?filter_path=items.*.error` is a cheap way to keep the response small. |
 | P1-3 | Field removal via scripted update (`ctx._source.remove(…)`) | 1 | Makes `Value::Absent` in `sets` mean "remove", closing the `value.rs:266` ambiguity properly. |
-| P1-4 | Cluster / node / shard health surfaced through the **existing catalog**, not a new screen: `_cluster/health`, `_cat/nodes`, `_cat/shards` in `ObjectDetail::extra` and a root-level `describe` | 2 | This is Elasticvue's most-used screen and we get most of it by reusing machinery we already have. No new UI concept. |
+| P1-4 | Cluster / node / shard health surfaced through the **existing catalog**, not a new screen: `_cluster/health`, `_cat/nodes`, `_cat/shards` in `ObjectDetail::extra` and a root-level `describe` | 2 | Reuses machinery we already have; no new UI concept. Two constraints: each source must degrade independently (Elasticvue's #358 `Promise.all` failure), and Elastic is blunt that **cat APIs are *"only intended for human consumption… not intended for use by applications"*** — values are human-formatted (`3.5mb`) unless `bytes=`/`time=` are passed. We already depend on `_cat/indices?format=json` in the catalog, so this is a pre-existing bet, not a new one — but pass the unit params. |
 | P1-5 | Index create/delete/close/open and alias add/remove as structured `DdlOp` | 3–4 | **Gated.** `DdlOp` is `Native { text }` today — an untyped passthrough the driver's own doc calls out (`connection.rs:637–641`). Giving it structured variants is an api milestone (M3) and Elasticsearch should not be the thing that drives it alone. |
 
 ### P2 — deferred, not refused
@@ -418,6 +523,18 @@ banned branch again.
 > **Add `DbError::Conflict { code, message }`, recoverable.** Postgres
 > serialization failures (`40001`) and Mongo `WriteConflict` map onto it too.
 
+Detection must key off the structured `error.type`, **never the reason string**.
+The reason is built by `VersionConflictEngineException` as
+`"{documentDescription}: version conflict, required seqNo [N], primary term [T]."`
+plus either `" current document has seqNo [M] and primary term [T]"` or
+`" but no document was found"` — and `documentDescription` is **not always
+`[<id>]`**: for time-series indices it includes the timestamp and dimensions.
+Same `type`, different prose. (Helpfully, ES 9.0 also made error JSON uniform —
+*"error fields will always have `type` and `reason`"*,
+[#90529](https://github.com/elastic/elasticsearch/pull/90529).) Note the
+second variant is a distinct UX case: the document was **deleted** underneath
+you, so "rebase my edits" is not offered — only "re-insert" or "discard".
+
 **6. The unavoidable caveat.** None of the above gives datagrep a place to
 *stage* an edit. `CoreApi` has no pending-edit concept and `EDITABLE_RESULTS` is
 consumed nowhere but `doctor`. So either:
@@ -459,14 +576,36 @@ fails today with "request body is not valid JSON".
 
 ### What the module has to handle
 
+**We do not have to guess at the grammar.** Kibana's Console parser is a
+hand-written recursive descent parser and its **test file is the de-facto
+spec** —
+[`parser.ts`](https://github.com/elastic/kibana/blob/main/src/platform/packages/shared/kbn-monaco/src/languages/console/parser.ts)
+and
+[`parser.test.ts`](https://github.com/elastic/kibana/blob/main/src/platform/packages/shared/kbn-monaco/src/languages/console/parser.test.ts).
+Port the rules, and every script Elastic's own docs ship works.
+
 - **`split`** — a request begins at a line whose first token is
-  `GET|POST|PUT|DELETE|HEAD|PATCH` followed by a path; the body runs to the next
-  request line or EOF. Must survive: `#` and `//` line comments and `/* … */`
-  blocks; **several JSON objects in a row** in one body (`_bulk` and `_msearch`
-  are NDJSON — a "one JSON object per request" parser gets this wrong, and
-  `_bulk` is the single most-pasted ES request there is); **triple-quoted
-  strings** `"""…"""`, where an embedded `}` will defeat a naive brace counter;
-  and blank lines inside a body.
+  `GET|POST|PUT|DELETE|HEAD|PATCH`; the body runs to the next request line or
+  EOF. The rules that matter, all taken from Kibana's parser:
+  - **The boundary is the next `METHOD` token, not a blank line.**
+    `'GET _search\nPOST _test_index'` is two requests with no blank line
+    between them. Method matching is case-insensitive and asserts the next
+    character is whitespace, so `GETTER` is not a method.
+  - A body is parsed **only** if the next non-space character is `{`.
+  - **Several JSON objects in a row** in one body: the parser loops
+    `while (ch === '{')` and collects them into an array. `_bulk` and
+    `_msearch` are NDJSON, and `_bulk` is the single most-pasted ES request
+    there is — a "one JSON object per request" parser gets it wrong.
+  - `#`, `//` **and** `/* … */` comments, plus `#!` as a *distinct* token
+    (deprecation warnings echoed in responses), not a plain comment.
+  - **Triple-quoted strings** `"""…"""`, scanned to the closing delimiter
+    rather than brace-counted — an embedded `}` defeats a naive counter.
+  - **Error recovery**: on a parse failure, re-anchor on
+    `/^\s*(POST|HEAD|GET|PUT|DELETE|PATCH)/im` so one broken body does not
+    destroy the rest of the buffer. Worth copying — it is the difference
+    between "one bad request" and "the tab is unusable".
+  - Kibana also flags **duplicate JSON keys** (`Duplicate key "a"`), which
+    `serde_json` silently accepts. Cheap, and a real ES footgun.
 - **`classify`** — `Read` for GET/HEAD plus the POST read allow-list; `Write`
   for `_doc`/`_update`/`_bulk`/`_delete_by_query`/`_update_by_query`/`_reindex`;
   `Ddl` for index create/delete/close/open, `_mapping`, `_settings`, `_alias`,
@@ -500,10 +639,19 @@ separate milestone, and the catalog's `complete` already exists).
 
 ### Copy
 
-- **Saved queries + history in the console.** Elasticvue has both
-  (`RestQuerySavedQueriesList.vue`, `RestQueryHistoryList.vue`). datagrep
-  already stores query history in `datagrep-profiles`; ES just needs to
-  participate. Nearly free.
+- **Saved queries + history in the console.** Elasticvue has both, plus tabs.
+  datagrep already stores query history in `datagrep-profiles`; ES just needs to
+  participate. Nearly free — and it beats Kibana's own Console, whose scripts
+  live only in `localStorage`
+  ([#93909](https://github.com/elastic/kibana/issues/93909),
+  [#39017](https://github.com/elastic/kibana/issues/39017), open since 2019,
+  with users reporting *"I had a browser session crash and I lost all the
+  queries"*).
+- **Auto-parse pasted Kibana-console text** into method/path/body
+  (`RestQueryForm.ts`). Once P0-2 lands this is nearly free for us too, and it
+  is the single most common way an ES snippet arrives.
+- **Error recovery in the parser** — Kibana re-anchors on the next METHOD after
+  a parse failure. Copy it (§6).
 - **A starter list of request examples** (`REST_QUERY_EXAMPLES`) — `_cat/indices`,
   `_cat/aliases`, `_cat/shards`, create index, `_bulk`. Trivial, and it genuinely
   helps people who do not remember endpoint names. This is what our
@@ -520,10 +668,19 @@ separate milestone, and the catalog's `complete` already exists).
 - **`?refresh=true` on every write.** Verified in `index()`, `delete()`,
   `docsBulkDelete()`, `deleteByQuery()`. Forces a shard refresh per save. Use
   `refresh=wait_for` (§3.2.3).
-- **Blind full-document `PUT` with no concurrency guard.** Verified: zero
-  occurrences of `if_seq_no`/`seq_no_primary_term` in the whole repository. This
-  is last-write-wins over a colleague's edit — the exact failure datagrep's
-  identity story exists to prevent, and the reason §3 is written the way it is.
+- **Blind full-document `PUT` with no concurrency guard, fired with no
+  confirmation.** Verified: zero occurrences of
+  `if_seq_no`/`seq_no_primary_term` in the whole repository, and
+  `updateDocument()` has no confirm step. This is last-write-wins over a
+  colleague's edit — the exact failure datagrep's identity story exists to
+  prevent, and the reason §3 is written the way it is. Dejavu makes the same
+  mistake one step worse by echoing metadata fields back
+  ([#450](https://github.com/appbaseio/dejavu/issues/450), broken since 2022) —
+  **write back `_source` only**.
+- **Confirmation as an opt-in per call site.** Elasticvue's confirms are a
+  `confirm` prop each caller may forget, which is why snapshot *restore* and
+  bulk close/open have none while their single-row siblings do. Destructiveness
+  should be a property of the operation, decided once.
 - **`from`+`size` paging.** `DEFAULT_SEARCH_QUERY_OBJ` ships `from: 0` and the
   repo has no `max_result_window` handling; deep paging 400s. datagrep is
   keyset-only by decision (`RANDOM_ACCESS_PAGE` off, `driver.rs:36–38`).
@@ -534,7 +691,19 @@ separate milestone, and the catalog's `complete` already exists).
   `${index}/${type}/${id}` and defaults `_type` to `_doc`
   (`src/models/SearchResults.ts`). Mapping types were removed in ES 8. We
   should not carry the concept at all.
-- **Kibana's textual `${var}` substitution.** See §6.
+- **Kibana's textual `${var}` substitution.** See §6. Its own history is a
+  warning: values starting with a digit were emitted unquoted and silently
+  parsed as numbers
+  ([#145764](https://github.com/elastic/kibana/issues/145764)).
+- **Expensive defaults.** Elasticvue shipped `"fields": ["*","*.*"]` as a
+  default and destabilised users' clusters (#332). Our equivalent temptation is
+  `track_total_hits` — already deliberately refused (`connection.rs:409–411`).
+  Keep refusing.
+- **A response pane that isn't valid JSON.** Kibana's Console rewrites strings
+  into `"""…"""` on output, so you cannot pipe it into `jq`
+  ([#15628](https://github.com/elastic/kibana/issues/15628) — "fixed" only by
+  adding an opt-out). Our `DocsCursor` returns the reply as a real `Value`;
+  keep it that way.
 
 ---
 
@@ -580,10 +749,24 @@ These are decisions, not a backlog.
   [`EditDocument.vue`](https://github.com/cars10/elasticvue/blob/master/src/components/search/EditDocument.vue) ·
   [`consts.ts`](https://github.com/cars10/elasticvue/blob/master/src/consts.ts) ·
   [issues](https://github.com/cars10/elasticvue/issues) ([#270](https://github.com/cars10/elasticvue/issues/270), [#257](https://github.com/cars10/elasticvue/issues/257), [#307](https://github.com/cars10/elasticvue/issues/307), [#316](https://github.com/cars10/elasticvue/issues/316), [#321](https://github.com/cars10/elasticvue/issues/321), [#323](https://github.com/cars10/elasticvue/issues/323), [#358](https://github.com/cars10/elasticvue/issues/358))
+- Elasticvue [feature survey #55](https://github.com/cars10/elasticvue/issues/55) (223 respondents) ·
+  [FAQ, "no read-only mode"](https://github.com/cars10/elasticvue/wiki/FAQ) ·
+  [#225 maintainer on editing](https://github.com/cars10/elasticvue/issues/225) ·
+  [#332](https://github.com/cars10/elasticvue/issues/332) · [#338](https://github.com/cars10/elasticvue/issues/338) · [#354](https://github.com/cars10/elasticvue/issues/354)
 - [Optimistic concurrency control](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/optimistic-concurrency-control) ·
+  [Index API](https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-index_.html) ·
   [Update API](https://www.elastic.co/guide/en/elasticsearch/reference/8.19/docs-update.html) ·
   [Bulk API](https://www.elastic.co/guide/en/elasticsearch/reference/8.19/docs-bulk.html) ·
-  [Reindex data stream API](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reindex-data-stream)
-- [Kibana Console (Dev Tools)](https://www.elastic.co/docs/explore-analyze/query-filter/tools/console)
-- [`appbaseio/dejavu`](https://github.com/appbaseio/dejavu) · [`lmenezes/cerebro`](https://github.com/lmenezes/cerebro)
+  [refresh](https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-refresh.html) ·
+  [Reindex](https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-reindex.html) ·
+  [Aliases](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-aliases.html) ·
+  [Put mapping](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-put-mapping.html) ·
+  [Register a snapshot repository](https://www.elastic.co/guide/en/elasticsearch/reference/current/snapshots-register-repository.html) ·
+  [cat APIs](https://www.elastic.co/guide/en/elasticsearch/reference/current/cat.html)
+- **[ES 9.x breaking changes](https://www.elastic.co/docs/release-notes/elasticsearch/breaking-changes)** — TSDB sequence numbers ([#145737](https://github.com/elastic/elasticsearch/pull/145737)), strict bulk parsing ([#115923](https://github.com/elastic/elasticsearch/pull/115923)), uniform error JSON ([#90529](https://github.com/elastic/elasticsearch/pull/90529)), timeouts → 429 ([#116026](https://github.com/elastic/elasticsearch/pull/116026)), `include_source_on_error` ([#120725](https://github.com/elastic/elasticsearch/pull/120725))
+- [Kibana Console (Dev Tools)](https://www.elastic.co/docs/explore-analyze/query-filter/tools/console) ·
+  [`parser.ts`](https://github.com/elastic/kibana/blob/main/src/platform/packages/shared/kbn-monaco/src/languages/console/parser.ts) ·
+  [`parser.test.ts`](https://github.com/elastic/kibana/blob/main/src/platform/packages/shared/kbn-monaco/src/languages/console/parser.test.ts) (the de-facto grammar spec)
+- [`appbaseio/dejavu`](https://github.com/appbaseio/dejavu) ([#450](https://github.com/appbaseio/dejavu/issues/450)) ·
+  [`lmenezes/cerebro`](https://github.com/lmenezes/cerebro) ([#591](https://github.com/lmenezes/cerebro/issues/591), [#600](https://github.com/lmenezes/cerebro/issues/600))
 - [`version_conflict_engine_exception` explainer](https://www.baeldung.com/ops/elasticsearch-version_conflict_engine_exception)
