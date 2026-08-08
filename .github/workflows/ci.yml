@@ -31,6 +31,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # keyring's Secret Service backend links libdbus. Without this the
+      # workspace does not build on a bare Ubuntu runner at all — the same
+      # dependency a Linux package will have to declare.
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Install Rust (stable, rustfmt + clippy)
         uses: dtolnay/rust-toolchain@stable
         with:
