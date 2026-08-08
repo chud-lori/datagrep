@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>datagrep — every database in one native app</title>
+<meta name="description" content="datagrep is a free, open-source database client for macOS: Postgres, MySQL, SQLite, Redis and MongoDB in one native app, with a Rust engine and a CLI. Results stream, memory stays flat. No Electron, no JVM.">
+<link rel="icon" type="image/svg+xml" href="appicon.svg">
+<link rel="stylesheet" href="style.css">
+<script>
+  // Apply a saved manual theme before first paint; otherwise follow the OS.
+  (function () {
+    try {
+      var t = localStorage.getItem("dg-theme");
+      if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+    } catch (e) {}
+  })();
+</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="appicon.svg" alt="" width="26" height="26">datagrep</a>
+    <nav class="site-nav" aria-label="Site">
+      <a href="#why">Why</a>
+      <a href="#compare">Compare</a>
+      <a href="#engines">Engines</a>
+      <a href="#install">Install</a>
+      <a href="#cli">CLI</a>
+      <a href="#design">Design</a>
+      <a href="#not-yet">Not yet</a>
+      <a class="nav-gh" href="https://github.com/chud-lori/datagrep">GitHub</a>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle dark mode">
+        <span class="icon-moon" aria-hidden="true">&#9789;</span><span class="icon-sun" aria-hidden="true">&#9728;</span>
+      </button>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- ============ hero ============ -->
+<section class="hero" id="top">
+  <div class="wrap">
+    <img class="hero-icon" src="appicon.svg" alt="" width="96" height="96">
+    <h1>Every database in <em>one native app</em>. Free and open source.</h1>
+    <p class="lede">
+      <strong>Postgres, MySQL, SQLite, Redis and MongoDB</strong> — SQL and documents as equals,
+      not one bolted onto the other. A native macOS app and a CLI, both over one Rust engine.
+      No Electron, no JVM.
+    </p>
+    <div class="hero-ctas">
+      <a class="btn btn-primary" href="https://github.com/chud-lori/datagrep">View on GitHub</a>
+      <a class="btn btn-ghost" href="#install">Build it in two commands</a>
+    </div>
+    <div class="term hero-term">
+      <div class="term-title">build from source</div>
+      <pre><code>git clone https://github.com/chud-lori/datagrep.git
+cd datagrep
+cargo build --release            <span class="c"># engine + CLI</span>
+cd ui/macos &amp;&amp; ./build-app.sh    <span class="c"># macOS app — no Xcode needed</span></code></pre>
+    </div>
+    <p class="hero-note">Rust toolchain + macOS Command Line Tools are the only prerequisites.</p>
+  </div>
+</section>
+
+<!-- ============ screenshot ============ -->
+<div class="shot-section">
+  <div class="wrap">
+    <div class="shot-frame">
+      <img class="shot-light" src="screenshot-light.png" width="1180" height="760"
+           alt="The datagrep app in light mode: a sidebar listing PostgreSQL, SQLite, Redis, and MongoDB connections, a SQL editor with block directives like @limit and @timeout, and a status bar showing the parsed directives.">
+      <img class="shot-dark" src="screenshot-dark.png" width="1180" height="760"
+           alt="The datagrep app in dark mode: a sidebar listing PostgreSQL, SQLite, Redis, and MongoDB connections, a SQL editor with block directives like @limit and @timeout, and a status bar showing the parsed directives.">
+    </div>
+    <p class="shot-caption">Four engines in one sidebar. The screenshot follows this page’s theme — dark mode is a first-class citizen, not an afterthought.</p>
+  </div>
+</div>
+
+<!-- ============ measured numbers ============ -->
+<section class="stats" aria-label="Measured performance">
+  <div class="wrap">
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="n">128&nbsp;ms</div>
+        <div class="d"><strong>to the first row</strong> of a 1,000,000-row query that takes 12.4&nbsp;s to finish. You read while it streams.</div>
+      </div>
+      <div class="stat">
+        <div class="n">174&nbsp;MB</div>
+        <div class="d"><strong>peak memory</strong> streaming that same 1M-row result — flat, it does not grow with the dataset.</div>
+      </div>
+      <div class="stat">
+        <div class="n">3–8&nbsp;ms</div>
+        <div class="d"><strong>to cancel a query</strong>, with zero orphaned queries left running on the server.</div>
+      </div>
+      <div class="stat">
+        <div class="n">7–29&nbsp;ms</div>
+        <div class="d"><strong>to connect</strong> to a schema with 100,000 relations — the catalog loads lazily, never crawled up front.</div>
+      </div>
+    </div>
+    <p class="measured-note">
+      Every number above was measured on 2026-08-08 with the release CLI against a live <code>postgres:16</code>
+      (1M-row &times; 24-column table). Method and full results:
+      <a href="https://github.com/chud-lori/datagrep/blob/main/notes/test-report.md">notes/test-report.md</a>.
+      No other benchmark claims are made on this page.
+    </p>
+  </div>
+</section>
+
+<!-- ============ why ============ -->
+<section id="why">
+  <div class="wrap">
+    <p class="kicker">Why datagrep</p>
+    <h2>Like DataGrip, but free and light</h2>
+    <p class="section-intro">
+      Most database clients make you choose: a heavyweight IDE, an Electron app, or one tool per engine.
+      datagrep’s bet is different — one small native app where relational rows and documents are equals.
+    </p>
+    <div class="card-grid">
+      <div class="card">
+        <h3>SQL and NoSQL as equals</h3>
+        <p>PostgreSQL and MongoDB sit in the same sidebar with the same interaction model. Document databases aren’t bolted onto a SQL tool, and SQL isn’t bolted onto a document viewer.</p>
+      </div>
+      <div class="card">
+        <h3>Results stream, memory stays flat</h3>
+        <p>The driver, a bounded channel, and the result store form a pipeline where nothing runs more than two chunks ahead. A million-row result never becomes a million resident rows.</p>
+      </div>
+      <div class="card">
+        <h3>Native macOS</h3>
+        <p>SwiftUI + AppKit over a Rust engine. No Electron, no JVM. The CLI binary is 7.7&nbsp;MB.</p>
+      </div>
+      <div class="card">
+        <h3>Cancel actually cancels</h3>
+        <p>Measured at 3–8&nbsp;ms from cancel to a usable connection, with no orphaned server-side queries — verified in <code>pg_stat_activity</code>.</p>
+      </div>
+      <div class="card">
+        <h3>Three kinds of blank</h3>
+        <p><code>NULL</code>, the empty string, and a field that is <em>absent</em> from a document are three different facts — and render as three visibly different things. <a href="#blanks">See below.</a></p>
+      </div>
+      <div class="card">
+        <h3>Free and open source</h3>
+        <p>No tiers, no licence server, no account. It works offline, and the source is on <a href="https://github.com/chud-lori/datagrep">GitHub</a>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ three blanks ============ -->
+<section id="blanks">
+  <div class="wrap">
+    <p class="kicker">A trust surface, not cosmetics</p>
+    <h2>NULL is not "" is not absent</h2>
+    <p class="section-intro">
+      In a document store a field can be <em>missing entirely</em> — a third fact, distinct from
+      <code>NULL</code> and from an empty string. Most clients collapse all three into one blank cell;
+      our <a href="https://github.com/chud-lori/datagrep/blob/main/notes/ux-reference-study.md">competitor study</a>
+      found none that cleanly distinguishes all three, and several with shipped bugs here — an invisible
+      NULL label in dark mode, NULL exported as the literal string <code>"null"</code>.
+      datagrep renders each one distinctly, in the grid and in the CLI.
+    </p>
+    <div class="blanks-demo" role="figure" aria-label="Example result grid showing NULL, empty string, and absent rendered distinctly">
+      <table>
+        <thead>
+          <tr><th scope="col">id</th><th scope="col">name</th><th scope="col">note</th><th scope="col">what the cell means</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="num">1</td><td>alice</td>
+            <td><span class="pill pill-null">NULL</span></td>
+            <td class="meaning">The value is NULL — explicitly unknown.</td>
+          </tr>
+          <tr>
+            <td class="num">2</td><td>bob</td>
+            <td><span class="pill pill-empty">""</span></td>
+            <td class="meaning">The value is an empty string — known, and empty.</td>
+          </tr>
+          <tr>
+            <td class="num">3</td><td>carol</td>
+            <td>likes SQL</td>
+            <td class="meaning">An ordinary value.</td>
+          </tr>
+          <tr>
+            <td class="num">4</td><td>dave</td>
+            <td><span class="pill pill-absent">absent</span></td>
+            <td class="meaning">The document has no <code>note</code> field at all.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ============ comparison ============ -->
+<section id="compare">
+  <div class="wrap">
+    <p class="kicker">The honest comparison</p>
+    <h2>How it stacks up</h2>
+    <p class="section-intro">
+      Every claim about a competitor below traces to a cited source in our
+      <a href="https://github.com/chud-lori/datagrep/blob/main/notes/ux-reference-study.md">UX reference study</a> —
+      GitHub issues, official docs, or the vendor’s own pages. Where the study found nothing, the cell says so.
+      And where a competitor is ahead of us, the table says that too.
+    </p>
+    <div class="table-scroll" tabindex="0">
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th scope="col">Tool</th>
+            <th scope="col">Price &amp; licence</th>
+            <th scope="col">Runtime</th>
+            <th scope="col">SQL + NoSQL</th>
+            <th scope="col">Large results</th>
+            <th scope="col">NULL vs "" vs absent</th>
+            <th scope="col">Inline editing / autocomplete</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="self">
+            <th scope="row">datagrep</th>
+            <td>Free, open source. No tiers, no account.</td>
+            <td>Native macOS + Rust engine</td>
+            <td>Both, as equals — Postgres, SQLite, Redis, MongoDB (MySQL &amp; Elasticsearch in progress)</td>
+            <td class="yes">Streams end-to-end; 174&nbsp;MB peak through a 1M-row result (measured)</td>
+            <td class="yes">Three visually distinct states</td>
+            <td class="no">Neither yet — see <a href="#not-yet">Not yet</a></td>
+          </tr>
+          <tr>
+            <th scope="row">DataGrip</th>
+            <td>Free for non-commercial use (since Oct&nbsp;2025); paid subscription (≈$99/yr) for commercial work</td>
+            <td>JVM (IntelliJ platform)</td>
+            <td>SQL-first, very broad engine list</td>
+            <td>500-row pages; JetBrains publishes its own “high memory consumption” troubleshooting guide</td>
+            <td>Not verified either way in the study</td>
+            <td class="yes">Both — its autocomplete is best-in-class (completes entire JOINs)</td>
+          </tr>
+          <tr>
+            <th scope="row">DBeaver</th>
+            <td>Free Community edition; MongoDB/Redis and other NoSQL require paid editions</td>
+            <td>JVM (Eclipse platform)</td>
+            <td>SQL broad; NoSQL behind paid tiers</td>
+            <td>Paged; long-standing documented startup-time and memory-growth complaints</td>
+            <td>Shipped a bug rendering <code>[NULL]</code> for all string values (<a href="https://github.com/dbeaver/dbeaver/issues/8803">#8803</a>)</td>
+            <td class="yes">Both</td>
+          </tr>
+          <tr>
+            <th scope="row">TablePlus</th>
+            <td>Proprietary; free tier capped at 2 tabs, 2 windows, 2 filters</td>
+            <td>Native</td>
+            <td>SQL + some NoSQL</td>
+            <td>300-row pages; documented lock-ups while autocomplete indexes 100+ schemas (<a href="https://github.com/TablePlus/TablePlus/issues/3649">#3649</a>)</td>
+            <td>Not verified in the study</td>
+            <td class="yes">Both</td>
+          </tr>
+          <tr>
+            <th scope="row">Beekeeper Studio</th>
+            <td>Open-source core; paid edition for the full feature set</td>
+            <td>Electron</td>
+            <td>SQL + MongoDB</td>
+            <td>20k-row on-screen cap; documented crash loading an 18k-table schema (<a href="https://github.com/beekeeper-studio/beekeeper-studio/issues/479">#479</a>)</td>
+            <td>Documented false-NULL display (<a href="https://github.com/beekeeper-studio/beekeeper-studio/issues/2652">#2652</a>); exported NULL as the string <code>"null"</code> (<a href="https://github.com/beekeeper-studio/beekeeper-studio/issues/2863">#2863</a>)</td>
+            <td class="yes">Both</td>
+          </tr>
+          <tr>
+            <th scope="row">MongoDB Compass</th>
+            <td>Free; MongoDB only</td>
+            <td>Electron</td>
+            <td>MongoDB only — one more app to keep open</td>
+            <td>25 documents per page; documented freezes on 30&nbsp;MB+ collections</td>
+            <td>Credit where due: its Schema tab shows an explicit “% undefined” for sparse fields</td>
+            <td class="yes">Document editing</td>
+          </tr>
+          <tr>
+            <th scope="row">RedisInsight</th>
+            <td>Free; Redis only</td>
+            <td>Electron</td>
+            <td>Redis only — one more app to keep open</td>
+            <td>SCAN batches by design; maintainers decline “scan all” to avoid OOM (<a href="https://github.com/redis/RedisInsight/issues/526">#526</a>) — which validates datagrep’s prefix-scoped Redis browsing</td>
+            <td>—</td>
+            <td class="yes">Key editing</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="compare-note">
+      To be plain about where datagrep is behind: <strong>every tool in this table has inline cell editing today, and most have autocomplete — datagrep has neither yet.</strong>
+      If you edit rows in a grid all day, those tools currently serve you better. What datagrep already does better is the part
+      they routinely get wrong at scale: streaming large results with flat memory, staying responsive against huge schemas,
+      and telling you the truth about blank cells.
+    </p>
+  </div>
+</section>
+
+<!-- ============ engines ============ -->
+<section id="engines">
+  <div class="wrap">
+    <p class="kicker">Engines</p>
+    <h2>What connects today</h2>
+    <p class="section-intro">One driver crate per engine, behind a capability-based API — no engine ever gets special-cased above the driver seam.</p>
+    <table class="engines-table">
+      <thead>
+        <tr><th scope="col">Engine</th><th scope="col">Status</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>PostgreSQL</td><td><span class="status status-ok">working</span></td></tr>
+        <tr><td>SQLite</td><td><span class="status status-ok">working</span></td></tr>
+        <tr><td>Redis</td><td><span class="status status-ok">working</span></td></tr>
+        <tr><td>MongoDB</td><td><span class="status status-ok">working</span></td></tr>
+        <tr><td>MySQL / MariaDB</td><td><span class="status status-wip">in progress</span></td></tr>
+        <tr><td>Elasticsearch</td><td><span class="status status-wip">in progress</span></td></tr>
+      </tbody>
+    </table>
+    <p class="foot">
+      The app is macOS-only today. In the CLI, PostgreSQL and SQLite are wired up now; the Redis and MongoDB
+      drivers currently surface through the app.
+    </p>
+  </div>
+</section>
+
+<!-- ============ install ============ -->
+<section id="install">
+  <div class="wrap">
+    <p class="kicker">Install</p>
+    <h2>Build from source</h2>
+    <p class="section-intro">
+      Two commands, two artifacts. The macOS app needs <strong>no Xcode</strong> — the Command Line Tools are enough,
+      because it builds with Swift Package Manager rather than <code>xcodebuild</code>.
+    </p>
+    <div class="step prose">
+      <h3>1. Engine + CLI</h3>
+      <div class="term">
+        <div class="term-title">terminal</div>
+        <pre><code>cargo build --release
+<span class="c"># → target/release/datagrep</span></code></pre>
+      </div>
+    </div>
+    <div class="step prose">
+      <h3>2. The macOS app</h3>
+      <div class="term">
+        <div class="term-title">terminal</div>
+        <pre><code>cd ui/macos &amp;&amp; ./build-app.sh
+<span class="c"># → ui/macos/datagrep.app</span></code></pre>
+      </div>
+    </div>
+    <p class="foot">
+      Prerequisites: a Rust toolchain (see <code>rust-toolchain.toml</code>) and the macOS Command Line Tools
+      (<code>xcode-select --install</code>). <code>cargo test --workspace</code> runs everything that needs no live server.
+    </p>
+  </div>
+</section>
+
+<!-- ============ cli ============ -->
+<section id="cli">
+  <div class="wrap">
+    <p class="kicker">The CLI</p>
+    <h2>The same engine, in your terminal</h2>
+    <p class="section-intro">
+      Connections are named <strong>profiles</strong>. A password in a connection URL is moved to the OS keychain
+      on import — profiles store only a reference to it, never the secret.
+    </p>
+    <div class="step">
+      <div class="term">
+        <div class="term-title">quickstart</div>
+        <pre><code><span class="p">$</span> datagrep profiles add local <span class="a">"sqlite:///tmp/app.db"</span>
+created profile `local` (sqlite)
+
+<span class="p">$</span> datagrep query --profile local -c <span class="a">"SELECT id, name, note FROM users ORDER BY id"</span>
+id  | name  | note
+----+-------+----------
+1   | alice | <span class="a">NULL</span>
+2   | bob   |
+3   | carol | likes SQL
+(3 rows)
+
+<span class="p">$</span> datagrep export --profile local -c <span class="a">"SELECT * FROM events"</span> --format csv -o events.csv
+<span class="p">$</span> datagrep query --profile prod -f report.sql --format json | jq '.[].email'</code></pre>
+      </div>
+    </div>
+    <p><code>NULL</code> (row 1) renders differently from an empty string (row 2) — the same three-way distinction the app’s grid makes.</p>
+    <dl class="cmds">
+      <dt>query</dt><dd>run SQL (or a Mongo/Redis command) and stream results in <code>table</code>, <code>csv</code>, <code>json</code>, <code>ndjson</code> formats</dd>
+      <dt>export</dt><dd>write a full result set to a file</dd>
+      <dt>profiles</dt><dd>add, list, show, import/export named connections</dd>
+      <dt>catalog</dt><dd>browse databases, schemas, and tables</dd>
+      <dt>history</dt><dd>list past queries, with full-text search</dd>
+      <dt>doctor</dt><dd>check connectivity and configuration</dd>
+    </dl>
+
+    <h3 id="directives">Block directives</h3>
+    <p class="section-intro">
+      Any statement can carry per-block settings as plain comments — they travel with the query text,
+      so they survive copy-paste and version control. The status bar shows what’s in effect.
+    </p>
+    <div class="step">
+      <div class="term">
+        <div class="term-title">editor</div>
+        <pre><code><span class="c">-- <span class="a">@limit</span> 200          cap the rows this block returns
+-- <span class="a">@timeout</span> 30s        give up after 30 seconds
+-- <span class="a">@connection</span> staging run against another profile
+-- <span class="a">@readonly</span>           refuse writes, checked client-side</span>
+SELECT * FROM events;</code></pre>
+      </div>
+    </div>
+    <p class="foot">In the app, <kbd>&#8984;&#8629;</kbd> runs the statement under the caret — never the whole buffer by accident.</p>
+  </div>
+</section>
+
+<!-- ============ design ============ -->
+<section id="design">
+  <div class="wrap">
+    <p class="kicker">Under the hood</p>
+    <h2>How it stays small</h2>
+    <p class="section-intro">
+      The goal, in one line: <em>the client you don’t have to close to get your laptop back.</em>
+      Three design decisions get it there.
+    </p>
+    <div class="prose">
+      <p>
+        <strong>Results stream.</strong> The driver, a bounded channel, and the result store form a pipeline in which
+        nothing runs more than two chunks ahead. When the UI stops consuming — you stop scrolling — the driver stops
+        reading its socket, the TCP window closes, and <em>the server stops producing</em>. Backpressure reaches all the
+        way to the database, end to end. That is why memory stays flat at 174&nbsp;MB through a million-row result: the
+        rows you aren’t looking at simply never exist on your machine.
+      </p>
+      <p>
+        <strong>Schema browsing is lazy.</strong> Expanding a tree level costs one cheap query for that level — connecting
+        never crawls the catalog. That is the whole trick behind connecting to a 100,000-relation schema in 7–29&nbsp;ms,
+        and it deliberately avoids the failure mode our competitor study documents in other tools: eager, blocking,
+        whole-catalog work that locks up the app at real-world scale.
+      </p>
+      <p>
+        <strong>The budget is enforced, not aspirational.</strong> Startup time, idle memory, first-row latency, and binary
+        size have machine-readable targets in
+        <a href="https://github.com/chud-lori/datagrep/blob/main/budget.toml">budget.toml</a>, checked by
+        <a href="https://github.com/chud-lori/datagrep/blob/main/ci/gates.sh">ci/gates.sh</a>. If a change makes the client
+        heavy, CI goes red.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ not yet ============ -->
+<section id="not-yet">
+  <div class="wrap">
+    <p class="kicker">The honest part</p>
+    <h2>What’s not built yet</h2>
+    <p class="section-intro">
+      You’ll find these gaps eventually; better you hear them here first. If one of them is your daily driver
+      requirement, datagrep isn’t your tool <em>yet</em>.
+    </p>
+    <ul class="notyet-list">
+      <li><strong>No inline cell editing.</strong> Every competitor in the table above has it. The plan is a staged-edit, review-before-commit model — because a naive implementation can update the wrong row, and that’s worse than not shipping it.</li>
+      <li><strong>No autocomplete.</strong> Planned as a restrained, lazily indexed version — our study found a bad autocomplete generates more anger than none.</li>
+      <li><strong>MySQL/MariaDB and Elasticsearch</strong> drivers are in progress, not usable yet.</li>
+      <li><strong>App-side gaps:</strong> no query-history panel (the CLI has <code>history</code> with search), no export UI (the CLI has <code>export</code>), no foreign-key click-through, no ER diagrams.</li>
+      <li><strong>macOS only.</strong> No Linux or Windows app today.</li>
+    </ul>
+    <p class="foot">
+      Something else missing, or broken?
+      <a href="https://github.com/chud-lori/datagrep/issues">File an issue</a> — engineering notes, test reports, and the
+      full competitor study live in <a href="https://github.com/chud-lori/datagrep/tree/main/notes">notes/</a>.
+    </p>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p>datagrep — a lightweight database client for SQL and NoSQL. Free and open source.</p>
+    <nav class="footer-links" aria-label="Footer">
+      <a href="https://github.com/chud-lori/datagrep">GitHub</a>
+      <a href="https://github.com/chud-lori/datagrep/issues">Issues</a>
+      <a href="https://github.com/chud-lori/datagrep/blob/main/README.md">README</a>
+      <a href="https://github.com/chud-lori/datagrep/blob/main/notes/test-report.md">Test report</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+  // Manual theme toggle: overrides the OS preference and persists.
+  (function () {
+    var btn = document.getElementById("theme-toggle");
+    if (!btn) return;
+    function effective() {
+      var forced = document.documentElement.getAttribute("data-theme");
+      if (forced) return forced;
+      return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }
+    btn.addEventListener("click", function () {
+      var next = effective() === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      try { localStorage.setItem("dg-theme", next); } catch (e) {}
+    });
+  })();
+</script>
+</body>
+</html>
