@@ -97,6 +97,10 @@ jobs:
       # --------------------------------------------------------------------
       - name: Build app bundle (real FFI, arm64)
         run: |
+          # Match Package.swift's .macOS(.v14). Without this the runner's SDK
+          # stamps the archive 15.x and every object warns "built for newer
+          # macOS version than being linked".
+          export MACOSX_DEPLOYMENT_TARGET=14.0
           cargo build --release -p datagrep-ffi --target aarch64-apple-darwin
           cd ui/macos
           DATAGREP_FFI=real \

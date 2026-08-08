@@ -48,6 +48,10 @@ var targets: [Target] = [
             ? [
                 .unsafeFlags([
                     "\(realLibDir)/libdatagrep_ffi.a", "-lc++", "-lresolv", "-liconv",
+                    // zlib: flate2 (via the mongodb and elasticsearch HTTP stacks)
+                    // links the system libz. The stub build has no flate2, which is
+                    // why omitting this only fails against the real FFI.
+                    "-lz",
                 ]),
                 .linkedFramework("Security"),
                 .linkedFramework("CoreFoundation"),
