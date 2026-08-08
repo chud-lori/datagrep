@@ -49,6 +49,9 @@ arrow-schema = "59.1"
 
 [dev-dependencies]
 tempfile = "3"
+# `SecretResolver::in_memory` for tests that exercise the keychain path without
+# a real credential store — see the profiles tests.
+datagrep-secrets = { path = "../datagrep-secrets", features = ["test-support"] }
 
 [lints.clippy]
 uninlined_format_args = "allow"

@@ -6,6 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 description = "Secret references and resolvers for datagrep: keychain | env | exec | prompt. Profiles never store secrets, only refs."
 
+[features]
+# Exposes `SecretResolver::in_memory`, which serves `keychain:` refs from a map
+# instead of the OS credential store. Enabled by dev-dependencies only, so a
+# release build cannot construct a resolver that bypasses the real keychain.
+test-support = []
+
 [dependencies]
 datagrep-api = { path = "../datagrep-api" }
 # keyring 3.x: platform stores are opt-in features. `sync-secret-service` is the

@@ -152,6 +152,18 @@ fn profiles_add_postgres_url_with_inline_password_never_stores_it() {
         "staging",
         "postgres://alice:hunter2@localhost:5432/app",
     ]);
+    // This test drives the shipped binary, so it uses the real OS credential
+    // store and cannot be pointed at the in-memory one the unit tests use. A
+    // bare CI runner has no Secret Service on the session bus, so `add` fails
+    // there for reasons that have nothing to do with what is being asserted.
+    // Skip loudly rather than fail, and rather than pretend to have run.
+    if !out.status.success() && stderr(&out).contains("secure storage") {
+        eprintln!(
+            "SKIPPED {}: no OS credential store on this machine",
+            "profiles_add_postgres_url_with_inline_password_never_stores_it"
+        );
+        return;
+    }
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("secret stored in the OS keychain"));
 
@@ -168,15 +180,42 @@ fn profiles_add_postgres_url_with_inline_password_never_stores_it() {
     assert!(toml.contains("secret_ref"));
     assert!(toml.contains("keychain:datagrep:"));
 
-    // Best-effort cleanup of the real keychain entry this test created.
+    // Clean up the real keychain entry this test created.
     //
-    // MUST be scoped by BOTH service and account. `-s datagrep` alone deletes
-    // the first entry for that service — i.e. one of the user's own saved
-    // connections. That destroyed real credentials twice before this was
-    // caught, so the account is not optional.
-    let _ = Command::new("security")
-        .args(["delete-generic-password", "-s", "datagrep", "-a", "staging"])
-        .output();
+    // This test drives the shipped binary as a subprocess, so unlike the unit
+    // tests it cannot be pointed at an in-memory secret store — it really does
+    // write to the OS keychain, and really does have to clear up after itself.
+    //
+    // The account is read back out of the exported TOML rather than guessed.
+    // It is the profile's generated id (`<id>:password`), NOT the profile name,
+    // so the previous hard-coded `-a staging` never matched anything and every
+    // single run leaked one entry — 35 had piled up on one machine before this
+    // was noticed. Deleting by an account taken from this test's own output is
+    // also what keeps the deletion precise.
+    //
+    // Scoping by BOTH service and account stays mandatory: `-s datagrep` alone
+    // deletes the first entry for that service — i.e. one of the user's own
+    // saved connections. That destroyed real credentials before it was caught.
+    let account = toml
+        .split("keychain:datagrep:")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .map(str::to_string)
+        .expect("the exported TOML asserted a keychain: secret_ref above");
+    // `security` is a macOS tool; on Linux the equivalent entry lives in
+    // whatever Secret Service implementation is running and there is no
+    // portable CLI to remove it, so the assertion is scoped to where it can
+    // actually be enforced.
+    if cfg!(target_os = "macos") {
+        let cleaned = Command::new("security")
+            .args(["delete-generic-password", "-s", "datagrep", "-a", &account])
+            .output();
+        assert!(
+            cleaned.is_ok_and(|o| o.status.success()),
+            "failed to remove the keychain entry `{account}` this test created; \
+             left behind it would accumulate on every run"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------

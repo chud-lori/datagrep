@@ -189,7 +189,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_with_inline_password_stores_no_password_and_a_secret_ref() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         add(
             &ctx,
             "pgtest",
@@ -224,7 +224,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_without_password_has_no_secret_ref() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         add(&ctx, "pgtest2", "postgres://alice@localhost:5432/app")
             .await
             .expect("add should succeed");
@@ -234,7 +234,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_sqlite_profile_has_no_secret_field_at_all() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         add(&ctx, "sqtest", "sqlite:///tmp/does-not-need-to-exist.db")
             .await
             .expect("add should succeed");
@@ -245,7 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_rejects_a_duplicate_name() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         add(&ctx, "dup", ":memory:").await.unwrap();
         let err = add(&ctx, "dup", ":memory:").await.unwrap_err();
         assert_eq!(err.kind, crate::exit::ExitKind::UsageError);
@@ -253,14 +253,14 @@ mod tests {
 
     #[tokio::test]
     async fn add_rejects_an_unrecognized_url() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         let err = add(&ctx, "bad", "mongodb://h/db").await.unwrap_err();
         assert_eq!(err.kind, crate::exit::ExitKind::UsageError);
     }
 
     #[tokio::test]
     async fn remove_deletes_the_profile() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         add(&ctx, "gone", ":memory:").await.unwrap();
         remove(&ctx, "gone").await.unwrap();
         assert!(ctx.find_profile("gone").await.is_err());
@@ -268,13 +268,13 @@ mod tests {
 
     #[tokio::test]
     async fn export_then_import_round_trips() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         add(&ctx, "roundtrip", ":memory:").await.unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("profiles.toml");
         export(&ctx, Some(&path)).await.unwrap();
 
-        let ctx2 = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx2 = crate::context::test_ctx();
         import(&ctx2, &path, false, false).await.unwrap();
         assert!(ctx2.find_profile("roundtrip").await.is_ok());
     }

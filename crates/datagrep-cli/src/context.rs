@@ -148,3 +148,18 @@ fn map_env(env: datagrep_profiles::Env) -> datagrep_core::api::Env {
         datagrep_profiles::Env::Prod => datagrep_core::api::Env::Prod,
     }
 }
+
+/// A [`Context`] whose profile store **and** secret store are both in memory.
+///
+/// The secrets half is the point. [`SecretResolver::new`] talks to the OS
+/// credential store, which fails outright on a bare Linux CI runner — there is
+/// no Secret Service on the session bus — and, worse, quietly *succeeds* on a
+/// developer's Mac, leaving a junk credential in their login keychain on every
+/// run. Those accumulate silently; a real machine had 30+ before this existed.
+/// No test in this crate asserts anything about the OS store itself.
+#[cfg(test)]
+pub fn test_ctx() -> Context {
+    let mut ctx = Context::with_store(Store::open_in_memory());
+    ctx.secrets = datagrep_secrets::SecretResolver::in_memory();
+    ctx
+}

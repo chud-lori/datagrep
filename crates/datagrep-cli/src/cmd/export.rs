@@ -352,7 +352,7 @@ mod tests {
 
     #[tokio::test]
     async fn export_streams_to_a_csv_file() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("export.db");
         sqlite_profile(&ctx.store, "exporttest", &db_path).await;
@@ -382,7 +382,7 @@ mod tests {
     /// every row still reaches the file.
     #[tokio::test]
     async fn export_of_200k_rows_never_grows_the_result_store() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("big.db");
         sqlite_profile(&ctx.store, "bigexport", &db_path).await;
@@ -421,7 +421,7 @@ mod tests {
     /// result store, and export never touches the store.
     #[tokio::test]
     async fn export_beyond_the_soft_row_cap_delivers_every_row() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("uncapped.db");
         sqlite_profile(&ctx.store, "uncapped", &db_path).await;
@@ -454,7 +454,7 @@ mod tests {
     /// whatever batch was in flight".
     #[tokio::test]
     async fn export_limit_yields_exactly_n_rows() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("limited.db");
         sqlite_profile(&ctx.store, "limited", &db_path).await;
@@ -489,7 +489,7 @@ mod tests {
     /// columns is indistinguishable from a broken export.
     #[tokio::test]
     async fn zero_row_export_still_writes_the_csv_header() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("empty.db");
         sqlite_profile(&ctx.store, "emptyexport", &db_path).await;
@@ -515,7 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn export_rejects_empty_input() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("export2.db");
         sqlite_profile(&ctx.store, "exporttest2", &db_path).await;

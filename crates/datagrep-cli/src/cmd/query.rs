@@ -253,7 +253,7 @@ mod tests {
     async fn streaming_never_buffers_more_than_one_window() {
         MAX_ROWS_PER_BATCH.store(0, Ordering::SeqCst);
 
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("stream.db");
         temp_sqlite_profile(&ctx.store, "streamtest", &db_path).await;
@@ -290,7 +290,7 @@ mod tests {
     /// from the cursor's declared shape, not from data arriving.
     #[tokio::test]
     async fn zero_row_query_still_writes_the_csv_header() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("empty.db");
         temp_sqlite_profile(&ctx.store, "emptyquery", &db_path).await;
@@ -325,7 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn readonly_directive_blocks_a_write_statement() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("ro.db");
         temp_sqlite_profile(&ctx.store, "rotest", &db_path).await;
@@ -347,7 +347,7 @@ mod tests {
 
     #[tokio::test]
     async fn limit_directive_caps_rows_and_still_succeeds() {
-        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let ctx = crate::context::test_ctx();
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("limit.db");
         temp_sqlite_profile(&ctx.store, "limittest", &db_path).await;

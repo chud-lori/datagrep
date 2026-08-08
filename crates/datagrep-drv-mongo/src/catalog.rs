@@ -577,7 +577,7 @@ fn inferred_columns_json(schema: &InferredSchema) -> String {
         .enumerate()
         .map(|(ordinal, (name, trie))| {
             let mut types: Vec<(LogicalType, u64)> = trie.types.clone();
-            types.sort_by(|a, b| b.1.cmp(&a.1));
+            types.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
             let non_null: Vec<String> = types
                 .iter()
                 .filter(|(ty, _)| *ty != LogicalType::Null)

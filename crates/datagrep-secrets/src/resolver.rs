@@ -4,7 +4,9 @@
 //! Called once per pool creation, on a blocking thread — resolution is not a
 //! hot path, so every choice here favors safety over speed.
 
+use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use datagrep_api::SecretString;
@@ -30,7 +32,15 @@ const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone)]
 pub struct SecretResolver {
     exec_timeout: Duration,
+    /// When set, `keychain:` refs are served from this map instead of the OS
+    /// store. Only [`SecretResolver::in_memory`] ever sets it, and that
+    /// constructor exists only under the `test-support` feature — so a release
+    /// build has no way to produce a resolver that skips the real keychain.
+    memory: Option<MemoryStore>,
 }
+
+/// Test-only backing map for `keychain:` refs, keyed by `(service, account)`.
+type MemoryStore = Arc<Mutex<HashMap<(String, String), String>>>;
 
 impl Default for SecretResolver {
     fn default() -> Self {
@@ -43,12 +53,36 @@ impl SecretResolver {
     pub fn new() -> Self {
         Self {
             exec_timeout: DEFAULT_EXEC_TIMEOUT,
+            memory: None,
         }
     }
 
     /// Override the `exec:` timeout (tests use ~1 s; UIs may shorten it).
     pub fn with_exec_timeout(exec_timeout: Duration) -> Self {
-        Self { exec_timeout }
+        Self {
+            exec_timeout,
+            memory: None,
+        }
+    }
+
+    /// A resolver whose `keychain:` refs live in memory for the life of the
+    /// value, touching no OS credential store.
+    ///
+    /// Two problems it exists to solve, both observed rather than theoretical:
+    /// a test asserting the keychain path fails outright on a bare Linux CI
+    /// runner, where no Secret Service is running ("The name
+    /// org.freedesktop.secrets was not provided by any .service files"); and on
+    /// a developer's Mac the same test *succeeds*, writing a junk credential
+    /// into their real login keychain on every run, which accumulates.
+    ///
+    /// `env:`, `exec:` and `prompt:` refs are unaffected — they resolve
+    /// normally, because none of them touch the OS store to begin with.
+    #[cfg(feature = "test-support")]
+    pub fn in_memory() -> Self {
+        Self {
+            exec_timeout: DEFAULT_EXEC_TIMEOUT,
+            memory: Some(Arc::new(Mutex::new(HashMap::new()))),
+        }
     }
 
     /// Resolve `reference` to its secret value.
@@ -63,6 +97,17 @@ impl SecretResolver {
         tracing::debug!(scheme = reference.scheme(), "resolving secret ref");
         match reference {
             SecretRef::Keychain { service, account } => {
+                if let Some(memory) = &self.memory {
+                    let key = (service.clone(), account.clone());
+                    return match lock(memory).get(&key) {
+                        Some(value) => Ok(SecretString::new(value.clone())),
+                        None => Err(SecretError::Keychain {
+                            service: service.clone(),
+                            account: account.clone(),
+                            source: keyring::Error::NoEntry,
+                        }),
+                    };
+                }
                 let entry = keychain_entry(service, account)?;
                 let (service, account) = (service.clone(), account.clone());
                 // Secret Service is DBus IPC — blocking thread only.
@@ -106,6 +151,13 @@ impl SecretResolver {
     ) -> Result<(), SecretError> {
         match reference {
             SecretRef::Keychain { service, account } => {
+                if let Some(memory) = &self.memory {
+                    lock(memory).insert(
+                        (service.clone(), account.clone()),
+                        secret.expose().to_string(),
+                    );
+                    return Ok(());
+                }
                 let entry = keychain_entry(service, account)?;
                 let (service, account) = (service.clone(), account.clone());
                 tokio::task::spawn_blocking(move || {
@@ -134,6 +186,17 @@ impl SecretResolver {
     pub async fn delete(&self, reference: &SecretRef) -> Result<(), SecretError> {
         match reference {
             SecretRef::Keychain { service, account } => {
+                if let Some(memory) = &self.memory {
+                    let key = (service.clone(), account.clone());
+                    return match lock(memory).remove(&key) {
+                        Some(_) => Ok(()),
+                        None => Err(SecretError::Keychain {
+                            service: service.clone(),
+                            account: account.clone(),
+                            source: keyring::Error::NoEntry,
+                        }),
+                    };
+                }
                 let entry = keychain_entry(service, account)?;
                 let (service, account) = (service.clone(), account.clone());
                 tokio::task::spawn_blocking(move || {
@@ -435,4 +498,15 @@ mod tests {
         let err = res.resolve(&r).await.unwrap_err();
         assert!(matches!(err, SecretError::Keychain { .. }));
     }
+}
+
+/// Lock the in-memory store, recovering from a poisoned mutex.
+///
+/// A panic in another test must not cascade into unrelated failures here: the
+/// map holds no invariant that a partial write could corrupt, so the contents
+/// are still perfectly usable after a poisoning panic.
+fn lock(memory: &MemoryStore) -> std::sync::MutexGuard<'_, HashMap<(String, String), String>> {
+    memory
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
