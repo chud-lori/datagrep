@@ -13,8 +13,14 @@ name: release
 #   datagrep-linux-x86_64       CLI, glibc x86_64 (bundled SQLite, rustls — no
 #   datagrep-linux-arm64        CLI, glibc aarch64  system deps beyond libc)
 #   datagrep-macos.app.zip      the macOS app (arm64-only, ad-hoc signed)
+#   datagrep-macos.dmg          the same app as a drag-to-Applications DMG
 #   *.sha256                    per-asset checksum (tangi convention)
 #   SHA256SUMS                  combined checksum file (install.sh verifies this)
+#
+# The release job also rewrites docs/latest.json on main to point at the tag
+# it just published — that file is the static update manifest GitHub Pages
+# serves (the app's launch check and install.sh both read it), and rewriting
+# it here means it can never drift from the release that actually shipped.
 #
 # Runner policy (learned the hard way on chud-lori/tangi): never macos-13.
 # The free-tier Intel macOS pool is starved (a tangi job queued 10+ minutes
@@ -101,6 +107,15 @@ jobs:
           cd ui/macos
           ditto -c -k --keepParent datagrep.app "${GITHUB_WORKSPACE}/dist/datagrep-macos.app.zip"
 
+      # Drag-to-Applications DMG alongside the zip (some people prefer the
+      # zip; the DMG is the friendlier first run). macOS built-ins only. The
+      # script auto-skips its Finder AppleScript layout pass under CI (no
+      # Finder on a runner) — the DMG still mounts with the app plus an
+      # /Applications symlink, just in Finder's default arrangement. Lands in
+      # dist/ before the checksum step so SHA256SUMS covers it.
+      - name: Build DMG
+        run: ./scripts/make_dmg.sh ui/macos/datagrep.app
+
       - name: Report sizes
         run: ls -lh dist
 
@@ -182,8 +197,10 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh | bash
           ```
 
-          **macOS app**: download `datagrep-macos.app.zip` below, unzip, and drag
-          `datagrep.app` into `/Applications` — or let the installer do it:
+          **macOS app**: download `datagrep-macos.dmg` below, open it, and drag
+          `datagrep.app` onto the Applications shortcut (a plain
+          `datagrep-macos.app.zip` is also attached if you prefer) — or let
+          the installer do it:
 
           ```sh
           curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh | bash -s -- --app
@@ -227,3 +244,40 @@ jobs:
           generate_release_notes: true
           files: |
             dist/*
+
+      # Re-assert the static update manifest AFTER the release is published,
+      # so latest.json never points at a tag whose assets failed to upload.
+      # scripts/deploy.sh already writes this file before tagging, so on a
+      # normal release this is a no-op ("nothing to commit"); it exists to
+      # catch manual tags / workflow_dispatch runs where deploy.sh was
+      # skipped. Checked out into a subdir so the dist/ artifacts above stay
+      # untouched.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: repo
+
+      - name: Update docs/latest.json on main
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          cat > repo/docs/latest.json <<EOF
+          {
+            "version": "$VERSION",
+            "tag": "$TAG",
+            "release_url": "https://github.com/chud-lori/datagrep/releases/tag/$TAG",
+            "release_notes_url": "https://github.com/chud-lori/datagrep/releases/tag/$TAG",
+            "install_url": "https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh"
+          }
+          EOF
+          cd repo
+          if git diff --quiet -- docs/latest.json; then
+            echo "docs/latest.json already points at $TAG — nothing to commit."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add docs/latest.json
+            git commit -m "Point docs/latest.json at $TAG"
+            git push origin main
+          fi

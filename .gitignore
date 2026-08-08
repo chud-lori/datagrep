@@ -8,3 +8,5 @@
 ui/macos/.build
 ui/macos/.bench
 ui/macos/*.app
+# scripts/make_dmg.sh output (same layout the release workflow uses)
+/dist

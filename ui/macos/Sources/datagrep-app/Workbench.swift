@@ -185,7 +185,7 @@ private struct ProdStripe: View {
                 .fill(Color.red)
                 .frame(height: 3)
                 .accessibilityLabel("production connection")
-                .help("This connection is marked production — client-side marker only.")
+                .help("This connection is marked production.")
         }
     }
 }
@@ -238,9 +238,7 @@ private struct WorkbenchToolbar: ToolbarContent {
                         set: { _ in model.toggleProdMark(model.activeProfile) })
                 )
                 .disabled(model.activeProfile.isEmpty)
-                .help(
-                    "Client-side marker only — this ABI cannot set a profile's env, so datagrep cannot learn it from the engine."
-                )
+                .help("Marks this connection as production, stored on the profile.")
             } label: {
                 // Icon AND name: a bare chevron is not a control.
                 HStack(spacing: 5) {

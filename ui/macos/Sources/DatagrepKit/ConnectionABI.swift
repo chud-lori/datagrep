@@ -60,6 +60,16 @@ public enum ReadOnlyEnforcement: String, Sendable, Hashable, CaseIterable {
         }
     }
 
+    /// The clause a refusal message uses. Short enough for the status bar, and
+    /// it still separates "the server would refuse this too" from "we are the
+    /// only thing in the way".
+    public var refusalClause: String {
+        switch self {
+        case .server: return "the server enforces it too"
+        case .client, .unknown, .none: return "datagrep is the only thing enforcing it"
+        }
+    }
+
     /// Short word for the compact badge next to the lock.
     public var shortLabel: String {
         switch self {

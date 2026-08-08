@@ -967,7 +967,7 @@ final class AppModel: ObservableObject {
         if safety.readOnly, SQLBlocks.isWriteStatement(sql) {
             let verb = Self.statementVerb(sql)
             message =
-                "`\(profile)` is read-only, so datagrep did not send this \(verb) — \(safety.enforcement.headline). Turn read-only off in Edit Connection (⌘E) if you meant to write."
+                "`\(profile)` is read-only — \(verb) not sent (\(safety.enforcement.refusalClause)). ⌘E to change it."
             isError = true
             state = nil
             return

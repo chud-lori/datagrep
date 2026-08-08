@@ -19,6 +19,11 @@ set -euo pipefail
 
 PROG=datagrep
 REPO=chud-lori/datagrep
+# Static release manifest on GitHub Pages (docs/latest.json on main). Same
+# scheme as chud-lori/rusty-requester: resolving "latest" from a static file
+# instead of the GitHub REST API avoids unauthenticated rate limits. Falls
+# back to GitHub's /releases/latest redirect when unreachable.
+LATEST_JSON_URL="${DATAGREP_LATEST_JSON_URL:-https://chud-lori.github.io/datagrep/latest.json}"
 
 PREFIX=""
 USER_INSTALL=0
@@ -180,7 +185,33 @@ sha256_of() {
 }
 
 tmpdir=$(mktemp -d)
-trap 'rm -rf "$tmpdir"' EXIT INT TERM
+mounted_dmg=""
+cleanup() {
+  if [ -n "$mounted_dmg" ]; then
+    hdiutil detach -quiet "$mounted_dmg" 2>/dev/null || true
+  fi
+  rm -rf "$tmpdir"
+}
+trap cleanup EXIT INT TERM
+
+# ---- resolve "latest" from the static manifest (docs/latest.json) ----
+if [ -z "$REL_VERSION" ]; then
+  manifest="$tmpdir/latest.json"
+  if fetch "$LATEST_JSON_URL" "$manifest" 2>/dev/null; then
+    tag=$(awk -F'"' '/"tag"[[:space:]]*:/ {print $4; exit}' "$manifest")
+    if [ -z "$tag" ]; then
+      ver=$(awk -F'"' '/"version"[[:space:]]*:/ {print $4; exit}' "$manifest")
+      [ -z "$ver" ] || tag="v${ver#v}"
+    fi
+    if [ -n "$tag" ]; then
+      REL_VERSION="$tag"
+      echo "Latest release: $REL_VERSION (via $LATEST_JSON_URL)"
+    fi
+  fi
+  if [ -z "$REL_VERSION" ]; then
+    echo "Release manifest unreachable — falling back to GitHub's latest-release redirect."
+  fi
+fi
 
 # ---- checksums first: everything downloaded is verified against SHA256SUMS ----
 sums="$tmpdir/SHA256SUMS"
@@ -220,15 +251,34 @@ install -m 0755 "$tmpdir/$asset" "$BINDIR/$PROG"
 echo "Installed $BINDIR/$PROG"
 
 # ---- optionally install the macOS app ----
+# Prefer the DMG (present from the release that introduced it; older releases
+# only have the zip — SHA256SUMS tells us which we have). Both paths verify
+# against SHA256SUMS before anything is opened or copied.
 if [ "$WANT_APP" -eq 1 ]; then
+  app_dmg="$PROG-macos.dmg"
   app_zip="$PROG-macos.app.zip"
-  download_verified "$app_zip"
   check_writable "$APPDIR"
   mkdir -p "$APPDIR"
-  rm -rf "${APPDIR:?}/$PROG.app"
-  # ditto preserves the bundle's symlinks and metadata (unzip can mangle .apps)
-  ditto -x -k "$tmpdir/$app_zip" "$APPDIR"
-  [ -d "$APPDIR/$PROG.app" ] || die "the zip did not contain $PROG.app (unexpected release layout)."
+  if awk -v a="$app_dmg" '$2 == a {found=1} END {exit !found}' "$sums"; then
+    download_verified "$app_dmg"
+    mnt="$tmpdir/mnt"
+    mkdir -p "$mnt"
+    hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mnt" "$tmpdir/$app_dmg" ||
+      die "could not mount $app_dmg"
+    mounted_dmg="$mnt"
+    [ -d "$mnt/$PROG.app" ] || die "the DMG did not contain $PROG.app (unexpected release layout)."
+    rm -rf "${APPDIR:?}/$PROG.app"
+    # ditto preserves the bundle's symlinks and metadata
+    ditto "$mnt/$PROG.app" "$APPDIR/$PROG.app"
+    hdiutil detach -quiet "$mnt" || true
+    mounted_dmg=""
+  else
+    download_verified "$app_zip"
+    rm -rf "${APPDIR:?}/$PROG.app"
+    # ditto preserves the bundle's symlinks and metadata (unzip can mangle .apps)
+    ditto -x -k "$tmpdir/$app_zip" "$APPDIR"
+    [ -d "$APPDIR/$PROG.app" ] || die "the zip did not contain $PROG.app (unexpected release layout)."
+  fi
   echo "Installed $APPDIR/$PROG.app"
 fi
 
