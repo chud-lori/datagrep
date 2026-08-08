@@ -11,13 +11,45 @@ import SwiftUI
 /// virtualisation contract: the table still only ever asks for rows that are
 /// on screen.
 final class GridTableView: NSTableView {
-    var onCopyRequest: (() -> String?)?
+    var onCopy: (() -> Void)?
     var onOpenFocusedCell: (() -> Void)?
     var onFocusChanged: (() -> Void)?
 
     private(set) var hoverRow = -1
-    private(set) var focusedColumn = 0
+    /// The rectangular block of cells the user has selected. `nil` until the
+    /// pointer or the keyboard has touched a cell.
+    private(set) var cellRange: GridCellRange?
+    /// Set while WE are the ones changing the row selection, so the
+    /// selection-did-change hook does not fight the block it just applied.
+    private var isSyncingSelection = false
     private var tracking: NSTrackingArea?
+
+    /// The block is only a *block* while the table's row selection is exactly
+    /// its rows. A ⌘-click that punches a hole in the selection makes it
+    /// discontiguous, and then the honest rendering is plain whole-row.
+    var selectionMatchesRange: Bool {
+        guard let r = cellRange else { return false }
+        let sel = selectedRowIndexes
+        return sel.count == r.rowCount && sel.contains(integersIn: r.rows)
+    }
+
+    var focusedColumn: Int { cellRange?.focusColumn ?? 0 }
+
+    var focusedCell: (row: Int, column: Int)? {
+        guard let r = cellRange, r.focusRow < numberOfRows, r.focusColumn < numberOfColumns else {
+            return nil
+        }
+        return (r.focusRow, r.focusColumn)
+    }
+
+    func resetSelection() {
+        cellRange = nil
+        isSyncingSelection = true
+        deselectAll(nil)
+        isSyncingSelection = false
+    }
+
+    // MARK: - hover
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -43,6 +75,25 @@ final class GridTableView: NSTableView {
         super.mouseExited(with: event)
     }
 
+    /// The pointer can also change which row it is over without moving at all —
+    /// the wheel moves the rows under a stationary pointer. This is driven by
+    /// the scroll notification, not by a timer, so a still grid posts nothing.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        NotificationCenter.default.removeObserver(
+            self, name: NSScrollView.didLiveScrollNotification, object: nil)
+        guard let clip = enclosingScrollView else { return }
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(liveScrolled), name: NSScrollView.didLiveScrollNotification,
+            object: clip)
+    }
+
+    @objc private func liveScrolled() {
+        guard let window, window.isKeyWindow else { return }
+        let p = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        setHover(visibleRect.contains(p) ? row(at: p) : -1)
+    }
+
     /// Repaints exactly two rows: the one the pointer left and the one it
     /// entered. Hover costs 2 row rects per pointer move, never a reload.
     private func setHover(_ newRow: Int) {
@@ -54,60 +105,274 @@ final class GridTableView: NSTableView {
         }
     }
 
-    // MARK: keyboard
+    // MARK: - selection plumbing
+
+    /// The single funnel every selection change goes through: clamp, mirror the
+    /// block onto the table's own row selection, repaint the visible rows.
+    private func apply(_ range: GridCellRange, scroll: Bool = true) {
+        guard let r = range.clamped(rowCount: numberOfRows, columnCount: numberOfColumns) else {
+            return
+        }
+        cellRange = r
+        isSyncingSelection = true
+        selectRowIndexes(
+            IndexSet(integersIn: r.rows.lowerBound...r.rows.upperBound), byExtendingSelection: false)
+        isSyncingSelection = false
+        if scroll {
+            scrollRowToVisible(r.focusRow)
+            if r.focusColumn < numberOfColumns { scrollColumnToVisible(r.focusColumn) }
+        }
+        refreshSelectionDecorations()
+        onFocusChanged?()
+    }
+
+    /// Called when AppKit changed the row selection behind our back — arrow
+    /// up/down, shift-arrow, ⌘-click. The column span of the block is kept and
+    /// the rows are re-derived from whatever AppKit decided.
+    func selectionChangedExternally() {
+        guard !isSyncingSelection else {
+            refreshSelectionDecorations()
+            return
+        }
+        let sel = selectedRowIndexes
+        guard let first = sel.first, let last = sel.last else {
+            cellRange = nil
+            refreshSelectionDecorations()
+            return
+        }
+        if var r = cellRange {
+            if sel.count == 1 {
+                r.anchorRow = first
+                r.focusRow = first
+            } else if r.anchorRow == first {
+                r.focusRow = last
+            } else if r.anchorRow == last {
+                r.focusRow = first
+            } else {
+                r.anchorRow = first
+                r.focusRow = last
+            }
+            cellRange = r
+        } else {
+            var r = GridCellRange(row: first, column: 0)
+            r.extend(toRow: last, column: max(0, numberOfColumns - 1))
+            cellRange = r
+        }
+        refreshSelectionDecorations()
+        onFocusChanged?()
+    }
+
+    /// Only the rows on screen are ever decorated: the block may be 20 000 rows
+    /// tall, but at most a viewport of row views exists to paint it.
+    func refreshSelectionDecorations() {
+        let vis = rows(in: visibleRect)
+        guard vis.length > 0 else { return }
+        for r in vis.lowerBound..<vis.upperBound {
+            guard let rv = rowView(atRow: r, makeIfNecessary: false) as? GridRowView else {
+                continue
+            }
+            decorate(rv, row: r)
+        }
+    }
+
+    /// Pushes the block's shape onto one row view. Also called from
+    /// `rowViewForRow` so a row scrolled into view arrives already correct.
+    func decorate(_ rowView: GridRowView, row: Int) {
+        rowView.isHovered = (row == hoverRow)
+        guard let r = cellRange, selectionMatchesRange, r.rows.contains(row) else {
+            rowView.rangeColumns = nil
+            rowView.isRangeTop = false
+            rowView.isRangeBottom = false
+            rowView.focusedColumn = -1
+            return
+        }
+        // A block that covers every column IS a row selection; drawing a border
+        // around it would only add noise.
+        rowView.rangeColumns = r.spansAllColumns(of: numberOfColumns) ? nil : r.columns
+        rowView.isRangeTop = (row == r.rows.lowerBound)
+        rowView.isRangeBottom = (row == r.rows.upperBound)
+        rowView.focusedColumn = (r.isSingleCell && row == r.focusRow) ? r.focusColumn : -1
+    }
+
+    private func visibleColumnPositions() -> [Int] {
+        (0..<numberOfColumns).filter { !tableColumns[$0].isHidden }
+    }
+
+    // MARK: - mouse: click, shift-click, drag-select with autoscroll
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        let r = row(at: p)
+        let c = column(at: p)
+        // Double-click (inspector), ⌘-click (discontiguous row selection) and
+        // control-click (context menu) stay with AppKit; everything else is a
+        // block gesture.
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard r >= 0, c >= 0, event.clickCount == 1,
+            !flags.contains(.command), !flags.contains(.control)
+        else {
+            super.mouseDown(with: event)
+            return
+        }
+        window?.makeFirstResponder(self)
+        var range = cellRange ?? GridCellRange(row: r, column: c)
+        if flags.contains(.shift), cellRange != nil {
+            range.extend(toRow: r, column: c)
+        } else {
+            range.moveTo(row: r, column: c)
+        }
+        apply(range, scroll: false)
+        trackDrag(startingFrom: event, range: range)
+    }
+
+    /// A hand-rolled tracking loop rather than `super.mouseDown`, because
+    /// AppKit's own loop only ever reports rows and we need the column too.
+    /// It idles on a 50 ms `nextEvent` timeout so that holding the pointer
+    /// still outside the viewport keeps autoscrolling, and holding it still
+    /// inside costs nothing at all.
+    private func trackDrag(startingFrom initial: NSEvent, range initialRange: GridCellRange) {
+        guard let window else { return }
+        var range = initialRange
+        var latest = initial
+        var didDrag = false
+        while true {
+            let e = window.nextEvent(
+                matching: [.leftMouseDragged, .leftMouseUp],
+                until: Date(timeIntervalSinceNow: 0.05), inMode: .eventTracking, dequeue: true)
+            if let e {
+                if e.type == .leftMouseUp { break }
+                latest = e
+                didDrag = true
+            } else if !didDrag {
+                continue  // button held, pointer never moved: nothing to do
+            }
+            let p = convert(latest.locationInWindow, from: nil)
+            let outside = !visibleRect.contains(p)
+            if outside { autoscroll(with: latest) }
+            if e == nil && !outside { continue }
+            let target = cell(at: convert(latest.locationInWindow, from: nil))
+            var next = range
+            next.extend(toRow: target.row, column: target.column)
+            guard next != range else { continue }
+            range = next
+            setHover(target.row)
+            apply(range, scroll: false)
+        }
+    }
+
+    /// Point -> cell, clamped rather than nil'd: during an autoscroll drag the
+    /// pointer is by definition outside the rows, and the block must still
+    /// follow it to the first/last row and column.
+    private func cell(at p: NSPoint) -> (row: Int, column: Int) {
+        let step = rowHeight + intercellSpacing.height
+        var r = step > 0 ? Int(floor(p.y / step)) : 0
+        r = max(0, min(max(numberOfRows - 1, 0), r))
+        var c = column(at: p)
+        if c < 0 {
+            let positions = visibleColumnPositions()
+            c = p.x <= 0 ? (positions.first ?? 0) : (positions.last ?? 0)
+        }
+        return (r, c)
+    }
+
+    /// Right-click outside the current block re-targets it, so "Copy Selection"
+    /// can never mean something other than what is highlighted.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let p = convert(event.locationInWindow, from: nil)
+        let r = row(at: p)
+        let c = column(at: p)
+        if r >= 0, c >= 0 {
+            let inside =
+                selectedRowIndexes.contains(r) && (cellRange?.columns.contains(c) ?? false)
+                && selectionMatchesRange
+            if !inside {
+                var range = cellRange ?? GridCellRange(row: r, column: c)
+                range.moveTo(row: r, column: c)
+                apply(range, scroll: false)
+            }
+        }
+        return super.menu(for: event)
+    }
+
+    // MARK: - keyboard
 
     override func keyDown(with event: NSEvent) {
-        let cmd = event.modifierFlags.contains(.command)
+        let flags = event.modifierFlags
+        let cmd = flags.contains(.command)
+        let shift = flags.contains(.shift)
         switch event.keyCode {
         case 123:  // left
-            moveFocus(by: -1)
-            return
+            moveHorizontally(by: -1, extend: shift, toEdge: cmd, wrap: false)
         case 124:  // right
-            moveFocus(by: +1)
-            return
-        case 126 where cmd:  // ⌘↑ -> first row
-            jump(to: 0)
-            return
-        case 125 where cmd:  // ⌘↓ -> last row
-            jump(to: numberOfRows - 1)
-            return
+            moveHorizontally(by: +1, extend: shift, toEdge: cmd, wrap: false)
+        case 48:  // tab / shift-tab
+            moveHorizontally(by: shift ? -1 : +1, extend: false, toEdge: false, wrap: true)
+        case 126 where cmd, 115:  // ⌘↑ / home -> first loaded row
+            jump(to: 0, extend: shift)
+        case 125 where cmd, 119:  // ⌘↓ / end -> last loaded row
+            jump(to: numberOfRows - 1, extend: shift)
         case 49:  // space -> inspect the focused cell
             onOpenFocusedCell?()
-            return
+        case 53:  // escape -> collapse the block back to its focused cell
+            if let r = cellRange, !r.isSingleCell {
+                var c = r
+                c.moveTo(row: r.focusRow, column: r.focusColumn)
+                apply(c)
+            } else {
+                super.keyDown(with: event)
+            }
         default:
             super.keyDown(with: event)
         }
     }
 
-    private func moveFocus(by delta: Int) {
-        guard numberOfColumns > 0 else { return }
-        let next = max(0, min(numberOfColumns - 1, focusedColumn + delta))
-        guard next != focusedColumn else { return }
-        focusedColumn = next
-        scrollColumnToVisible(next)
-        refreshFocusRing()
-        onFocusChanged?()
-    }
-
-    private func jump(to row: Int) {
-        guard row >= 0, row < numberOfRows else { return }
-        selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        scrollRowToVisible(row)
-        refreshFocusRing()
-    }
-
-    func refreshFocusRing() {
-        let rows = self.rows(in: visibleRect)
-        guard rows.length > 0 else { return }
-        for r in rows.lowerBound..<rows.upperBound {
-            (rowView(atRow: r, makeIfNecessary: false) as? GridRowView)?.focusedColumn =
-                (r == selectedRow) ? focusedColumn : -1
+    private func moveHorizontally(by delta: Int, extend: Bool, toEdge: Bool, wrap: Bool) {
+        let positions = visibleColumnPositions()
+        guard !positions.isEmpty, numberOfRows > 0 else { return }
+        var range = cellRange ?? GridCellRange(row: max(0, selectedRow), column: positions[0])
+        let current = positions.firstIndex(of: range.focusColumn) ?? 0
+        var index = toEdge ? (delta < 0 ? 0 : positions.count - 1) : current + delta
+        var row = range.focusRow
+        if wrap {
+            if index < 0 {
+                index = positions.count - 1
+                row = max(0, row - 1)
+            } else if index >= positions.count {
+                index = 0
+                row = min(numberOfRows - 1, row + 1)
+            }
+        } else {
+            index = max(0, min(positions.count - 1, index))
         }
+        if extend {
+            range.extend(toRow: row, column: positions[index])
+        } else {
+            range.moveTo(row: row, column: positions[index])
+        }
+        apply(range)
     }
 
-    var focusedCell: (row: Int, column: Int)? {
-        guard selectedRow >= 0, focusedColumn < numberOfColumns else { return nil }
-        return (selectedRow, focusedColumn)
+    private func jump(to row: Int, extend: Bool) {
+        guard row >= 0, row < numberOfRows else { return }
+        let positions = visibleColumnPositions()
+        var range = cellRange ?? GridCellRange(row: row, column: positions.first ?? 0)
+        if extend {
+            range.extend(toRow: row, column: range.focusColumn)
+        } else {
+            range.moveTo(row: row, column: range.focusColumn)
+        }
+        apply(range)
+    }
+
+    /// ⌘A means "the rows I can see", never "all 500 000 rows": a select-all
+    /// that spanned the whole result would turn the next ⌘C into a full-table
+    /// scan through the FFI, which is precisely the thing this grid does not do.
+    override func selectAll(_ sender: Any?) {
+        let vis = rows(in: visibleRect)
+        guard vis.length > 0, numberOfColumns > 0 else { return }
+        var range = GridCellRange(row: vis.lowerBound, column: 0)
+        range.extend(toRow: vis.lowerBound + vis.length - 1, column: numberOfColumns - 1)
+        apply(range, scroll: false)
     }
 
     // MARK: copy
@@ -115,13 +380,12 @@ final class GridTableView: NSTableView {
     /// ⌘C. Routed here by the Edit menu's `copy:` because the table is first
     /// responder — no extra key handling needed.
     @objc func copy(_ sender: Any?) {
-        guard let text = onCopyRequest?(), !text.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        onCopy?()
     }
 
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(copy(_:)) { return selectedRowIndexes.count > 0 }
+        if item.action == #selector(selectAll(_:)) { return numberOfRows > 0 }
         return super.validateUserInterfaceItem(item)
     }
 
@@ -160,6 +424,9 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     var onSortRequested: ((String) -> Void)?
     var onFilterRequested: ((String, String) -> Void)?
     var onCopied: ((String) -> Void)?
+    /// Fires whenever the selected block changes: "3 rows × 2 columns", or nil
+    /// when nothing is selected. Purely informational — a status-bar hook.
+    var onSelectionChanged: ((String?) -> Void)?
     /// Which column the engine is currently sorted by, and which way. Owned by
     /// the model (the sort is a re-issued query, not a client-side shuffle).
     var sortColumn: String?
@@ -194,9 +461,12 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         menu.delegate = self
         tableView.menu = menu
 
-        tableView.onCopyRequest = { [weak self] in self?.selectionAsTSV() }
+        tableView.onCopy = { [weak self] in self?.copySelection() }
         tableView.onOpenFocusedCell = { [weak self] in self?.openFocusedCell() }
-        tableView.onFocusChanged = {}
+        tableView.onFocusChanged = { [weak self] in
+            guard let self else { return }
+            self.onSelectionChanged?(self.selectionSummary())
+        }
         tableView.doubleAction = #selector(tableDoubleClicked(_:))
         tableView.target = self
 
@@ -227,6 +497,8 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         self.pager?.invalidateAll()
         self.pager = pager
         rowCount = 0
+        tableView.resetSelection()
+        onSelectionChanged?(nil)
         didSizeColumns = false
         hiddenColumnCount = 0
         for c in tableView.tableColumns { tableView.removeTableColumn(c) }
@@ -242,6 +514,8 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         pager?.invalidateAll()
         pager = nil
         rowCount = 0
+        tableView.resetSelection()
+        onSelectionChanged?(nil)
         for c in tableView.tableColumns { tableView.removeTableColumn(c) }
         columnIndexByID.removeAll()
         columnByName.removeAll()
@@ -280,6 +554,7 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
                 columnIndexes: IndexSet(integersIn: 0..<tableView.tableColumns.count))
         }
         applySortIndicator()
+        tableView.refreshSelectionDecorations()
     }
 
     private func applySchema(_ columns: [ColumnSpec]) {
@@ -383,20 +658,46 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         let id = NSUserInterfaceItemIdentifier("datagrep.grid.row")
+        let v: GridRowView
         if let reused = tableView.makeView(withIdentifier: id, owner: nil) as? GridRowView {
-            reused.isHovered = (row == self.tableView.hoverRow)
-            reused.focusedColumn =
-                (row == tableView.selectedRow) ? self.tableView.focusedColumn : -1
-            return reused
+            v = reused
+        } else {
+            v = GridRowView()
+            v.identifier = id
         }
-        let v = GridRowView()
-        v.identifier = id
-        v.isHovered = (row == self.tableView.hoverRow)
+        // A row arriving from the reuse pool is decorated before it is ever
+        // drawn, so scrolling through a selection never flashes an unstyled row.
+        self.tableView.decorate(v, row: row)
         return v
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        tableView.refreshFocusRing()
+        tableView.selectionChangedExternally()
+    }
+
+    /// Reordering changes every cell's column POSITION, which is what the block
+    /// highlight is expressed in. The engine column index each cell reads from
+    /// is unaffected — it is resolved by identifier — so this is repaint-only.
+    func tableViewColumnDidMove(_ notification: Notification) {
+        reloadVisibleRows()
+    }
+
+    func tableViewColumnDidResize(_ notification: Notification) {
+        tableView.refreshSelectionDecorations()
+        let vis = tableView.rows(in: tableView.visibleRect)
+        guard vis.length > 0 else { return }
+        for r in vis.lowerBound..<vis.upperBound {
+            tableView.rowView(atRow: r, makeIfNecessary: false)?.needsDisplay = true
+        }
+    }
+
+    private func reloadVisibleRows() {
+        let vis = tableView.rows(in: tableView.visibleRect)
+        guard vis.length > 0, tableView.tableColumns.count > 0 else { return }
+        tableView.reloadData(
+            forRowIndexes: IndexSet(integersIn: vis.lowerBound..<vis.upperBound),
+            columnIndexes: IndexSet(integersIn: 0..<tableView.tableColumns.count))
+        tableView.refreshSelectionDecorations()
     }
 
     /// Double-click a column divider. AppKit asks the delegate how wide the
@@ -441,9 +742,15 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
             cell.identifier = GridCellView.reuseID
         }
 
+        // The block highlight is expressed in column POSITIONS, so each cell
+        // carries the position it is currently drawn at as well as the engine
+        // column index it reads from.
+        let position = tableView.column(withIdentifier: tableColumn.identifier)
+
         guard let pager, let win = pager.window(for: UInt64(row)), colIndex < win.columns else {
             cell.configure(
-                kind: .value, text: "", row: row, column: colIndex, pending: true,
+                kind: .value, text: "", row: row, column: colIndex, position: position,
+                pending: true,
                 rightAligned: rightAlignedByID[tableColumn.identifier] ?? false)
             cell.onNestedClick = nil
             // Shimmer only while rows are genuinely still arriving; a terminal
@@ -461,7 +768,7 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         default: text = win.text(absoluteRow: UInt64(row), col: colIndex)
         }
         cell.configure(
-            kind: kind, text: text, row: row, column: colIndex, pending: false,
+            kind: kind, text: text, row: row, column: colIndex, position: position, pending: false,
             rightAligned: rightAlignedByID[tableColumn.identifier] ?? false)
         cell.setShimmer(false)
         cell.onNestedClick = { [weak self] c in
@@ -502,16 +809,79 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         }
     }
 
-    func selectionAsTSV() -> String? {
-        let rows = tableView.selectedRowIndexes
-        guard !rows.isEmpty, let pager else { return nil }
-        let cols = visibleColumnPairs()
-        var out = cols.map(\.name).joined(separator: "\t")
-        for r in rows {
-            guard let win = pager.window(for: UInt64(r)) else { continue }
-            out += "\n" + cols.map { rawText(win, row: r, col: $0.index) }.joined(separator: "\t")
+    /// The columns inside a block, in display order, skipping hidden ones — a
+    /// block drawn across a hidden column must not paste that column's data.
+    private func columnPairs(inPositions positions: ClosedRange<Int>)
+        -> [(name: String, index: UInt32)]
+    {
+        var out: [(name: String, index: UInt32)] = []
+        for pos in positions where pos >= 0 && pos < tableView.tableColumns.count {
+            let col = tableView.tableColumns[pos]
+            guard !col.isHidden, let idx = columnIndexByID[col.identifier] else { continue }
+            out.append((name: col.title, index: idx))
         }
         return out
+    }
+
+    /// What ⌘C and "Copy Selection as TSV" put on the pasteboard.
+    ///
+    /// A single cell copies bare (a header line above one value is noise);
+    /// anything larger copies as TSV with a header row. Row count is capped:
+    /// a drag with autoscroll can cover more rows than it is sane to pull back
+    /// through the FFI one page at a time.
+    func selectionAsTSV() -> (text: String, label: String)? {
+        guard let pager else { return nil }
+        let selected = tableView.selectedRowIndexes
+        guard !selected.isEmpty else { return nil }
+
+        let cols: [(name: String, index: UInt32)]
+        let rowList: [Int]
+        if let range = tableView.cellRange, tableView.selectionMatchesRange {
+            cols = columnPairs(inPositions: range.columns)
+            if range.isSingleCell, let first = cols.first,
+                let win = pager.window(for: UInt64(range.focusRow))
+            {
+                return (rawText(win, row: range.focusRow, col: first.index), "cell copied")
+            }
+            rowList = Array(range.rows)
+        } else {
+            // Discontiguous (⌘-clicked) selection: whole rows, all visible columns.
+            cols = visibleColumnPairs()
+            rowList = Array(selected)
+        }
+        guard !cols.isEmpty else { return nil }
+
+        let truncated = rowList.count > GridCopy.maxRows
+        let wanted = truncated ? Array(rowList.prefix(GridCopy.maxRows)) : rowList
+        var lines: [String] = [cols.map(\.name).joined(separator: "\t")]
+        lines.reserveCapacity(wanted.count + 1)
+        for r in wanted {
+            guard let win = pager.window(for: UInt64(r)) else { continue }
+            lines.append(cols.map { rawText(win, row: r, col: $0.index) }.joined(separator: "\t"))
+        }
+        return (
+            lines.joined(separator: "\n"),
+            GridCopy.summary(rows: lines.count - 1, columns: cols.count, truncated: truncated)
+        )
+    }
+
+    private func copySelection() {
+        guard let (text, label) = selectionAsTSV() else { return }
+        copyToPasteboard(text, label: label)
+    }
+
+    /// "3 rows × 2 columns" for the status bar. Nil when nothing is selected.
+    func selectionSummary() -> String? {
+        guard let range = tableView.cellRange, !tableView.selectedRowIndexes.isEmpty else {
+            return nil
+        }
+        if !tableView.selectionMatchesRange {
+            return "\(tableView.selectedRowIndexes.count) rows"
+        }
+        if range.isSingleCell { return nil }
+        let r = range.rowCount == 1 ? "1 row" : "\(range.rowCount) rows"
+        let c = range.columnCount == 1 ? "1 column" : "\(range.columnCount) columns"
+        return "\(r) × \(c)"
     }
 
     private func rowAsJSON(_ row: Int) -> String? {
@@ -557,8 +927,12 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     /// the items always name the cell actually under the pointer.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        let row = tableView.clickedRow
-        let colPos = tableView.clickedColumn
+        // `clickedRow` is the cell actually under the pointer; the focused cell
+        // is the fallback for a menu opened from the keyboard.
+        let row = tableView.clickedRow >= 0 ? tableView.clickedRow : (tableView.focusedCell?.row ?? -1)
+        let colPos =
+            tableView.clickedColumn >= 0
+            ? tableView.clickedColumn : (tableView.focusedCell?.column ?? -1)
         guard row >= 0, colPos >= 0, colPos < tableView.tableColumns.count else { return }
         let column = tableView.tableColumns[colPos]
         guard let idx = columnIndexByID[column.identifier], let pager,
@@ -578,7 +952,14 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         menu.addItem(item("Copy Cell", #selector(ctxCopyCell(_:))))
         menu.addItem(item("Copy Row as JSON", #selector(ctxCopyRowJSON(_:))))
         menu.addItem(item("Copy Row as TSV", #selector(ctxCopyRowTSV(_:))))
-        menu.addItem(item("Copy Column “\(column.title)” (visible rows)", #selector(ctxCopyColumn(_:))))
+        menu.addItem(
+            item("Copy Column “\(column.title)” (visible rows)", #selector(ctxCopyColumn(_:))))
+        if let summary = selectionSummary() {
+            let sel = item("Copy Selection as TSV (\(summary))", #selector(ctxCopySelection(_:)))
+            sel.keyEquivalent = "c"
+            sel.keyEquivalentModifierMask = [.command]
+            menu.addItem(sel)
+        }
         menu.addItem(.separator())
         if kind == .value || kind == .null {
             let f = item("Filter by “\(preview)”", #selector(ctxFilter(_:)))
@@ -630,6 +1011,10 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
             lines.append(rawText(win, row: r, col: c.idx))
         }
         copyToPasteboard(lines.joined(separator: "\n"), label: "\(lines.count - 1) cells copied")
+    }
+
+    @objc private func ctxCopySelection(_ sender: Any?) {
+        copySelection()
     }
 
     @objc private func ctxFilter(_ sender: Any?) {

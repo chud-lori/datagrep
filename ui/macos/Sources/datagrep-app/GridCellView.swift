@@ -91,14 +91,20 @@ final class GridCellView: NSView {
 
     var onNestedClick: ((GridCellView) -> Void)?
     var row: Int = -1
+    /// The ENGINE column index this cell reads from — stable across reordering.
     var column: UInt32 = 0
+    /// The DISPLAY position this cell is drawn at — what the selection block is
+    /// expressed in. The two differ the moment a column is dragged.
+    var columnPosition: Int = 0
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
 
     func configure(
-        kind: CellKind, text: String, row: Int, column: UInt32, pending: Bool, rightAligned: Bool
+        kind: CellKind, text: String, row: Int, column: UInt32, position: Int, pending: Bool,
+        rightAligned: Bool
     ) {
+        self.columnPosition = position
         // A cell that was a skeleton and is now real fades in once. This is the
         // difference between rows "arriving" and rows "popping".
         let wasPending = isPending
@@ -125,9 +131,15 @@ final class GridCellView: NSView {
         layer?.add(a, forKey: "datagrep.fade")
     }
 
+    /// True only when this cell is inside the highlighted block. A partial block
+    /// paints a solid accent over some columns and a faint wash over the rest;
+    /// the light "selected" text colour belongs only to the solid part.
     private var isSelectedRow: Bool {
-        guard let rv = superview as? NSTableRowView else { return false }
-        return rv.isSelected && rv.isEmphasized
+        guard let rv = superview as? GridRowView, rv.isSelected, rv.isEmphasized else {
+            return false
+        }
+        guard let cols = rv.rangeColumns else { return true }
+        return cols.contains(columnPosition)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -249,6 +261,23 @@ final class GridRowView: NSTableRowView {
     var focusedColumn: Int = -1 {
         didSet { if focusedColumn != oldValue { needsDisplay = true } }
     }
+    /// The column positions this row contributes to the selected block, or nil
+    /// for "the whole row" — which is both the classic row selection and what a
+    /// block that happens to span every column should look like.
+    var rangeColumns: ClosedRange<Int>? {
+        didSet {
+            guard rangeColumns != oldValue else { return }
+            needsDisplay = true
+            // The text colour inside vs outside the block changes with it.
+            for sub in subviews { sub.needsDisplay = true }
+        }
+    }
+    var isRangeTop = false {
+        didSet { if isRangeTop != oldValue { needsDisplay = true } }
+    }
+    var isRangeBottom = false {
+        didSet { if isRangeBottom != oldValue { needsDisplay = true } }
+    }
 
     override func drawBackground(in dirtyRect: NSRect) {
         super.drawBackground(in: dirtyRect)
@@ -263,21 +292,79 @@ final class GridRowView: NSTableRowView {
             isEmphasized
             ? NSColor.selectedContentBackgroundColor
             : NSColor.unemphasizedSelectedContentBackgroundColor
-        color.setFill()
+        guard let cols = rangeColumns, let block = blockRect(cols) else {
+            color.setFill()
+            dirtyRect.fill()
+            return
+        }
+        // Partial block: the row still reads as "in the selection" via a wash,
+        // and the columns actually selected get the real highlight.
+        color.withAlphaComponent(0.14).setFill()
         dirtyRect.fill()
+        let solid = block.intersection(dirtyRect)
+        guard !solid.isNull, !solid.isEmpty else { return }
+        color.setFill()
+        solid.fill()
     }
 
+    /// The block's outline, drawn under the (non-opaque) cell views so the
+    /// borders sit behind the text rather than clipping it.
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        if let cols = rangeColumns, let block = blockRect(cols) {
+            NSColor.controlAccentColor.setStroke()
+            let path = NSBezierPath()
+            path.lineWidth = 1.5
+            // Vertical edges always; horizontal edges only on the first and last
+            // row of the block, so a tall block reads as one rectangle.
+            path.move(to: NSPoint(x: block.minX + 0.75, y: block.minY))
+            path.line(to: NSPoint(x: block.minX + 0.75, y: block.maxY))
+            path.move(to: NSPoint(x: block.maxX - 0.75, y: block.minY))
+            path.line(to: NSPoint(x: block.maxX - 0.75, y: block.maxY))
+            // Which edge is visually "top" depends on the row view's geometry,
+            // not on the rect: get this backwards and a block gets its cap line
+            // at the wrong end.
+            let topY = isFlipped ? block.minY + 0.75 : block.maxY - 0.75
+            let bottomY = isFlipped ? block.maxY - 0.75 : block.minY + 0.75
+            if isRangeTop {
+                path.move(to: NSPoint(x: block.minX, y: topY))
+                path.line(to: NSPoint(x: block.maxX, y: topY))
+            }
+            if isRangeBottom {
+                path.move(to: NSPoint(x: block.minX, y: bottomY))
+                path.line(to: NSPoint(x: block.maxX, y: bottomY))
+            }
+            path.stroke()
+        }
         guard focusedColumn >= 0, let table = superview as? NSTableView,
             focusedColumn < table.numberOfColumns
         else { return }
         let r = table.frameOfCell(atColumn: focusedColumn, row: table.row(for: self))
+        guard !r.isEmpty else { return }
         let local = convert(r, from: table).insetBy(dx: 1, dy: 1)
         NSColor.controlAccentColor.setStroke()
         let path = NSBezierPath(roundedRect: local, xRadius: 3, yRadius: 3)
         path.lineWidth = 1.5
         path.stroke()
+    }
+
+    /// Unions the frames of the block's columns. Hidden columns report an empty
+    /// frame, so they are skipped rather than dragging the union to the origin.
+    private func blockRect(_ cols: ClosedRange<Int>) -> NSRect? {
+        guard let table = superview as? NSTableView else { return nil }
+        let row = table.row(for: self)
+        guard row >= 0 else { return nil }
+        let lo = max(0, cols.lowerBound)
+        let hi = min(table.numberOfColumns - 1, cols.upperBound)
+        guard lo <= hi else { return nil }
+        var union: NSRect?
+        for c in lo...hi {
+            let f = table.frameOfCell(atColumn: c, row: row)
+            if f.isEmpty { continue }
+            union = union.map { $0.union(f) } ?? f
+        }
+        guard let union else { return nil }
+        return convert(union, from: table)
     }
 }
 
@@ -320,7 +407,9 @@ final class GridHeaderView: NSTableHeaderView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        guard hoverColumn >= 0, hoverColumn < (tableView?.numberOfColumns ?? 0) else { return }
+        guard let table = tableView, hoverColumn >= 0, hoverColumn < table.numberOfColumns else {
+            return
+        }
         let r = headerRect(ofColumn: hoverColumn)
         NSColor.secondaryLabelColor.withAlphaComponent(0.10).setFill()
         r.insetBy(dx: 0, dy: 1).fill()
@@ -328,9 +417,42 @@ final class GridHeaderView: NSTableHeaderView {
         // repainting the whole header in a different colour.
         NSColor.controlAccentColor.withAlphaComponent(0.65).setFill()
         NSRect(x: r.minX, y: r.maxY - 2, width: r.width, height: 2).fill()
+        // A ghost chevron on the hovered column that is NOT the sorted one:
+        // it says "clicking here sorts" before the click, which is the whole
+        // difference between a header and a label.
+        let sorted = table.tableColumns.indices.contains(hoverColumn)
+            && table.indicatorImage(in: table.tableColumns[hoverColumn]) != nil
+        guard !sorted, r.width > 46 else { return }
+        drawGhostChevron(in: r)
     }
 
+    private func drawGhostChevron(in r: NSRect) {
+        let w: CGFloat = 7
+        let h: CGFloat = 4
+        let x = r.maxX - w - 7
+        let y = r.midY - h / 2
+        let p = NSBezierPath()
+        p.move(to: NSPoint(x: x, y: y + h))
+        p.line(to: NSPoint(x: x + w / 2, y: y))
+        p.line(to: NSPoint(x: x + w, y: y + h))
+        p.lineWidth = 1.3
+        p.lineCapStyle = .round
+        p.lineJoinStyle = .round
+        NSColor.secondaryLabelColor.withAlphaComponent(0.45).setStroke()
+        p.stroke()
+    }
+
+    /// `super` first: AppKit's own resize cursors live on the dividers, and
+    /// blanketing the header in a pointing hand is what made resizing
+    /// undiscoverable. The hand is added only over each column's interior.
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .pointingHand)
+        super.resetCursorRects()
+        guard let table = tableView else { return }
+        let gutter: CGFloat = 4
+        for c in 0..<table.numberOfColumns {
+            let r = headerRect(ofColumn: c)
+            guard r.width > 2 * gutter + 4 else { continue }
+            addCursorRect(r.insetBy(dx: gutter, dy: 0), cursor: .pointingHand)
+        }
     }
 }

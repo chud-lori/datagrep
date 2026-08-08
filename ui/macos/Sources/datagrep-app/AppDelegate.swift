@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var cancellables: Set<AnyCancellable> = []
     private var autopilot: Autopilot?
     private var sidebarMenuItem: NSMenuItem!
+    private var inspectorMenuItem: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMainMenu()
@@ -71,6 +72,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             .store(in: &cancellables)
 
+        model.$showDetail
+            .removeDuplicates()
+            .sink { [weak self] visible in
+                self?.inspectorMenuItem.title = visible ? "Hide Inspector" : "Show Inspector"
+            }
+            .store(in: &cancellables)
+
         model.editor.focus()
 
         DispatchQueue.main.async { [weak self] in
@@ -93,6 +101,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self?.writeScreenshot(to: path)
                 if args.contains("--quit-after-shot") {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { NSApp.terminate(nil) }
+                }
+            }
+        }
+
+        // `--theme-flip-shot <light.png> <dark.png>`: forces aqua, snapshots,
+        // then flips NSApp.appearance to darkAqua and snapshots again. Setting
+        // `NSApp.appearance` changes `effectiveAppearance`, which fires the
+        // same KVO that a System Settings appearance change does — so the dark
+        // screenshot proves the engine artwork re-resolves at runtime, not
+        // just at launch.
+        if let i = args.firstIndex(of: "--theme-flip-shot"), i + 2 < args.count {
+            let lightPath = args[i + 1]
+            let darkPath = args[i + 2]
+            NSApp.appearance = NSAppearance(named: .aqua)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                self?.writeScreenshot(to: lightPath)
+                NSApp.appearance = NSAppearance(named: .darkAqua)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    self?.writeScreenshot(to: darkPath)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        NSApp.terminate(nil)
+                    }
                 }
             }
         }
@@ -215,10 +245,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sidebarMenuItem.keyEquivalentModifierMask = [.control, .command]
         sidebarMenuItem.target = self
         viewMenu.addItem(sidebarMenuItem)
-        let inspectorItem = NSMenuItem(
+        inspectorMenuItem = NSMenuItem(
             title: "Show Inspector", action: #selector(toggleDetail(_:)), keyEquivalent: "i")
-        inspectorItem.target = self
-        viewMenu.addItem(inspectorItem)
+        inspectorMenuItem.target = self
+        viewMenu.addItem(inspectorMenuItem)
         viewItem.submenu = viewMenu
         main.addItem(viewItem)
 

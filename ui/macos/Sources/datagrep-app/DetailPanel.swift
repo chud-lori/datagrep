@@ -32,7 +32,9 @@ struct DetailPanel: View {
             Divider()
             legend
         }
-        .background(Color(nsColor: .controlBackgroundColor))
+        // A material, not a flat fill: the inspector reads as a floating
+        // layer above the results pane, matching the status bar treatment.
+        .background(.ultraThinMaterial)
     }
 
     private var header: some View {

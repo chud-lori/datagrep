@@ -26,6 +26,20 @@ mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 
 cp "${BIN}" "${APP}/Contents/MacOS/${APP_NAME}"
 
+# App icon. CFBundleIconFile below must match this basename WITHOUT extension
+# ("datagrep", not "datagrep.icns") — Finder/Dock resolve it themselves, and a
+# wrong value fails silently (app launches fine, just keeps the generic
+# document icon). macOS also caches Dock/Finder icon lookups aggressively per
+# bundle path, so a stale icon after rebuilding usually means the cache, not
+# this script — `touch` the .app and/or restart Dock/Finder to force it.
+ICNS_SRC="${PWD}/../../assets/datagrep.icns"
+if [ -f "${ICNS_SRC}" ]; then
+  cp "${ICNS_SRC}" "${APP}/Contents/Resources/${APP_NAME}.icns"
+  echo "==> bundled ${APP_NAME}.icns"
+else
+  echo "==> WARNING: ${ICNS_SRC} missing — app will show the generic document icon" >&2
+fi
+
 # SwiftPM resource bundles (engine brand marks). `Bundle.module` resolves these
 # from Bundle.main.resourceURL, so they MUST be inside Contents/Resources — if
 # this loop copies nothing, every engine icon silently falls back to an SF
@@ -50,6 +64,7 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key>              <string>${APP_NAME}</string>
   <key>CFBundleDisplayName</key>       <string>${APP_NAME}</string>
   <key>CFBundleExecutable</key>        <string>${APP_NAME}</string>
+  <key>CFBundleIconFile</key>          <string>${APP_NAME}</string>
   <key>CFBundleIdentifier</key>        <string>${BUNDLE_ID}</string>
   <key>CFBundleVersion</key>           <string>${VERSION}</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>

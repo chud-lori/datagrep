@@ -23,6 +23,16 @@ public struct SQLBlock: Sendable {
     public let text: String
     public let range: Range<Int>  // UTF-16 offsets into the source, for NSTextView
     public let directives: BlockDirectives
+
+    /// Public so the editor can hand back a block it located itself. The editor
+    /// keeps a per-line lexer cache and can find the statement under the caret
+    /// without re-splitting the document, but the result still has to be the
+    /// same `SQLBlock` the rest of the app consumes.
+    public init(text: String, range: Range<Int>, directives: BlockDirectives) {
+        self.text = text
+        self.range = range
+        self.directives = directives
+    }
 }
 
 public enum SQLBlocks {

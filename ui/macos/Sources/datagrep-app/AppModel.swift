@@ -1,5 +1,6 @@
 import AppKit
 import DatagrepKit
+import Foundation
 import SwiftUI
 
 /// One catalog node. A reference type with `@Published` so a lazily-loaded
