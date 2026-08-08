@@ -216,7 +216,17 @@ fn decode_array(elem_ty: &Type, raw: &[u8]) -> Value {
     if ndim <= 0 {
         return Value::Array(Arc::from(Vec::<Value>::new()));
     }
-    let mut dims = Vec::with_capacity(ndim as usize);
+    // Every number below this point comes off the wire, so none of them may
+    // size an allocation on its own say-so. Each dimension header is 8 bytes
+    // (length + lower bound), so a payload too short to hold `ndim` of them is
+    // malformed rather than merely large — and a server claiming `ndim =
+    // 0x7fffffff` in a twelve-byte message would otherwise have this reserve
+    // ~17 GB before the first bounds-checked read ran.
+    let ndim = ndim as usize;
+    if ndim > cur.len() / 8 {
+        return unsupported(elem_ty, raw);
+    }
+    let mut dims = Vec::with_capacity(ndim);
     for _ in 0..ndim {
         let len = match take(&mut cur, 4).and_then(|b| read_i32(&b)) {
             Some(v) => v.max(0) as usize,
@@ -228,7 +238,15 @@ fn decode_array(elem_ty: &Type, raw: &[u8]) -> Value {
         }
         dims.push(len);
     }
-    let total: usize = dims.iter().product();
+    // Same reasoning for the element count, plus one more hazard: three
+    // dimensions of 2^31 overflow the `product()` and wrap to a small, wrong
+    // total, so multiply with `checked_mul`. Every element carries at least its
+    // own four-byte length prefix — a NULL is exactly that and nothing more —
+    // so anything above `cur.len() / 4` cannot be in this payload.
+    let total = match dims.iter().try_fold(1usize, |acc, d| acc.checked_mul(*d)) {
+        Some(total) if total <= cur.len() / 4 => total,
+        _ => return unsupported(elem_ty, raw),
+    };
     let mut flat = Vec::with_capacity(total);
     for _ in 0..total {
         let elen = match take(&mut cur, 4).and_then(|b| read_i32(&b)) {
@@ -758,5 +776,51 @@ mod tests {
             v,
             Value::Array(Arc::from(vec![Value::Str(Arc::from("abc")), Value::Null]))
         );
+    }
+
+    /// An array payload is a *server* message, so its dimension count and
+    /// per-dimension lengths are attacker-controlled numbers. They used to size
+    /// `Vec::with_capacity` directly: a claimed `ndim` of 2^31 reserved ~17 GB
+    /// from a twelve-byte message, and three dimensions of 2^31 overflowed the
+    /// `product()` outright. Both are now bounded by what the payload can
+    /// actually carry, and a malformed one degrades to `Unsupported` — the
+    /// driver's existing "never lose bytes, never crash on a quirk" answer.
+    #[test]
+    fn a_hostile_array_header_is_unsupported_not_an_allocation() {
+        let hdr = |ndim: i32, dims: &[i32]| {
+            let mut b = Vec::new();
+            b.extend_from_slice(&ndim.to_be_bytes());
+            b.extend_from_slice(&0i32.to_be_bytes()); // has-null flag
+            b.extend_from_slice(&23u32.to_be_bytes()); // element oid
+            for d in dims {
+                b.extend_from_slice(&d.to_be_bytes());
+                b.extend_from_slice(&1i32.to_be_bytes()); // lower bound
+            }
+            b
+        };
+
+        // A dimension count no payload this size could carry.
+        let v = decode_array(&Type::INT4, &hdr(i32::MAX, &[]));
+        assert!(matches!(v, Value::Unsupported { .. }), "got {v:?}");
+
+        // Dimensions whose product overflows `usize`.
+        let huge = hdr(3, &[i32::MAX, i32::MAX, i32::MAX]);
+        let v = decode_array(&Type::INT4, &huge);
+        assert!(matches!(v, Value::Unsupported { .. }), "got {v:?}");
+
+        // A single dimension claiming more elements than the bytes allow.
+        let v = decode_array(&Type::INT4, &hdr(1, &[1_000_000]));
+        assert!(matches!(v, Value::Unsupported { .. }), "got {v:?}");
+
+        // The honest case still decodes.
+        let mut ok = hdr(1, &[2]);
+        for n in [7i32, 8i32] {
+            ok.extend_from_slice(&4i32.to_be_bytes());
+            ok.extend_from_slice(&n.to_be_bytes());
+        }
+        match decode_array(&Type::INT4, &ok) {
+            Value::Array(items) => assert_eq!(items.len(), 2, "{items:?}"),
+            other => panic!("expected an array, got {other:?}"),
+        }
     }
 }
