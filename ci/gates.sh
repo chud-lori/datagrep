@@ -81,7 +81,89 @@ if ! (cd "${repo_root}/xtask" && cargo fmt --check); then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. cargo clippy --workspace --all-targets -- -D warnings
+# 2. Supply chain: cargo-audit (RUSTSEC advisories) and cargo-deny
+#    (advisories + licence policy + banned crates + allowed registries).
+#    The policy — including the written reasoning behind every accepted
+#    advisory — lives in deny.toml. Read that file before changing anything
+#    in this section.
+#
+#    Runs ahead of clippy/test on purpose: both tools read Cargo.lock and
+#    compile nothing, so they finish in seconds, and learning that a
+#    dependency is vulnerable should not cost a five-minute build first.
+#    Both do need network to fetch the RustSec advisory database.
+#
+#    Missing-tool policy: WARN locally, HARD FAIL in CI. `cargo install`-ing
+#    either tool from source takes ~4 minutes, which would roughly double the
+#    Tier-1 budget and be paid by every contributor on every clean checkout —
+#    so a local `./ci/gates.sh` does not depend on having them. CI installs
+#    both as prebuilt binaries in a couple of seconds (taiki-e/install-action,
+#    see .github/workflows/ci.yml) before calling this script, so the gate
+#    genuinely runs on every PR. `CI` is set by every CI provider, so a tool
+#    missing *there* means the workflow is broken rather than that someone
+#    skipped a local install, and passing quietly would leave a gate that
+#    only looks enforced.
+# ---------------------------------------------------------------------------
+
+note "Supply chain (cargo-audit + cargo-deny)"
+
+supply_chain_missing() {
+  # $1 = tool name, $2 = install command to suggest
+  if [[ -n "${CI:-}" ]]; then
+    fail_gate "$1 is not installed (CI must install it — see .github/workflows/ci.yml)"
+  else
+    warn "$1 not installed, supply-chain gate skipped locally. Install with: $2"
+  fi
+}
+
+# The accepted-advisory list is parsed out of deny.toml rather than repeated
+# here. cargo-audit cannot read deny.toml — it wants its own .cargo/audit.toml
+# in its own format — and two hand-maintained lists of advisory IDs would drift
+# the first time someone accepted one in a hurry, leaving a gate that is green
+# for the wrong reason. Matching only the `{ id = "RUSTSEC-...` form means a
+# prose mention of an ID elsewhere in deny.toml cannot silently widen the
+# exemption.
+audit_ignore_args=()
+while IFS= read -r adv_id; do
+  [[ -n "${adv_id}" ]] || continue
+  audit_ignore_args+=(--ignore "${adv_id}")
+done < <(grep -E '^[[:space:]]*\{[[:space:]]*id[[:space:]]*=[[:space:]]*"RUSTSEC-' \
+           "${repo_root}/deny.toml" | grep -oE 'RUSTSEC-[0-9]{4}-[0-9]{4}' || true)
+
+# `--deny warnings` promotes unmaintained/unsound/yanked findings to failures,
+# so cargo-audit matches deny.toml, which has no warn tier for advisories
+# either. The `${arr[@]+...}` dance is not decoration: under `set -u`, bash 3.2
+# (what macOS ships as /bin/bash) treats an empty "${arr[@]}" as unbound and
+# aborts the script, which would silently happen the day the ignore list is
+# emptied — i.e. exactly when the gate is finally clean.
+if cargo audit --version >/dev/null 2>&1; then
+  if cargo audit --deny warnings ${audit_ignore_args[@]+"${audit_ignore_args[@]}"}; then
+    echo "cargo-audit: OK"
+  else
+    fail_gate "cargo audit (RUSTSEC advisory)"
+  fi
+else
+  supply_chain_missing "cargo-audit" "cargo install cargo-audit --locked"
+fi
+
+# cargo-deny output is captured and printed only on failure. `multiple-versions`
+# is deliberately a warn tier (see deny.toml) and currently reports 27 duplicated
+# crates across ~300 lines; dumping that into every green run is how people learn
+# to stop reading gate output altogether. On failure the whole thing is printed
+# verbatim, which is the case where you want it.
+if cargo deny --version >/dev/null 2>&1; then
+  if deny_out="$(cargo deny check --hide-inclusion-graph 2>&1)"; then
+    deny_warns="$(printf '%s\n' "${deny_out}" | grep -c 'warning\[' || true)"
+    echo "cargo-deny: OK (${deny_warns} warning(s); run 'cargo deny check bans' to read them)"
+  else
+    printf '%s\n' "${deny_out}"
+    fail_gate "cargo deny check (advisories/licences/bans/sources)"
+  fi
+else
+  supply_chain_missing "cargo-deny" "cargo install cargo-deny --locked"
+fi
+
+# ---------------------------------------------------------------------------
+# 3. cargo clippy --workspace --all-targets -- -D warnings
 # ---------------------------------------------------------------------------
 
 note "cargo clippy --workspace --all-targets -- -D warnings"
@@ -92,7 +174,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. cargo test --workspace
+# 4. cargo test --workspace
 # ---------------------------------------------------------------------------
 
 note "cargo test --workspace"
@@ -103,7 +185,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Anti-pattern greps, via xtask grep-gates.
+# 5. Anti-pattern greps, via xtask grep-gates.
 #    HARD FAIL: unbounded_channel in crates/datagrep-core/src, ControlFlow::Poll
 #    outside spike/bench/test dirs, tokio::time::interval anywhere in gated
 #    source. WARN (count only): .unwrap() in non-test src/. WARN: format!
@@ -119,7 +201,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Binary size vs budget.toml P10 (informational)/P11 (installed-on-disk).
+# 6. Binary size vs budget.toml P10 (informational)/P11 (installed-on-disk).
 #    WARN-only for now: no application binary target exists yet (M0 is still
 #    landing crates/*). Wired via `xtask budget-check` so that the moment a
 #    `datagrep` binary exists, pointing this step at it turns P11 into a hard
@@ -140,7 +222,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Crate count vs P16d (limit 400) — WARN-only.
+# 7. Crate count vs P16d (limit 400) — WARN-only.
 # ---------------------------------------------------------------------------
 
 note "Crate count vs P16d (limit 400) — WARN-only"

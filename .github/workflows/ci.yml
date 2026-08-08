@@ -3,9 +3,9 @@ name: CI
 # The Tier-1 gate: every PR, hardware-independent,
 # deterministic, <8 min. Runs ci/gates.sh verbatim — the same script
 # contributors run locally, so "green in CI" and "green locally" mean
-# the same thing. gates.sh covers cargo fmt --check, clippy -D warnings,
-# cargo test --workspace, the anti-pattern greps, and the budget.toml
-# size/crate-count checks.
+# the same thing. gates.sh covers cargo fmt --check, the supply-chain scan
+# (cargo-audit + cargo-deny), clippy -D warnings, cargo test --workspace,
+# the anti-pattern greps, and the budget.toml size/crate-count checks.
 #
 # Runner policy (learned the hard way on chud-lori/tangi): never macos-13.
 # The free-tier Intel macOS pool is starved (10+ min queue while everything
@@ -18,6 +18,13 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Weekly, for the supply-chain gate specifically. Every other check here is a
+  # function of the tree and cannot change while the tree does not — but a new
+  # RUSTSEC advisory lands against a Cargo.lock nobody touched, and on a repo
+  # with a slow week that is precisely the window where a known-vulnerable
+  # dependency sits in main unnoticed. Monday morning, before anyone starts.
+  schedule:
+    - cron: "17 6 * * 1"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -53,6 +60,31 @@ jobs:
           workspaces: |
             .
             xtask
+
+      # Prebuilt binaries, not `cargo install`. Building cargo-audit and
+      # cargo-deny from source is ~4 minutes of the 8-minute Tier-1 budget for
+      # two tools that then spend 5 seconds each reading Cargo.lock;
+      # install-action pulls the release binaries in a couple of seconds. This
+      # step is also what makes gates.sh's supply-chain section a real gate:
+      # the script hard-fails when either tool is missing and CI is set, so
+      # deleting this step breaks the build rather than quietly disarming it.
+      - name: Install supply-chain tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+
+      # The RustSec advisory database is a git clone that both tools share, and
+      # a cold clone costs more than the scans themselves. Key on run_id so the
+      # cache is rewritten every run and restore-keys picks up the most recent
+      # one; both tools `git pull` it on startup anyway, so a restored copy is
+      # refreshed rather than stale — the cache saves the clone, not the update.
+      - name: Cache RustSec advisory database
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/advisory-db
+          key: advisory-db-${{ github.run_id }}
+          restore-keys: |
+            advisory-db-
 
       - name: Shellcheck shell entry points
         run: shellcheck ci/gates.sh install.sh

@@ -1,0 +1,205 @@
+# deny.toml — supply-chain policy for the whole workspace.
+#
+# Checked by `cargo deny check` in ci/gates.sh (Tier-1, every PR). Reads
+# Cargo.lock only, so it costs no compilation and runs in a couple of seconds.
+# `cargo audit` runs alongside it in the same gate: audit is the narrower,
+# faster RUSTSEC-only tool and is what most people reach for by reflex, deny
+# is the one that also enforces licences, bans and registries. They overlap on
+# advisories on purpose — the overlap is what makes it safe for one of them to
+# be temporarily unavailable on a contributor's machine.
+#
+# Config schema is cargo-deny 0.18+ (the 0.16 rewrite dropped the old
+# `vulnerability = "deny"` / `copyleft` keys; if you see those in a blog post,
+# it predates this format).
+
+# `targets` is deliberately left unset, so every platform in the graph is
+# checked, Windows crates included. Narrowing it to the platforms we actually
+# ship would prune ~80 windows-* crates out of the licence and advisory scan
+# and make this file quieter — and would also mean that the day someone adds
+# a Windows build, a whole tranche of dependencies enters the product having
+# never been through this gate. Noise is the cheaper failure.
+[graph]
+all-features = false
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Advisories (RUSTSEC)
+# ---------------------------------------------------------------------------
+#
+# POLICY, including for advisories with no fix available: FAIL.
+#
+# Everything not listed in `ignore` below fails the build — vulnerabilities,
+# unmaintained crates, unsound crates, yanked releases, fixable or not. There
+# is no "warn" tier here, and that is the whole point of the file.
+#
+# The tempting alternative is to fail on advisories that have a fixed version
+# and merely warn on the ones that do not, on the grounds that a warning you
+# cannot act on is just noise. It does not survive contact with reality: a
+# warning in a green build is read once, by the person who introduced it, and
+# never again. Six months later the crate has a fix, nobody notices, and the
+# "policy" has quietly become "we ship known-vulnerable code". A gate that is
+# green because it was configured not to look is worse than no gate.
+#
+# So an unfixable advisory blocks the build until a human writes an entry in
+# `ignore` saying why it is acceptable here. That is intentionally a little
+# painful. It costs ten minutes of reasoning, it puts the reasoning in git
+# history next to the commit that accepted it, and it forces the exposure to
+# be argued from *our* call graph rather than from the CVSS number.
+#
+# Rules for adding an entry:
+#   1. Say why *this* codebase is or is not exposed — which of our call paths
+#      reaches the vulnerable code, and with what attacker-controlled input.
+#      "Severity is only medium" is not a reason.
+#   2. Record the review-by date. An entry with no date is a permanent
+#      exception nobody will ever revisit.
+#   3. Delete the entry the moment a fixed version is reachable. Do not
+#      leave it "just in case" — a stale ignore silently re-disarms the gate
+#      for a future advisory that reuses the same crate.
+[advisories]
+unmaintained = "all"
+yanked = "deny"
+
+ignore = [
+  { id = "RUSTSEC-2023-0071", reason = """
+Marvin Attack: timing sidechannel in the `rsa` crate's private-key operations.
+No fixed version exists — the fix requires constant-time modular exponentiation
+that upstream has not landed, so this is not an upgrade we can wait out.
+
+Path into our tree (there is only one):
+    datagrep-tunnel -> russh 0.62.5 -> ssh-key 0.7.0-rc.11 -> rsa
+
+Exposure: `rsa` is reached only when an SSH tunnel authenticates with an
+RSA *client* key, via `authenticate_publickey` in tunnel.rs — one private-key
+signature per connection attempt. The remote host-key check is a public-key
+verification and does not touch the vulnerable code path at all, and nothing
+in datagrep ever performs RSA *decryption*, so a hostile SSH server never gets
+a decryption oracle. Marvin needs on the order of 10^4-10^6 timed private-key
+operations against attacker-chosen inputs; what a hostile jump host can
+actually collect here is one signature timing per TCP connect, over the
+network, on data it does not choose. Accepted as not practically exploitable
+in this shape.
+
+Mitigation available if that ever stops being true: `russh` gates this behind
+its `rsa` feature, which crates/datagrep-tunnel/Cargo.toml enables explicitly
+to match upstream defaults. Dropping the feature removes the crate from the
+graph entirely, at the cost of RSA client keys (still the default `id_rsa` on
+plenty of older machines) failing to authenticate. That is a product decision,
+not a build-config one, which is why it has not been taken unilaterally here.
+
+Review by: 2027-02-01, or immediately if `rsa` ships a fixed release, or if
+SSH tunnelling grows a code path that decrypts rather than signs.
+""" },
+]
+
+# ---------------------------------------------------------------------------
+# Licences
+# ---------------------------------------------------------------------------
+#
+# datagrep is Apache-2.0 and ships as a signed binary, so the bar is: no
+# licence that obliges us to publish source we did not write, or to relicense
+# ours. Strong copyleft (GPL/AGPL/LGPL as a sole licence) is therefore out;
+# everything below is either permissive or file-scoped copyleft.
+#
+# Crates offering `A OR B` resolve to whichever side is allowed here, so a
+# dual-licensed LGPL crate like `r-efi` (Apache-2.0 OR LGPL-2.1-or-later OR
+# MIT) is fine and needs no exception — we take the Apache side.
+[licenses]
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-1-Clause",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  # CC0 is a public-domain dedication with no express patent grant, which is
+  # why some larger orgs blanket-ban it. Reached here only via `tiny-keccak`,
+  # a hash implementation with no plausible patent story; allowed rather than
+  # excepted because the same is true of any other CC0 crate we would take.
+  "CC0-1.0",
+  # Data-only licence, currently `webpki-roots` (the Mozilla CA bundle).
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.9
+
+# MPL-2.0 is file-scoped copyleft: modifying an MPL file obliges us to publish
+# that file, not our binary. Acceptable, but scoped to the one crate that has
+# it rather than allowed workspace-wide, so that a *new* MPL dependency has to
+# be argued rather than inherited. option-ext arrives via dirs -> dirs-sys and
+# we do not modify it.
+exceptions = [
+  { crate = "option-ext", allow = ["MPL-2.0"] },
+]
+
+# Note this currently has no effect: cargo-deny counts a crate as private only
+# when it declares `publish = false`, and crates/* declares nothing, so our own
+# crates are scanned like any other. They pass on `license.workspace = true`
+# (Apache-2.0), so leaving them in the scan costs nothing and is arguably
+# better — it means a member crate that overrides its licence gets caught.
+[licenses.private]
+ignore = true
+
+# ---------------------------------------------------------------------------
+# Bans
+# ---------------------------------------------------------------------------
+[bans]
+# WARN, not deny. The lockfile genuinely carries several duplicated majors
+# (syn 2/3, digest 0.10/0.11, rand 0.9/0.10, getrandom 0.2/0.3/0.4, three
+# windows-sys lines) because the crypto and async ecosystems are mid-migration
+# and we do not control when `russh` and `mongodb` agree on a `digest`.
+# Denying it would mean a `skip` list longer than this file that nobody ever
+# prunes, which teaches the reader that skip lists are normal. Duplicate
+# versions already have a real owner: they inflate the crate count, and the
+# crate count is budgeted and gated separately by `xtask count-crates`
+# against budget.toml (P16d). This check is here to show the diff, not to
+# block on it.
+multiple-versions = "warn"
+# WARN, and it should be "deny" — a `version = "*"` on an external crate means
+# the lockfile, not the manifest, decides what we depend on, and a resolver
+# refresh can then walk us onto a new major without a diff. It is at warn only
+# because cargo-deny cannot currently tell an intra-workspace path dependency
+# apart from a real wildcard: `allow-wildcard-paths` exempts path deps only for
+# crates marked `publish = false`, and none of crates/* is, so "deny" reports
+# all ~20 `{ path = "../datagrep-api" }` lines as violations and buries the one
+# case worth seeing. Flip this to "deny" as soon as the member crates declare
+# their publish status (which is a real decision — datagrep-api is the crate a
+# third-party driver would compile against, so it may well want publishing).
+wildcards = "warn"
+allow-wildcard-paths = true
+highlight = "all"
+
+deny = [
+  # A second TLS stack. Every network driver here is rustls + ring, which
+  # gives one trust store, one set of protocol defaults, and one place to
+  # assert "a downgrade to plaintext is never silent". native-tls delegates
+  # to whatever the platform ships — SecureTransport, Schannel, or a system
+  # OpenSSL of unknown vintage — so TLS behaviour would become per-platform
+  # and untestable from the workspace, and openssl-sys would put a C build
+  # dependency back in the way of `cargo build` on a clean machine. Neither
+  # is in the tree today; this keeps it that way, since both usually arrive
+  # transitively as a default feature nobody meant to enable.
+  { crate = "native-tls", reason = "second TLS stack; rustls is the only one, see deny.toml" },
+  { crate = "openssl", reason = "second TLS stack; rustls is the only one, see deny.toml" },
+  { crate = "openssl-sys", reason = "pulls a C OpenSSL build dependency; rustls is the only TLS stack" },
+]
+
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
+#
+# Every crate in Cargo.lock today resolves to crates.io — no git dependencies,
+# no vendored registries. That is worth locking in: a git dependency is a
+# dependency whose contents can change under a moved tag, and it is exactly
+# the shape a supply-chain attack wants. Adding one should require editing
+# this file and explaining why in the diff.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
