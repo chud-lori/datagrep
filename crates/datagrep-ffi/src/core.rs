@@ -337,7 +337,13 @@ pub(crate) unsafe fn core_ref<'a>(core: *mut DatagrepCore) -> Result<&'a Arc<Cor
     if core.is_null() {
         return Err("DatagrepCore* must not be NULL".to_string());
     }
-    Ok(&(*core).0)
+    // SAFETY: `core` is non-NULL (checked above) and the caller's contract says
+    // it is a live `Box<DatagrepCore>` from `datagrep_core_new`. A use-after-free
+    // or a fabricated pointer is unreachable from here — the null check is the
+    // only half of the contract Rust can enforce. The `'a` is unbound and every
+    // caller drops the borrow before returning to C, so it cannot outlive the
+    // handle it borrows from.
+    Ok(unsafe { &(*core).0 })
 }
 
 // ---- lifecycle ---------------------------------------------------------
@@ -356,7 +362,9 @@ pub unsafe extern "C" fn datagrep_core_new(
     err_out: *mut *mut c_char,
 ) -> *mut DatagrepCore {
     guard(err_out, std::ptr::null_mut(), "datagrep_core_new", || {
-        let path = crate::ffi_util::cstr(profiles_db_path, "profiles_db_path")?;
+        // SAFETY: `profiles_db_path` is NULL or a NUL-terminated string per this
+        // function's contract; `cstr` turns NULL and non-UTF-8 into errors.
+        let path = unsafe { crate::ffi_util::cstr(profiles_db_path, "profiles_db_path") }?;
         let store = if path.is_empty() || path == ":memory:" {
             Store::open_in_memory()
         } else {
@@ -381,7 +389,11 @@ pub unsafe extern "C" fn datagrep_core_free(core: *mut DatagrepCore) {
         if core.is_null() {
             return;
         }
-        let core = Box::from_raw(core);
+        // SAFETY: non-NULL (checked) and, per the contract, a pointer from
+        // `datagrep_core_new` that has not been freed. Taking the `Box` back is
+        // what makes "freed at most once" load-bearing: a second call would be a
+        // double free, and nothing here can detect one.
+        let core = unsafe { Box::from_raw(core) };
         // Sound from any thread: the runtime is process-global and is never
         // dropped here, so this can never be "drop a runtime from inside its
         // own worker" (see `runtime.rs`).
@@ -400,7 +412,11 @@ pub unsafe extern "C" fn datagrep_core_free(core: *mut DatagrepCore) {
 pub unsafe extern "C" fn datagrep_string_free(s: *mut c_char) {
     guard_quiet((), || {
         if !s.is_null() {
-            drop(std::ffi::CString::from_raw(s));
+            // SAFETY: non-NULL (checked) and, per the contract, a pointer this
+            // library produced. Every `char*` leaving this crate comes from
+            // `to_c_string` → `CString::into_raw`, so `CString::from_raw` is the
+            // matching deallocation — one allocator, one free.
+            drop(unsafe { std::ffi::CString::from_raw(s) });
         }
     })
 }

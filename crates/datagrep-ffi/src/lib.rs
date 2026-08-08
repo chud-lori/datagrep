@@ -47,6 +47,13 @@
 //! The workspace release profile keeps `panic = "unwind"`, so this works.
 
 #![warn(rust_2018_idioms)]
+// Inside an `unsafe fn` the whole body is an unsafe context by default, so a
+// raw deref reads exactly like a safe one and nothing forces the author to say
+// why it is sound. Every entry point in this crate is an `unsafe fn`, which
+// means without this lint the audit surface is invisible. With it, each
+// individual unsafe operation must be spelled out in an `unsafe { }` block and
+// carry the `// SAFETY:` note that names the caller invariant it leans on.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod catalog;
 pub mod cells;

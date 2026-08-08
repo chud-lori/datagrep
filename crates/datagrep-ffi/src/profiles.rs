@@ -6,6 +6,18 @@
 //! [`datagrep_profiles::Store::create_profile`] — which independently refuses a
 //! secret-shaped config key anyway, so this is defence in depth rather than
 //! the only thing between a password and disk.
+//!
+//! ## The one safety contract every entry point here shares
+//!
+//! Each function below takes the same three kinds of argument, so rather than
+//! repeat the reasoning nine times: `core` must be a live handle from
+//! `datagrep_core_new`, the `*const c_char` arguments must be NULL or
+//! NUL-terminated, and `err_out` must be NULL or a writable `char*`.
+//! [`core_ref`] and [`cstr`] turn NULL and non-UTF-8 into error strings before
+//! any dereference, so the halves a caller can get wrong and Rust cannot catch
+//! are exactly two: passing a freed or fabricated `DatagrepCore*`, and passing a
+//! `char*` that is not actually NUL-terminated. The per-call `// SAFETY:` notes
+//! below name which of those a given call leans on.
 
 use std::ffi::c_char;
 
@@ -85,7 +97,9 @@ pub unsafe extern "C" fn datagrep_profiles_list_json(
         std::ptr::null_mut(),
         "datagrep_profiles_list_json",
         || {
-            let core = core_ref(core)?;
+            // SAFETY: the module-level contract — a live `DatagrepCore*` from
+            // `datagrep_core_new`, and NUL-terminated string arguments.
+            let core = unsafe { core_ref(core) }?;
             let rt = runtime()?;
             let profiles = rt
                 .block_on(core.store.list_profiles(None))
@@ -125,9 +139,11 @@ pub unsafe extern "C" fn datagrep_profiles_add(
     err_out: *mut *mut c_char,
 ) -> bool {
     guard(err_out, false, "datagrep_profiles_add", || {
-        let core = core_ref(core)?;
-        let name = cstr(name, "name")?;
-        let url = cstr(url, "url")?;
+        // SAFETY: the module-level contract — a live `DatagrepCore*` from
+        // `datagrep_core_new`, and NUL-terminated string arguments.
+        let core = unsafe { core_ref(core) }?;
+        let name = unsafe { cstr(name, "name") }?;
+        let url = unsafe { cstr(url, "url") }?;
         if name.is_empty() {
             return Err("name must not be empty".to_string());
         }
@@ -162,16 +178,18 @@ pub unsafe extern "C" fn datagrep_profiles_add_json(
     err_out: *mut *mut c_char,
 ) -> bool {
     guard(err_out, false, "datagrep_profiles_add_json", || {
-        let core = core_ref(core)?;
-        let name = cstr(name, "name")?;
-        let url = cstr(url, "url")?;
+        // SAFETY: the module-level contract — a live `DatagrepCore*` from
+        // `datagrep_core_new`, and NUL-terminated string arguments.
+        let core = unsafe { core_ref(core) }?;
+        let name = unsafe { cstr(name, "name") }?;
+        let url = unsafe { cstr(url, "url") }?;
         if name.is_empty() {
             return Err("name must not be empty".to_string());
         }
         let options = if options_json.is_null() {
             ProfilePatch::default()
         } else {
-            parse_patch(cstr(options_json, "options_json")?)?
+            parse_patch(unsafe { cstr(options_json, "options_json") }?)?
         };
         if options.name.is_some() || options.url.is_some() {
             return Err(
@@ -291,9 +309,11 @@ pub unsafe extern "C" fn datagrep_profiles_update(
     err_out: *mut *mut c_char,
 ) -> bool {
     guard(err_out, false, "datagrep_profiles_update", || {
-        let core = core_ref(core)?;
-        let name = cstr(name, "name")?;
-        let patch = parse_patch(cstr(patch_json, "patch_json")?)?;
+        // SAFETY: the module-level contract — a live `DatagrepCore*` from
+        // `datagrep_core_new`, and NUL-terminated string arguments.
+        let core = unsafe { core_ref(core) }?;
+        let name = unsafe { cstr(name, "name") }?;
+        let patch = parse_patch(unsafe { cstr(patch_json, "patch_json") }?)?;
         let rt = runtime()?;
         rt.block_on(update_profile(core, name, patch))?;
         Ok(true)
@@ -415,8 +435,10 @@ pub unsafe extern "C" fn datagrep_profiles_get_json(
         std::ptr::null_mut(),
         "datagrep_profiles_get_json",
         || {
-            let core = core_ref(core)?;
-            let name = cstr(name, "name")?;
+            // SAFETY: the module-level contract — a live `DatagrepCore*` from
+            // `datagrep_core_new`, and NUL-terminated string arguments.
+            let core = unsafe { core_ref(core) }?;
+            let name = unsafe { cstr(name, "name") }?;
             let rt = runtime()?;
             let p = rt.block_on(core.saved_profile(name))?;
 
@@ -509,8 +531,10 @@ pub unsafe extern "C" fn datagrep_connection_info_json(
         std::ptr::null_mut(),
         "datagrep_connection_info_json",
         || {
-            let core = core_ref(core)?;
-            let name = cstr(name, "name")?;
+            // SAFETY: the module-level contract — a live `DatagrepCore*` from
+            // `datagrep_core_new`, and NUL-terminated string arguments.
+            let core = unsafe { core_ref(core) }?;
+            let name = unsafe { cstr(name, "name") }?;
             let rt = runtime()?;
             let p = rt.block_on(core.saved_profile(name))?;
             let payload = json!({
@@ -569,13 +593,19 @@ pub unsafe extern "C" fn datagrep_connection_test_json(
         std::ptr::null_mut(),
         "datagrep_connection_test_json",
         || {
-            let core = core_ref(core)?;
+            // SAFETY: the module-level contract — a live `DatagrepCore*` from
+            // `datagrep_core_new`, and NUL-terminated string arguments.
+            let core = unsafe { core_ref(core) }?;
             let name = if name.is_null() {
                 ""
             } else {
-                cstr(name, "name")?
+                unsafe { cstr(name, "name") }?
             };
-            let url = if url.is_null() { "" } else { cstr(url, "url")? };
+            let url = if url.is_null() {
+                ""
+            } else {
+                unsafe { cstr(url, "url") }?
+            };
             if name.trim().is_empty() && url.trim().is_empty() {
                 return Err("pass either a profile name or a connection URL".to_string());
             }
@@ -664,8 +694,10 @@ pub unsafe extern "C" fn datagrep_profiles_remove(
     err_out: *mut *mut c_char,
 ) -> bool {
     guard(err_out, false, "datagrep_profiles_remove", || {
-        let core = core_ref(core)?;
-        let name = cstr(name, "name")?;
+        // SAFETY: the module-level contract — a live `DatagrepCore*` from
+        // `datagrep_core_new`, and NUL-terminated string arguments.
+        let core = unsafe { core_ref(core) }?;
+        let name = unsafe { cstr(name, "name") }?;
         let rt = runtime()?;
         rt.block_on(remove_profile(core, name))?;
         // The engine keeps its own copy of an opened profile and cannot be
@@ -717,20 +749,27 @@ mod tests {
     /// Call an ABI function that returns `char*`, asserting `err_out` stayed
     /// NULL, and hand back an owned `String`.
     unsafe fn take_json(p: *mut c_char, err: *mut c_char, what: &str) -> String {
-        if !err.is_null() {
-            let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-            panic!("{what} errored: {msg}");
+        // SAFETY (this helper): `p` and `err` are whatever the entry point under
+        // test just wrote — NULL, or a string it allocated with `to_c_string`.
+        unsafe {
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                panic!("{what} errored: {msg}");
+            }
+            assert!(!p.is_null(), "{what} returned NULL without an error");
+            let s = CStr::from_ptr(p).to_str().expect("utf8").to_string();
+            crate::core::datagrep_string_free(p);
+            s
         }
-        assert!(!p.is_null(), "{what} returned NULL without an error");
-        let s = CStr::from_ptr(p).to_str().expect("utf8").to_string();
-        crate::core::datagrep_string_free(p);
-        s
     }
 
     unsafe fn expect_ok(ok: bool, err: *mut c_char, what: &str) {
-        if !err.is_null() {
-            let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-            panic!("{what} errored: {msg}");
+        // SAFETY: `err` is NULL or a string the entry point under test allocated.
+        unsafe {
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                panic!("{what} errored: {msg}");
+            }
         }
         assert!(ok, "{what} returned false without an error");
     }
@@ -738,9 +777,13 @@ mod tests {
     unsafe fn expect_err(ok: bool, err: *mut c_char, what: &str) -> String {
         assert!(!ok, "{what} unexpectedly succeeded");
         assert!(!err.is_null(), "{what} failed without a message");
-        let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-        crate::core::datagrep_string_free(err);
-        msg
+        // SAFETY: non-NULL (asserted) and allocated by the entry point under
+        // test, so `datagrep_string_free` is the matching deallocation.
+        unsafe {
+            let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+            crate::core::datagrep_string_free(err);
+            msg
+        }
     }
 
     fn saved(core: *mut DatagrepCore, name: &str) -> datagrep_profiles::Profile {
@@ -753,11 +796,15 @@ mod tests {
     unsafe fn await_terminal(q: *mut crate::query::DatagrepQuery) -> String {
         for _ in 0..1500 {
             let mut err: *mut c_char = std::ptr::null_mut();
-            let status = take_json(
-                datagrep_query_status_json(q, &mut err),
-                err,
-                "datagrep_query_status_json",
-            );
+            // SAFETY: `q` is the live handle the caller just got from
+            // `datagrep_query_run` and does not free until this returns.
+            let status = unsafe {
+                take_json(
+                    datagrep_query_status_json(q, &mut err),
+                    err,
+                    "datagrep_query_status_json",
+                )
+            };
             for terminal in ["\"failed\"", "\"done\"", "\"capped\"", "\"cancelled\""] {
                 if status.contains(&format!("\"state\":{terminal}")) {
                     return status;

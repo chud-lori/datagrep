@@ -197,7 +197,12 @@ pub(crate) unsafe fn query_ref<'a>(q: *mut DatagrepQuery) -> Result<&'a Datagrep
     if q.is_null() {
         return Err("DatagrepQuery* must not be NULL".to_string());
     }
-    Ok(&*q)
+    // SAFETY: `q` is non-NULL (checked above) and, per the contract, a live
+    // `Box<DatagrepQuery>` from `datagrep_query_run`. The borrow is shared and
+    // every field behind it is either immutable or a `Mutex`, so handing out
+    // several `&DatagrepQuery` at once — which the C side can do freely, since
+    // it may call from any thread — is sound.
+    Ok(unsafe { &*q })
 }
 
 // ---- run ---------------------------------------------------------------
@@ -215,9 +220,14 @@ pub unsafe extern "C" fn datagrep_query_run(
     err_out: *mut *mut c_char,
 ) -> *mut DatagrepQuery {
     guard(err_out, std::ptr::null_mut(), "datagrep_query_run", || {
-        let core = core_ref(core)?.clone();
-        let profile = cstr(profile, "profile")?.to_string();
-        let sql = cstr(sql, "sql")?.to_string();
+        // SAFETY: the contract above — a live core handle and NUL-terminated
+        // `profile`/`sql`. Both strings are copied to owned `String`s right here
+        // because they are moved into a task that outlives the call; borrowing
+        // C memory across that boundary would be a use-after-free the instant
+        // Swift released the argument.
+        let core = unsafe { core_ref(core) }?.clone();
+        let profile = unsafe { cstr(profile, "profile") }?.to_string();
+        let sql = unsafe { cstr(sql, "sql") }?.to_string();
         if sql.trim().is_empty() {
             return Err("sql must not be empty".to_string());
         }
@@ -553,7 +563,12 @@ pub unsafe extern "C" fn datagrep_query_free(q: *mut DatagrepQuery) {
         if q.is_null() {
             return;
         }
-        let q = Box::from_raw(q);
+        // SAFETY: non-NULL (checked) and, per the contract, a pointer from
+        // `datagrep_query_run` not yet freed. Reclaiming the `Box` here is also
+        // what makes the header's ordering rule real: any `DatagrepRows` built
+        // from this query borrows buffers the query keeps alive, so freeing the
+        // query first would dangle them.
+        let q = unsafe { Box::from_raw(q) };
         // Detach the callback before anything else: the Swift-owned `ctx` may
         // be freed the instant this returns, and firing into it would be a
         // use-after-free.
@@ -602,10 +617,18 @@ pub unsafe extern "C" fn datagrep_query_cancel(
     outcome_json_out: *mut *mut c_char,
 ) {
     guard_quiet((), || {
+        // Null the out-parameter first: the caller must be able to treat a
+        // non-NULL result as "there is a report to free" even if we bail out
+        // below, and an uninitialised slot would fail that test at random.
+        // SAFETY: non-NULL (checked) and writable per the contract.
         if !outcome_json_out.is_null() {
-            *outcome_json_out = std::ptr::null_mut();
+            unsafe { *outcome_json_out = std::ptr::null_mut() };
         }
-        let Ok(q) = query_ref(q) else { return };
+        // SAFETY: `q` carries this function's contract — from `datagrep_query_run`,
+        // not yet freed.
+        let Ok(q) = (unsafe { query_ref(q) }) else {
+            return;
+        };
 
         let (qid, already, report) = {
             let mut inner = q.shared.lock();
@@ -650,7 +673,10 @@ pub unsafe extern "C" fn datagrep_query_cancel(
 
         if !outcome_json_out.is_null() {
             if let Ok(text) = serde_json::to_string(&report) {
-                *outcome_json_out = to_c_string(text);
+                // SAFETY: non-NULL (checked) and writable per the contract. The
+                // slot still holds the NULL written at the top of this call, so
+                // overwriting it leaks nothing.
+                unsafe { *outcome_json_out = to_c_string(text) };
             }
         }
     })
@@ -693,7 +719,9 @@ pub unsafe extern "C" fn datagrep_query_status_json(
         std::ptr::null_mut(),
         "datagrep_query_status_json",
         || {
-            let q = query_ref(q)?;
+            // SAFETY: `q` is from `datagrep_query_run` and unfreed per the
+            // contract; `query_ref` turns NULL into an error string.
+            let q = unsafe { query_ref(q) }?;
             let inner = q.shared.lock();
             let elapsed_ms = q.shared.started.elapsed().as_millis() as u64;
 
@@ -769,7 +797,13 @@ pub unsafe extern "C" fn datagrep_query_on_progress(
     ctx: *mut c_void,
 ) {
     guard_quiet((), || {
-        let Ok(q) = query_ref(q) else { return };
+        // SAFETY: `q` is from `datagrep_query_run` and unfreed per the contract.
+        // `ctx` is stored, never dereferenced here — keeping it alive while the
+        // callback stays attached is the caller's half of the bargain, and
+        // `datagrep_query_free` detaches before it can be missed.
+        let Ok(q) = (unsafe { query_ref(q) }) else {
+            return;
+        };
         let mut hook = q
             .shared
             .progress
