@@ -118,6 +118,20 @@ the whole catalog on connect.
 The performance budget is machine-readable in [`budget.toml`](budget.toml) and
 enforced by [`ci/gates.sh`](ci/gates.sh).
 
+## Security
+
+A database client holds live credentials, so this is engineered, not assumed:
+secrets live in the OS keychain and profiles store only a `keychain:` reference
+(exports have no field that can hold a secret), `cargo audit` + `cargo deny`
+gate every PR and run weekly against the unchanged tree, and every FFI entry
+point contains panics behind `catch_unwind`. Two limits worth knowing up front:
+PostgreSQL and MySQL connections are **not** TLS-encrypted yet — use the
+built-in SSH tunnel across untrusted networks — and an imported profile bundle
+can carry `exec:` secret references, so read one before importing it.
+
+The full threat model, the open gaps, and how to report a vulnerability
+privately: [SECURITY.md](SECURITY.md).
+
 ## Layout
 
 ```
