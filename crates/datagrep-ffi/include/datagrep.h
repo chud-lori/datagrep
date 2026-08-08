@@ -15,10 +15,63 @@ void     datagrep_core_free(DatagrepCore*);
 void     datagrep_string_free(char*);            // frees any char* this API returned
 
 // ---- profiles --------------------------------------------------------
-// Returns JSON: [{"name":..,"driver":..,"env":..,"has_secret":bool}, ...]
+// Returns JSON:
+// [{"name":..,"driver":..,"env":"dev"|"staging"|"prod","read_only":bool,
+//   "has_secret":bool}, ...]
+// env tints prod rows; read_only badges guarded rows — no per-row round trip.
 char* datagrep_profiles_list_json(DatagrepCore*, char** err_out);
+// Adds with default settings (env=dev, writeable, no limits). Use
+// datagrep_profiles_add_json to set env / safety settings at creation time.
 bool  datagrep_profiles_add(DatagrepCore*, const char* name, const char* url, char** err_out);
+// datagrep_profiles_add with initial settings. options_json is NULL, "", or any
+// subset of:
+// {"env":"dev"|"staging"|"prod","read_only":bool,"confirm_writes":bool,
+//  "auto_limit":i64|null,"idle_timeout_s":i64|null,"color":str|null}
+// This is how a profile is born prod (env drives the design 3.8 prod
+// guardrails: red chrome, confirm-on-write).
+bool  datagrep_profiles_add_json(DatagrepCore*, const char* name, const char* url,
+                                 const char* options_json, char** err_out);
+// Edit an existing profile, keyed by its current name. patch_json is any
+// subset of:
+// {"name":str,"url":str,"env":"dev"|"staging"|"prod","read_only":bool,
+//  "confirm_writes":bool,"auto_limit":i64|null,"idle_timeout_s":i64|null,
+//  "color":str|null}
+// Absent key = leave alone; JSON null = clear (auto_limit/idle_timeout_s/
+// color only). Unknown keys are errors, not ignored. Renaming keeps the
+// profile id and therefore its keychain secret. A new "url" is re-parsed and
+// any inline password is re-split into the keychain exactly as _add does; a
+// URL without a password keeps the stored secret (unless the engine changed).
+// The edit applies to the NEXT query — the stale pool is closed here.
+bool  datagrep_profiles_update(DatagrepCore*, const char* name,
+                               const char* patch_json, char** err_out);
+// Full detail for one profile — what an edit dialog populates from. JSON:
+// {"name":str,"driver":str,"env":"dev"|"staging"|"prod","read_only":bool,
+//  "confirm_writes":bool,"auto_limit":i64|null,"idle_timeout_s":i64|null,
+//  "color":str|null,"folder_id":str|null,"has_secret":bool,
+//  "secret":"••••"|null,"config":{key:str|num|bool,...},
+//  "last_used_at":i64|null}
+// The secret VALUE never crosses this ABI: "secret" is the mask string when
+// one is stored in the keychain, null otherwise, and "config" is the
+// persisted secretless connection config (secret-schema keys re-masked).
+char* datagrep_profiles_get_json(DatagrepCore*, const char* name, char** err_out);
 bool  datagrep_profiles_remove(DatagrepCore*, const char* name, char** err_out);
+
+// Read-only truth for one profile (design 3.8: say WHICH protection is in
+// force, never imply server enforcement that isn't there). Returns JSON:
+// {"profile":str,"driver":str,"env":"dev"|"staging"|"prod",
+//  "read_only": null                                    // profile is writeable
+//             | {"enforcement":"server"|"client"|"none",
+//                "server_confirmed":bool}}
+// "server" - a live connection accepted a server-side read-only session (PG/
+//   MySQL SET SESSION ... READ ONLY, SQLite PRAGMA query_only); only then is
+//   server_confirmed true.
+// "client" - only this process blocks writes: statements classified Write/
+//   Ddl/Admin are refused before dispatch. Redis has no server-side mode, and
+//   a profile that has never connected is also at most "client". A client-only
+//   badge MUST say so - it is not the server protecting you.
+// "none"   - no enforcement of any kind is available.
+// The same object appears as "read_only" in datagrep_query_status_json.
+char* datagrep_connection_info_json(DatagrepCore*, const char* name, char** err_out);
 
 // ---- catalog (lazy, ONE level per call) -------------------------------
 // path_json is a JSON array of path segments, e.g. ["main"] or [] for roots.
@@ -58,8 +111,14 @@ void datagrep_query_cancel(DatagrepQuery*, char** outcome_json_out);
 
 // Status snapshot as JSON:
 // {"state":"streaming"|"parked"|"capped"|"done"|"cancelled"|"failed",
-//  "rows_loaded":u64,"elapsed_ms":u64,"error":string|null,
+//  "rows_loaded":u64,"affected_rows":u64|null,"elapsed_ms":u64,
+//  "error":string|null,
+//  "read_only": null | {"enforcement":"server"|"client"|"none",
+//                       "server_confirmed":bool},   // see datagrep_connection_info_json
 //  "columns":[{"name":..,"type":..}],"total_known":bool}
+// A statement that a read-only profile refuses (Write/Ddl/Admin, classified
+// client-side before dispatch) surfaces as state="failed" with an error
+// naming the profile — it never reaches the server.
 char* datagrep_query_status_json(DatagrepQuery*, char** err_out);
 
 // Registers a callback fired when the query makes progress. Called from a

@@ -226,6 +226,34 @@ mod tests {
         core.shutdown().await;
     }
 
+    /// **The soft row cap never touches the export path.** The 500k cap in
+    /// the policy above exists for the grid's result store; export bypasses
+    /// the store entirely, so a 600k-row export delivers every row — exactly,
+    /// not "roughly", and never silently clipped at the cap.
+    #[tokio::test]
+    async fn export_ignores_the_soft_row_cap_and_delivers_every_row() {
+        let (core, id, _counters) = core_with(MockPlan {
+            batches: Some(1_200),
+            rows_per_batch: 500,
+            ..MockPlan::default()
+        })
+        .await;
+
+        let mut sink = CountingSink::default();
+        let stats = core
+            .run_export(id, Request::native("select * from events"), &mut sink)
+            .await
+            .expect("export");
+
+        assert_eq!(
+            stats.rows, 600_000,
+            "export was capped — it must deliver every row"
+        );
+        assert_eq!(sink.rows, 600_000);
+        assert!(!stats.stopped);
+        core.shutdown().await;
+    }
+
     /// A sink can stop the export early (deadline, Ctrl-C); the cursor is
     /// closed and the totals say so honestly.
     #[tokio::test]

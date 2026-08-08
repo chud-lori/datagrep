@@ -19,6 +19,7 @@ use datagrep_api::{
 
 use crate::connection::PgConnection;
 use crate::error::TlsMode;
+use crate::pool::PgPool;
 
 /// Capability flags this driver's baseline (pre-handshake) [`Capabilities`]
 /// reports. Note: the ticket's requested flag list names six flags
@@ -251,7 +252,14 @@ impl Driver for PostgresDriver {
             details: Vec::new(),
         };
 
-        Ok(Box::new(PgConnection::new(client, server_info)))
+        // The config is kept alongside the primary session so the connection
+        // can dial an *additional* identical session on demand: a cursor or
+        // an interactive transaction pins the socket it runs on, and catalog
+        // browsing or the next query must not queue behind it (see
+        // `pool.rs`). Same host/user/database/application_name, so a pooled
+        // session is indistinguishable from the first one.
+        let pool = PgPool::with_primary(pg_cfg, timeout, client);
+        Ok(Box::new(PgConnection::new(pool, server_info)))
     }
 }
 

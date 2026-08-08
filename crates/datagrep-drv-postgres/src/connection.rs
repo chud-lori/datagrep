@@ -1,11 +1,38 @@
-//! [`PgConnection`] (ticket item 2): wraps a `tokio_postgres::Client` plus
-//! the spawned connection task.
+//! [`PgConnection`] (ticket item 2): one *logical* connection to a Postgres
+//! server, backed by a small [`crate::pool::PgPool`] of physical sessions.
+//!
+//! # Why a logical connection is not a single socket
+//!
+//! A streaming cursor and an interactive transaction both **pin** the socket
+//! they run on: `tokio_postgres::Transaction<'a>` borrows `&'a mut Client`,
+//! and a portal only exists inside a transaction (design §3.5 — "a pool that
+//! silently moves a BEGIN to a different socket is a correctness bug").
+//!
+//! Earlier this driver drew the wrong conclusion from that and made *every*
+//! operation queue behind the pinned socket: `catalog()` and the next
+//! `execute()` awaited the same `Mutex<Client>` with no timeout. Holding an
+//! open cursor and doing anything else — the GUI's "results grid open, click
+//! the schema tree" — hung forever with the server sitting `idle in
+//! transaction` (TEST-REPORT.md F2).
+//!
+//! What actually follows from the constraint is the opposite: a cursor pins
+//! *its* session, so everything else must use a different one. Hence:
+//!
+//! * a cursor gives its session back the moment its portal is drained, not
+//!   when the handle is dropped ([`crate::cursor::PgCursor`]);
+//! * anything that needs the server while a session is pinned acquires
+//!   another from the pool, dialled lazily with the same config;
+//! * at the pool's cap the wait is bounded and ends in
+//!   `DbError::ResourceExhausted` naming what holds the sessions — never a
+//!   silent freeze.
+//!
+//! The full reasoning, including the server-side lock angle, is in the
+//! `pool.rs` module docs.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::{oneshot, Mutex};
-use tokio_postgres::Client;
+use tokio::sync::oneshot;
 
 use datagrep_api::caps::Capabilities;
 use datagrep_api::catalog::Catalog;
@@ -19,8 +46,9 @@ use datagrep_api::value::Value;
 use crate::actor::{self, ActorCmd, ExecOutcome};
 use crate::canceller::PgCanceller;
 use crate::catalog::PgCatalog;
-use crate::cursor::{AckCursor, PgCursor};
+use crate::cursor::{AckCursor, PgCursor, SessionOwnership};
 use crate::error::map_pg_error;
+use crate::pool::PgPool;
 use crate::sql;
 use crate::transaction::PgTransaction;
 use crate::value::PgParam;
@@ -39,25 +67,13 @@ fn request_kind(req: &Request) -> &'static str {
 }
 
 pub struct PgConnection {
-    client: Arc<Mutex<Option<Client>>>,
+    pool: Arc<PgPool>,
     server_info: ServerInfo,
-    // Extracted eagerly (`Client::cancel_token` is a cheap, lock-free `&self`
-    // call) because `Connection::canceller` is *not* async — there is no way
-    // to `.await` the shared client mutex from inside it, and `CancelToken`
-    // is `Clone`/self-contained (process id + secret key), so grabbing one
-    // copy up front and cloning it per `canceller()` call is both correct
-    // and avoids ever blocking that method.
-    cancel_token: tokio_postgres::CancelToken,
 }
 
 impl PgConnection {
-    pub fn new(client: Client, server_info: ServerInfo) -> Self {
-        let cancel_token = client.cancel_token();
-        Self {
-            client: Arc::new(Mutex::new(Some(client))),
-            server_info,
-            cancel_token,
-        }
+    pub fn new(pool: Arc<PgPool>, server_info: ServerInfo) -> Self {
+        Self { pool, server_info }
     }
 
     /// Compile a `Request` down to `(sql, params)`. `Native` text passes
@@ -95,21 +111,21 @@ impl PgConnection {
         text: String,
         params: Vec<Value>,
     ) -> Result<Box<dyn Cursor>, DbError> {
-        let guard = self.client.lock().await;
-        let client = guard.as_ref().ok_or(DbError::Closed)?;
-        let stmt = client.prepare(&text).await.map_err(map_pg_error)?;
+        // One session for the whole call: prepare on it, and — if this turns
+        // out to be SELECT-ish — hand that same session to the cursor's
+        // actor. Preparing on one socket and binding on another would be
+        // both wasteful and, for temp tables/search_path, wrong.
+        let session = self.pool.acquire().await?;
+        let stmt = session.prepare(&text).await.map_err(map_pg_error)?;
         let is_select_ish = !stmt.columns().is_empty();
-        drop(guard);
 
         if !is_select_ish {
-            let guard = self.client.lock().await;
-            let client = guard.as_ref().ok_or(DbError::Closed)?;
             let bound: Vec<PgParam<'_>> = params.iter().map(PgParam).collect();
             let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = bound
                 .iter()
                 .map(|p| p as &(dyn tokio_postgres::types::ToSql + Sync))
                 .collect();
-            let affected = client.execute(&stmt, &refs).await.map_err(map_pg_error)?;
+            let affected = session.execute(&stmt, &refs).await.map_err(map_pg_error)?;
             return Ok(Box::new(AckCursor::new(affected)));
         }
 
@@ -124,8 +140,8 @@ impl PgConnection {
         // the statement's command tag, which `Statement::columns()` alone
         // doesn't give us. Documented as a known limitation in the crate
         // report rather than papered over.
-        let owned_guard = self.client.clone().lock_owned().await;
-        let cmd_tx = actor::spawn(owned_guard, true, None);
+        drop(stmt);
+        let cmd_tx = actor::spawn(session.into_guard(), true, None);
         let (reply_tx, reply_rx) = oneshot::channel();
         cmd_tx
             .send(ActorCmd::Execute {
@@ -136,10 +152,20 @@ impl PgConnection {
             .await
             .map_err(|_| DbError::Closed)?;
         match reply_rx.await.map_err(|_| DbError::Closed)?? {
-            ExecOutcome::Ack { affected } => Ok(Box::new(AckCursor::new(affected))),
-            ExecOutcome::Cursor { portal_id, schema } => {
-                Ok(Box::new(PgCursor::new(cmd_tx, portal_id, schema)))
+            ExecOutcome::Ack { affected } => {
+                // No portal was bound, so nothing will ever release this
+                // actor's session for us — end its transaction now instead of
+                // leaving a socket pinned until the task happens to be
+                // scheduled after `cmd_tx` drops.
+                Self::rollback(&cmd_tx).await;
+                Ok(Box::new(AckCursor::new(affected)))
             }
+            ExecOutcome::Cursor { portal_id, schema } => Ok(Box::new(PgCursor::new(
+                cmd_tx,
+                portal_id,
+                schema,
+                SessionOwnership::Owned,
+            ))),
         }
     }
 
@@ -147,8 +173,7 @@ impl PgConnection {
         if batch.mutations.is_empty() {
             return Ok(Box::new(AckCursor::new(0)));
         }
-        let owned_guard = self.client.clone().lock_owned().await;
-        let cmd_tx = actor::spawn(owned_guard, false, None);
+        let cmd_tx = actor::spawn(self.pool.acquire().await?.into_guard(), false, None);
 
         let mut total_affected = 0u64;
         for m in &batch.mutations {
@@ -229,9 +254,8 @@ impl Connection for PgConnection {
     }
 
     async fn ping(&self) -> Result<(), DbError> {
-        let guard = self.client.lock().await;
-        let client = guard.as_ref().ok_or(DbError::Closed)?;
-        client
+        let session = self.pool.acquire().await?;
+        session
             .simple_query("SELECT 1")
             .await
             .map_err(map_pg_error)?;
@@ -249,41 +273,46 @@ impl Connection for PgConnection {
     }
 
     fn canceller(&self) -> Arc<dyn Canceller> {
-        Arc::new(PgCanceller::new(self.cancel_token.clone()))
+        // A logical connection can own several physical sessions, so "cancel
+        // this connection's work" means cancelling each of them; the pool is
+        // snapshotted at `cancel()` time so sessions dialled after this call
+        // are covered too.
+        Arc::new(PgCanceller::new(self.pool.clone()))
     }
 
     fn catalog(&self) -> Arc<dyn Catalog> {
-        Arc::new(PgCatalog::new(self.client.clone()))
+        // Deliberately the *pool*, not a pinned client: catalog browsing must
+        // keep working while a result cursor is open (that interleaving is
+        // exactly what used to deadlock).
+        Arc::new(PgCatalog::new(self.pool.clone()))
     }
 
     async fn begin(&self, opts: TxOpts) -> Result<Box<dyn Transaction>, DbError> {
-        let owned_guard = self.client.clone().lock_owned().await;
-        let cmd_tx = actor::spawn(owned_guard, opts.read_only, opts.isolation);
+        let cmd_tx = actor::spawn(
+            self.pool.acquire().await?.into_guard(),
+            opts.read_only,
+            opts.isolation,
+        );
         Ok(Box::new(PgTransaction::new(cmd_tx)))
     }
 
     async fn set_read_only(&self, on: bool) -> Result<Enforcement, DbError> {
-        let guard = self.client.lock().await;
-        let client = guard.as_ref().ok_or(DbError::Closed)?;
-        let sql = if on {
-            "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY"
-        } else {
-            "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE"
-        };
-        client.batch_execute(sql).await.map_err(map_pg_error)?;
+        // Recorded on the pool, not fired once at one socket: every session
+        // this connection owns — including ones dialled later, and ones
+        // pinned by a cursor right now — reconciles to this before it is
+        // handed out again.
+        self.pool.set_read_only(on).await?;
         Ok(Enforcement::Server)
     }
 
     async fn close(&self) -> Result<(), DbError> {
-        // Idempotent: `.take()` on an already-`None` slot is a no-op. Taking
-        // the `Client` (rather than just dropping our `Arc`) drops its last
-        // strong reference here so the background connection task's channel
-        // closes and the socket shuts down promptly, and every subsequent
-        // operation on this connection (which all go through the same
-        // `Arc<Mutex<Option<Client>>>`) sees `None` and returns
-        // `DbError::Closed`, per the trait's contract.
-        let mut guard = self.client.lock().await;
-        guard.take();
+        // Idempotent, and deliberately non-blocking: idle sessions have their
+        // `Client` dropped here so the sockets shut down promptly, a session
+        // still pinned by a live cursor is released by its own actor, and
+        // every subsequent operation sees the closed flag and returns
+        // `DbError::Closed`, per the trait's contract. Waiting for a pinned
+        // session here would re-create the hang this design removes.
+        self.pool.close();
         Ok(())
     }
 }

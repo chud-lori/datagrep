@@ -3,14 +3,21 @@ name: CI
 # The Tier-1 gate (design doc §6): every PR, hardware-independent,
 # deterministic, <8 min. Runs ci/gates.sh verbatim — the same script
 # contributors run locally, so "green in CI" and "green locally" mean
-# the same thing. See ci/README.md for the Tier-1 vs Tier-2 split; the
-# nightly Tier-2 real-hardware fleet is not wired up here (tracked as a
-# TODO in ci/README.md).
+# the same thing. gates.sh covers cargo fmt --check, clippy -D warnings,
+# cargo test --workspace, the §5.2 anti-pattern greps, and the budget.toml
+# size/crate-count checks.
+#
+# Runner policy (learned the hard way on chud-lori/tangi): never macos-13.
+# The free-tier Intel macOS pool is starved (10+ min queue while everything
+# else finished in seconds) and is on GitHub's deprecation path. All macOS
+# work runs on macos-14 (Apple silicon); release.yml cross-compiles x86_64
+# from there via rustup targets.
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -18,12 +25,8 @@ concurrency:
 
 jobs:
   gates:
-    name: gates.sh (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    name: gates.sh (linux)
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,8 +46,29 @@ jobs:
             .
             xtask
 
-      - name: Shellcheck ci/gates.sh
-        run: shellcheck ci/gates.sh
+      - name: Shellcheck shell entry points
+        run: shellcheck ci/gates.sh install.sh
 
       - name: Run Tier-1 gates
         run: ./ci/gates.sh
+
+  # Builds the macOS app with the default stub FFI (synthetic data, no cargo
+  # involved) purely to catch Swift-side breakage on every push while staying
+  # fast. The real-FFI link (libdatagrep_ffi.a) is exercised by release.yml.
+  macos-app:
+    name: swift build (macos-14)
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache SwiftPM build
+        uses: actions/cache@v4
+        with:
+          path: ui/macos/.build
+          key: swiftpm-macos14-${{ hashFiles('ui/macos/Package.swift') }}
+          restore-keys: |
+            swiftpm-macos14-
+
+      - name: Build app (stub FFI)
+        run: cd ui/macos && swift build -c release

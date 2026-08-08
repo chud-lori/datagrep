@@ -82,7 +82,12 @@ impl Rendered {
         match cell {
             CellText::Null => Rendered::Null,
             CellText::Absent => Rendered::Absent,
-            CellText::Text(s) => Rendered::Text(s.clone()),
+            other => Rendered::Text(
+                other
+                    .display_text()
+                    .map(|t| t.into_owned())
+                    .unwrap_or_default(),
+            ),
         }
     }
 

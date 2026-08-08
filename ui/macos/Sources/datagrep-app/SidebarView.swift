@@ -33,6 +33,41 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        // §3.8 layer 2. Full width, a word, and an icon — the Sequel Ace
+        // lesson in the reference study §8 is that shrinking this to a dot
+        // produced sustained backlash, so it is a band and not a tint.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if model.isProd, !model.activeProfile.isEmpty {
+                VStack(spacing: 0) {
+                    ProdBanner(name: model.activeProfile)
+                    if !model.prodIsStored {
+                        Text(
+                            "Marked in this window only — this engine build cannot store an environment on the profile, so the CLI does not see it."
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.ultraThinMaterial)
+                    }
+                }
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        // ⌘E on the selected connection. A zero-size button rather than a menu
+        // item because the main menu is built in AppDelegate; the shortcut is
+        // live for as long as the window is.
+        .background {
+            Button("Edit Connection") { model.editActiveConnection() }
+                .keyboardShortcut("e", modifiers: .command)
+                .disabled(model.activeProfile.isEmpty)
+                .hidden()
+        }
+        .sheet(item: $model.editDraft) { draft in
+            ConnectionEditorSheet(model: model, draft: draft)
+        }
+        .animation(.smooth(duration: 0.2), value: model.isProd)
         // Real window vibrancy. `.listStyle(.sidebar)` alone gives the sidebar
         // *metrics*, not the material — hosted in an NSHostingView it renders
         // as flat window gray without this.
@@ -125,8 +160,25 @@ private struct NodeLabel: View {
         !node.isProfile && model.schemaTarget?.cacheKey == node.schemaCacheKey
     }
 
+    /// The connection's own facts, asked of the model so the row and the query
+    /// path can never disagree about whether this thing is protected.
+    private var safety: ConnectionSafety? {
+        node.isProfile ? model.safety(for: node.name) : nil
+    }
+
     var body: some View {
         HStack(spacing: 7) {
+            if let safety, safety.isProd || safety.color != nil {
+                // A solid bar down the leading edge. Wide enough to see at a
+                // glance, and it does not depend on the row being selected.
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(
+                        safety.isProd
+                            ? Color(nsColor: .systemRed)
+                            : (ConnectionColor.color(safety.color) ?? Color.clear)
+                    )
+                    .frame(width: 3, height: 17)
+            }
             if node.isProfile {
                 EngineIcon(node.driver, size: 15)
             } else {
@@ -144,13 +196,28 @@ private struct NodeLabel: View {
 
             Spacer(minLength: 4)
 
-            if node.isProfile && model.prodMarked.contains(node.name) {
-                Text("PROD")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(Color.red))
+            // The pencil only appears under the pointer, so the resting row
+            // stays quiet — but the lock and the PROD marker never hide.
+            if node.isProfile, hovering {
+                Button {
+                    model.editConnection(named: node.name)
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Edit this connection  ⌘E")
+                .transition(.opacity)
+            }
+
+            if let safety, safety.readOnly {
+                ReadOnlyBadge(level: safety.enforcement, compact: true)
+            }
+            if let safety, safety.isProd {
+                ProdRowMarker()
             }
             if let badge = node.badge {
                 Text(badge)
@@ -173,7 +240,7 @@ private struct NodeLabel: View {
                         : (hovering ? Color.secondary.opacity(0.11) : Color.clear))
         )
         .contentShape(Rectangle())
-        .onHover { h in hovering = h }
+        .onHover { h in withAnimation(.smooth(duration: 0.12)) { hovering = h } }
         .onTapGesture { model.select(node) }
         .onTapGesture(count: 2) {
             if node.isPreviewable { model.preview(node) }
@@ -181,11 +248,19 @@ private struct NodeLabel: View {
         .contextMenu {
             if node.isProfile {
                 Button("Set as Active Connection") { model.selectProfile(node.name) }
+                Button("Edit Connection…") { model.editConnection(named: node.name) }
+                    .keyboardShortcut("e", modifiers: .command)
+                Divider()
                 Toggle(
                     "Treat as Production",
                     isOn: Binding(
                         get: { model.prodMarked.contains(node.name) },
-                        set: { _ in model.toggleProdMark(node.name) }))
+                        set: { _ in model.toggleProdMark(node.name) })
+                )
+                .help(
+                    model.prodIsStored
+                        ? "Stores env = prod on the connection itself, so the CLI sees it too"
+                        : "Marked in this window only — this engine build cannot store an environment on the profile")
                 Divider()
                 Button("Remove Connection…") {
                     model.selectProfile(node.name)

@@ -50,6 +50,11 @@ pub(crate) struct RunOutcome {
     /// Affected-row count from an `Ack`-shaped statement (INSERT/UPDATE/DDL),
     /// read from the store snapshot (`StoreState::affected`).
     pub affected: Option<u64>,
+    /// True when the stream stopped at the soft row cap — the result on
+    /// screen is (or may be) incomplete. `query` turns this into a non-zero
+    /// exit and a stderr warning: silently truncated output is the one thing
+    /// a database client must never produce.
+    pub capped: bool,
 }
 
 /// Drive one already-started query (`qid`) to completion, streaming rows into
@@ -84,12 +89,23 @@ async fn stream_result_inner(
 ) -> Result<RunOutcome, CliError> {
     let mut events = ctx.core.subscribe_events();
     let started_at = std::time::Instant::now();
+    // The shape the cursor declared at execute time: column names even for a
+    // zero-row result (the header row must not depend on data arriving), and
+    // which columns carry raw JSON (`json`/`jsonb`) so the JSON formats can
+    // pass them through as nested JSON instead of an escaped string.
+    let (shape_cols, json_cols) = ctx
+        .core
+        .queries()
+        .store(qid)
+        .map(|s| shape_columns(s.shape()))
+        .unwrap_or_default();
     let mut next = 0u64;
     let mut rows_shown = 0u64;
     let mut started = false;
-    let mut columns: Vec<String> = Vec::new();
+    let mut columns: Vec<String> = shape_cols;
     let mut note: Option<String> = None;
     let mut cancelled = false;
+    let mut capped = false;
 
     loop {
         if let Some(dl) = deadline {
@@ -111,11 +127,15 @@ async fn stream_result_inner(
 
         for slice in &window.slices {
             if !started {
-                columns = derive_columns(slice);
+                if columns.is_empty() {
+                    // `Shape::Unknown` narrowed by its first chunk: fall back
+                    // to the slice's own (possibly synthesized) column names.
+                    columns = derive_columns(slice);
+                }
                 sink.start(&columns)?;
                 started = true;
             }
-            let mut rows = slice_to_rows(slice);
+            let mut rows = slice_to_rows(slice, &json_cols);
             // `--limit`/`@limit` must cap what actually reaches the sink, not
             // just when we stop asking for more: a single window (up to
             // `FETCH_WINDOW` rows) can already exceed a small `--limit`, so
@@ -151,6 +171,7 @@ async fn stream_result_inner(
 
         match window.status {
             WindowStatus::Capped => {
+                capped = true;
                 note = Some("stopped at the soft row cap".to_string());
                 break;
             }
@@ -200,7 +221,30 @@ async fn stream_result_inner(
         rows_shown,
         cancelled,
         affected,
+        capped,
     })
+}
+
+/// Column names — and which columns carry raw JSON — from the shape the
+/// cursor declared, before any row arrives.
+fn shape_columns(shape: &datagrep_api::shape::Shape) -> (Vec<String>, Vec<bool>) {
+    use datagrep_api::shape::{LogicalType, Shape};
+    match shape {
+        Shape::Table(schema) => (
+            schema.fields.iter().map(|f| f.name.to_string()).collect(),
+            schema
+                .fields
+                .iter()
+                .map(|f| f.logical == LogicalType::Json)
+                .collect(),
+        ),
+        Shape::Documents { .. } => (vec!["doc".to_string()], vec![false]),
+        Shape::Pairs { .. } => (
+            vec!["key".to_string(), "value".to_string()],
+            vec![false, false],
+        ),
+        _ => (Vec::new(), Vec::new()),
+    }
 }
 
 /// Wait for the next event about `qid` (or the deadline, or the broadcast
@@ -249,7 +293,7 @@ fn derive_columns(slice: &WindowSlice) -> Vec<String> {
     }
 }
 
-fn slice_to_rows(slice: &WindowSlice) -> Vec<Row> {
+fn slice_to_rows(slice: &WindowSlice, json_cols: &[bool]) -> Vec<Row> {
     match slice {
         WindowSlice::Table {
             batch, offset, len, ..
@@ -257,7 +301,19 @@ fn slice_to_rows(slice: &WindowSlice) -> Vec<Row> {
             .map(|r| {
                 (0..batch.num_columns())
                     .map(|c| {
-                        CellText::from_value(&arrow_cell_to_value(batch.column(c).as_ref(), r))
+                        let value = arrow_cell_to_value(batch.column(c).as_ref(), r);
+                        // The Arrow lane stores json/jsonb as plain Utf8 (its
+                        // raw text); the declared schema is what remembers the
+                        // column is JSON. Restore that identity here so the
+                        // JSON formats can nest it instead of string-escaping.
+                        match value {
+                            datagrep_api::Value::Str(s)
+                                if json_cols.get(c).copied().unwrap_or(false) =>
+                            {
+                                CellText::Json(s.to_string())
+                            }
+                            other => CellText::from_value(&other),
+                        }
                     })
                     .collect()
             })
@@ -291,7 +347,9 @@ fn doc_cell(v: &datagrep_api::Value) -> CellText {
         datagrep_api::Value::Null => CellText::Null,
         datagrep_api::Value::Absent => CellText::Absent,
         other => match serde_json::to_string(&crate::value_text::value_to_json(other)) {
-            Ok(json) => CellText::Text(json),
+            // `Json`, not `Text`: the JSON formats then emit the document as
+            // nested JSON rather than one big escaped string.
+            Ok(json) => CellText::Json(json),
             Err(_) => CellText::Text(String::from("<unserializable document>")),
         },
     }

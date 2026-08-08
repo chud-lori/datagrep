@@ -93,6 +93,32 @@ async fn bulk(index: &str, docs: &[serde_json::Value]) {
         .await;
 }
 
+/// Seed documents written as raw JSON text, so `_source`'s key order on the
+/// wire is exactly what the test wrote. `serde_json::json!` would alphabetize
+/// it (its `Map` is a `BTreeMap` without the crate-wide `preserve_order`
+/// feature), which would make a key-order assertion test nothing at all.
+async fn bulk_raw(index: &str, docs: &[&str]) {
+    let mut ndjson = String::new();
+    for doc in docs {
+        ndjson.push_str(&serde_json::json!({ "index": { "_index": index } }).to_string());
+        ndjson.push('\n');
+        ndjson.push_str(doc);
+        ndjson.push('\n');
+    }
+    let resp = seeder()
+        .post(format!("{}/_bulk", es_url()))
+        .header("content-type", "application/x-ndjson")
+        .body(ndjson)
+        .send()
+        .await
+        .expect("bulk");
+    assert!(resp.status().is_success(), "bulk indexing failed");
+    let _ = seeder()
+        .post(format!("{}/{index}/_refresh", es_url()))
+        .send()
+        .await;
+}
+
 async fn drop_index(index: &str) {
     let _ = seeder()
         .delete(format!("{}/{index}", es_url()))
@@ -275,8 +301,11 @@ async fn streams_100k_documents_in_incremental_batches_with_flat_rss() {
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn a_resume_token_continues_the_scan_where_it_stopped() {
     let index = unique_index("resume");
-    create_index(&index, serde_json::json!({ "properties": { "n": { "type": "long" } }}))
-        .await;
+    create_index(
+        &index,
+        serde_json::json!({ "properties": { "n": { "type": "long" } }}),
+    )
+    .await;
     let docs: Vec<serde_json::Value> = (0..1_000).map(|i| serde_json::json!({ "n": i })).collect();
     bulk(&index, &docs).await;
 
@@ -306,9 +335,11 @@ async fn a_resume_token_continues_the_scan_where_it_stopped() {
     }
     assert_eq!(first_half.len(), 300);
     let token = cursor.resume_token().expect("a resume token");
-    // Deliberately do NOT close the cursor's context here: the token has to be
-    // usable while the point-in-time is still alive, which is exactly the
-    // idle-disconnect case.
+    // Close it properly: this releases the point-in-time, which is exactly
+    // what the core does when it disconnects an idle connection. The token
+    // must survive that — resuming re-opens a point-in-time and continues
+    // from the `search_after` position.
+    cursor.close().await.unwrap();
     drop(cursor);
 
     let mut resumed = conn.execute(scan(Some(token))).await.unwrap();
@@ -351,16 +382,21 @@ async fn a_resume_token_continues_the_scan_where_it_stopped() {
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn heterogeneous_documents_emit_schema_delta_add_column_events() {
     let index = unique_index("hetero");
-    create_index(&index, serde_json::json!({ "properties": { "n": { "type": "long" } }}))
-        .await;
+    create_index(
+        &index,
+        serde_json::json!({ "properties": { "n": { "type": "long" } }}),
+    )
+    .await;
     // Each document introduces at least one field the previous ones lacked.
-    bulk(
+    // Written as raw text so `_source` arrives in this exact key order, which
+    // is what the AddColumn ordering assertion below is really testing.
+    bulk_raw(
         &index,
         &[
-            serde_json::json!({ "n": 1, "a": "first" }),
-            serde_json::json!({ "n": 2, "a": "again", "b": 7 }),
-            serde_json::json!({ "n": 3, "c": { "nested": true } }),
-            serde_json::json!({ "n": 4 }),
+            r#"{"n":1,"a":"first"}"#,
+            r#"{"n":2,"a":"again","b":7}"#,
+            r#"{"n":3,"c":{"nested":true}}"#,
+            r#"{"n":4}"#,
         ],
     )
     .await;
@@ -430,23 +466,27 @@ async fn heterogeneous_documents_emit_schema_delta_add_column_events() {
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn cancel_mid_slow_query_reaches_the_server_and_returns_control() {
     let index = unique_index("cancel");
-    create_index(&index, serde_json::json!({ "properties": { "n": { "type": "long" } }}))
-        .await;
+    create_index(
+        &index,
+        serde_json::json!({ "properties": { "n": { "type": "long" } }}),
+    )
+    .await;
     let docs: Vec<serde_json::Value> = (0..10_000).map(|i| serde_json::json!({ "n": i })).collect();
     bulk(&index, &docs).await;
 
     let conn: Arc<dyn Connection> = Arc::from(connect(Some(&index)).await);
     assert!(conn.capabilities().flags.contains(Caps::SERVER_CANCEL));
 
-    // ~10 s of real work: a per-document scripted loop over 10k documents.
+    // ~10 s of real work that Elasticsearch cannot short-circuit: a `script`
+    // *filter* (so the driver's `_shard_doc` sort cannot terminate the
+    // collection early) whose predicate matches nothing (so every document
+    // must be evaluated) and whose loop depends on a doc value (so the JIT
+    // cannot fold it away).
     let slow = format!(
         "POST /{index}/_search\n{}",
         serde_json::json!({
-            "query": { "script_score": {
-                "query": { "match_all": {} },
-                "script": { "source":
-                    "double s = 0; for (int i = 0; i < 20000; i++) { s += Math.sqrt(i * 1.0) + doc['n'].value; } return s > 0 ? 1.0 : 0.5;" }
-            }}
+            "query": { "bool": { "filter": { "script": { "script": { "source":
+                "double s = 0; for (int i = 0; i < 40000; i++) { s += Math.sqrt(i * 1.0) + doc['n'].value; } return s > 1e18;" } } } } }
         })
     );
 
@@ -504,7 +544,11 @@ async fn cancel_mid_slow_query_reaches_the_server_and_returns_control() {
         }))
         .await
         .expect("a new request works after a cancel");
-    assert!(after.next_batch(FetchHint::default()).await.unwrap().is_some());
+    assert!(after
+        .next_batch(FetchHint::default())
+        .await
+        .unwrap()
+        .is_some());
 
     conn.close().await.unwrap();
     drop_index(&index).await;
@@ -558,7 +602,10 @@ async fn catalog_lists_indices_maps_fields_and_infers_shape() {
     assert!(
         page.items.iter().any(|n| n.path.to_string() == index),
         "the seeded index must be listed, got {:?}",
-        page.items.iter().map(|n| n.path.to_string()).collect::<Vec<_>>()
+        page.items
+            .iter()
+            .map(|n| n.path.to_string())
+            .collect::<Vec<_>>()
     );
 
     // Fields come from that one index's mapping.
@@ -682,7 +729,12 @@ async fn value_mapping_preserves_precision_bytes_and_the_absent_null_distinction
         }))
         .await
         .unwrap();
-    let Payload::Docs(docs) = cursor.next_batch(FetchHint::default()).await.unwrap().unwrap().payload
+    let Payload::Docs(docs) = cursor
+        .next_batch(FetchHint::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .payload
     else {
         panic!("expected docs")
     };
@@ -708,10 +760,7 @@ async fn value_mapping_preserves_precision_bytes_and_the_absent_null_distinction
         Some(Value::Bytes(datagrep_api::Bytes::from_static(b"hello")))
     );
     assert_eq!(field(doc, "_source.flag"), Some(Value::Bool(true)));
-    assert!(matches!(
-        field(doc, "_source.tags"),
-        Some(Value::Array(_))
-    ));
+    assert!(matches!(field(doc, "_source.tags"), Some(Value::Array(_))));
     assert_eq!(
         field(doc, "_source.explicit_null"),
         Some(Value::Null),
@@ -724,7 +773,10 @@ async fn value_mapping_preserves_precision_bytes_and_the_absent_null_distinction
     );
     // The envelope pseudo-fields are there too.
     assert!(matches!(field(doc, "_id"), Some(Value::Str(_))));
-    assert_eq!(field(doc, "_index"), Some(Value::Str(Arc::from(index.as_str()))));
+    assert_eq!(
+        field(doc, "_index"),
+        Some(Value::Str(Arc::from(index.as_str())))
+    );
 
     cursor.close().await.unwrap();
     conn.close().await.unwrap();
@@ -792,7 +844,11 @@ async fn counts_filters_and_explain_report_what_they_actually_did() {
         }
         other => panic!("expected Ack, got {other:?}"),
     }
-    let batch = cheap.next_batch(FetchHint::default()).await.unwrap().unwrap();
+    let batch = cheap
+        .next_batch(FetchHint::default())
+        .await
+        .unwrap()
+        .unwrap();
     assert!(batch
         .notices
         .iter()
@@ -840,7 +896,12 @@ async fn counts_filters_and_explain_report_what_they_actually_did() {
         }))
         .await
         .unwrap();
-    let Payload::Docs(docs) = plan.next_batch(FetchHint::default()).await.unwrap().unwrap().payload
+    let Payload::Docs(docs) = plan
+        .next_batch(FetchHint::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .payload
     else {
         panic!("expected docs")
     };
@@ -880,7 +941,11 @@ async fn counts_filters_and_explain_report_what_they_actually_did() {
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn capabilities_refusals_and_read_only_are_honest() {
     let index = unique_index("caps");
-    create_index(&index, serde_json::json!({ "properties": { "n": { "type": "long" } }})).await;
+    create_index(
+        &index,
+        serde_json::json!({ "properties": { "n": { "type": "long" } }}),
+    )
+    .await;
     bulk(&index, &[serde_json::json!({ "n": 1 })]).await;
 
     let conn = connect(Some(&index)).await;
@@ -955,8 +1020,16 @@ async fn native_console_requests_and_bound_parameters_work() {
     let conn = connect(Some(&index)).await;
 
     // A non-search request comes back as one reply document.
-    let mut health = conn.execute(Request::native("GET /_cluster/health")).await.unwrap();
-    let Payload::Docs(docs) = health.next_batch(FetchHint::default()).await.unwrap().unwrap().payload
+    let mut health = conn
+        .execute(Request::native("GET /_cluster/health"))
+        .await
+        .unwrap();
+    let Payload::Docs(docs) = health
+        .next_batch(FetchHint::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .payload
     else {
         panic!("expected docs")
     };
@@ -967,7 +1040,12 @@ async fn native_console_requests_and_bound_parameters_work() {
         .execute(Request::native(r#"{"query":{"match_all":{}}}"#))
         .await
         .unwrap();
-    let Payload::Docs(docs) = bare.next_batch(FetchHint::default()).await.unwrap().unwrap().payload
+    let Payload::Docs(docs) = bare
+        .next_batch(FetchHint::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .payload
     else {
         panic!("expected docs")
     };
@@ -982,7 +1060,12 @@ async fn native_console_requests_and_bound_parameters_work() {
         })
         .await
         .unwrap();
-    let Payload::Docs(docs) = bound.next_batch(FetchHint::default()).await.unwrap().unwrap().payload
+    let Payload::Docs(docs) = bound
+        .next_batch(FetchHint::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .payload
     else {
         panic!("expected docs")
     };

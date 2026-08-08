@@ -180,10 +180,21 @@ impl SearchCursor {
     /// Rebuild a cursor from a [`ResumeToken`] — the idle-disconnect path
     /// (design §3.5): the core closed everything, and the scan picks up from
     /// the PIT id plus the last `search_after` values alone.
+    /// `fresh_pit` is a **newly opened** point-in-time for a `Pit`-mode resume.
+    ///
+    /// The token's own PIT id is deliberately not reused: the whole point of a
+    /// resume token is that the core could close the cursor and disconnect,
+    /// and closing a cursor releases its PIT (`DELETE /_pit`). Trying the dead
+    /// id would fail with `search_context_missing_exception` on every shard.
+    /// The *position* lives in the `search_after` sort values, which remain
+    /// valid against a new point-in-time, so the resume opens a fresh one and
+    /// says — via a `Notice` — that the snapshot changed and documents indexed
+    /// in the meantime may now be visible.
     #[allow(clippy::too_many_arguments)]
     pub fn from_resume(
         http: Arc<EsHttp>,
         resume: EsResume,
+        fresh_pit: Option<String>,
         user_sort: Vec<Json>,
         types: Arc<FieldTypes>,
         inflight: InFlightSlot,
@@ -215,7 +226,8 @@ impl SearchCursor {
             opaque_prefix,
         );
         cursor.context = Some(match resume.mode {
-            ResumeMode::Pit => Context::Pit(resume.id.clone()),
+            ResumeMode::Pit => Context::Pit(fresh_pit.unwrap_or_else(|| resume.id.clone())),
+            // A scroll id *is* the position, so it is reused as-is.
             ResumeMode::Scroll => Context::Scroll(Some(resume.id.clone())),
         });
         cursor.last_sort = resume.sort;
@@ -233,6 +245,17 @@ impl SearchCursor {
                 .as_str(),
             ),
         });
+        if mode == PageMode::Pit {
+            cursor.pending_notices.push(Notice {
+                severity: NoticeSeverity::Warning,
+                code: Some(Arc::from("es.pit_recreated")),
+                message: Arc::from(
+                    "the point-in-time was re-opened for this resume: the scan continues from \
+                     exactly where it stopped, but it is no longer the original snapshot, so \
+                     documents indexed since may now appear",
+                ),
+            });
+        }
         cursor
     }
 
@@ -393,15 +416,22 @@ impl SearchCursor {
         let mut current = submitted;
         let deadline = self.spec.timeout.map(|t| Instant::now() + t);
         loop {
-            if let Some(err) = async_search_error(&current) {
-                self.finish_async(async_id.as_deref()).await;
-                return Err(err);
-            }
             let running = current
                 .get("is_running")
                 .and_then(OrderedJson::as_bool)
                 .unwrap_or(false);
+
+            // The error is only authoritative once the search has STOPPED.
+            // A still-running async search can report a transient
+            // `status_exception: error while reducing partial results` in an
+            // intermediate response — that is a hiccup reducing the partial
+            // view, not the outcome of the search, and failing on it would
+            // turn a perfectly good query into a spurious error.
             if !running {
+                if let Some(err) = async_search_error(&current) {
+                    self.finish_async(async_id.as_deref()).await;
+                    return Err(err);
+                }
                 let response = current
                     .get("response")
                     .cloned()
@@ -423,7 +453,7 @@ impl SearchCursor {
                 self.finish_async(Some(id)).await;
                 return Err(DbError::Timeout);
             }
-            let (next, n) = self
+            let polled = self
                 .http
                 .request_ordered(
                     Method::Get,
@@ -433,7 +463,23 @@ impl SearchCursor {
                     Some(&opaque),
                     self.spec.timeout,
                 )
-                .await?;
+                .await;
+            let (next, n) = match polled {
+                Ok(v) => v,
+                // The async search vanished between two polls. In this driver
+                // the only thing that deletes a *running* async search is
+                // `EsCanceller::cancel`, so this is the user's stop button
+                // landing — a cancellation, not a failure, and the UI must not
+                // dress it as one (design §3.3).
+                Err(e) if is_async_search_gone(&e) => {
+                    self.clear_inflight().await;
+                    return Err(DbError::Cancelled);
+                }
+                Err(e) => {
+                    self.finish_async(Some(id)).await;
+                    return Err(e);
+                }
+            };
             bytes = n;
             current = next;
         }
@@ -578,6 +624,67 @@ fn async_search_error(envelope: &OrderedJson) -> Option<DbError> {
     ))
 }
 
+/// Did a poll fail because the async search no longer exists?
+///
+/// Elasticsearch answers `DELETE`d or expired async searches with
+/// `resource_not_found_exception`, whose `reason` is the search id itself.
+fn is_async_search_gone(err: &DbError) -> bool {
+    matches!(
+        err,
+        DbError::Query { code: Some(code), .. } if code == "resource_not_found_exception"
+    )
+}
+
+/// Inspect a search response's `_shards` block.
+///
+/// This matters more than it looks. A search that fails on **every** shard —
+/// an expired point-in-time, a mapping conflict, a cancelled task — still
+/// returns HTTP 200 with `hits.hits: []` and the failures tucked away under
+/// `_shards.failures`. Reading only `hits` would render that as "no results",
+/// which is the single most dangerous possible lie for a database client. So
+/// a total failure becomes an error, and a partial one becomes a `Notice`
+/// beside the rows that did come back.
+fn shard_failure(response: &OrderedJson) -> Option<(String, String)> {
+    let shards = response.get("_shards")?;
+    if shards
+        .get("failed")
+        .and_then(OrderedJson::as_i64)
+        .unwrap_or(0)
+        == 0
+    {
+        return None;
+    }
+    let reason = shards
+        .get("failures")
+        .and_then(OrderedJson::as_array)
+        .and_then(|f| f.first())
+        .and_then(|f| f.get("reason"));
+    let ty = reason
+        .and_then(|r| r.get("type"))
+        .and_then(OrderedJson::as_str)
+        .unwrap_or("shard_failure")
+        .to_string();
+    let text = reason
+        .and_then(|r| r.get("reason"))
+        .and_then(OrderedJson::as_str)
+        .unwrap_or("a shard failed with no stated reason")
+        .to_string();
+    Some((ty, text))
+}
+
+/// Turn a shard failure into the right kind of `DbError` — a cancelled task is
+/// a cancellation, not a failure, and the UI must not dress it as one.
+fn shard_failure_error(ty: &str, reason: &str) -> DbError {
+    if ty.contains("cancel") || reason.contains("cancel") {
+        return DbError::Cancelled;
+    }
+    DbError::Query {
+        code: Some(ty.to_string()),
+        message: reason.to_string(),
+        position: None,
+    }
+}
+
 /// One hit -> one [`Value::Document`], preserving the envelope's key order and
 /// converting `_source` through the mapping-aware converter.
 ///
@@ -659,6 +766,29 @@ impl Cursor for SearchCursor {
             .and_then(OrderedJson::as_array)
             .map(<[OrderedJson]>::to_vec)
             .unwrap_or_default();
+
+        // A shard failure arrives as HTTP 200 with an empty `hits.hits`.
+        // Rendering that as "no results" would be the worst lie this driver
+        // could tell, so it is surfaced — fatally when nothing came back at
+        // all, as a notice beside the rows when the failure was partial.
+        if let Some((ty, reason)) = shard_failure(&response) {
+            if hits.is_empty() {
+                self.release_context().await;
+                self.exhausted = true;
+                return Err(shard_failure_error(&ty, &reason));
+            }
+            self.pending_notices.push(Notice {
+                severity: NoticeSeverity::Warning,
+                code: Some(Arc::from(format!("es.shard_failure.{ty}").as_str())),
+                message: Arc::from(
+                    format!(
+                        "some shards failed ({ty}: {reason}) — these results are PARTIAL, not \
+                         the full match set"
+                    )
+                    .as_str(),
+                ),
+            });
+        }
 
         let mut docs = Vec::with_capacity(hits.len());
         let mut deltas = Vec::new();
@@ -993,6 +1123,82 @@ mod tests {
         );
     }
 
+    /// A still-running async search may report a transient reduce error in an
+    /// intermediate poll; only the final state decides the outcome. Failing on
+    /// the intermediate one turns a good query into a spurious error — which
+    /// is exactly what it did before this was fixed.
+    #[test]
+    fn a_transient_error_on_a_still_running_async_search_is_not_final() {
+        let intermediate = OrderedJson::from_serde(&json!({
+            "is_partial": true,
+            "is_running": true,
+            "error": {
+                "type": "status_exception",
+                "reason": "Async search: error while reducing partial results"
+            }
+        }));
+        // The helper still classifies it…
+        assert!(async_search_error(&intermediate).is_some());
+        // …but the poll loop must only consult it once `is_running` is false,
+        // which is the invariant asserted here.
+        assert_eq!(
+            intermediate
+                .get("is_running")
+                .and_then(OrderedJson::as_bool),
+            Some(true),
+            "the guard the poll loop keys off"
+        );
+    }
+
+    #[test]
+    fn a_total_shard_failure_is_an_error_not_an_empty_result() {
+        let response = OrderedJson::from_serde(&json!({
+            "_shards": { "total": 1, "successful": 0, "failed": 1, "failures": [
+                { "shard": 0, "reason": {
+                    "type": "search_context_missing_exception",
+                    "reason": "No search context found for id [25]" } }
+            ]},
+            "hits": { "total": { "value": 0, "relation": "eq" }, "hits": [] }
+        }));
+        let (ty, reason) = shard_failure(&response).expect("the failure must be seen");
+        assert_eq!(ty, "search_context_missing_exception");
+        assert!(reason.contains("No search context"));
+        match shard_failure_error(&ty, &reason) {
+            DbError::Query { code, .. } => {
+                assert_eq!(code.as_deref(), Some("search_context_missing_exception"))
+            }
+            other => panic!("expected Query, got {other:?}"),
+        }
+
+        // A healthy response reports nothing.
+        assert!(shard_failure(&OrderedJson::from_serde(&json!({
+            "_shards": { "total": 1, "successful": 1, "failed": 0 }
+        })))
+        .is_none());
+        assert!(shard_failure(&OrderedJson::from_serde(&json!({}))).is_none());
+    }
+
+    #[test]
+    fn a_cancelled_shard_failure_is_a_cancellation_not_a_failure() {
+        assert!(matches!(
+            shard_failure_error("task_cancelled_exception", "task cancelled"),
+            DbError::Cancelled
+        ));
+        // A deleted async search — the only thing that deletes a running one
+        // is our own canceller — reads as gone, and nothing else does.
+        assert!(is_async_search_gone(&DbError::Query {
+            code: Some("resource_not_found_exception".into()),
+            message: "Fk1...".into(),
+            position: None
+        }));
+        assert!(!is_async_search_gone(&DbError::Timeout));
+        assert!(!is_async_search_gone(&DbError::Query {
+            code: Some("index_not_found_exception".into()),
+            message: "no such index".into(),
+            position: None
+        }));
+    }
+
     #[tokio::test]
     async fn docs_cursor_yields_once_then_ends() {
         let mut c = DocsCursor::new(vec![Value::I64(1)]);
@@ -1119,6 +1325,7 @@ mod tests {
         let rebuilt = SearchCursor::from_resume(
             cursor.http.clone(),
             decoded,
+            Some("pit-id-1".to_string()),
             cursor.spec.user_sort.clone(),
             types(),
             Arc::new(tokio::sync::Mutex::new(InFlight::default())),

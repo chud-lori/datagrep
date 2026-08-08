@@ -1,9 +1,11 @@
 //! [`PgTransaction`]: the explicit, interactive transaction returned by
-//! [`crate::connection::PgConnection::begin`] — pinned to its connection's
-//! socket for its whole life (design §3.5: "a pool that silently moves a
+//! [`crate::connection::PgConnection::begin`] — pinned to one physical
+//! session for its whole life (design §3.5: "a pool that silently moves a
 //! BEGIN to a different socket is a correctness bug"), which falls out for
-//! free here because the backing actor holds the connection's client mutex
-//! locked for exactly that long (see `actor.rs`).
+//! free here because the backing actor holds that pooled session for exactly
+//! that long (see `actor.rs`). Other work on the same logical connection
+//! takes a *different* session from [`crate::pool::PgPool`] rather than
+//! queueing behind this transaction.
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
@@ -14,7 +16,7 @@ use datagrep_api::request::{Op, Request};
 use datagrep_api::value::Value;
 
 use crate::actor::{ActorCmd, ExecOutcome};
-use crate::cursor::{AckCursor, PgCursor};
+use crate::cursor::{AckCursor, PgCursor, SessionOwnership};
 
 pub struct PgTransaction {
     cmd_tx: mpsc::Sender<ActorCmd>,
@@ -62,10 +64,14 @@ impl Transaction for PgTransaction {
             .map_err(|_| DbError::Closed)?;
         match reply_rx.await.map_err(|_| DbError::Closed)?? {
             ExecOutcome::Ack { affected } => Ok(Box::new(AckCursor::new(affected))),
+            // `Borrowed`: draining this cursor closes its portal but must
+            // never end the caller's transaction — only `commit`/`rollback`
+            // below may do that, and only they release the pinned session.
             ExecOutcome::Cursor { portal_id, schema } => Ok(Box::new(PgCursor::new(
                 self.cmd_tx.clone(),
                 portal_id,
                 schema,
+                SessionOwnership::Borrowed,
             ))),
         }
     }

@@ -29,8 +29,8 @@ use std::collections::HashMap;
 use std::ffi::c_char;
 use std::sync::{Arc, Mutex};
 
-use datagrep_api::ConfigValue;
-use datagrep_core::{CoreApi, ProfileId};
+use datagrep_api::{ConfigValue, Enforcement};
+use datagrep_core::{CoreApi, ProfileId, QueryId};
 use datagrep_profiles::Store;
 use datagrep_secrets::{SecretRef, SecretResolver};
 
@@ -52,10 +52,16 @@ pub(crate) struct CoreInner {
     /// lookup-by-name, no update, and no *remove*. Registering afresh on every
     /// query would therefore leak one `Profile` entry **and one connection
     /// pool** per query — so the mapping is cached here and a profile is
-    /// registered at most once per process. The cost is that editing a profile
-    /// on disk does not affect an already-opened one until restart; noted in
-    /// the README rather than papered over.
+    /// registered at most once per process. `datagrep_profiles_update` calls
+    /// [`CoreInner::forget_profile`], which evicts the entry *and* closes the
+    /// stale connection pool, so an edited profile takes effect on its next
+    /// query instead of after a restart.
     registered: Mutex<HashMap<String, ProfileId>>,
+    /// Saved-profile name → the [`Enforcement`] the driver reported the last
+    /// time `set_read_only(true)` ran on one of its connections (design §3.8:
+    /// the UI must say *which kind* of protection is in force, never imply
+    /// server enforcement it does not have). Absent until the first connect.
+    enforcement: Mutex<HashMap<String, Enforcement>>,
 }
 
 impl std::fmt::Debug for CoreInner {
@@ -82,6 +88,7 @@ impl DatagrepCore {
             store: Arc::new(store),
             secrets: Arc::new(SecretResolver::new()),
             registered: Mutex::new(HashMap::new()),
+            enforcement: Mutex::new(HashMap::new()),
         })))
     }
 }
@@ -100,10 +107,13 @@ impl CoreInner {
     /// never holds it, but the resolved value sits in an un-zeroized `String`
     /// for the life of this `CoreApi` profile, weaker than the `SecretString`
     /// guarantee it started as. Same trade `datagrep-cli` documents.
-    pub(crate) async fn open_profile(&self, name: &str) -> Result<(ProfileId, String), String> {
+    pub(crate) async fn open_profile(
+        &self,
+        name: &str,
+    ) -> Result<(ProfileId, datagrep_profiles::Profile), String> {
         let profile = self.saved_profile(name).await?;
         if let Some(id) = self.lock_registered().get(name).copied() {
-            return Ok((id, profile.driver_id));
+            return Ok((id, profile));
         }
 
         let mut config = profile.config.clone();
@@ -143,7 +153,56 @@ impl CoreInner {
         let id = *self.lock_registered().entry(name.to_string()).or_insert(id);
 
         let _ = self.store.touch_profile_last_used(profile.id.clone()).await;
-        Ok((id, profile.driver_id))
+        Ok((id, profile))
+    }
+
+    /// Dispatch one request, honouring the profile's read-only flag.
+    ///
+    /// For a read-only profile the lease is acquired here (instead of inside
+    /// `CoreApi::run_query`) so `set_read_only(true)` runs **on the exact
+    /// connection that will execute the statement** — a pooled socket opened
+    /// by an earlier writeable use, or a brand-new dial, gets the server-side
+    /// guard either way, every time. The driver's honest answer
+    /// ([`Enforcement`]) is recorded per profile for
+    /// `datagrep_connection_info_json` / the query status JSON to report.
+    pub(crate) async fn run_request(
+        &self,
+        id: ProfileId,
+        name: &str,
+        read_only: bool,
+        req: datagrep_api::Request,
+    ) -> Result<QueryId, String> {
+        if !read_only {
+            return self.api.run_query(id, req).await.map_err(|e| e.to_string());
+        }
+        let session = self.api.session(id).map_err(|e| e.to_string())?;
+        let lease = session.acquire().await.map_err(|e| e.to_string())?;
+        match lease.set_read_only(true).await {
+            Ok(enforcement) => {
+                self.lock_enforcement()
+                    .insert(name.to_string(), enforcement);
+            }
+            Err(_) => {
+                // The server half could not be (re)confirmed on this socket.
+                // Never keep claiming `Server` from an earlier connection —
+                // that is exactly the lie §3.8 forbids. The client-side
+                // classifier already vetted this statement, so running it is
+                // still safe; the badge just must not over-promise.
+                self.lock_enforcement()
+                    .insert(name.to_string(), Enforcement::Client);
+            }
+        }
+        self.api
+            .queries()
+            .run(lease, req)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// The last [`Enforcement`] a live connection of this profile reported,
+    /// if it has connected at all since this process started.
+    pub(crate) fn enforcement_for(&self, name: &str) -> Option<Enforcement> {
+        self.lock_enforcement().get(name).copied()
     }
 
     pub(crate) async fn saved_profile(
@@ -159,8 +218,18 @@ impl CoreInner {
             .ok_or_else(|| format!("no profile named `{name}`"))
     }
 
+    /// Drop the name → `ProfileId` mapping *and* close the stale pool it
+    /// pointed at, so an edited or removed profile stops answering with its
+    /// old configuration on the very next query.
     pub(crate) fn forget_profile(&self, name: &str) {
-        self.lock_registered().remove(name);
+        let stale = self.lock_registered().remove(name);
+        self.lock_enforcement().remove(name);
+        if let Some(id) = stale {
+            let api = self.api.clone();
+            if let Ok(rt) = runtime() {
+                rt.spawn(async move { api.disconnect(id).await });
+            }
+        }
     }
 
     fn lock_registered(&self) -> std::sync::MutexGuard<'_, HashMap<String, ProfileId>> {
@@ -168,6 +237,51 @@ impl CoreInner {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    fn lock_enforcement(&self) -> std::sync::MutexGuard<'_, HashMap<String, Enforcement>> {
+        self.enforcement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// The read-only story of one profile, as one JSON value the ABI can embed in
+/// both `datagrep_query_status_json` and `datagrep_connection_info_json`:
+///
+/// ```json
+/// null                                                  // profile is not read-only
+/// {"enforcement":"server"|"client"|"none",
+///  "server_confirmed":bool}                             // profile is read-only
+/// ```
+///
+/// `enforcement` is what the badge may claim (§3.8 honesty rule):
+/// - `"server"` — a live connection of this profile accepted a server-side
+///   read-only session (PG `SET SESSION … READ ONLY`, SQLite
+///   `PRAGMA query_only`, …). `server_confirmed` is `true`.
+/// - `"client"` — only this process stands in the way: statements classified
+///   `Write`/`Ddl`/`Admin` by `datagrep-lang` are refused before dispatch, but
+///   the server itself would accept a write (Redis, or not yet connected).
+/// - `"none"` — nothing enforces it and the UI must say so (an engine this
+///   build cannot classify statements for).
+pub(crate) fn read_only_json(
+    read_only: bool,
+    driver_id: &str,
+    reported: Option<Enforcement>,
+) -> serde_json::Value {
+    if !read_only {
+        return serde_json::Value::Null;
+    }
+    let client_guard = crate::query::language_for_driver(driver_id).is_some();
+    let label = match reported {
+        Some(Enforcement::Server) => "server",
+        Some(Enforcement::Client) | Some(Enforcement::None) | None if client_guard => "client",
+        Some(Enforcement::Client) => "client",
+        _ => "none",
+    };
+    serde_json::json!({
+        "enforcement": label,
+        "server_confirmed": matches!(reported, Some(Enforcement::Server)),
+    })
 }
 
 pub(crate) fn map_env(env: datagrep_profiles::Env) -> datagrep_core::api::Env {

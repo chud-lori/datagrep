@@ -468,13 +468,20 @@ final class Autopilot {
     private let profile: (name: String, url: String)?
     private let sql: String?
     private let bench: Bool
+    /// `--select-path public/orders`: catalog path under the active profile to
+    /// expand and then select, exactly as clicking it in the sidebar would.
+    private let selectPath: [String]
     private var settleTicks = 0
 
-    init(model: AppModel?, profile: (name: String, url: String)?, sql: String?, bench: Bool) {
+    init(
+        model: AppModel?, profile: (name: String, url: String)?, sql: String?, bench: Bool,
+        selectPath: [String] = []
+    ) {
         self.model = model
         self.profile = profile
         self.sql = sql
         self.bench = bench
+        self.selectPath = selectPath
     }
 
     static func fromArguments(model: AppModel?) -> Autopilot? {
@@ -489,8 +496,11 @@ final class Autopilot {
         }
         let sql = value("--sql")
         let bench = args.contains("--bench")
-        guard profile != nil || sql != nil || bench else { return nil }
-        return Autopilot(model: model, profile: profile, sql: sql, bench: bench)
+        let selectPath =
+            value("--select-path")?.split(separator: "/").map(String.init) ?? []
+        guard profile != nil || sql != nil || bench || !selectPath.isEmpty else { return nil }
+        return Autopilot(
+            model: model, profile: profile, sql: sql, bench: bench, selectPath: selectPath)
     }
 
     func start() {
@@ -512,6 +522,7 @@ final class Autopilot {
         {
             model.selectProfile(profile.name)
         }
+        if !selectPath.isEmpty { return descend(from: nil, remaining: selectPath[...]) }
         guard let sql else { return finishOrBench() }
         FileHandle.standardError.write(Data("AUTOPILOT running: \(sql)\n".utf8))
         model.run(sql: sql, directives: SQLBlocks.directives(in: sql))
@@ -533,6 +544,65 @@ final class Autopilot {
             } else {
                 self.waitForRows()
             }
+        }
+    }
+
+    /// Walks the catalog one level at a time — the same `load(_:prefix:)` the
+    /// disclosure triangle calls — and finishes with `select(_:)`, the same call
+    /// a sidebar click makes. Nothing here reaches past the UI's own entry
+    /// points, so a green result really does mean "clicking that table works".
+    private func descend(from parent: CatalogNode?, remaining: ArraySlice<String>) {
+        guard let model else { return }
+        guard let wanted = remaining.first else {
+            if let parent {
+                FileHandle.standardError.write(
+                    Data("AUTOPILOT selecting \(parent.profile)/\(parent.path.joined(separator: "/"))\n".utf8))
+                model.select(parent)
+            }
+            return finishOrBench()
+        }
+
+        let siblings: [CatalogNode]
+        if let parent {
+            siblings = parent.children
+        } else {
+            siblings = model.roots.filter { $0.name == model.activeProfile }
+            // The first hop is the profile row itself, whose "children" are the
+            // top-level schemas — so start by expanding the active profile.
+            if let root = siblings.first, !root.didLoad, !root.isLoading {
+                model.load(root, prefix: nil)
+            }
+            if let root = siblings.first, root.didLoad {
+                return descend(from: root, remaining: remaining)
+            }
+            return retryDescend(parent: nil, remaining: remaining)
+        }
+
+        guard let match = siblings.first(where: { $0.name == wanted }) else {
+            if parent?.didLoad == true {
+                FileHandle.standardError.write(
+                    Data(
+                        "AUTOPILOT no child named `\(wanted)` under /\(parent?.path.joined(separator: "/") ?? "") — have: \(siblings.map(\.name).joined(separator: ", "))\n"
+                            .utf8))
+                return finishOrBench()
+            }
+            return retryDescend(parent: parent, remaining: remaining)
+        }
+
+        if remaining.count == 1 { return descend(from: match, remaining: remaining.dropFirst()) }
+        if !match.didLoad && !match.isLoading { model.load(match, prefix: nil) }
+        if match.didLoad { return descend(from: match, remaining: remaining.dropFirst()) }
+        retryDescend(parent: parent, remaining: remaining)
+    }
+
+    private func retryDescend(parent: CatalogNode?, remaining: ArraySlice<String>) {
+        settleTicks += 1
+        guard settleTicks < 100 else {
+            FileHandle.standardError.write(Data("AUTOPILOT catalog walk timed out\n".utf8))
+            return finishOrBench()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.descend(from: parent, remaining: remaining)
         }
     }
 

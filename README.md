@@ -14,8 +14,8 @@ one Rust engine. No Electron, no JVM.
 | SQLite | working |
 | Redis | working |
 | MongoDB | working |
-| MySQL / MariaDB | in progress |
-| Elasticsearch | in progress |
+| MySQL / MariaDB | working |
+| Elasticsearch | working (read-only — no writes yet) |
 
 ## Build
 

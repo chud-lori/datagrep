@@ -2,12 +2,30 @@
 //! browsing — never eager whole-catalog indexing). Every method below issues
 //! exactly one parameterized query against `pg_catalog`/`information_schema`
 //! equivalents, bounded by `ListOpts::limit`.
+//!
+//! # Two rules this file learned the hard way
+//!
+//! 1. **It borrows a session from [`crate::pool::PgPool`], never the
+//!    connection's one pinned client.** Browsing the schema tree while a
+//!    result grid is open is the single most common thing a user does; when
+//!    the catalog shared the cursor's socket, that froze the driver forever
+//!    (TEST-REPORT.md F2). Each method acquires one session, does its one
+//!    query on it, and gives it straight back.
+//! 2. **Every `pg_catalog` column whose Postgres type is not plainly `text`
+//!    is cast in SQL.** `pg_class.relkind` is the 1-byte `"char"` type
+//!    (OID 18), which `tokio_postgres` decodes as `i8` and *panics* on if you
+//!    ask for a `String` — which is precisely what happened on every table
+//!    listing and every `describe` against a real server (TEST-REPORT.md F3).
+//!    `::text` at the query site is deliberate: it is visible next to the
+//!    column, and it survives someone reordering the select list later.
+//!    (`name`-typed columns — `relname`, `nspname`, `attname`, `datname`,
+//!    `amname` — *are* decodable as `String`; `oid` as `u32`; those are left
+//!    alone.)
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio::sync::Mutex;
 use tokio_postgres::Client;
 
 use datagrep_api::catalog::{
@@ -19,39 +37,66 @@ use datagrep_api::error::DbError;
 use datagrep_api::shape::{FieldDef, FieldFlags, Identity, LogicalType, ObjectPath, RowSchema};
 
 use crate::error::map_pg_error;
+use crate::pool::{PgPool, PooledClient};
 use crate::value::{decode_binary, logical_type_of};
 
 pub struct PgCatalog {
-    client: Arc<Mutex<Option<Client>>>,
+    pool: Arc<PgPool>,
 }
 
 impl PgCatalog {
-    pub fn new(client: Arc<Mutex<Option<Client>>>) -> Self {
-        Self { client }
+    pub fn new(pool: Arc<PgPool>) -> Self {
+        Self { pool }
     }
 
-    async fn current_database(&self) -> Result<String, DbError> {
-        let guard = self.client.lock().await;
-        let client = guard.as_ref().ok_or(DbError::Closed)?;
-        let row = client
-            .query_one("SELECT current_database()", &[])
-            .await
-            .map_err(map_pg_error)?;
-        Ok(row.get::<_, String>(0))
+    /// Borrow a session for one catalog query. Never the session a cursor or
+    /// transaction has pinned — see the module docs.
+    async fn session(&self) -> Result<PooledClient, DbError> {
+        self.pool.acquire().await
     }
+}
 
-    async fn require_current_database(&self, db: &str) -> Result<(), DbError> {
-        let current = self.current_database().await?;
-        if current != db {
-            return Err(DbError::Unsupported {
-                feature: format!(
-                    "browsing database {db:?} over a connection to {current:?} — Postgres has no \
-                     cross-database catalog access; open a new connection to {db:?} instead"
-                ),
-            });
-        }
-        Ok(())
+/// Postgres has no cross-database catalog access, so browsing a database
+/// other than the one this session is connected to is refused rather than
+/// silently answered from the wrong database.
+async fn require_current_database(client: &Client, db: &str) -> Result<(), DbError> {
+    let row = client
+        .query_one("SELECT current_database()::text", &[])
+        .await
+        .map_err(map_pg_error)?;
+    let current: String = row.get(0);
+    if current != db {
+        return Err(DbError::Unsupported {
+            feature: format!(
+                "browsing database {db:?} over a connection to {current:?} — Postgres has no \
+                 cross-database catalog access; open a new connection to {db:?} instead"
+            ),
+        });
     }
+    Ok(())
+}
+
+/// Map `pg_class.relkind` (already cast to `text` at the query site) onto the
+/// engine-independent [`ObjectKind`]. `v` = view, `m` = materialized view;
+/// ordinary/partitioned/foreign tables (`r`/`p`/`f`) are all tables.
+fn object_kind_of(relkind: &str) -> ObjectKind {
+    match relkind {
+        "v" | "m" => ObjectKind::View,
+        _ => ObjectKind::Table,
+    }
+}
+
+/// `row.get()` **panics** on a type mismatch, which crashed the whole process
+/// on the `relkind` bug rather than surfacing a `DbError`. Catalog reads whose
+/// Postgres type we had to reason about go through here instead, so a future
+/// mismatch is a recoverable protocol error with the column index in it.
+fn try_get_text(row: &tokio_postgres::Row, idx: usize) -> Result<String, DbError> {
+    row.try_get::<_, String>(idx).map_err(|e| {
+        DbError::Protocol(format!(
+            "catalog query column {idx} did not decode as text ({e}) — a pg_catalog column is \
+             probably missing its ::text cast"
+        ))
+    })
 }
 
 fn resume_prefix(resume: &Option<ResumeToken>) -> Option<String> {
@@ -148,8 +193,8 @@ impl Catalog for PgCatalog {
         sample_size: u32,
     ) -> Result<InferredSchema, DbError> {
         let table = crate::sql::quote_object_path(path)?;
-        let guard = self.client.lock().await;
-        let client = guard.as_ref().ok_or(DbError::Closed)?;
+        let session = self.session().await?;
+        let client = &*session;
         let sql = format!("SELECT * FROM {table} LIMIT $1");
         let stmt = client.prepare(&sql).await.map_err(map_pg_error)?;
         let rows = client
@@ -184,13 +229,14 @@ impl Catalog for PgCatalog {
         if prefix.is_empty() {
             return Ok(Vec::new());
         }
-        let guard = self.client.lock().await;
-        let client = guard.as_ref().ok_or(DbError::Closed)?;
+        let session = self.session().await?;
+        let client = &*session;
 
         let mut out = Vec::new();
         let table_rows = client
             .query(
-                "SELECT relname, n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                "SELECT c.relname::text, n.nspname::text \
+                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
                  WHERE c.relkind IN ('r','v','m','p') AND c.relname LIKE $1 || '%' \
                  ORDER BY c.relname LIMIT 25",
                 &[&prefix],
@@ -209,8 +255,9 @@ impl Catalog for PgCatalog {
 
         let col_rows = client
             .query(
-                "SELECT DISTINCT attname FROM pg_attribute WHERE attnum > 0 AND NOT attisdropped \
-                 AND attname LIKE $1 || '%' ORDER BY attname LIMIT 25",
+                "SELECT DISTINCT attname::text FROM pg_attribute \
+                 WHERE attnum > 0 AND NOT attisdropped \
+                 AND attname LIKE $1 || '%' ORDER BY 1 LIMIT 25",
                 &[&prefix],
             )
             .await
@@ -245,11 +292,10 @@ impl PgCatalog {
     async fn list_databases(&self, opts: ListOpts) -> Result<Page<ObjectNode>, DbError> {
         let prefix = opts.prefix.as_deref().unwrap_or("");
         let after = resume_prefix(&opts.resume).unwrap_or_default();
-        let guard = self.client.lock().await;
-        let client = guard.as_ref().ok_or(DbError::Closed)?;
-        let rows = client
+        let session = self.session().await?;
+        let rows = session
             .query(
-                "SELECT datname FROM pg_database \
+                "SELECT datname::text FROM pg_database \
                  WHERE datistemplate = false AND datname LIKE $1 || '%' AND datname > $2 \
                  ORDER BY datname LIMIT $3",
                 &[&prefix, &after, &(opts.limit as i64)],
@@ -276,14 +322,13 @@ impl PgCatalog {
         db: &Arc<str>,
         opts: ListOpts,
     ) -> Result<Page<ObjectNode>, DbError> {
-        self.require_current_database(db).await?;
         let prefix = opts.prefix.as_deref().unwrap_or("");
         let after = resume_prefix(&opts.resume).unwrap_or_default();
-        let guard = self.client.lock().await;
-        let client = guard.as_ref().ok_or(DbError::Closed)?;
-        let rows = client
+        let session = self.session().await?;
+        require_current_database(&session, db).await?;
+        let rows = session
             .query(
-                "SELECT nspname FROM pg_namespace \
+                "SELECT nspname::text FROM pg_namespace \
                  WHERE nspname LIKE $1 || '%' AND nspname > $2 ORDER BY nspname LIMIT $3",
                 &[&prefix, &after, &(opts.limit as i64)],
             )
@@ -310,14 +355,18 @@ impl PgCatalog {
         schema: &Arc<str>,
         opts: ListOpts,
     ) -> Result<Page<ObjectNode>, DbError> {
-        self.require_current_database(db).await?;
         let prefix = opts.prefix.as_deref().unwrap_or("");
         let after = resume_prefix(&opts.resume).unwrap_or_default();
-        let guard = self.client.lock().await;
-        let client = guard.as_ref().ok_or(DbError::Closed)?;
-        let rows = client
+        let session = self.session().await?;
+        require_current_database(&session, db).await?;
+        let rows = session
             .query(
-                "SELECT c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                // Cast to text, never selected bare: relkind is the
+                // 1-byte `"char"` type and decoding it as `String` panics
+                // (TEST-REPORT.md F3 — every table listing, against every
+                // real server).
+                "SELECT c.relname::text, c.relkind::text \
+                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
                  WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','p','f') \
                  AND c.relname LIKE $2 || '%' AND c.relname > $3 \
                  ORDER BY c.relname LIMIT $4",
@@ -327,17 +376,14 @@ impl PgCatalog {
             .map_err(map_pg_error)?;
         let mut names_kinds: Vec<(String, String)> = Vec::with_capacity(rows.len());
         for r in &rows {
-            names_kinds.push((r.get(0), r.get(1)));
+            names_kinds.push((try_get_text(r, 0)?, try_get_text(r, 1)?));
         }
         let last = names_kinds.last().map(|(n, _)| n.clone());
         let items = names_kinds
             .into_iter()
             .map(|(name, relkind)| ObjectNode {
                 path: ObjectPath::new(vec![db.clone(), schema.clone(), Arc::from(name)]),
-                kind: match relkind.as_str() {
-                    "v" | "m" => ObjectKind::View,
-                    _ => ObjectKind::Table,
-                },
+                kind: object_kind_of(&relkind),
                 has_children: true,
                 comment: None,
             })
@@ -353,14 +399,13 @@ impl PgCatalog {
         table: &Arc<str>,
         opts: ListOpts,
     ) -> Result<Page<ObjectNode>, DbError> {
-        self.require_current_database(db).await?;
         let prefix = opts.prefix.as_deref().unwrap_or("");
         let after = resume_prefix(&opts.resume).unwrap_or_default();
-        let guard = self.client.lock().await;
-        let client = guard.as_ref().ok_or(DbError::Closed)?;
-        let rows = client
+        let session = self.session().await?;
+        require_current_database(&session, db).await?;
+        let rows = session
             .query(
-                "SELECT a.attname FROM pg_attribute a \
+                "SELECT a.attname::text FROM pg_attribute a \
                  JOIN pg_class c ON c.oid = a.attrelid \
                  JOIN pg_namespace n ON n.oid = c.relnamespace \
                  WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped \
@@ -402,15 +447,17 @@ impl PgCatalog {
         schema: &Arc<str>,
         table: &Arc<str>,
     ) -> Result<ObjectDetail, DbError> {
-        self.require_current_database(db).await?;
-        let guard = self.client.lock().await;
-        let client = guard.as_ref().ok_or(DbError::Closed)?;
+        let session = self.session().await?;
+        let client = &*session;
+        require_current_database(client, db).await?;
 
         // One cheap query for size facts (design item 5: "reltuples estimate
-        // + pg_relation_size") plus the table comment.
+        // + pg_relation_size") plus the table comment. `relkind::text` for
+        // the same reason as in `list_relations` — bare `relkind` is `"char"`
+        // and panicked here on every `--describe` (TEST-REPORT.md F3).
         let size_row = client
             .query_opt(
-                "SELECT c.reltuples::float8, c.relkind, pg_relation_size(c.oid), \
+                "SELECT c.reltuples::float8, c.relkind::text, pg_relation_size(c.oid), \
                  obj_description(c.oid, 'pg_class') \
                  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
                  WHERE n.nspname = $1 AND c.relname = $2",
@@ -423,7 +470,7 @@ impl PgCatalog {
         let mut comment: Option<Arc<str>> = None;
         if let Some(row) = &size_row {
             let reltuples: f64 = row.get(0);
-            relkind = row.get(1);
+            relkind = try_get_text(row, 1)?;
             let size_bytes: i64 = row.get(2);
             comment = row.get::<_, Option<String>>(3).map(Arc::from);
             extra.push((
@@ -443,7 +490,7 @@ impl PgCatalog {
         // (`SCHEMA_DECLARED`).
         let col_rows = client
             .query(
-                "SELECT a.attname, a.atttypid, a.attnotnull, \
+                "SELECT a.attname::text, a.atttypid, a.attnotnull, \
                  pg_get_expr(d.adbin, d.adrelid) \
                  FROM pg_attribute a \
                  JOIN pg_class c ON c.oid = a.attrelid \
@@ -507,7 +554,7 @@ impl PgCatalog {
 
         let pk_row = client
             .query(
-                "SELECT a.attname FROM pg_index i \
+                "SELECT a.attname::text FROM pg_index i \
                  JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
                  JOIN pg_class c ON c.oid = i.indrelid \
                  JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -542,10 +589,7 @@ impl PgCatalog {
         Ok(ObjectDetail {
             node: ObjectNode {
                 path: ObjectPath::new(vec![db.clone(), schema.clone(), table.clone()]),
-                kind: match relkind.as_str() {
-                    "v" | "m" => ObjectKind::View,
-                    _ => ObjectKind::Table,
-                },
+                kind: object_kind_of(&relkind),
                 has_children: true,
                 comment,
             },
@@ -569,7 +613,7 @@ impl PgCatalog {
     ) -> Result<Vec<PgIndexInfo>, DbError> {
         let rows = client
             .query(
-                "SELECT ci.relname, i.indisunique, i.indisprimary, am.amname, \
+                "SELECT ci.relname::text, i.indisunique, i.indisprimary, am.amname::text, \
                  pg_get_expr(i.indpred, i.indrelid), \
                  pg_relation_size(i.indexrelid), \
                  pg_get_indexdef(i.indexrelid), \
@@ -809,6 +853,53 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(parsed["id"], "nextval('users_id_seq'::regclass)");
         assert_eq!(parsed["note"], "'say \"hi\"'::text");
+    }
+
+    /// `relkind` is a single character, and only `v`/`m` are views. Pinned
+    /// because the mapping used to be an inline `match` duplicated at two
+    /// sites — both of which also decoded the column with the wrong Rust
+    /// type (TEST-REPORT.md F3).
+    #[test]
+    fn relkind_maps_onto_object_kind() {
+        assert_eq!(object_kind_of("v"), ObjectKind::View);
+        assert_eq!(object_kind_of("m"), ObjectKind::View);
+        assert_eq!(object_kind_of("r"), ObjectKind::Table);
+        assert_eq!(object_kind_of("p"), ObjectKind::Table);
+        assert_eq!(object_kind_of("f"), ObjectKind::Table);
+    }
+
+    /// Every `pg_catalog` column this file reads as a Rust `String` must be
+    /// either a `name` (which `tokio_postgres` does decode as `String`) or
+    /// explicitly `::text`-cast. `relkind` is the 1-byte `"char"` type, so a
+    /// bare qualified reference to it in a select list is the exact panic
+    /// reported in TEST-REPORT.md F3. Every SQL mention in this file is
+    /// qualified (`c.…`), so scanning for that is enough to catch a
+    /// reintroduction — and cheaper than another live server round trip.
+    #[test]
+    fn relkind_is_never_selected_without_a_text_cast() {
+        // Built at runtime, not written literally: a literal needle would
+        // match this very test and make the scan self-referential.
+        let needle = format!("c.{}", "relkind");
+        let src = include_str!("catalog.rs");
+        let mut from = 0usize;
+        let mut checked = 0usize;
+        while let Some(pos) = src[from..].find(&needle) {
+            let at = from + pos;
+            let rest = &src[at + needle.len()..];
+            assert!(
+                rest.starts_with("::text") || rest.starts_with(" IN"),
+                "byte {at}: relkind must be selected as `::text` — it is Postgres's 1-byte \
+                 \"char\" type and decoding it as a Rust String panics. Context: {:?}",
+                &src[at..(at + 60).min(src.len())]
+            );
+            checked += 1;
+            from = at + needle.len();
+        }
+        assert!(
+            checked >= 3,
+            "expected the relations query, the describe query and the relkind filter to be \
+             scanned; found {checked} — did the queries move?"
+        );
     }
 
     #[test]

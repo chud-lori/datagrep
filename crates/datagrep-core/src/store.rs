@@ -553,6 +553,10 @@ impl StoreShared {
 /// windowed accessor for the grid.
 pub struct ResultStore {
     shared: Arc<StoreShared>,
+    /// The shape the cursor declared at execute time, kept so frontends can
+    /// name columns even for a result that delivered zero rows (a CSV header
+    /// must not depend on data arriving).
+    shape: Shape,
     cancel: CancellationToken,
     writer: Mutex<Option<JoinHandle<()>>>,
 }
@@ -580,14 +584,21 @@ impl ResultStore {
             settled_schema: Mutex::new(None),
         });
         let writer = tokio::spawn(
-            run_store(rx, shared.clone(), shape, cancel.clone())
+            run_store(rx, shared.clone(), shape.clone(), cancel.clone())
                 .instrument(tracing::info_span!("store")),
         );
         Arc::new(Self {
             shared,
+            shape,
             cancel,
             writer: Mutex::new(Some(writer)),
         })
+    }
+
+    /// The shape the cursor declared when the query was accepted — available
+    /// before (and regardless of whether) any row arrives.
+    pub fn shape(&self) -> &Shape {
+        &self.shape
     }
 
     /// The current snapshot. Cheap: one `Arc` clone.

@@ -282,6 +282,17 @@ struct StatusBar: View {
                 .foregroundStyle(model.isError ? Color.red : Color.primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+                // `idealWidth` is what keeps a long message from bullying the
+                // rest of the bar. `ViewThatFits` sizes each candidate by
+                // proposing it nothing and reading back its ideal width, and an
+                // unconstrained `Text` answers with the width of the whole
+                // string — so one `reportFootprint()` line (eight clauses) would
+                // force `.minimal` at 1180 pt and hide an incomplete-result
+                // warning that had 400 pt of room to sit in. Capping the ideal
+                // says "assume this field takes 220 pt and truncates", which is
+                // what it in fact does; it still expands into whatever slack is
+                // left over.
+                .frame(idealWidth: 220, alignment: .leading)
                 .layoutPriority(1)
                 .help(model.message)
 

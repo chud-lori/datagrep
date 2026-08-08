@@ -10,25 +10,57 @@
 
 use std::io::{self, Write};
 
-use serde_json::{Map, Value as Json};
-
 use super::{Row, RowSink, Summary};
 use crate::value_text::CellText;
 
-fn row_to_object(columns: &[String], row: &Row) -> Json {
-    let mut map = Map::with_capacity(row.len());
+/// Serialize one row as a JSON object, streamed straight to the writer.
+///
+/// Types are real JSON types: booleans are `true`/`false`, integers and
+/// (finite) floats are numbers — `{"id":1}`, never `{"id":"1"}` — so the
+/// README's `--format json | jq` filters (`.id > 40`, `select(.b)`) work. A
+/// `json`/`jsonb` cell is spliced in **verbatim** (validated first): nested
+/// JSON stays nested, key order and number formatting untouched, never
+/// double-encoded as an escaped string.
+fn write_row_object<W: Write>(out: &mut W, columns: &[String], row: &Row) -> io::Result<()> {
+    out.write_all(b"{")?;
+    let mut first = true;
     for (col, cell) in columns.iter().zip(row) {
-        match cell {
-            CellText::Absent => {} // omitted, not `null`
-            CellText::Null => {
-                map.insert(col.clone(), Json::Null);
-            }
-            CellText::Text(s) => {
-                map.insert(col.clone(), Json::String(s.clone()));
+        if matches!(cell, CellText::Absent) {
+            continue; // omitted, not `null`
+        }
+        if !first {
+            out.write_all(b",")?;
+        }
+        first = false;
+        serde_json::to_writer(&mut *out, col)?;
+        out.write_all(b":")?;
+        write_cell(out, cell)?;
+    }
+    out.write_all(b"}")
+}
+
+fn write_cell<W: Write>(out: &mut W, cell: &CellText) -> io::Result<()> {
+    match cell {
+        CellText::Null | CellText::Absent => out.write_all(b"null"),
+        CellText::Bool(b) => out.write_all(if *b { b"true" } else { b"false" }),
+        CellText::I64(n) => write!(out, "{n}"),
+        CellText::U64(n) => write!(out, "{n}"),
+        // JSON has no NaN/Infinity; a non-finite float becomes its display
+        // text as a string rather than lying with `null`.
+        CellText::F64(n) if n.is_finite() => Ok(serde_json::to_writer(&mut *out, n)?),
+        CellText::F64(n) => Ok(serde_json::to_writer(&mut *out, &n.to_string())?),
+        CellText::Json(raw) => {
+            // Verbatim passthrough, gated on the text actually being JSON
+            // (it always is for a server-side json/jsonb column; anything
+            // else would corrupt the output stream).
+            if serde_json::from_str::<serde_json::Value>(raw).is_ok() {
+                out.write_all(raw.as_bytes())
+            } else {
+                Ok(serde_json::to_writer(&mut *out, raw)?)
             }
         }
+        CellText::Text(s) => Ok(serde_json::to_writer(&mut *out, s)?),
     }
-    Json::Object(map)
 }
 
 pub struct JsonArraySink<W: Write> {
@@ -59,8 +91,7 @@ impl<W: Write + Send> RowSink for JsonArraySink<W> {
                 self.out.write_all(b",")?;
             }
             self.wrote_any = true;
-            let obj = row_to_object(&self.columns, row);
-            serde_json::to_writer(&mut self.out, &obj)?;
+            write_row_object(&mut self.out, &self.columns, row)?;
         }
         self.out.flush()
     }
@@ -93,8 +124,7 @@ impl<W: Write + Send> RowSink for NdjsonSink<W> {
 
     fn write_rows(&mut self, rows: &[Row]) -> io::Result<()> {
         for row in rows {
-            let obj = row_to_object(&self.columns, row);
-            serde_json::to_writer(&mut self.out, &obj)?;
+            write_row_object(&mut self.out, &self.columns, row)?;
             self.out.write_all(b"\n")?;
         }
         self.out.flush()
@@ -108,6 +138,7 @@ impl<W: Write + Send> RowSink for NdjsonSink<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value as Json;
 
     fn cols() -> Vec<String> {
         vec!["a".into(), "b".into(), "c".into()]
@@ -141,6 +172,58 @@ mod tests {
             parsed.get("c").is_none(),
             "an Absent cell must omit its key, not serialize null"
         );
+    }
+
+    /// The README's `| jq` pitch: scalars keep their JSON types — an int is
+    /// `1` (not `"1"`), a bool is `true`, a float is `3.5` — and a
+    /// `json`/`jsonb` cell arrives as nested JSON, verbatim, never as an
+    /// escaped string.
+    #[test]
+    fn scalars_keep_their_json_types_and_json_cells_nest_verbatim() {
+        let mut out = Vec::new();
+        {
+            let mut sink = NdjsonSink::new(&mut out);
+            sink.start(&["i".into(), "b".into(), "f".into(), "js".into()])
+                .unwrap();
+            sink.write_rows(&[vec![
+                CellText::I64(42),
+                CellText::Bool(true),
+                CellText::F64(3.5),
+                CellText::Json(r#"{"k": 1, "nested": [1, 2]}"#.into()),
+            ]])
+            .unwrap();
+            sink.finish(&Summary {
+                rows_shown: 1,
+                note: None,
+                affected: None,
+            })
+            .unwrap();
+        }
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains(r#""js":{"k": 1, "nested": [1, 2]}"#),
+            "jsonb must be spliced verbatim, got: {text}"
+        );
+        let parsed: Json = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(parsed["i"], serde_json::json!(42));
+        assert_eq!(parsed["b"], serde_json::json!(true));
+        assert_eq!(parsed["f"], serde_json::json!(3.5));
+        assert_eq!(parsed["js"]["k"], serde_json::json!(1));
+    }
+
+    /// A json cell whose text somehow is not valid JSON (driver bug) must not
+    /// corrupt the output stream — it degrades to a truthful string.
+    #[test]
+    fn invalid_json_cell_degrades_to_a_string() {
+        let mut out = Vec::new();
+        {
+            let mut sink = NdjsonSink::new(&mut out);
+            sink.start(&["j".into()]).unwrap();
+            sink.write_rows(&[vec![CellText::Json("not json{".into())]])
+                .unwrap();
+        }
+        let parsed: Json = serde_json::from_slice(&out).unwrap();
+        assert_eq!(parsed["j"], serde_json::json!("not json{"));
     }
 
     #[test]

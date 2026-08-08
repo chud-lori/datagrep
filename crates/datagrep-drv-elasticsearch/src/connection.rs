@@ -158,6 +158,30 @@ impl EsConnection {
         opts.read_only_assert || self.read_only.load(Ordering::Acquire)
     }
 
+    /// `POST /<index>/_pit` — the one place a point-in-time is opened.
+    async fn open_pit(
+        &self,
+        index: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<String, DbError> {
+        let response = self
+            .http
+            .request(
+                Method::Post,
+                &format!("/{}/_pit", encode_index_expression(index)?),
+                &[("keep_alive", DEFAULT_KEEP_ALIVE.to_string())],
+                None,
+                None,
+                timeout,
+            )
+            .await?;
+        response
+            .get("id")
+            .and_then(Json::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| DbError::Protocol("_pit returned no point-in-time id".to_string()))
+    }
+
     /// Open the server-side scan context and build the streaming cursor. The
     /// single place a `SearchCursor` is created, so PIT opening and mapping
     /// loading are never duplicated.
@@ -183,9 +207,20 @@ impl EsConnection {
 
         if let Some(token) = resume {
             let resume = crate::resume::EsResume::decode(token)?;
+            // A resumed `Pit` scan needs a *new* point-in-time: closing the
+            // original cursor released the old one, which is the whole point
+            // of a resume token. The position lives in the `search_after`
+            // values, not in the PIT — see `SearchCursor::from_resume`.
+            let fresh_pit = match resume.mode {
+                crate::resume::ResumeMode::Pit => {
+                    Some(self.open_pit(&resume.index, timeout).await?)
+                }
+                crate::resume::ResumeMode::Scroll => None,
+            };
             return Ok(Box::new(SearchCursor::from_resume(
                 self.http.clone(),
                 resume,
+                fresh_pit,
                 spec.user_sort.clone(),
                 types,
                 self.inflight.clone(),
@@ -196,28 +231,7 @@ impl EsConnection {
         }
 
         let pit_id = match self.page_mode {
-            PageMode::Pit => {
-                let response = self
-                    .http
-                    .request(
-                        Method::Post,
-                        &format!("/{}/_pit", encode_index_expression(&index)?),
-                        &[("keep_alive", DEFAULT_KEEP_ALIVE.to_string())],
-                        None,
-                        None,
-                        timeout,
-                    )
-                    .await?;
-                Some(
-                    response
-                        .get("id")
-                        .and_then(Json::as_str)
-                        .ok_or_else(|| {
-                            DbError::Protocol("_pit returned no point-in-time id".to_string())
-                        })?
-                        .to_string(),
-                )
-            }
+            PageMode::Pit => Some(self.open_pit(&index, timeout).await?),
             PageMode::Scroll => None,
         };
 

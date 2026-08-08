@@ -27,11 +27,21 @@ use arrow_schema::{DataType, TimeUnit};
 use datagrep_api::{Bytes, TzSpec, Value};
 
 /// A cell's renderable state, truthful about the three-way distinction the
-/// ticket calls out.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// ticket calls out — and about scalar *types*: booleans, integers, and
+/// floats keep their identity to the JSON formats (`{"id":1}`, never
+/// `{"id":"1"}`), and a `json`/`jsonb` cell keeps its raw text so the JSON
+/// formats can pass it through verbatim instead of double-encoding it.
+/// Decimals stay text deliberately (§risk-4 fidelity: JSON numbers are f64).
+#[derive(Debug, Clone, PartialEq)]
 pub enum CellText {
     Null,
     Absent,
+    Bool(bool),
+    I64(i64),
+    U64(u64),
+    F64(f64),
+    /// Raw JSON text from a `json`/`jsonb` column, verbatim from the server.
+    Json(String),
     Text(String),
 }
 
@@ -40,9 +50,29 @@ impl CellText {
         match v {
             Value::Null => CellText::Null,
             Value::Absent => CellText::Absent,
+            Value::Bool(b) => CellText::Bool(*b),
+            Value::I64(n) => CellText::I64(*n),
+            Value::U64(n) => CellText::U64(*n),
+            Value::F64(n) => CellText::F64(*n),
+            Value::Json(raw) => CellText::Json(raw.to_string()),
             other => {
                 CellText::Text(datagrep_core::convert::display_value(other).unwrap_or_default())
             }
+        }
+    }
+
+    /// The cell as display text — what `table`/`csv`/`tsv` print. `None` for
+    /// NULL/Absent (those formats have their own rendering for that state).
+    /// Matches `datagrep_core::convert::display_value` for every variant.
+    pub fn display_text(&self) -> Option<std::borrow::Cow<'_, str>> {
+        use std::borrow::Cow;
+        match self {
+            CellText::Null | CellText::Absent => None,
+            CellText::Bool(b) => Some(Cow::Borrowed(if *b { "true" } else { "false" })),
+            CellText::I64(n) => Some(Cow::Owned(n.to_string())),
+            CellText::U64(n) => Some(Cow::Owned(n.to_string())),
+            CellText::F64(n) => Some(Cow::Owned(n.to_string())),
+            CellText::Json(s) | CellText::Text(s) => Some(Cow::Borrowed(s)),
         }
     }
 }
@@ -146,13 +176,16 @@ pub fn value_to_json(v: &Value) -> serde_json::Value {
                 .map(|(k, v)| (k.to_string(), value_to_json(v)))
                 .collect(),
         ),
-        // Decimal, Str, Bytes, dates/times, Uuid, Json text, Interval, Ref,
-        // Geo, Vector, Unsupported: all render as their truthful display
-        // text (JSON stays raw text unparsed, so key order/precision aren't
-        // re-derived from a `serde_json::Value` we'd have had to build).
-        other => match CellText::from_value(other) {
-            CellText::Text(s) => J::String(s),
-            CellText::Null | CellText::Absent => J::Null,
+        // A json/jsonb value nests as real JSON (it *is* JSON); only text
+        // that fails to parse — a driver bug — falls back to a string.
+        Value::Json(raw) => {
+            serde_json::from_str(raw).unwrap_or_else(|_| J::String(raw.to_string()))
+        }
+        // Decimal, Str, Bytes, dates/times, Uuid, Interval, Ref, Geo,
+        // Vector, Unsupported: all render as their truthful display text.
+        other => match datagrep_core::convert::display_value(other) {
+            Some(s) => J::String(s),
+            None => J::Null,
         },
     }
 }

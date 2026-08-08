@@ -1,0 +1,229 @@
+name: release
+
+# Tag a version to cut a release:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Builds stripped CLI binaries per platform plus the macOS app bundle, emits
+# SHA256SUMS, and attaches everything to a GitHub Release so install.sh can
+# pull prebuilt binaries without a clone.
+#
+# Assets:
+#   datagrep-macos-arm64        CLI, Apple silicon
+#   datagrep-macos-x86_64       CLI, Intel mac (cross-compiled — see below)
+#   datagrep-linux-x86_64       CLI, glibc x86_64 (bundled SQLite, rustls — no
+#   datagrep-linux-arm64        CLI, glibc aarch64  system deps beyond libc)
+#   datagrep-macos.app.zip      the macOS app (arm64-only, ad-hoc signed)
+#   *.sha256                    per-asset checksum (tangi convention)
+#   SHA256SUMS                  combined checksum file (install.sh verifies this)
+#
+# Runner policy (learned the hard way on chud-lori/tangi): never macos-13.
+# The free-tier Intel macOS pool is starved (a tangi job queued 10+ minutes
+# while arm64/Linux finished in seconds) and is on GitHub's deprecation path.
+# One macos-14 (Apple silicon) job cross-compiles both mac arches via
+# `rustup target add x86_64-apple-darwin` + `cargo build --target`.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to build (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: build (macos)
+    runs-on: macos-14 # Apple silicon; cross-compiles x86_64 — never macos-13, see header.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (both mac targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # [profile.release] already sets strip = "symbols" (plus fat LTO), so
+      # the binaries come out of cargo stripped. No extra `strip` pass on
+      # macOS: it would invalidate the linker's ad-hoc code signature that
+      # arm64 binaries require to run at all.
+      - name: Build CLI (both arches)
+        run: |
+          cargo build --release -p datagrep-cli --target aarch64-apple-darwin
+          cargo build --release -p datagrep-cli --target x86_64-apple-darwin
+          mkdir -p dist
+          cp target/aarch64-apple-darwin/release/datagrep dist/datagrep-macos-arm64
+          cp target/x86_64-apple-darwin/release/datagrep dist/datagrep-macos-x86_64
+
+      - name: Smoke test (native arm64)
+        run: |
+          ./dist/datagrep-macos-arm64 --version
+          ./dist/datagrep-macos-arm64 --help
+
+      # The app links the real FFI static lib (not the synthetic-data stub the
+      # CI workflow builds). build-app.sh assembles the .app bundle by hand
+      # (SwiftPM, no xcodebuild) and ad-hoc signs it (`codesign -s -`).
+      #
+      # -- Code signing / notarization -------------------------------------
+      # There is no Apple Developer account, so the app CANNOT be notarized;
+      # ad-hoc signing is the honest best we can do, and Gatekeeper will warn
+      # on first launch (the release notes below tell users what to do).
+      # To notarize later WITHOUT restructuring this job, insert a step here,
+      # after build-app.sh and before "Zip app", that needs these secrets:
+      #   MACOS_CERT_P12        — "Developer ID Application" cert, base64 .p12
+      #   MACOS_CERT_PASSWORD   — password for that .p12
+      #   APPLE_ID              — Apple ID email used with notarytool
+      #   APPLE_TEAM_ID         — 10-character team id
+      #   APPLE_APP_PASSWORD    — app-specific password for that Apple ID
+      # The step would: import the cert into a throwaway keychain, re-sign
+      # with `codesign --force --options runtime --sign "Developer ID
+      # Application: …" datagrep.app`, `xcrun notarytool submit <zip> --wait`,
+      # `xcrun stapler staple datagrep.app`, then let "Zip app" run as-is.
+      # --------------------------------------------------------------------
+      - name: Build app bundle (real FFI, arm64)
+        run: |
+          cargo build --release -p datagrep-ffi --target aarch64-apple-darwin
+          cd ui/macos
+          DATAGREP_FFI=real \
+          DATAGREP_FFI_LIB_DIR="${GITHUB_WORKSPACE}/target/aarch64-apple-darwin/release" \
+          ./build-app.sh
+
+      # ditto, not zip: it preserves the bundle's symlinks and extended
+      # attributes, which unzip-with-zip famously mangles for .app bundles.
+      - name: Zip app
+        run: |
+          cd ui/macos
+          ditto -c -k --keepParent datagrep.app "${GITHUB_WORKSPACE}/dist/datagrep-macos.app.zip"
+
+      - name: Report sizes
+        run: ls -lh dist
+
+      - name: Checksums
+        run: |
+          cd dist
+          shasum -a 256 datagrep-* | while read -r sum f; do echo "$sum  $f" > "$f.sha256"; done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+
+  build-linux:
+    name: build (${{ matrix.asset }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, asset: datagrep-linux-x86_64 }
+          - { os: ubuntu-24.04-arm, asset: datagrep-linux-arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # SQLite is bundled and TLS is rustls, so the binary depends on nothing
+      # beyond glibc — no apt packages needed, and the download stays portable.
+      - name: Build CLI
+        run: cargo build --release -p datagrep-cli
+
+      - name: Stage, strip, smoke test, checksum
+        run: |
+          mkdir -p dist
+          cp target/release/datagrep "dist/${{ matrix.asset }}"
+          strip "dist/${{ matrix.asset }}"   # belt-and-braces; cargo already strips symbols
+          "./dist/${{ matrix.asset }}" --version
+          "./dist/${{ matrix.asset }}" --help
+          ls -lh dist
+          cd dist && sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/*
+
+  release:
+    name: publish release
+    needs: [build-macos, build-linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Aggregate the per-job .sha256 files into one SHA256SUMS (what
+      # install.sh downloads and verifies), then re-verify every asset here —
+      # a corrupted artifact transfer fails the release instead of shipping.
+      - name: Assemble and verify SHA256SUMS
+        run: |
+          cd dist
+          cat -- *.sha256 | sort -k2 > SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      - name: Write release notes
+        run: |
+          cat > notes.md <<'EOF'
+          ## Install
+
+          **CLI** (macOS and Linux, no clone or toolchain needed):
+
+          ```sh
+          curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh | bash
+          ```
+
+          **macOS app**: download `datagrep-macos.app.zip` below, unzip, and drag
+          `datagrep.app` into `/Applications` — or let the installer do it:
+
+          ```sh
+          curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh | bash -s -- --app
+          ```
+
+          ## macOS Gatekeeper — read this before first launch
+
+          datagrep is **not notarized** (there is no Apple Developer account
+          behind this project); the app is ad-hoc signed only. If you download
+          the zip with a browser, macOS quarantines it and the first launch
+          shows:
+
+          > "datagrep" cannot be opened because the developer cannot be verified.
+
+          **The app is not broken.** Either right-click (Ctrl-click)
+          `datagrep.app` and choose **Open**, then **Open** again in the
+          dialog — macOS remembers the choice — or clear the quarantine flag:
+
+          ```sh
+          xattr -dr com.apple.quarantine /Applications/datagrep.app
+          ```
+
+          The CLI binaries are not affected when installed via `install.sh` or
+          `curl` (the quarantine flag is added by browsers, not by curl).
+
+          ## Verify downloads
+
+          `SHA256SUMS` covers every asset (install.sh checks it automatically):
+
+          ```sh
+          shasum -a 256 -c SHA256SUMS --ignore-missing   # macOS
+          sha256sum -c SHA256SUMS --ignore-missing       # Linux
+          ```
+          EOF
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          body_path: notes.md
+          generate_release_notes: true
+          files: |
+            dist/*

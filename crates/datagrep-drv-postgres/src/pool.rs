@@ -291,7 +291,10 @@ impl PgPool {
 
     /// Bring a session's session-level state in line with what the caller
     /// last asked for before handing it out.
-    async fn reconcile(&self, mut guard: OwnedMutexGuard<PgSession>) -> Result<PooledClient, DbError> {
+    async fn reconcile(
+        &self,
+        mut guard: OwnedMutexGuard<PgSession>,
+    ) -> Result<PooledClient, DbError> {
         let desired = *self.read_only.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(want) = desired {
             if guard.read_only != Some(want) {
@@ -377,8 +380,15 @@ mod tests {
     /// can't quietly reintroduce an unbounded wait.
     #[test]
     fn acquire_is_bounded_and_capped() {
-        assert!(MAX_SESSIONS >= 2, "interleaving needs a second session");
-        assert!(ACQUIRE_TIMEOUT > Duration::ZERO);
-        assert!(ACQUIRE_TIMEOUT <= Duration::from_secs(60));
+        let max = std::hint::black_box(MAX_SESSIONS);
+        let timeout = std::hint::black_box(ACQUIRE_TIMEOUT);
+        assert!(
+            max >= 2,
+            "interleaving a cursor with anything else needs a second session"
+        );
+        assert!(
+            timeout > Duration::ZERO && timeout <= Duration::from_secs(60),
+            "the acquire wait must be bounded — hanging forever is the bug this replaced"
+        );
     }
 }

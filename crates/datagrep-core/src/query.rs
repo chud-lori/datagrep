@@ -269,6 +269,14 @@ impl QueryMgr {
     /// query reaches a terminal state or is cancelled.
     pub async fn run(&self, conn: ConnLease, req: Request) -> Result<QueryId, DbError> {
         let started = Instant::now();
+        // An explicit `row_limit` is the caller saying "I want exactly this
+        // many rows" — it lifts the grid's soft row cap up to that number, so
+        // `--limit 600000` is never silently clipped back to 500k. Spill
+        // (§3.2) keeps memory bounded either way.
+        let row_limit = match &req {
+            Request::Native { opts, .. } => opts.row_limit,
+            Request::Op(_) => None,
+        };
         // `execute` returns when the server accepts the request; it never waits
         // for or buffers the result (design §3.1).
         let cursor = conn.execute(req).await?;
@@ -280,12 +288,11 @@ impl QueryMgr {
         let fetch_rows = conn.capabilities().default_fetch_rows;
 
         let (tx, rx) = mpsc::channel(DATA_CHANNEL_BOUND);
-        let feeder = spawn_feeder(
-            cursor,
-            tx,
-            self.policy.feeder_policy(fetch_rows),
-            cancel.clone(),
-        );
+        let mut feeder_policy = self.policy.feeder_policy(fetch_rows);
+        if let Some(limit) = row_limit {
+            feeder_policy.soft_row_cap = feeder_policy.soft_row_cap.max(limit);
+        }
+        let feeder = spawn_feeder(cursor, tx, feeder_policy, cancel.clone());
         let store = ResultStore::spawn(
             shape,
             rx,
@@ -897,8 +904,45 @@ mod tests {
         let seen = drain_until(&mut events, 3_000, |e| matches!(e, QueryEvent::Done { .. })).await;
         assert!(
             seen.iter()
-                .any(|e| matches!(e, QueryEvent::Capped { rows: 150, .. })),
-            "no Capped event: {seen:?}"
+                .any(|e| matches!(e, QueryEvent::Capped { rows: 120, .. })),
+            "no Capped event at exactly the cap: {seen:?}"
+        );
+        h.queries.shutdown();
+        h.sessions.shutdown();
+    }
+
+    /// An explicit `row_limit` lifts the soft row cap up to that number —
+    /// `--limit 600000` must never be silently clipped back to the default
+    /// cap, and the boundary is exact.
+    #[tokio::test]
+    async fn an_explicit_row_limit_lifts_the_soft_cap() {
+        let h = Harness::build(
+            MockPlan {
+                rows_per_batch: 50,
+                ..MockPlan::infinite(50)
+            },
+            MemoryPolicy {
+                soft_row_cap: 120,
+                ..policy()
+            },
+        );
+        let mut events = h.queries.subscribe();
+        let req = Request::Native {
+            text: Arc::from("select * from events"),
+            params: Vec::new(),
+            opts: datagrep_api::request::ExecOpts {
+                timeout: None,
+                row_limit: Some(300),
+                read_only_assert: false,
+            },
+        };
+        h.queries.run(h.lease().await, req).await.expect("run");
+
+        let seen = drain_until(&mut events, 3_000, |e| matches!(e, QueryEvent::Done { .. })).await;
+        assert!(
+            seen.iter()
+                .any(|e| matches!(e, QueryEvent::Capped { rows: 300, .. })),
+            "the explicit limit did not lift the cap: {seen:?}"
         );
         h.queries.shutdown();
         h.sessions.shutdown();

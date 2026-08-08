@@ -153,6 +153,19 @@ pub async fn run(ctx: &Context, args: &QueryArgs) -> Result<(), CliError> {
             .await;
 
         let outcome = run?;
+        if outcome.capped {
+            // Truncated output with exit 0 is the one thing a database client
+            // must never produce (TEST-REPORT F1): name the cap on stderr and
+            // fail loudly. `export` is the designated uncapped escape hatch.
+            let cap = ctx.core.queries().policy().soft_row_cap;
+            return Err(CliError::query(format!(
+                "statement {} stopped at the soft row cap ({cap} rows) after {} rows — \
+                 the output is (or may be) incomplete. Use `datagrep export` for the complete \
+                 result, or pass --limit N to raise the cap to exactly N rows",
+                statement_index + 1,
+                outcome.rows_shown
+            )));
+        }
         if outcome.cancelled {
             any_cancelled = true;
         }
@@ -271,6 +284,34 @@ mod tests {
         assert!(max > 0, "the counter never observed any rows at all");
         // 200k ndjson lines were actually written.
         assert_eq!(out.iter().filter(|&&b| b == b'\n').count(), 200_000);
+    }
+
+    /// A zero-row result still gets its CSV header — the columns are known
+    /// from the cursor's declared shape, not from data arriving.
+    #[tokio::test]
+    async fn zero_row_query_still_writes_the_csv_header() {
+        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("empty.db");
+        temp_sqlite_profile(&ctx.store, "emptyquery", &db_path).await;
+        let out_path = dir.path().join("empty.csv");
+
+        let args = QueryArgs {
+            profile: "emptyquery".to_string(),
+            file: None,
+            command: Some("SELECT 1 AS a, 'x' AS b WHERE 1 = 0".to_string()),
+            stdin: None,
+            format: OutputFormat::Csv,
+            limit: None,
+            timeout: None,
+            out: Some(out_path.clone()),
+        };
+        run(&ctx, &args).await.expect("query should succeed");
+        let written = std::fs::read_to_string(&out_path).unwrap();
+        assert_eq!(
+            written, "a,b\r\n",
+            "a zero-row result must still name its columns"
+        );
     }
 
     #[test]

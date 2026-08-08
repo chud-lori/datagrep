@@ -139,6 +139,11 @@ pub struct ExportArgs {
     #[arg(short = 'o', long = "out", value_name = "FILE")]
     pub out: PathBuf,
 
+    /// Export exactly N rows per statement, then stop. Without this, export
+    /// is uncapped and always delivers the complete result.
+    #[arg(long)]
+    pub limit: Option<u64>,
+
     #[arg(long)]
     pub timeout: Option<String>,
 }

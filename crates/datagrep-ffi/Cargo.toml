@@ -24,6 +24,7 @@ datagrep-drv-sqlite = { path = "../datagrep-drv-sqlite" }
 datagrep-drv-redis = { path = "../datagrep-drv-redis" }
 datagrep-drv-mongo = { path = "../datagrep-drv-mongo" }
 datagrep-drv-mysql = { path = "../datagrep-drv-mysql" }
+datagrep-drv-elasticsearch = { path = "../datagrep-drv-elasticsearch" }
 
 # The one global runtime (design §3.4). `rt-multi-thread` for the 4 workers,
 # `sync` for the broadcast/watch channels CoreApi hands out.
@@ -34,6 +35,9 @@ once_cell = "1"
 # serde_json: every string this ABI returns is JSON by the header's own
 # contract ("Returns JSON: [...]"). Not optional.
 serde_json = { workspace = true }
+# serde (derive): `datagrep_profiles_update`/`_add_json` take a typed JSON
+# patch; hand-walking a serde_json::Value would re-implement Deserialize badly.
+serde = { workspace = true }
 # arrow-array/-schema: `datagrep_core::store::WindowSlice::Table` hands back an
 # `Arc<RecordBatch>`. Reading a tabular cell at all means reading Arrow.
 # Pinned to datagrep-core's exact versions so the `RecordBatch` flowing across the

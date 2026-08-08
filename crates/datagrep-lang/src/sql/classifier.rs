@@ -230,6 +230,24 @@ mod tests {
         assert_eq!(classify(""), Unknown);
     }
 
+    /// DML with a `RETURNING` clause is still a **Write** — it produces rows,
+    /// but the leading keyword decides the class. Drivers that wrap
+    /// row-producing statements in a READ ONLY transaction must consult this
+    /// classification, not just "does it have columns" (TEST-REPORT F5).
+    #[test]
+    fn dml_with_returning_is_still_write() {
+        assert_eq!(
+            classify("INSERT INTO t (v) VALUES ('a') RETURNING id"),
+            Write
+        );
+        assert_eq!(classify("UPDATE t SET v = 'b' RETURNING id, v"), Write);
+        assert_eq!(classify("DELETE FROM t WHERE id = 1 RETURNING *"), Write);
+        assert_eq!(
+            classify("WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x RETURNING id"),
+            Write
+        );
+    }
+
     #[test]
     fn explain_variants_are_always_read() {
         assert_eq!(classify("EXPLAIN SELECT 1"), Read);

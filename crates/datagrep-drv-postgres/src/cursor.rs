@@ -147,6 +147,10 @@ impl Cursor for PgCursor {
         self.stats.bytes += bytes;
         self.stats.batches += 1;
 
+        if self.exhausted {
+            self.release_session().await;
+        }
+
         Ok(Some(Batch {
             seq: self.stats.batches - 1,
             payload: Payload::Rows(decoded),
@@ -180,13 +184,8 @@ impl Cursor for PgCursor {
         }
         self.closed = true;
         // Best-effort: if the actor already exited (e.g. explicit
-        // transaction committed elsewhere), the send silently no-ops.
-        let _ = self
-            .cmd_tx
-            .send(ActorCmd::CloseCursor {
-                portal_id: self.portal_id,
-            })
-            .await;
+        // transaction committed elsewhere), the sends silently no-op.
+        self.release_session().await;
         Ok(())
     }
 }

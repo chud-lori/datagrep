@@ -46,10 +46,11 @@ use std::ffi::{c_char, c_void};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use datagrep_api::LanguageId;
+use datagrep_api::{ExecOpts, LanguageId};
 use datagrep_core::query::CancelReport;
 use datagrep_core::store::{ChunkBody, StorePhase, StoreState};
 use datagrep_core::{QueryEvent, QueryId};
+use datagrep_lang::StatementClass;
 use serde_json::json;
 use tokio::task::JoinHandle;
 
@@ -89,6 +90,9 @@ impl ProgressHook {
 /// Everything the supervisor task and the FFI entry points share.
 struct QueryShared {
     core: Arc<CoreInner>,
+    /// The saved-profile name this query runs on — the key into the core's
+    /// per-profile [`datagrep_api::Enforcement`] record for the status JSON.
+    profile: String,
     started: Instant,
     inner: Mutex<QueryInner>,
     progress: Mutex<ProgressHook>,
@@ -117,6 +121,11 @@ struct QueryInner {
     /// mirrored from `StoreState::affected` so the GUI can say
     /// "N rows affected" instead of an empty grid.
     affected: Option<u64>,
+    /// The profile's read-only flag, learned as soon as the profile opens.
+    read_only: bool,
+    /// The profile's driver id, learned with `read_only` — needed to say
+    /// whether the `datagrep-lang` client-side guard covers this engine.
+    driver_id: String,
     /// The user pressed stop, possibly before the query was even accepted.
     cancel_requested: bool,
     /// Latest known report — pending at first, resolved once the server
@@ -215,6 +224,7 @@ pub unsafe extern "C" fn datagrep_query_run(
 
         let shared = Arc::new(QueryShared {
             core,
+            profile: profile.clone(),
             started: Instant::now(),
             inner: Mutex::new(QueryInner::default()),
             progress: Mutex::new(ProgressHook {
@@ -236,10 +246,17 @@ async fn drive(shared: Arc<QueryShared>, profile: String, sql: String) {
     // subscriber that started a moment too late.
     let events = shared.core.api.subscribe_events();
 
-    let (id, driver_id) = match shared.core.open_profile(&profile).await {
+    let (id, saved) = match shared.core.open_profile(&profile).await {
         Ok(v) => v,
         Err(e) => return shared.fail(e),
     };
+    let driver_id = saved.driver_id;
+    let read_only = saved.read_only;
+    {
+        let mut inner = shared.lock();
+        inner.read_only = read_only;
+        inner.driver_id = driver_id.clone();
+    }
 
     // Split with `datagrep-lang` rather than shipping a second tokenizer. A script
     // pasted into the editor ("CREATE TABLE …; INSERT …; SELECT …") runs in
@@ -250,11 +267,24 @@ async fn drive(shared: Arc<QueryShared>, profile: String, sql: String) {
         return shared.fail("sql contains no statement".to_string());
     };
 
+    // Read-only guardrail layer 2 (design §3.8): every statement of the
+    // script is vetted by `datagrep-lang`'s classifier *before dispatch*, so a
+    // write never even reaches the server — the same client-side guard
+    // `datagrep-cli`'s `@readonly` uses, and it applies regardless of how
+    // strongly the server enforces read-only (layer 1).
+    if read_only {
+        for stmt in &statements {
+            if let Err(e) = refuse_writes(&profile, &driver_id, stmt) {
+                return shared.fail(e);
+            }
+        }
+    }
+
     for stmt in leading {
         if shared.lock().cancel_requested {
             return shared.fail("cancelled before the server accepted the query".to_string());
         }
-        if let Err(e) = run_to_completion(&shared, id, stmt).await {
+        if let Err(e) = run_to_completion(&shared, id, &profile, read_only, stmt).await {
             return shared.fail(e);
         }
     }
@@ -265,12 +295,11 @@ async fn drive(shared: Arc<QueryShared>, profile: String, sql: String) {
 
     let qid = match shared
         .core
-        .api
-        .run_query(id, datagrep_api::Request::native(last.as_str()))
+        .run_request(id, &profile, read_only, request_for(last, read_only))
         .await
     {
         Ok(qid) => qid,
-        Err(e) => return shared.fail(e.to_string()),
+        Err(e) => return shared.fail(e),
     };
 
     // If stop was pressed while the server was still accepting, honour it now.
@@ -401,14 +430,14 @@ fn columns_of(state: &StoreState) -> Vec<(String, String)> {
 async fn run_to_completion(
     shared: &Arc<QueryShared>,
     id: datagrep_core::ProfileId,
+    profile: &str,
+    read_only: bool,
     sql: &str,
 ) -> Result<(), String> {
     let qid = shared
         .core
-        .api
-        .run_query(id, datagrep_api::Request::native(sql))
-        .await
-        .map_err(|e| e.to_string())?;
+        .run_request(id, profile, read_only, request_for(sql, read_only))
+        .await?;
 
     let result = match shared.core.api.queries().store(qid) {
         Some(store) => {
@@ -431,6 +460,54 @@ async fn run_to_completion(
     result
 }
 
+/// A `Request` for one statement, with `ExecOpts::read_only_assert` filled in
+/// honestly — a future driver that reads it gets the real value.
+fn request_for(sql: &str, read_only: bool) -> datagrep_api::Request {
+    datagrep_api::Request::Native {
+        text: Arc::from(sql),
+        params: Vec::new(),
+        opts: ExecOpts {
+            read_only_assert: read_only,
+            ..ExecOpts::default()
+        },
+    }
+}
+
+/// The client half of the read-only guard: refuse a statement `datagrep-lang`
+/// classifies as `Write`/`Ddl`/`Admin`, naming the profile so the user knows
+/// *which* setting refused them. Engines with no classifier pass through —
+/// their protection level is reported as `"none"`, never silently claimed.
+fn refuse_writes(profile: &str, driver_id: &str, stmt: &str) -> Result<(), String> {
+    let Some(language) = language_for_driver(driver_id) else {
+        return Ok(());
+    };
+    let class = datagrep_lang::language_for(language).classify(stmt);
+    if matches!(
+        class,
+        StatementClass::Write | StatementClass::Ddl | StatementClass::Admin
+    ) {
+        return Err(format!(
+            "profile `{profile}` is read-only: refused a {class:?} statement before it \
+             reached the server: {}",
+            preview(stmt)
+        ));
+    }
+    Ok(())
+}
+
+/// One line, at most 80 chars, of a refused statement — enough to recognise
+/// it, not enough to flood a status field.
+fn preview(stmt: &str) -> String {
+    const MAX: usize = 80;
+    let one_line: String = stmt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() > MAX {
+        let truncated: String = one_line.chars().take(MAX).collect();
+        format!("{truncated}…")
+    } else {
+        one_line
+    }
+}
+
 /// Statement splitting via `datagrep-lang` — never a second tokenizer here.
 fn split_statements(driver_id: &str, sql: &str) -> Vec<String> {
     let Some(language) = language_for_driver(driver_id) else {
@@ -448,13 +525,16 @@ fn split_statements(driver_id: &str, sql: &str) -> Vec<String> {
 
 /// The language a profile's engine speaks. One line per driver, like
 /// [`crate::drivers::register_drivers`].
-fn language_for_driver(id: &str) -> Option<LanguageId> {
+pub(crate) fn language_for_driver(id: &str) -> Option<LanguageId> {
     match id {
         "sqlite" => Some(LanguageId::Sql(datagrep_api::SqlDialect::Sqlite)),
         "postgres" => Some(LanguageId::Sql(datagrep_api::SqlDialect::Postgres)),
         "redis" => Some(LanguageId::RedisCli),
         "mongodb" => Some(LanguageId::MongoShell),
         "mysql" => Some(LanguageId::Sql(datagrep_api::SqlDialect::Mysql)),
+        // datagrep-lang has no ES lexer yet, so this resolves to its inert
+        // fallback: no splitting, no highlighting. Honest, not a pretence.
+        "elasticsearch" => Some(LanguageId::EsDsl),
         _ => None,
     }
 }
@@ -644,6 +724,15 @@ pub unsafe extern "C" fn datagrep_query_status_json(
                 // the frozen header's documented shape — the GUI renders
                 // "N rows affected" from this.
                 "affected_rows": inner.affected,
+                // Read-only guard status (design §3.8's honesty rule): null
+                // when the profile is writeable, otherwise
+                // {"enforcement":"server"|"client"|"none","server_confirmed":bool}
+                // — see the header comment on datagrep_connection_info_json.
+                "read_only": crate::core::read_only_json(
+                    inner.read_only,
+                    &inner.driver_id,
+                    q.shared.core.enforcement_for(&q.shared.profile),
+                ),
                 "elapsed_ms": elapsed_ms,
                 "error": error,
                 "columns": inner

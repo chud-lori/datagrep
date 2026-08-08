@@ -478,7 +478,19 @@ async fn pull_loop(
         };
 
         // ---- account, adapt, hand over ---------------------------------
-        let rows = payload_rows(&batch) as u64;
+        let mut batch = batch;
+        let mut rows = payload_rows(&batch) as u64;
+        // The cap boundary is exact: a chunk that would cross the soft row
+        // cap is trimmed to land on it, so a capped result holds *exactly*
+        // `soft_row_cap` rows — deterministic, run after run — instead of
+        // "the cap plus whatever was in flight". Only this task ever writes
+        // `ctl.rows`, so the load below cannot race another writer.
+        let admitted = ctl.rows.load(Ordering::SeqCst);
+        let remaining = policy.soft_row_cap.saturating_sub(admitted);
+        if rows > remaining {
+            truncate_payload(&mut batch.payload, remaining as usize);
+            rows = remaining;
+        }
         let stats = cursor.stats();
         *lock(&ctl.stats) = stats;
         let bytes_this_chunk = stats.bytes.saturating_sub(prev_bytes);
@@ -499,6 +511,20 @@ async fn pull_loop(
         if total >= policy.soft_row_cap {
             return Ending::Capped;
         }
+    }
+}
+
+/// Trim a chunk's payload to at most `keep` rows — the exact-boundary half
+/// of the soft row cap (a capped result is `soft_row_cap` rows, not
+/// "roughly").
+fn truncate_payload(payload: &mut datagrep_api::driver::Payload, keep: usize) {
+    use datagrep_api::driver::Payload;
+    match payload {
+        Payload::Rows(rows) => rows.truncate(keep),
+        Payload::Docs(docs) => docs.truncate(keep),
+        Payload::Pairs(pairs) => pairs.truncate(keep),
+        Payload::Graph(chunk) => chunk.nodes.truncate(keep),
+        Payload::Empty => {}
     }
 }
 
@@ -679,7 +705,10 @@ mod tests {
         feeder.join().await;
 
         assert_eq!(feeder.state(), FeedState::Capped);
-        assert_eq!(rows, 300, "capped on the first chunk that crossed 250");
+        assert_eq!(
+            rows, 250,
+            "the chunk that crossed the cap must be trimmed to land exactly on it"
+        );
         assert_eq!(
             counters.next_batch_calls(),
             3,

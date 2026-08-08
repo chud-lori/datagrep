@@ -175,13 +175,7 @@ fn profiles_add_postgres_url_with_inline_password_never_stores_it() {
     // connections. That destroyed real credentials twice before this was
     // caught, so the account is not optional.
     let _ = Command::new("security")
-        .args([
-            "delete-generic-password",
-            "-s",
-            "datagrep",
-            "-a",
-            "staging",
-        ])
+        .args(["delete-generic-password", "-s", "datagrep", "-a", "staging"])
         .output();
 }
 
@@ -342,12 +336,10 @@ fn multi_statement_script_runs_every_statement_in_order() {
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
     let text = stdout(&out);
-    // Every cell renders through `CellText::Text(String)` (design: NULL and
-    // `Absent` are the only sentinels this crate's `Row`/JSON encoding
-    // distinguishes — see `value_text.rs`), so a JSON number cell is
-    // legitimately a JSON *string* here, not `1`. Documented, not a bug.
-    assert!(text.contains("\"id\":\"1\""));
-    assert!(text.contains("\"id\":\"2\""));
+    // Scalars keep their JSON types (`{"id":1}`, never `{"id":"1"}`) — the
+    // README's `--format json | jq` pitch depends on it. See `value_text.rs`.
+    assert!(text.contains("\"id\":1"), "got: {text}");
+    assert!(text.contains("\"id\":2"), "got: {text}");
 }
 
 #[test]

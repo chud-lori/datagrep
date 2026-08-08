@@ -53,7 +53,7 @@ pub unsafe extern "C" fn datagrep_catalog_children_json(
 }
 
 async fn children(core: &CoreInner, profile: &str, parent: ObjectPath) -> Result<String, String> {
-    let (id, _driver) = core.open_profile(profile).await?;
+    let (id, _profile) = core.open_profile(profile).await?;
     let depth = parent.parts().len();
 
     let page = core
@@ -199,7 +199,7 @@ pub unsafe extern "C" fn datagrep_catalog_describe_json(
 }
 
 async fn describe(core: &CoreInner, profile: &str, path: ObjectPath) -> Result<String, String> {
-    let (id, _driver) = core.open_profile(profile).await?;
+    let (id, _profile) = core.open_profile(profile).await?;
     let session = core.api.session(id).map_err(|e| e.to_string())?;
     let lease = session.acquire().await.map_err(|e| e.to_string())?;
     let detail = lease

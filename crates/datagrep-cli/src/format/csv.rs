@@ -10,7 +10,6 @@
 use std::io::{self, Write};
 
 use super::{Row, RowSink, Summary};
-use crate::value_text::CellText;
 
 pub struct CsvSink<W: Write> {
     out: W,
@@ -41,11 +40,13 @@ impl<W: Write + Send> RowSink for CsvSink<W> {
     fn write_rows(&mut self, rows: &[Row]) -> io::Result<()> {
         for row in rows {
             for (i, cell) in row.iter().enumerate() {
-                let text = match cell {
-                    CellText::Null | CellText::Absent => "",
-                    CellText::Text(s) => s.as_str(),
-                };
-                write_csv_field(&mut self.out, self.delim, text, i == 0)?;
+                let text = cell.display_text();
+                write_csv_field(
+                    &mut self.out,
+                    self.delim,
+                    text.as_deref().unwrap_or(""),
+                    i == 0,
+                )?;
             }
             self.out.write_all(b"\r\n")?;
         }
@@ -80,6 +81,7 @@ fn write_csv_field<W: Write>(out: &mut W, delim: u8, field: &str, first: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value_text::CellText;
 
     fn render(rows: &[Vec<&str>]) -> String {
         let mut out = Vec::new();

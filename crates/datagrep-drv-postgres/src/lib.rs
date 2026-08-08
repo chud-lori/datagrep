@@ -16,6 +16,18 @@
 //! opened them — see `actor.rs` for the actor design that replaces what
 //! would otherwise need an unsafe self-referential struct.
 //!
+//! # Sessions (§3.5 "a cursor pins its connection")
+//!
+//! One `PgConnection` is a *logical* connection backed by a small pool of
+//! *physical* sessions (`pool.rs`). A cursor or an interactive transaction
+//! pins the session it runs on, but only for as long as it really needs it:
+//! a cursor releases its session the moment its portal is drained, and
+//! anything that needs the server while a session is genuinely pinned takes a
+//! different one from the pool. Nothing in this driver waits on another
+//! operation without a deadline — at the pool's cap the wait ends in
+//! `DbError::ResourceExhausted` naming what holds the sessions. `pool.rs`'s
+//! module docs carry the full reasoning and the deadlock it replaced.
+//!
 //! # Known `datagrep-api` gaps found while implementing this driver
 //!
 //! 1. **Capability flags named in the ticket don't exist in `Caps`.**
@@ -70,6 +82,7 @@ pub mod connection;
 pub mod cursor;
 pub mod driver;
 pub mod error;
+pub mod pool;
 pub mod sql;
 pub mod transaction;
 pub mod value;

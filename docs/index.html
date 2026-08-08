@@ -221,7 +221,7 @@ cd ui/macos &amp;&amp; ./build-app.sh    <span class="c"># macOS app — no Xcod
             <th scope="row">datagrep</th>
             <td>Free, open source. No tiers, no account.</td>
             <td>Native macOS + Rust engine</td>
-            <td>Both, as equals — Postgres, SQLite, Redis, MongoDB (MySQL &amp; Elasticsearch in progress)</td>
+            <td>Both, as equals — Postgres, MySQL/MariaDB, SQLite, Redis, MongoDB, Elasticsearch</td>
             <td class="yes">Streams end-to-end; 174&nbsp;MB peak through a 1M-row result (measured)</td>
             <td class="yes">Three visually distinct states</td>
             <td class="no">Neither yet — see <a href="#not-yet">Not yet</a></td>
@@ -307,8 +307,8 @@ cd ui/macos &amp;&amp; ./build-app.sh    <span class="c"># macOS app — no Xcod
         <tr><td>SQLite</td><td><span class="status status-ok">working</span></td></tr>
         <tr><td>Redis</td><td><span class="status status-ok">working</span></td></tr>
         <tr><td>MongoDB</td><td><span class="status status-ok">working</span></td></tr>
-        <tr><td>MySQL / MariaDB</td><td><span class="status status-wip">in progress</span></td></tr>
-        <tr><td>Elasticsearch</td><td><span class="status status-wip">in progress</span></td></tr>
+        <tr><td>MySQL / MariaDB</td><td><span class="status status-ok">working</span></td></tr>
+        <tr><td>Elasticsearch</td><td><span class="status status-ok">working</span> <small>read-only — no writes yet</small></td></tr>
       </tbody>
     </table>
     <p class="foot">
@@ -452,7 +452,7 @@ SELECT * FROM events;</code></pre>
     <ul class="notyet-list">
       <li><strong>No inline cell editing.</strong> Every competitor in the table above has it. The plan is a staged-edit, review-before-commit model — because a naive implementation can update the wrong row, and that’s worse than not shipping it.</li>
       <li><strong>No autocomplete.</strong> Planned as a restrained, lazily indexed version — our study found a bad autocomplete generates more anger than none.</li>
-      <li><strong>MySQL/MariaDB and Elasticsearch</strong> drivers are in progress, not usable yet.</li>
+      <li><strong>Elasticsearch is read-only</strong> — browsing and querying work, writes are not implemented.</li>
       <li><strong>App-side gaps:</strong> no query-history panel (the CLI has <code>history</code> with search), no export UI (the CLI has <code>export</code>), no foreign-key click-through, no ER diagrams.</li>
       <li><strong>macOS only.</strong> No Linux or Windows app today.</li>
     </ul>

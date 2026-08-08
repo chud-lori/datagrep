@@ -415,6 +415,291 @@ async fn scan_op_streams_with_identity() {
         .ok();
 }
 
+/// Regression test for the connection-wide deadlock (TEST-REPORT.md F2).
+///
+/// The shape that used to hang forever: an open, deliberately **half-read**
+/// cursor pins its session, and then the caller does something else on the
+/// same `Connection` — browses the catalog (the GUI's "results grid open,
+/// click the schema tree") and runs another query. Both used to await the
+/// connection-wide client mutex with no timeout, so the driver froze at 0%
+/// CPU with the server showing `idle in transaction`.
+///
+/// Every step is wrapped in a real deadline: the whole point is that these
+/// operations *return*, so a regression must fail the test, not hang the
+/// suite the way the shipped one did.
+#[tokio::test]
+#[ignore]
+async fn catalog_and_queries_work_while_a_cursor_is_open() {
+    const DEADLINE: Duration = Duration::from_secs(20);
+    let conn = connect().await;
+
+    // Deliberately partial: 10k rows available, 10 pulled. The cursor is not
+    // drained, so its session stays pinned for the rest of the test.
+    let mut cursor = conn
+        .execute(Request::native(
+            "SELECT g FROM generate_series(1, 10000) AS g",
+        ))
+        .await
+        .expect("execute");
+    let first = cursor
+        .next_batch(FetchHint {
+            max_rows: 10,
+            ..FetchHint::default()
+        })
+        .await
+        .expect("first batch")
+        .expect("at least one batch");
+    match &first.payload {
+        datagrep_api::driver::Payload::Rows(rows) => assert_eq!(rows.len(), 10),
+        other => panic!("expected Rows, got {other:?}"),
+    }
+
+    // 1. Catalog browsing must not queue behind the open cursor.
+    let catalog = conn.catalog();
+    let databases = tokio::time::timeout(
+        DEADLINE,
+        catalog.children(
+            &ObjectPath::new(vec![]),
+            ListOpts {
+                limit: 100,
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .expect("catalog.children() must not hang while a cursor is open")
+    .expect("list databases");
+    assert!(!databases.items.is_empty(), "at least one database");
+
+    let dbname: Arc<str> = Arc::from(env_or("DATAGREP_TEST_PG_DB", "postgres"));
+    let schemas = tokio::time::timeout(
+        DEADLINE,
+        catalog.children(
+            &ObjectPath::new(vec![dbname.clone()]),
+            ListOpts {
+                limit: 500,
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .expect("catalog.children(schemas) must not hang while a cursor is open")
+    .expect("list schemas");
+    assert!(schemas
+        .items
+        .iter()
+        .any(|n| &*n.path.parts()[1] == "pg_catalog"));
+
+    // 2. Listing relations exercises the `relkind::text` decode (F3) *and*
+    //    does it on a second session while the first is pinned.
+    let relations = tokio::time::timeout(
+        DEADLINE,
+        catalog.children(
+            &ObjectPath::new(vec![dbname.clone(), Arc::from("pg_catalog")]),
+            ListOpts {
+                limit: 50,
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .expect("catalog.children(relations) must not hang while a cursor is open")
+    .expect("list relations — decoding relkind must not panic");
+    assert!(!relations.items.is_empty(), "pg_catalog has relations");
+    assert!(
+        relations
+            .items
+            .iter()
+            .any(|n| n.kind == datagrep_api::catalog::ObjectKind::View),
+        "pg_catalog is full of views; if none came back as View, relkind decoded wrong"
+    );
+
+    // `describe` reads relkind too, from its own query — the second of the
+    // two sites that panicked. Point it at a view so the decoded value is
+    // actually load-bearing.
+    let detail = tokio::time::timeout(
+        DEADLINE,
+        catalog.describe(&ObjectPath::new(vec![
+            dbname.clone(),
+            Arc::from("pg_catalog"),
+            Arc::from("pg_views"),
+        ])),
+    )
+    .await
+    .expect("describe must not hang while a cursor is open")
+    .expect("describe — decoding relkind must not panic");
+    assert_eq!(detail.node.kind, datagrep_api::catalog::ObjectKind::View);
+
+    // 3. A whole second query must not queue behind the open cursor either.
+    let mut other = tokio::time::timeout(DEADLINE, conn.execute(Request::native("SELECT 42")))
+        .await
+        .expect("a second execute() must not hang while a cursor is open")
+        .expect("second query");
+    let batch = tokio::time::timeout(DEADLINE, other.next_batch(FetchHint::default()))
+        .await
+        .expect("second query's batch must not hang")
+        .expect("batch")
+        .expect("one row");
+    match batch.payload {
+        datagrep_api::driver::Payload::Rows(rows) => assert_eq!(rows[0][0], Value::I64(42)),
+        other => panic!("expected Rows, got {other:?}"),
+    }
+
+    // 4. …and the original cursor is still perfectly usable afterwards.
+    let more = tokio::time::timeout(DEADLINE, cursor.next_batch(FetchHint::default()))
+        .await
+        .expect("the original cursor must still stream")
+        .expect("batch")
+        .expect("more rows");
+    match &more.payload {
+        datagrep_api::driver::Payload::Rows(rows) => assert!(!rows.is_empty()),
+        other => panic!("expected Rows, got {other:?}"),
+    }
+
+    // 5. Closing the connection must not block on the still-pinned session.
+    tokio::time::timeout(DEADLINE, conn.close())
+        .await
+        .expect("close() must not hang behind an open cursor")
+        .expect("close");
+}
+
+/// The other half of "never hang": once every pooled session is pinned, an
+/// acquire *waits* — with a deadline — instead of blocking forever, and is
+/// served the moment a session comes back. Proven by pinning
+/// `MAX_SESSIONS` un-drained cursors and then racing one more query against
+/// releasing one of them.
+#[tokio::test]
+#[ignore]
+async fn a_query_at_the_session_cap_waits_and_is_served_not_wedged() {
+    let conn = connect().await;
+
+    let mut cursors = Vec::new();
+    for _ in 0..datagrep_drv_postgres::pool::MAX_SESSIONS {
+        let mut cursor = conn
+            .execute(Request::native(
+                "SELECT g FROM generate_series(1, 1000) AS g",
+            ))
+            .await
+            .expect("execute");
+        // Pull one short batch and stop: the portal is *not* drained, so this
+        // cursor keeps its session pinned.
+        cursor
+            .next_batch(FetchHint {
+                max_rows: 10,
+                ..FetchHint::default()
+            })
+            .await
+            .expect("batch")
+            .expect("rows");
+        cursors.push(cursor);
+    }
+
+    // Every session is now pinned. One more query has to wait — so release a
+    // cursor while it waits and check it gets served promptly.
+    let spare = cursors.pop().expect("a cursor to release");
+    let (result, ()) = tokio::join!(
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            conn.execute(Request::native("SELECT 7")),
+        ),
+        async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            drop(spare);
+        },
+    );
+    let mut cursor = result
+        .expect("a query at the session cap must wait with a deadline, never hang")
+        .expect("and must succeed once a session is released");
+    let batch = cursor
+        .next_batch(FetchHint::default())
+        .await
+        .expect("batch")
+        .expect("one row");
+    match batch.payload {
+        datagrep_api::driver::Payload::Rows(rows) => assert_eq!(rows[0][0], Value::I64(7)),
+        other => panic!("expected Rows, got {other:?}"),
+    }
+
+    // The still-pinned cursors are untouched by any of that.
+    for cursor in cursors.iter_mut() {
+        let more = cursor
+            .next_batch(FetchHint::default())
+            .await
+            .expect("the pinned cursors must still stream")
+            .expect("more rows");
+        assert!(matches!(
+            more.payload,
+            datagrep_api::driver::Payload::Rows(_)
+        ));
+    }
+}
+
+/// `set_read_only` must bind the whole logical connection, not just whichever
+/// socket happened to be idle when it was called. Once a connection can own
+/// several sessions, a write slipping onto a freshly dialled one would turn a
+/// safety switch into a lie — so this pins the first session with an open
+/// cursor and checks the write is still refused on the second.
+#[tokio::test]
+#[ignore]
+async fn read_only_binds_every_pooled_session_not_just_the_first() {
+    let conn = connect().await;
+    conn.execute(Request::native("DROP TABLE IF EXISTS datagrep_ro_test"))
+        .await
+        .ok();
+    conn.execute(Request::native("CREATE TABLE datagrep_ro_test (id int)"))
+        .await
+        .expect("create");
+
+    assert_eq!(
+        conn.set_read_only(true).await.expect("set read only"),
+        datagrep_api::driver::Enforcement::Server
+    );
+
+    // Pin the session that `set_read_only` just configured, so the write
+    // below is forced onto a different, newly dialled one.
+    let mut cursor = conn
+        .execute(Request::native(
+            "SELECT g FROM generate_series(1, 1000) AS g",
+        ))
+        .await
+        .expect("execute");
+    cursor
+        .next_batch(FetchHint {
+            max_rows: 10,
+            ..FetchHint::default()
+        })
+        .await
+        .expect("batch")
+        .expect("rows");
+
+    let write = conn
+        .execute(Request::native("INSERT INTO datagrep_ro_test VALUES (1)"))
+        .await;
+    // SQLSTATE 25006 = read_only_sql_transaction: the *server* refused it, so
+    // this cannot pass for some unrelated reason (a busy pool, a missing
+    // table). Read-only is a property of the connection, not of one socket.
+    match write {
+        Err(datagrep_api::error::DbError::Query { code, .. }) => {
+            assert_eq!(
+                code.as_deref(),
+                Some("25006"),
+                "expected a server-side read-only refusal"
+            )
+        }
+        Err(other) => panic!("expected a server-side read-only refusal, got {other:?}"),
+        Ok(_) => panic!(
+            "the write succeeded on a freshly dialled pooled session — set_read_only did not \
+             bind the whole connection"
+        ),
+    }
+
+    conn.set_read_only(false).await.expect("back to read-write");
+    drop(cursor);
+    conn.execute(Request::native("DROP TABLE datagrep_ro_test"))
+        .await
+        .ok();
+}
+
 #[tokio::test]
 #[ignore]
 async fn non_select_returns_ack_shape_without_a_portal() {

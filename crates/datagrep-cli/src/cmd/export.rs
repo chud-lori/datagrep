@@ -65,7 +65,7 @@ pub async fn run(ctx: &Context, args: &ExportArgs) -> Result<(), CliError> {
 
         let opts = ExecOpts {
             timeout,
-            row_limit: None,
+            row_limit: args.limit,
             read_only_assert: false,
         };
         let req = Request::Native {
@@ -74,9 +74,9 @@ pub async fn run(ctx: &Context, args: &ExportArgs) -> Result<(), CliError> {
             opts,
         };
 
-        let rows_this_statement = {
+        let (rows_this_statement, timed_out) = {
             let row_sink = super::build_sink(args.format, &mut out, statement_index > 0);
-            let mut sink = ExportRowSink::new(row_sink, deadline, stderr_is_tty);
+            let mut sink = ExportRowSink::new(row_sink, deadline, stderr_is_tty, args.limit);
             ctx.core
                 .run_export(default_id, req, &mut sink)
                 .await
@@ -85,10 +85,20 @@ pub async fn run(ctx: &Context, args: &ExportArgs) -> Result<(), CliError> {
             if stderr_is_tty {
                 eprintln!();
             }
-            sink.rows_written
+            (sink.rows_written, sink.timed_out)
         };
         total_rows += rows_this_statement;
         statement_index += 1;
+
+        if timed_out {
+            // A partial export must never exit 0 (TEST-REPORT F1: silent
+            // truncation of an export is the worst failure mode there is).
+            out.flush()?;
+            return Err(CliError::query(format!(
+                "export stopped by --timeout after {rows_this_statement} rows — {} is INCOMPLETE",
+                args.out.display()
+            )));
+        }
     }
 
     if statement_index == 0 {
@@ -114,27 +124,44 @@ fn map_export_err(err: DbError) -> CliError {
 struct ExportRowSink<'w> {
     inner: Box<dyn RowSink + 'w>,
     deadline: Option<Instant>,
+    /// Explicit `--limit N`: hand the writer exactly N rows, then stop. The
+    /// boundary is exact — the final chunk is truncated, never "N-ish".
+    limit: Option<u64>,
     stderr_is_tty: bool,
     started_at: std::time::Instant,
+    /// Last progress line emitted, for throttling (a 7s export must not spam
+    /// hundreds of stderr lines into a pipe).
+    last_progress: Option<std::time::Instant>,
     started: bool,
     columns: Vec<String>,
     /// Set once the shape is known to be an acknowledgement (no rows).
     ack: Option<(Option<u64>, Option<String>)>,
     rows_written: u64,
+    /// The deadline stopped this export early: the file is incomplete and the
+    /// caller must exit non-zero.
+    timed_out: bool,
     note: Option<String>,
 }
 
 impl<'w> ExportRowSink<'w> {
-    fn new(inner: Box<dyn RowSink + 'w>, deadline: Option<Instant>, stderr_is_tty: bool) -> Self {
+    fn new(
+        inner: Box<dyn RowSink + 'w>,
+        deadline: Option<Instant>,
+        stderr_is_tty: bool,
+        limit: Option<u64>,
+    ) -> Self {
         Self {
             inner,
             deadline,
+            limit,
             stderr_is_tty,
             started_at: std::time::Instant::now(),
+            last_progress: None,
             started: false,
             columns: Vec::new(),
             ack: None,
             rows_written: 0,
+            timed_out: false,
             note: None,
         }
     }
@@ -154,7 +181,22 @@ impl<'w> ExportRowSink<'w> {
         Ok(())
     }
 
-    fn progress(&self) {
+    fn progress(&mut self) {
+        // Throttle: ~10/s on a TTY (smooth `\r` refresh), ~1/s into a pipe
+        // (each line persists — hundreds of them is spam, not progress).
+        let min_interval = if self.stderr_is_tty {
+            std::time::Duration::from_millis(100)
+        } else {
+            std::time::Duration::from_secs(1)
+        };
+        let now = std::time::Instant::now();
+        if self
+            .last_progress
+            .is_some_and(|last| now.duration_since(last) < min_interval)
+        {
+            return;
+        }
+        self.last_progress = Some(now);
         let secs = self.started_at.elapsed().as_secs_f64().max(0.001);
         let rate = self.rows_written as f64 / secs;
         if self.stderr_is_tty {
@@ -209,10 +251,11 @@ impl ExportSink for ExportRowSink<'_> {
                 self.note = Some(
                     "stopped: timed out — the server may still be executing this query".to_string(),
                 );
+                self.timed_out = true;
                 return Ok(SinkFlow::Stop);
             }
         }
-        let rows: Vec<Row> = match batch.payload {
+        let mut rows: Vec<Row> = match batch.payload {
             Payload::Rows(rows) => rows
                 .iter()
                 .map(|row| row.iter().map(CellText::from_value).collect())
@@ -224,6 +267,17 @@ impl ExportSink for ExportRowSink<'_> {
                 .collect(),
             Payload::Graph(_) | Payload::Empty => Vec::new(),
         };
+        // `--limit N` is exact: truncate the chunk that crosses the boundary
+        // so exactly N rows reach the file — never "N plus whatever batch was
+        // in flight".
+        let mut hit_limit = false;
+        if let Some(limit) = self.limit {
+            let remaining = limit.saturating_sub(self.rows_written);
+            if rows.len() as u64 >= remaining {
+                rows.truncate(remaining as usize);
+                hit_limit = true;
+            }
+        }
         if !rows.is_empty() {
             self.ensure_started(rows[0].len())?;
             self.inner.write_rows(&rows)?;
@@ -231,6 +285,13 @@ impl ExportSink for ExportRowSink<'_> {
             self.progress();
         }
         // `rows` (this chunk's only copy) drops here.
+        if hit_limit {
+            self.note = Some(format!(
+                "stopped after {} rows (--limit)",
+                self.rows_written
+            ));
+            return Ok(SinkFlow::Stop);
+        }
         Ok(SinkFlow::Continue)
     }
 }
@@ -243,7 +304,9 @@ fn doc_cell(v: &Value) -> CellText {
         Value::Null => CellText::Null,
         Value::Absent => CellText::Absent,
         other => match serde_json::to_string(&crate::value_text::value_to_json(other)) {
-            Ok(json) => CellText::Text(json),
+            // `Json`, not `Text`: the JSON formats then emit the document as
+            // nested JSON rather than one big escaped string.
+            Ok(json) => CellText::Json(json),
             Err(_) => CellText::Text(String::from("<unserializable document>")),
         },
     }
@@ -302,6 +365,7 @@ mod tests {
             command: Some("SELECT 1 AS a, 'x' AS b UNION ALL SELECT 2, 'y'".to_string()),
             format: OutputFormat::Csv,
             out: out_path.clone(),
+            limit: None,
             timeout: None,
         };
         run(&ctx, &args).await.expect("export should succeed");
@@ -335,6 +399,7 @@ mod tests {
             ),
             format: OutputFormat::Ndjson,
             out: out_path.clone(),
+            limit: None,
             timeout: None,
         };
         run(&ctx, &args).await.expect("export should succeed");
@@ -352,6 +417,103 @@ mod tests {
         );
     }
 
+    /// **The F1 regression test**: an export larger than the grid's 500k soft
+    /// row cap delivers **every row, exactly** — the cap belongs to the
+    /// result store, and export never touches the store.
+    #[tokio::test]
+    async fn export_beyond_the_soft_row_cap_delivers_every_row() {
+        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("uncapped.db");
+        sqlite_profile(&ctx.store, "uncapped", &db_path).await;
+        let out_path = dir.path().join("uncapped.ndjson");
+
+        let args = ExportArgs {
+            profile: "uncapped".to_string(),
+            file: None,
+            command: Some(
+                "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM cnt \
+                 WHERE x < 600000) SELECT x FROM cnt"
+                    .to_string(),
+            ),
+            format: OutputFormat::Ndjson,
+            out: out_path.clone(),
+            limit: None,
+            timeout: None,
+        };
+        run(&ctx, &args).await.expect("export should succeed");
+
+        let written = std::fs::read_to_string(&out_path).unwrap();
+        assert_eq!(
+            written.lines().count(),
+            600_000,
+            "export must deliver the complete result, exactly — never the soft row cap"
+        );
+    }
+
+    /// `--limit N` is exact: exactly N rows reach the file, not "N plus
+    /// whatever batch was in flight".
+    #[tokio::test]
+    async fn export_limit_yields_exactly_n_rows() {
+        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("limited.db");
+        sqlite_profile(&ctx.store, "limited", &db_path).await;
+        let out_path = dir.path().join("limited.ndjson");
+
+        let args = ExportArgs {
+            profile: "limited".to_string(),
+            file: None,
+            command: Some(
+                "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM cnt \
+                 WHERE x < 100000) SELECT x FROM cnt"
+                    .to_string(),
+            ),
+            format: OutputFormat::Ndjson,
+            out: out_path.clone(),
+            limit: Some(1_234),
+            timeout: None,
+        };
+        run(&ctx, &args)
+            .await
+            .expect("limited export should succeed");
+
+        let written = std::fs::read_to_string(&out_path).unwrap();
+        assert_eq!(
+            written.lines().count(),
+            1_234,
+            "--limit N must yield exactly N rows"
+        );
+    }
+
+    /// A zero-row result still gets its CSV header: an empty file with no
+    /// columns is indistinguishable from a broken export.
+    #[tokio::test]
+    async fn zero_row_export_still_writes_the_csv_header() {
+        let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("empty.db");
+        sqlite_profile(&ctx.store, "emptyexport", &db_path).await;
+        let out_path = dir.path().join("empty.csv");
+
+        let args = ExportArgs {
+            profile: "emptyexport".to_string(),
+            file: None,
+            command: Some("SELECT 1 AS a, 'x' AS b WHERE 1 = 0".to_string()),
+            format: OutputFormat::Csv,
+            out: out_path.clone(),
+            limit: None,
+            timeout: None,
+        };
+        run(&ctx, &args).await.expect("export should succeed");
+
+        let contents = std::fs::read_to_string(&out_path).unwrap();
+        assert_eq!(
+            contents, "a,b\r\n",
+            "a zero-row export must still name its columns"
+        );
+    }
+
     #[tokio::test]
     async fn export_rejects_empty_input() {
         let ctx = Context::with_store(datagrep_profiles::Store::open_in_memory());
@@ -366,6 +528,7 @@ mod tests {
             command: Some("   ".to_string()),
             format: OutputFormat::Csv,
             out: out_path,
+            limit: None,
             timeout: None,
         };
         let err = run(&ctx, &args).await.unwrap_err();
