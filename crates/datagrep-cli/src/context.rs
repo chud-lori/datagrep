@@ -163,3 +163,18 @@ pub fn test_ctx() -> Context {
     ctx.secrets = datagrep_secrets::SecretResolver::in_memory();
     ctx
 }
+
+/// [`test_ctx`] over a real file, for the one claim an in-memory store cannot
+/// support: that a password never lands on disk. Give it a path inside a
+/// `tempfile::tempdir()` and the whole directory — db, `-wal`, `-shm`, any
+/// export written beside them — becomes greppable.
+///
+/// Secrets stay in memory for exactly the reasons [`test_ctx`] gives; a test
+/// that reaches the OS keychain to prove something about disk would be trading
+/// one leak for another.
+#[cfg(test)]
+pub fn test_ctx_at(profiles_db: &std::path::Path) -> Context {
+    let mut ctx = Context::with_store(Store::open(profiles_db));
+    ctx.secrets = datagrep_secrets::SecretResolver::in_memory();
+    ctx
+}

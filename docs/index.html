@@ -30,6 +30,7 @@
       <a href="#install">Install</a>
       <a href="#cli">CLI</a>
       <a href="#design">Design</a>
+      <a href="#security">Security</a>
       <a href="#not-yet">Not yet</a>
       <a class="nav-gh" href="https://github.com/chud-lori/datagrep">GitHub</a>
       <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle dark mode">
@@ -473,6 +474,79 @@ SELECT * FROM events;</code></pre>
   </div>
 </section>
 
+<!-- ============ security ============ -->
+<section id="security">
+  <div class="wrap">
+    <p class="kicker">Security</p>
+    <h2>What’s defended — and what isn’t</h2>
+    <p class="section-intro">
+      A database client holds live credentials, opens connections to production systems, and renders
+      whatever those systems send back. So datagrep has a written
+      <a href="https://github.com/chud-lori/datagrep/blob/main/SECURITY.md">threat model</a> that treats
+      three inputs as attacker-controlled — the server, the connection URL, and an imported profile
+      bundle. The claims below are the checkable kind: each one points at the code or policy file
+      that makes it true.
+    </p>
+    <div class="card-grid">
+      <div class="card">
+        <h3>Secrets live in the OS keychain</h3>
+        <p>A password never lands in the profile store — the profile keeps only a <code>keychain:</code>
+        reference, and the exported profile format has no field capable of holding a secret, so exports
+        are safe to commit <em>structurally</em>, not by a filter someone has to remember to run.
+        DataGrip gets this right too; DBeaver’s default credentials file misses the bar — it is
+        encrypted with a static, publicly known key
+        (<a href="https://github.com/dbeaver/dbeaver/issues/6991">dbeaver#6991</a>).</p>
+      </div>
+      <div class="card">
+        <h3>The supply chain is gated, not trusted</h3>
+        <p><code>cargo audit</code> and <code>cargo deny</code> run on every pull request, and weekly
+        against the unchanged tree — so an advisory filed against a lockfile nobody touched still goes
+        red on Monday morning. Advisories fail the build whether or not a fix exists, licences are
+        policed, and <code>native-tls</code>&#8202;/&#8202;<code>openssl</code> are banned by name so a
+        second TLS stack cannot arrive as someone’s transitive default. The policy is a readable file:
+        <a href="https://github.com/chud-lori/datagrep/blob/main/deny.toml">deny.toml</a>.</p>
+      </div>
+      <div class="card">
+        <h3>Hostile input is assumed, and tested</h3>
+        <p>Every FFI entry point wraps its body in
+        <a href="https://github.com/chud-lori/datagrep/blob/main/crates/datagrep-ffi/src/ffi_util.rs"><code>catch_unwind</code></a>
+        — a Rust panic unwinding across the C ABI is undefined behaviour, so that wrapper is
+        load-bearing, not defensive style — and every entry point has hostile-input tests. The driver
+        panics found reachable from a malicious connection URL or server response were fixed, with
+        tests pinning each one. The protocol decoders are not fuzzed yet, and SECURITY.md says so
+        rather than rounding up.</p>
+      </div>
+      <div class="card">
+        <h3>Tunnels that fail closed</h3>
+        <p>SSH tunnels run in-process, with no listening port on your machine. Host keys are pinned on
+        first use, and the trust prompt is built so a dropped or unanswered prompt counts as
+        <em>reject</em> — never silent acceptance. And the read-only badge <a href="#why">above</a>
+        already told you the same kind of truth: it reports whether the server enforces the promise, or
+        only datagrep does.</p>
+      </div>
+    </div>
+    <h3>The gaps, stated plainly</h3>
+    <ul class="notyet-list">
+      <li><strong>PostgreSQL and MySQL connections are not encrypted.</strong> The Postgres driver
+      implements no TLS, and the MySQL driver compiles it out. Both fail loudly — an
+      <code>sslmode=require</code> URL is rejected, never silently downgraded to plaintext — but the
+      consequence stands: across an untrusted network, use the built-in SSH tunnel. That is the
+      supported answer until the drivers grow TLS.</li>
+      <li><strong>A profile bundle is executable.</strong> A profile’s secret can be an
+      <code>exec:</code> command, and import does not gate that yet. Treat a bundle you did not write
+      exactly as you would treat a shell script from the same source: read it before importing it.</li>
+      <li><strong>No external audit, one maintainer, ad-hoc code signing.</strong> datagrep is pre-1.0
+      and not notarized — this page says so rather than implying otherwise.</li>
+    </ul>
+    <p class="foot">
+      The full threat model, what “out of scope” means here, and the coordinated-disclosure process are in
+      <a href="https://github.com/chud-lori/datagrep/blob/main/SECURITY.md">SECURITY.md</a>. Found something?
+      Use <a href="https://github.com/chud-lori/datagrep/security/advisories/new">private vulnerability
+      reporting</a> — a human reads it within three business days.
+    </p>
+  </div>
+</section>
+
 <!-- ============ not yet ============ -->
 <section id="not-yet">
   <div class="wrap">
@@ -506,6 +580,7 @@ SELECT * FROM events;</code></pre>
       <a href="https://github.com/chud-lori/datagrep">GitHub</a>
       <a href="https://github.com/chud-lori/datagrep/issues">Issues</a>
       <a href="https://github.com/chud-lori/datagrep/blob/main/README.md">README</a>
+      <a href="https://github.com/chud-lori/datagrep/blob/main/SECURITY.md">Security policy</a>
       <a href="https://github.com/chud-lori/datagrep/blob/main/notes/test-report.md">Test report</a>
     </nav>
   </div>

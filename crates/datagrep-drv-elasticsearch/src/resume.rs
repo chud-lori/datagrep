@@ -93,7 +93,7 @@ impl EsResume {
     }
 
     pub fn decode(token: &ResumeToken) -> Result<Self, DbError> {
-        let parsed: Self = serde_json::from_slice(&token.0).map_err(|e| {
+        let mut parsed: Self = serde_json::from_slice(&token.0).map_err(|e| {
             DbError::Protocol(format!(
                 "resume token is not a valid elasticsearch token: {e}"
             ))
@@ -109,7 +109,39 @@ impl EsResume {
                 "resume token carries no point-in-time / scroll id".to_string(),
             ));
         }
+        // A resume token is untrusted input — it round-trips through whatever
+        // held it — and `body` is fed straight to `EsCursor::page_body`, which
+        // needs a JSON object to insert `size`/`sort` into. `current()` mints
+        // `Json::Null` for "no body", which means the same thing to
+        // Elasticsearch as `{}`, so normalise that one case and refuse the
+        // rest. Refusing rather than substituting `{}` matters: a token whose
+        // body is a string or an array has lost the original scan's query, and
+        // resuming without it would quietly return *more* rows than the scan
+        // the user actually ran.
+        match &parsed.body {
+            Json::Null => parsed.body = Json::Object(serde_json::Map::new()),
+            Json::Object(_) => {}
+            other => {
+                return Err(DbError::Protocol(format!(
+                    "resume token's search body must be a JSON object, got {}",
+                    kind_of(other)
+                )))
+            }
+        }
         Ok(parsed)
+    }
+}
+
+/// The JSON type name, for an error message that tells the user what they
+/// actually handed over.
+fn kind_of(v: &Json) -> &'static str {
+    match v {
+        Json::Null => "null",
+        Json::Bool(_) => "a boolean",
+        Json::Number(_) => "a number",
+        Json::String(_) => "a string",
+        Json::Array(_) => "an array",
+        Json::Object(_) => "an object",
     }
 }
 
@@ -194,6 +226,31 @@ mod tests {
         empty.id = String::new();
         let token = ResumeToken(serde_json::to_vec(&empty).unwrap().into());
         assert!(EsResume::decode(&token).is_err());
+    }
+
+    /// `EsCursor::page_body` inserts `size`/`sort` into the token's body and so
+    /// requires an object. The fresh-scan path validates that; the resume path
+    /// did not, so a token carrying `"body": null` — which `current()` itself
+    /// mints before `at()` fills it in — reached an `expect` and panicked the
+    /// cursor. Null now normalises to `{}`; anything else is refused, because a
+    /// body that is not an object has lost the scan's query and resuming
+    /// without it would return more rows than the user asked for.
+    #[test]
+    fn a_token_body_that_is_not_an_object_is_normalised_or_refused() {
+        let mut null_body = sample();
+        null_body.body = Json::Null;
+        let token = ResumeToken(serde_json::to_vec(&null_body).unwrap().into());
+        let back = EsResume::decode(&token).expect("a null body means `no body`");
+        assert_eq!(back.body, json!({}));
+
+        for bad in [json!("query"), json!([1, 2]), json!(7), json!(true)] {
+            let mut r = sample();
+            r.body = bad.clone();
+            let token = ResumeToken(serde_json::to_vec(&r).unwrap().into());
+            let err = EsResume::decode(&token)
+                .expect_err(&format!("body {bad} must be refused, not panicked on"));
+            assert!(err.to_string().contains("must be a JSON object"), "{err}");
+        }
     }
 
     #[test]

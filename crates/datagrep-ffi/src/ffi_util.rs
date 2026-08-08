@@ -31,14 +31,27 @@ pub fn to_c_string(s: impl Into<Vec<u8>>) -> *mut c_char {
 
 /// Borrow a `const char*` argument as `&str`.
 ///
+/// NULL and non-UTF-8 are *errors*, not preconditions: both are things a Swift
+/// caller can produce by accident (an unset `String?`, a `Data` blob mistaken
+/// for text) and neither may be allowed to reach a deref. What the caller must
+/// still guarantee is the one property no amount of checking here can recover:
+/// that the bytes are NUL-terminated. An unterminated buffer makes the scan for
+/// the terminator run off the end of the allocation, and nothing in Rust can
+/// detect that after the fact.
+///
 /// # Safety
 /// `p` must be NULL or a valid NUL-terminated string that outlives the call.
 pub unsafe fn cstr<'a>(p: *const c_char, what: &str) -> Result<&'a str, String> {
     if p.is_null() {
         return Err(format!("{what} must not be NULL"));
     }
-    CStr::from_ptr(p)
-        .to_str()
+    // SAFETY: `p` is non-NULL (checked above) and the caller's contract says it
+    // points at a NUL-terminated buffer living at least for this call. The
+    // returned `&str` borrows that buffer; the `'a` is unbound, so every caller
+    // in this crate consumes it before returning to C, which is where the
+    // buffer's guaranteed lifetime ends.
+    let raw = unsafe { CStr::from_ptr(p) };
+    raw.to_str()
         .map_err(|_| format!("{what} is not valid UTF-8"))
 }
 
@@ -50,10 +63,15 @@ pub unsafe fn set_err(err_out: *mut *mut c_char, msg: Option<String>) {
     if err_out.is_null() {
         return;
     }
-    *err_out = match msg {
+    let value = match msg {
         Some(m) => to_c_string(m),
         None => std::ptr::null_mut(),
     };
+    // SAFETY: `err_out` is non-NULL (checked above) and the caller's contract
+    // says it points at a writable `char*`. This overwrites rather than reads,
+    // so an uninitialised slot is fine — which is exactly why every entry point
+    // writes NULL here on success instead of leaving a stale value behind.
+    unsafe { *err_out = value };
 }
 
 /// Run `f` with an `err_out` contract: NULL on success, a freshly allocated
@@ -65,6 +83,12 @@ pub fn guard<T>(
     what: &str,
     f: impl FnOnce() -> Result<T, String>,
 ) -> T {
+    // SAFETY (all three `set_err` calls): `err_out` is whatever the C caller
+    // passed to the entry point that called us, and `set_err`'s contract is
+    // "NULL or a writable `char*`" — the same contract every entry point's own
+    // `# Safety` section states. `set_err` null-checks before writing, so the
+    // only way to break this is a caller passing a non-NULL, non-writable
+    // pointer, which no amount of Rust can catch.
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok(value)) => {
             unsafe { set_err(err_out, None) };

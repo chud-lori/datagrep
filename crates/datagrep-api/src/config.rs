@@ -119,6 +119,48 @@ fn zeroize_in_place(s: &mut str) {
     std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 }
 
+/// A connection URL with any inline password masked, for an error message or a
+/// log line.
+///
+/// A pasted `postgres://alice:hunter2@host/db` is the one place a password
+/// arrives as ordinary text, before anything has had a chance to split it into
+/// a `SecretString` — and "could not parse `<url>`" is precisely the message a
+/// user copies into a bug report or a chat channel. So the redaction has to
+/// happen at the point of formatting, not at the point of storage.
+///
+/// The username, host, port and path survive: a redaction that hides those is
+/// useless for diagnosing the very error it accompanies, and none of them is
+/// the secret. Anything that is not a URL with credentials comes back
+/// unchanged.
+pub fn redact_url(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let authority_start = scheme_end + 3;
+    // The authority runs to the first `/`, `?` or `#`. Bounding it matters:
+    // an `@` in a path or a query string is not a credential separator, and
+    // masking up to it would eat the part of the URL worth showing.
+    let authority_end = url[authority_start..]
+        .find(['/', '?', '#'])
+        .map(|i| authority_start + i)
+        .unwrap_or(url.len());
+    let authority = &url[authority_start..authority_end];
+    // Last `@`, not first: a password may legally contain one.
+    let Some(at) = authority.rfind('@') else {
+        return url.to_string();
+    };
+    // No `:` means userinfo is a bare username, which is not a secret.
+    let Some(colon) = authority[..at].find(':') else {
+        return url.to_string();
+    };
+    format!(
+        "{}{}:••••{}",
+        &url[..authority_start],
+        &authority[..colon],
+        &url[authority_start + at..]
+    )
+}
+
 /// Configuration problems, reported per-field so the form can point at them.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
@@ -178,5 +220,40 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         let back: ConnectionConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back, cfg);
+    }
+
+    /// The redaction has to keep enough of the URL to diagnose the error it is
+    /// attached to, and drop exactly the password.
+    #[test]
+    fn redact_url_masks_the_password_and_nothing_else() {
+        assert_eq!(
+            redact_url("postgres://alice:hunter2@db.example.com:5432/app?sslmode=require"),
+            "postgres://alice:••••@db.example.com:5432/app?sslmode=require"
+        );
+        // A password containing an `@` — the reason the scan is `rfind`.
+        assert_eq!(
+            redact_url("mongodb://u:p@ss@host/db"),
+            "mongodb://u:••••@host/db"
+        );
+        // A bare username is not a secret and stays readable.
+        assert_eq!(
+            redact_url("redis://user@host:6379"),
+            "redis://user@host:6379"
+        );
+        // Nothing to redact, nothing changed.
+        assert_eq!(redact_url("sqlite:///tmp/x.db"), "sqlite:///tmp/x.db");
+        assert_eq!(redact_url(":memory:"), ":memory:");
+        assert_eq!(redact_url("nonsense"), "nonsense");
+        assert_eq!(redact_url(""), "");
+        // An `@` in the path or query is not a credential separator.
+        assert_eq!(
+            redact_url("http://host:9200/idx?q=a@b"),
+            "http://host:9200/idx?q=a@b"
+        );
+        // Non-ASCII anywhere must not panic on a byte-index slice.
+        assert_eq!(
+            redact_url("postgres://ünïcode:pä$$@hö.st/dæta"),
+            "postgres://ünïcode:••••@hö.st/dæta"
+        );
     }
 }

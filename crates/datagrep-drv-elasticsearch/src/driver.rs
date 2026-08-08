@@ -555,7 +555,13 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(hex) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+            // Read the pair out of the byte slice rather than by slicing the
+            // `&str`. `i + 1..i + 3` lands inside a multi-byte character
+            // whenever a `%` is followed by non-ASCII, and slicing a `str` off
+            // a char boundary panics — from a *pasted connection URL*, which is
+            // untrusted text that reaches here before anything dials.
+            let pair = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(hex) = pair.and_then(|p| u8::from_str_radix(p, 16).ok()) {
                 out.push(hex);
                 i += 3;
                 continue;
@@ -844,5 +850,34 @@ mod tests {
             build_base_url(&cfg),
             Err(DbError::Config(ConfigError::InvalidValue { .. }))
         ));
+    }
+
+    /// `percent_decode` indexed the `&str` by byte offset, so a `%` followed by
+    /// a multi-byte character sliced off a char boundary and panicked. The
+    /// input is a *pasted connection URL* — untrusted text that reaches
+    /// `parse_url` before anything dials — so this was one paste from taking
+    /// the process down. Decoding now reads the byte pair directly and leaves a
+    /// `%` that is not followed by two hex ASCII digits alone.
+    #[test]
+    fn a_percent_escape_before_a_multibyte_char_does_not_panic() {
+        for tail in [
+            "%\u{20ac}",
+            "%\u{20ac}\u{20ac}",
+            "\u{20ac}%",
+            "%",
+            "%A",
+            "%\u{e9}9",
+            "100%",
+        ] {
+            assert!(
+                !percent_decode(tail).is_empty() || tail.is_empty(),
+                "{tail:?}"
+            );
+        }
+        // A real escape still decodes, and the surrounding text survives.
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("%41%42"), "AB");
+        // A lone `%` before non-ASCII is passed through, not swallowed.
+        assert_eq!(percent_decode("%\u{20ac}"), "%\u{20ac}");
     }
 }

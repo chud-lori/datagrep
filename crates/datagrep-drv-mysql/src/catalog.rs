@@ -217,7 +217,14 @@ fn prefix_at_caret(text: &str, offset: usize) -> String {
     while start > 0 && matches!(bytes[start - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_') {
         start -= 1;
     }
-    text[start..end].to_string()
+    // Rebuild from the bytes, not by slicing the `str`: the caret `offset` is
+    // an editor position, and both it and the backwards scan can stop inside
+    // a multi-byte character (type after any non-ASCII text and they do).
+    // Slicing a `str` off a char boundary panics; an empty prefix is the
+    // right answer for a caret that is not on one.
+    std::str::from_utf8(&bytes[start..end])
+        .unwrap_or("")
+        .to_string()
 }
 
 impl MySqlCatalog {

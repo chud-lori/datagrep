@@ -41,9 +41,15 @@ pub unsafe extern "C" fn datagrep_catalog_children_json(
         std::ptr::null_mut(),
         "datagrep_catalog_children_json",
         || {
-            let core = core_ref(core)?;
-            let profile = cstr(profile, "profile")?;
-            let parent = object_path(cstr(path_json, "path_json")?)?;
+            // SAFETY: the three pointers carry exactly the contract this
+            // function's `# Safety` section states — a live handle from
+            // `datagrep_core_new` and NUL-terminated strings. `core_ref` and
+            // `cstr` reject NULL (and non-UTF-8) as errors rather than
+            // dereferencing them, so the only unenforceable half left is
+            // "not yet freed" / "NUL-terminated".
+            let core = unsafe { core_ref(core) }?;
+            let profile = unsafe { cstr(profile, "profile") }?;
+            let parent = object_path(unsafe { cstr(path_json, "path_json") }?)?;
             let rt = runtime()?;
             let text = rt.block_on(children(core, profile, parent))?;
             Ok(to_c_string(text))
@@ -187,9 +193,12 @@ pub unsafe extern "C" fn datagrep_catalog_describe_json(
         std::ptr::null_mut(),
         "datagrep_catalog_describe_json",
         || {
-            let core = core_ref(core)?;
-            let profile = cstr(profile, "profile")?;
-            let path = object_path(cstr(path_json, "path_json")?)?;
+            // SAFETY: as `datagrep_catalog_children_json` — a live core handle
+            // and NUL-terminated strings, with NULL and non-UTF-8 rejected
+            // before any deref.
+            let core = unsafe { core_ref(core) }?;
+            let profile = unsafe { cstr(profile, "profile") }?;
+            let path = object_path(unsafe { cstr(path_json, "path_json") }?)?;
             let rt = runtime()?;
             let text = rt.block_on(describe(core, profile, path))?;
             Ok(to_c_string(text))

@@ -181,8 +181,6 @@ private struct EditorTabChip: View {
                 .font(.system(size: 11, weight: isActive ? .semibold : .regular))
                 .lineLimit(1)
 
-            // One dot, two meanings, never both at once: unsaved work, or a
-            // close button once the pointer is over the chip.
             // The unsaved dot keeps its own slot instead of sharing the close
             // button's. Sharing meant it disappeared the moment the pointer
             // touched the chip — i.e. exactly when someone is looking at the

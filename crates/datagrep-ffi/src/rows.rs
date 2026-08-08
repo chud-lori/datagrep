@@ -106,7 +106,11 @@ unsafe fn rows_ref<'a>(r: *mut DatagrepRows) -> Option<&'a DatagrepRows> {
     if r.is_null() {
         None
     } else {
-        Some(&*r)
+        // SAFETY: non-NULL (checked) and, per the contract, a live
+        // `Box<DatagrepRows>` from `datagrep_query_rows`. A window is immutable
+        // once built — `fill` runs before the pointer ever leaves Rust — so a
+        // shared borrow handed to any number of concurrent readers is sound.
+        Some(unsafe { &*r })
     }
 }
 
@@ -126,7 +130,12 @@ pub unsafe extern "C" fn datagrep_query_rows(
     err_out: *mut *mut c_char,
 ) -> *mut DatagrepRows {
     guard(err_out, std::ptr::null_mut(), "datagrep_query_rows", || {
-        let q = query_ref(q)?;
+        // SAFETY: `q` is from `datagrep_query_run` and unfreed per the contract.
+        // The window built below holds `Arc` clones of the store's buffers, so
+        // it does not depend on `q` staying alive — but the header still
+        // requires freeing the window first, and `DatagrepQuery::free` closing
+        // the query is what makes that ordering matter.
+        let q = unsafe { query_ref(q) }?;
         let skeleton_cols = q.column_count();
 
         // Not accepted by the server yet (or already failed to start): there
@@ -226,7 +235,7 @@ impl DatagrepRows {
                                 Some(array) => {
                                     let start = arena.len();
                                     let rendered = render_arrow(array.as_ref(), r, &mut arena);
-                                    finish(&arena, start, rendered)
+                                    finish(&mut arena, start, rendered)
                                 }
                                 // Fewer Arrow columns than the projection (a
                                 // window straddling a schema delta): absent,
@@ -256,7 +265,7 @@ impl DatagrepRows {
                                     Some(v) => {
                                         let start = arena.len();
                                         let r = render_value(v, &mut arena);
-                                        finish(&arena, start, r)
+                                        finish(&mut arena, start, r)
                                     }
                                 };
                                 cells.push(meta);
@@ -280,7 +289,7 @@ impl DatagrepRows {
                                     Some(v) => {
                                         let start = arena.len();
                                         let r = render_value(v, &mut arena);
-                                        finish(&arena, start, r)
+                                        finish(&mut arena, start, r)
                                     }
                                 };
                                 cells.push(meta);
@@ -343,21 +352,47 @@ impl DatagrepRows {
 }
 
 /// Resolve a [`Rendered`] against the arena it may have written into.
-fn finish(arena: &str, start: usize, rendered: Rendered<'_>) -> CellMeta {
+///
+/// [`CellMeta`] keeps its offset and length as `u32` to stay at 24 bytes — at
+/// rows×cols per window that size is the difference between a cheap index and a
+/// second copy of the data. The cast is therefore the one place a hostile result
+/// set could bend this module: a window whose arena grew past 4 GiB, or a single
+/// cell longer than that, would silently wrap the offset and hand
+/// `datagrep_rows_cell` a pointer to the wrong bytes. It stays in bounds of the
+/// allocation either way, so it is garbled text rather than UB — but garbled
+/// text presented as the server's answer is its own kind of wrong. Both cases
+/// are refused here instead, and the cell renders empty.
+fn finish(arena: &mut String, start: usize, rendered: Rendered<'_>) -> CellMeta {
     match rendered {
         Rendered::Empty(kind) => CellMeta::empty(kind),
-        Rendered::Borrowed(s, kind) => CellMeta {
-            off: 0,
-            len: s.len() as u32,
-            kind,
-            ptr: s.as_ptr(),
+        Rendered::Borrowed(s, kind) => match u32::try_from(s.len()) {
+            Ok(len) => CellMeta {
+                off: 0,
+                len,
+                kind,
+                ptr: s.as_ptr(),
+            },
+            Err(_) => CellMeta::empty(kind),
         },
-        Rendered::Arena(kind) => CellMeta {
-            off: start as u32,
-            len: (arena.len() - start) as u32,
-            kind,
-            ptr: std::ptr::null(),
-        },
+        Rendered::Arena(kind) => {
+            let end = arena.len();
+            match (u32::try_from(start), u32::try_from(end - start)) {
+                (Ok(off), Ok(len)) => CellMeta {
+                    off,
+                    len,
+                    kind,
+                    ptr: std::ptr::null(),
+                },
+                // Give the bytes back rather than leaving text in the arena that
+                // no `CellMeta` points at — the next cell's `start` is
+                // `arena.len()`, so an abandoned tail would push every later
+                // cell that much closer to the same cliff.
+                _ => {
+                    arena.truncate(start);
+                    CellMeta::empty(kind)
+                }
+            }
+        }
     }
 }
 
@@ -438,7 +473,9 @@ pub(crate) fn doc_columns(segment: &Arc<DocSegment>) -> Vec<String> {
 /// `r` must come from `datagrep_query_rows` and not yet be freed.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_rows_count(r: *mut DatagrepRows) -> u64 {
-    guard_quiet(0, || rows_ref(r).map(|r| r.rows).unwrap_or(0))
+    // SAFETY: `r` is NULL or a live window from `datagrep_query_rows`, per the
+    // contract; `rows_ref` maps NULL to `None`.
+    guard_quiet(0, || unsafe { rows_ref(r) }.map(|r| r.rows).unwrap_or(0))
 }
 
 /// Columns in this window.
@@ -447,7 +484,8 @@ pub unsafe extern "C" fn datagrep_rows_count(r: *mut DatagrepRows) -> u64 {
 /// `r` must come from `datagrep_query_rows` and not yet be freed.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_rows_columns(r: *mut DatagrepRows) -> u32 {
-    guard_quiet(0, || rows_ref(r).map(|r| r.cols).unwrap_or(0))
+    // SAFETY: as `datagrep_rows_count` — NULL or a live window.
+    guard_quiet(0, || unsafe { rows_ref(r) }.map(|r| r.cols).unwrap_or(0))
 }
 
 /// `true` => not fetched yet, draw skeletons.
@@ -456,7 +494,10 @@ pub unsafe extern "C" fn datagrep_rows_columns(r: *mut DatagrepRows) -> u32 {
 /// `r` must come from `datagrep_query_rows` and not yet be freed.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_rows_pending(r: *mut DatagrepRows) -> bool {
-    guard_quiet(false, || rows_ref(r).map(|r| r.pending).unwrap_or(false))
+    // SAFETY: as `datagrep_rows_count` — NULL or a live window.
+    guard_quiet(false, || {
+        unsafe { rows_ref(r) }.map(|r| r.pending).unwrap_or(false)
+    })
 }
 
 /// Cell text, borrowed — valid until `datagrep_rows_free`. NOT null-terminated.
@@ -475,17 +516,26 @@ pub unsafe extern "C" fn datagrep_rows_cell(
     len_out: *mut usize,
 ) -> *const c_char {
     guard_quiet(std::ptr::null(), || {
+        // Zero the length first so an early return can never leave the caller
+        // reading a stale count against a NULL pointer.
+        // SAFETY: non-NULL (checked) and writable per the contract.
         if !len_out.is_null() {
-            *len_out = 0;
+            unsafe { *len_out = 0 };
         }
-        let Some(rows) = rows_ref(r) else {
+        // SAFETY: `r` is NULL or a live window from `datagrep_query_rows`, per
+        // the contract; `rows_ref` maps NULL to `None`.
+        let Some(rows) = (unsafe { rows_ref(r) }) else {
             return std::ptr::null();
         };
+        // Out-of-window coordinates come back `None` — `cell_meta` bounds-checks
+        // against `rows`/`cols` and indexes with `.get`, so a hostile or merely
+        // stale (row, col) from the UI cannot reach the arithmetic below.
         let Some(meta) = rows.cell_meta(row, col) else {
             return std::ptr::null();
         };
+        // SAFETY: non-NULL (checked) and writable per the contract.
         if !len_out.is_null() {
-            *len_out = meta.len as usize;
+            unsafe { *len_out = meta.len as usize };
         }
         if meta.len == 0 {
             // A real, empty string — distinct from NULL and from ABSENT,
@@ -495,8 +545,18 @@ pub unsafe extern "C" fn datagrep_rows_cell(
             return rows.text.as_ptr() as *const c_char;
         }
         if meta.ptr.is_null() {
-            rows.text.as_ptr().add(meta.off as usize) as *const c_char
+            // SAFETY: `meta` came from this window's own `fill`, which only ever
+            // emits an arena cell with `off + len <= text.len()` — `finish`
+            // refuses to record a cell whose offset or length would not survive
+            // the `u32` round trip, so the stored numbers are the real ones
+            // rather than wrapped ones. The resulting pointer therefore lands
+            // inside `text`'s allocation, and `text` is owned by `rows` and
+            // dropped only by `datagrep_rows_free`.
+            unsafe { rows.text.as_ptr().add(meta.off as usize) as *const c_char }
         } else {
+            // A borrowed cell: the pointer is into an Arrow buffer or an
+            // `Arc<str>` that `rows.slices` holds an `Arc` on, so it stays valid
+            // for exactly as long as the window does.
             meta.ptr as *const c_char
         }
     })
@@ -512,7 +572,9 @@ pub unsafe extern "C" fn datagrep_rows_cell(
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_rows_cell_kind(r: *mut DatagrepRows, row: u64, col: u32) -> u8 {
     guard_quiet(KIND_ABSENT, || {
-        rows_ref(r)
+        // SAFETY: `r` is NULL or a live window from `datagrep_query_rows`, per
+        // the contract; `rows_ref` maps NULL to `None`.
+        unsafe { rows_ref(r) }
             .and_then(|rows| rows.cell_meta(row, col))
             .map(|m| m.kind)
             .unwrap_or(KIND_ABSENT)
@@ -533,9 +595,13 @@ pub unsafe extern "C" fn datagrep_rows_cell_detail_json(
     col: u32,
 ) -> *mut c_char {
     guard_quiet(std::ptr::null_mut(), || {
-        let Some(rows) = rows_ref(r) else {
+        // SAFETY: `r` is NULL or a live window from `datagrep_query_rows`, per
+        // the contract; `rows_ref` maps NULL to `None`.
+        let Some(rows) = (unsafe { rows_ref(r) }) else {
             return std::ptr::null_mut();
         };
+        // `value_at` bounds-checks `(row, col)` and indexes every container with
+        // `.get`, so out-of-window coordinates return `None` rather than panic.
         let Some(value) = rows.value_at(row, col) else {
             return std::ptr::null_mut();
         };
@@ -555,7 +621,12 @@ pub unsafe extern "C" fn datagrep_rows_cell_detail_json(
 pub unsafe extern "C" fn datagrep_rows_free(r: *mut DatagrepRows) {
     guard_quiet((), || {
         if !r.is_null() {
-            drop(Box::from_raw(r));
+            // SAFETY: non-NULL (checked) and, per the contract, a pointer from
+            // `datagrep_query_rows` not yet freed. Dropping the `Box` releases
+            // the arena and the `Arc`s on the store's buffers, which is exactly
+            // why every pointer `datagrep_rows_cell` handed out dangles after
+            // this returns — the header says so.
+            drop(unsafe { Box::from_raw(r) });
         }
     })
 }

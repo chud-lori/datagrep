@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio_postgres::config::Host;
+use tokio_postgres::config::{Host, SslMode};
 
 use datagrep_api::{
     caps::{Capabilities, Caps, LanguageId, ParamStyle, SqlDialect},
@@ -171,9 +171,28 @@ impl Driver for PostgresDriver {
         if let Some(&port) = cfg.get_ports().first() {
             values.insert("port".to_string(), ConfigValue::Num(port as f64));
         }
-        values
-            .entry("tls".to_string())
-            .or_insert_with(|| ConfigValue::Str(TlsMode::Disable.as_str().to_string()));
+        // `sslmode` used to be dropped on the floor here, so
+        // `postgres://…?sslmode=require` produced `tls=disable` and then
+        // connected in plaintext without a word. That is the exact shape of a
+        // silent downgrade: the user stated a requirement and got the opposite,
+        // with nothing on screen to say so. Carry the mode through instead —
+        // `connect` refuses anything but `disable` while TLS is unimplemented,
+        // so a `require` URL now fails loudly rather than succeeding wrongly.
+        //
+        // `prefer` maps to `disable` and that is not a downgrade: `prefer`
+        // states no requirement, and it is what libpq itself does when TLS is
+        // unavailable. The catch-all leans the other way — `SslMode` is
+        // `#[non_exhaustive]`, and a mode this build has not heard of must fail
+        // closed, not open.
+        let tls = match cfg.get_ssl_mode() {
+            SslMode::Disable | SslMode::Prefer => TlsMode::Disable,
+            SslMode::Require => TlsMode::Require,
+            _ => TlsMode::Require,
+        };
+        values.insert(
+            "tls".to_string(),
+            ConfigValue::Str(tls.as_str().to_string()),
+        );
 
         Ok(ConnectionConfig {
             driver: Arc::from("postgres"),
