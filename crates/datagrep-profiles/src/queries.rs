@@ -6,8 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use crate::db::{hash_text, Db};
 use crate::error::ProfilesError;
 use crate::model::{
-    EditorTab, Env, Folder, HistoryEntry, HistoryStatus, NewHistoryEntry, Profile, SavedQuery,
-    Tunnel,
+    Env, Folder, HistoryEntry, HistoryStatus, NewHistoryEntry, Profile, SavedQuery, Tunnel,
 };
 
 // ---------------------------------------------------------------------
@@ -601,47 +600,6 @@ pub(crate) fn update_saved_query(
 pub(crate) fn delete_saved_query(conn: &Connection, id: &str) -> Result<(), ProfilesError> {
     conn.execute("DELETE FROM saved_query WHERE id = ?1", params![id])?;
     Ok(())
-}
-
-// ---------------------------------------------------------------------
-// editor_tab — crash-safe session restore: the whole set is replaced
-// atomically so a reader never observes a half-written session.
-// ---------------------------------------------------------------------
-
-fn editor_tab_from_row(row: &Row<'_>) -> rusqlite::Result<EditorTab> {
-    Ok(EditorTab {
-        id: row.get("id")?,
-        profile_id: row.get("profile_id")?,
-        title: row.get("title")?,
-        text: row.get("text")?,
-        cursor_pos: row.get("cursor_pos")?,
-        sort_order: row.get("sort_order")?,
-        updated_at: row.get("updated_at")?,
-    })
-}
-
-pub(crate) fn save_all_tabs(
-    conn: &mut Connection,
-    tabs: Vec<EditorTab>,
-) -> Result<(), ProfilesError> {
-    let tx = conn.transaction()?;
-    tx.execute("DELETE FROM editor_tab", [])?;
-    for t in &tabs {
-        tx.execute(
-            "INSERT INTO editor_tab (id, profile_id, title, text, cursor_pos, sort_order, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            params![t.id, t.profile_id, t.title, t.text, t.cursor_pos, t.sort_order, t.updated_at],
-        )?;
-    }
-    tx.commit()?;
-    Ok(())
-}
-
-pub(crate) fn restore_all_tabs(conn: &Connection) -> Result<Vec<EditorTab>, ProfilesError> {
-    let mut stmt = conn.prepare("SELECT * FROM editor_tab ORDER BY sort_order")?;
-    let rows = stmt.query_map([], editor_tab_from_row)?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(Into::into)
 }
 
 // ---------------------------------------------------------------------

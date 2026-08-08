@@ -16,9 +16,7 @@ use tokio::sync::{oneshot, OnceCell};
 use crate::db::{self, Db, RetentionPolicy, Target};
 use crate::error::ProfilesError;
 use crate::export::{ExportBundle, ImportStrategy, ImportSummary};
-use crate::model::{
-    now_ms, EditorTab, Folder, HistoryEntry, NewHistoryEntry, Profile, SavedQuery, Tunnel,
-};
+use crate::model::{now_ms, Folder, HistoryEntry, NewHistoryEntry, Profile, SavedQuery, Tunnel};
 use crate::queries;
 use crate::secrets::validate_no_secrets;
 
@@ -358,20 +356,6 @@ impl Store {
         let id = id.into();
         self.run(move |db| queries::delete_saved_query(&db.conn, &id))
             .await
-    }
-
-    // -- editor_tab: crash-safe session restore --------------------------
-
-    /// Atomically replaces the entire open-tabs set. Called on every editor
-    /// change of note — not on a timer, this crate runs none — so a crash
-    /// never loses more than the in-flight keystroke.
-    pub async fn save_all_tabs(&self, tabs: Vec<EditorTab>) -> Result<(), ProfilesError> {
-        self.run(move |db| queries::save_all_tabs(&mut db.conn, tabs))
-            .await
-    }
-
-    pub async fn restore_all_tabs(&self) -> Result<Vec<EditorTab>, ProfilesError> {
-        self.run(|db| queries::restore_all_tabs(&db.conn)).await
     }
 
     // -- kv ----------------------------------------------------------------

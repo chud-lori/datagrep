@@ -2,7 +2,9 @@
 //!
 //! One SQLite file, WAL, opened lazily off the startup path. Tables:
 //! `folder`, `profile`, `tunnel`, `query_history` (+ FTS5), `saved_query`,
-//! `editor_tab`, `kv`. A `plugin` table is **not** implemented yet — there is
+//! `editor_tab` (present but unused — see `db.rs`; editor tabs are plain files
+//! under `~/Library/Application Support/datagrep/tabs`), `kv`. A `plugin` table
+//! is **not** implemented yet — there is
 //! no plugin host to populate it, and shipping dead DDL for a host that
 //! doesn't exist just means migrating it again once the host's real shape
 //! (sha256, granted hosts) is known.
@@ -37,8 +39,8 @@ pub use db::RetentionPolicy;
 pub use error::ProfilesError;
 pub use export::{ExportBundle, ImportStrategy, ImportSummary};
 pub use model::{
-    new_id, now_ms, EditorTab, Env, Folder, HistoryEntry, HistoryStatus, NewHistoryEntry, Profile,
-    SavedQuery, Tunnel,
+    new_id, now_ms, Env, Folder, HistoryEntry, HistoryStatus, NewHistoryEntry, Profile, SavedQuery,
+    Tunnel,
 };
 pub use secrets::validate_no_secrets;
 pub use store::Store;

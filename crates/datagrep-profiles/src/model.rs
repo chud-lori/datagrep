@@ -195,16 +195,3 @@ pub struct SavedQuery {
     pub created_at: i64,
     pub updated_at: i64,
 }
-
-/// The `editor_tab` table — the whole open-tabs set is persisted
-/// together via `Store::save_all_tabs` for crash-safe session restore.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EditorTab {
-    pub id: String,
-    pub profile_id: Option<String>,
-    pub title: Option<String>,
-    pub text: String,
-    pub cursor_pos: Option<i64>,
-    pub sort_order: i64,
-    pub updated_at: i64,
-}

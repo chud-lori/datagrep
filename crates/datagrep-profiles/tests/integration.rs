@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use datagrep_api::{ConfigValue, ConnectionConfig};
 use datagrep_profiles::{
-    new_id, now_ms, EditorTab, Env, Folder, HistoryStatus, ImportStrategy, NewHistoryEntry,
-    ProfilesError, RetentionPolicy, SavedQuery, Store, Tunnel,
+    new_id, now_ms, Env, Folder, HistoryStatus, ImportStrategy, NewHistoryEntry, ProfilesError,
+    RetentionPolicy, SavedQuery, Store, Tunnel,
 };
 
 // ---------------------------------------------------------------------
@@ -504,49 +504,6 @@ async fn retention_trims_to_max_row_count_on_reopen() {
     );
     assert_eq!(remaining[0].text, "query 4");
     assert_eq!(remaining[1].text, "query 3");
-}
-
-// ---------------------------------------------------------------------
-// editor_tab
-// ---------------------------------------------------------------------
-
-#[tokio::test]
-async fn editor_tabs_save_all_restore_all_round_trip() {
-    let store = Store::open_in_memory();
-    store
-        .create_profile(sample_profile("p1", None))
-        .await
-        .unwrap();
-    let now = now_ms();
-    let tabs = vec![
-        EditorTab {
-            id: new_id(),
-            profile_id: Some("p1".into()),
-            title: Some("scratch".into()),
-            text: "SELECT 1".into(),
-            cursor_pos: Some(8),
-            sort_order: 0,
-            updated_at: now,
-        },
-        EditorTab {
-            id: new_id(),
-            profile_id: None,
-            title: None,
-            text: "SELECT 2".into(),
-            cursor_pos: None,
-            sort_order: 1,
-            updated_at: now,
-        },
-    ];
-
-    store.save_all_tabs(tabs.clone()).await.unwrap();
-    let restored = store.restore_all_tabs().await.unwrap();
-    assert_eq!(restored, tabs);
-
-    // A second save_all replaces the whole set (crash-safe session restore).
-    let replacement = vec![tabs[0].clone()];
-    store.save_all_tabs(replacement.clone()).await.unwrap();
-    assert_eq!(store.restore_all_tabs().await.unwrap(), replacement);
 }
 
 // ---------------------------------------------------------------------

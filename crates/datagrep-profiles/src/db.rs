@@ -226,6 +226,13 @@ CREATE TABLE saved_query (
     updated_at   INTEGER NOT NULL
 );
 
+-- Unused. Editor tabs live in ~/Library/Application Support/datagrep/tabs as
+-- one .sql file plus a JSON sidecar per tab, which is deliberate: a saved query
+-- is a file you can open in any editor and commit to git. No ABI entry point
+-- ever reached this table and no row was ever written to it, so its Rust side
+-- has been removed rather than left as a second, dead store. The DDL stays
+-- because dropping it would mean a forward migration of a database holding real
+-- connections, to reclaim nothing.
 CREATE TABLE editor_tab (
     id           TEXT PRIMARY KEY,
     profile_id   TEXT REFERENCES profile(id) ON DELETE SET NULL,
