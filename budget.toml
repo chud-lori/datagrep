@@ -1,4 +1,4 @@
-# dbx performance budget — machine-readable transcription of design doc §5.
+# datagrep performance budget — machine-readable transcription of design doc §5.
 # Semantics (non-negotiable, §5): all memory figures are the WHOLE PROCESS TREE,
 # summed, using the platform-correct metric (§6): macOS phys_footprint, Windows
 # Private Working Set + QueryVideoMemoryInfo (reported separately), Linux PSS from

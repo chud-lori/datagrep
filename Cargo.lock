@@ -782,6 +782,184 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
+name = "datagrep-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bitflags",
+ "bytes",
+ "futures-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "datagrep-cli"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "clap",
+ "datagrep-api",
+ "datagrep-core",
+ "datagrep-drv-postgres",
+ "datagrep-drv-sqlite",
+ "datagrep-lang",
+ "datagrep-profiles",
+ "datagrep-secrets",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "datagrep-core"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-ipc",
+ "arrow-schema",
+ "async-trait",
+ "bytes",
+ "datagrep-api",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "datagrep-drv-mongo"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bson",
+ "bytes",
+ "datagrep-api",
+ "datagrep-lang",
+ "futures-util",
+ "mongodb",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "datagrep-drv-postgres"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "datagrep-api",
+ "futures-util",
+ "thiserror",
+ "tokio",
+ "tokio-postgres",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "datagrep-drv-redis"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "datagrep-api",
+ "datagrep-lang",
+ "futures-util",
+ "redis",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "datagrep-drv-sqlite"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "datagrep-api",
+ "rusqlite",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "datagrep-ffi"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "datagrep-api",
+ "datagrep-core",
+ "datagrep-drv-postgres",
+ "datagrep-drv-redis",
+ "datagrep-drv-sqlite",
+ "datagrep-lang",
+ "datagrep-profiles",
+ "datagrep-secrets",
+ "once_cell",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "datagrep-lang"
+version = "0.1.0"
+dependencies = [
+ "datagrep-api",
+ "thiserror",
+]
+
+[[package]]
+name = "datagrep-profiles"
+version = "0.1.0"
+dependencies = [
+ "datagrep-api",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "datagrep-secrets"
+version = "0.1.0"
+dependencies = [
+ "datagrep-api",
+ "keyring",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "datagrep-tunnel"
+version = "0.1.0"
+dependencies = [
+ "datagrep-api",
+ "dirs",
+ "russh",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dbus"
 version = "0.9.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -800,184 +978,6 @@ checksum = "708b509edf7889e53d7efb0ffadd994cc6c2345ccb62f55cfd6b0682165e4fa6"
 dependencies = [
  "dbus",
  "zeroize",
-]
-
-[[package]]
-name = "dbx-api"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bitflags",
- "bytes",
- "futures-core",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "dbx-cli"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "clap",
- "dbx-api",
- "dbx-core",
- "dbx-drv-postgres",
- "dbx-drv-sqlite",
- "dbx-lang",
- "dbx-profiles",
- "dbx-secrets",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "dbx-core"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-buffer",
- "arrow-ipc",
- "arrow-schema",
- "async-trait",
- "bytes",
- "dbx-api",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "dbx-drv-mongo"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bson",
- "bytes",
- "dbx-api",
- "dbx-lang",
- "futures-util",
- "mongodb",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dbx-drv-postgres"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "dbx-api",
- "futures-util",
- "thiserror",
- "tokio",
- "tokio-postgres",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "dbx-drv-redis"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "dbx-api",
- "dbx-lang",
- "futures-util",
- "redis",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dbx-drv-sqlite"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "dbx-api",
- "rusqlite",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dbx-ffi"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "dbx-api",
- "dbx-core",
- "dbx-drv-postgres",
- "dbx-drv-redis",
- "dbx-drv-sqlite",
- "dbx-lang",
- "dbx-profiles",
- "dbx-secrets",
- "once_cell",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "dbx-lang"
-version = "0.1.0"
-dependencies = [
- "dbx-api",
- "thiserror",
-]
-
-[[package]]
-name = "dbx-profiles"
-version = "0.1.0"
-dependencies = [
- "dbx-api",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "dbx-secrets"
-version = "0.1.0"
-dependencies = [
- "dbx-api",
- "keyring",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dbx-tunnel"
-version = "0.1.0"
-dependencies = [
- "dbx-api",
- "dirs",
- "russh",
- "thiserror",
- "tokio",
- "tracing",
 ]
 
 [[package]]

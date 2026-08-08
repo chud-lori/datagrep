@@ -13,13 +13,13 @@
 #   controlflow-poll   — ControlFlow::Poll outside spike/bench/test dirs
 #   tokio-interval      — tokio::time::interval anywhere in gated source
 #   unbounded-channel   — mpsc::unbounded_channel (hard fail only inside
-#                          crates/dbx-core/src; warn elsewhere already)
+#                          crates/datagrep-core/src; warn elsewhere already)
 #   unwrap              — .unwrap() in non-test src/ (warn-only, not
 #                          normally worth allowlisting — the count is
 #                          informational)
 #   format-in-render    — format! in a *render*/*paint* file (warn-only)
 #
 # Example (do not uncomment — no waivers are currently justified):
-# tokio-interval  crates/dbx-tui/src/tick.rs  # ratatui redraw tick, not the data/render path; reviewed 2026-xx-xx
+# tokio-interval  crates/datagrep-tui/src/tick.rs  # ratatui redraw tick, not the data/render path; reviewed 2026-xx-xx
 
 # (no active entries — nothing in the tree currently needs a waiver)

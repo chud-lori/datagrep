@@ -1,14 +1,14 @@
 # SPIKE — throwaway UI toolkit spike (design doc §8: S1, S8). Not part of the
-# `dbx` product. Standalone package: the empty [workspace] table below makes
+# `datagrep` product. Standalone package: the empty [workspace] table below makes
 # this its OWN workspace root, so gpui's git-adjacent dependency tree and its
-# own Cargo.lock never touch the shared dbx workspace lockfile.
+# own Cargo.lock never touch the shared datagrep workspace lockfile.
 #
 # Isolation note: an earlier attempt put this [workspace] table directly in
 # ../Cargo.toml (the file the parent's `members = ["crates/*"]` glob matches).
 # That breaks the parent with "multiple workspace roots found" (verified
 # empirically — see SPIKE-REPORT.md). Nesting one directory deeper, outside
 # the glob's reach, gets the same isolation without breaking concurrent work
-# in sibling crates/dbx-* dirs.
+# in sibling crates/datagrep-* dirs.
 [package]
 name = "spike-ui-harness"
 version = "0.0.0"

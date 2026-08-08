@@ -1,6 +1,6 @@
 # STUB package. The real UI spikes live one level deeper, each its own
 # standalone cargo workspace (own [workspace] table + own Cargo.lock) so
-# their dependency trees never touch the shared dbx workspace lockfile:
+# their dependency trees never touch the shared datagrep workspace lockfile:
 #   ./harness/       gpui 0.2.2 + gpui-component 0.5.1 (S1, S8 as designed)
 #   ./harness-winit/ bare winit 0.30 + wgpu 30 (S1 fallback -- gpui could not
 #                     be built on this machine, see SPIKE-REPORT.md)

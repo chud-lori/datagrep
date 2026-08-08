@@ -12,11 +12,11 @@
 services:
   postgres:
     image: postgres:16
-    container_name: dbx-fixtures-postgres
+    container_name: datagrep-fixtures-postgres
     environment:
-      POSTGRES_USER: dbx
-      POSTGRES_PASSWORD: dbx
-      POSTGRES_DB: dbx_fixtures
+      POSTGRES_USER: datagrep
+      POSTGRES_PASSWORD: datagrep
+      POSTGRES_DB: datagrep_fixtures
     ports:
       - "55432:5432"
     shm_size: "1gb"
@@ -38,12 +38,12 @@ services:
       - "max_wal_size=4GB" # quiets "checkpoints occurring too frequently" during the bulk-load seed
     volumes:
       - ./seed.sql:/docker-entrypoint-initdb.d/01-seed.sql:ro
-      - dbx-fixtures-pgdata:/var/lib/postgresql/data
+      - datagrep-fixtures-pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dbx -d dbx_fixtures"]
+      test: ["CMD-SHELL", "pg_isready -U datagrep -d datagrep_fixtures"]
       interval: 5s
       timeout: 5s
       retries: 20
 
 volumes:
-  dbx-fixtures-pgdata:
+  datagrep-fixtures-pgdata:

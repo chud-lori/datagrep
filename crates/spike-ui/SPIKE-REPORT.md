@@ -1,4 +1,4 @@
-# dbx UI toolkit spike report — S1, S8
+# datagrep UI toolkit spike report — S1, S8
 
 Ran on this machine: Apple Silicon (M1), macOS 15.6.1 (24G90), rustc/cargo 1.89.0,
 Xcode Command Line Tools 16.4 **only** (no Xcode.app). `CARGO_TARGET_DIR=/Users/nurchudlori/Projects/dbx/target-spike`
@@ -173,7 +173,7 @@ target. It is the pairing that then hit the Xcode/Metal wall in §2.
 ## 4. Isolation: verified, not just asserted
 
 The task requires `spike-ui`'s `Cargo.toml` to carry an empty `[workspace]` table so
-gpui's dependency tree and lockfile never touch the shared `dbx` workspace. Tried that
+gpui's dependency tree and lockfile never touch the shared `datagrep` workspace. Tried that
 literally first, in a scratch replica of the workspace layout (not the real repo):
 
 ```
@@ -186,7 +186,7 @@ error: multiple workspace roots found in the same workspace:
 A package matched by the parent's `members = ["crates/*"]` glob **cannot** itself
 declare `[workspace]` — Cargo treats it as a second, conflicting workspace root and
 errors for the *whole* workspace, which would have broken every other agent's concurrent
-build in sibling `crates/dbx-*` dirs. Confirmed empirically before touching the real repo.
+build in sibling `crates/datagrep-*` dirs. Confirmed empirically before touching the real repo.
 
 **Structure used instead**, which gets the same isolation without that failure mode
 (also verified empirically in the same scratch replica, then applied for real):

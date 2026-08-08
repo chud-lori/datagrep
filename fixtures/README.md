@@ -14,11 +14,11 @@ docker compose logs -f postgres   # watch seeding progress
 ```
 
 `seed.sql` runs automatically on first boot via
-`docker-entrypoint-initdb.d`, against a fresh `dbx-fixtures-pgdata` volume.
+`docker-entrypoint-initdb.d`, against a fresh `datagrep-fixtures-pgdata` volume.
 Connection string once seeded:
 
 ```
-postgres://dbx:dbx@localhost:55432/dbx_fixtures
+postgres://datagrep:datagrep@localhost:55432/datagrep_fixtures
 ```
 
 To reseed from scratch (e.g. after editing `seed.sql`):
@@ -46,7 +46,7 @@ docker compose logs postgres | grep -q 'bench_catalog (relations)'
 or just poll for the tables to exist:
 
 ```
-until docker exec dbx-fixtures-postgres psql -U dbx -d dbx_fixtures -c 'select 1 from bench_catalog_s200.t500' >/dev/null 2>&1; do sleep 2; done
+until docker exec datagrep-fixtures-postgres psql -U datagrep -d datagrep_fixtures -c 'select 1 from bench_catalog_s200.t500' >/dev/null 2>&1; do sleep 2; done
 ```
 
 ### Fixtures
@@ -79,7 +79,7 @@ disk.
 
 **This must not run on every CI job.** Per §6: "seeding 1M+ rows every CI
 run costs 15–25 min and you will delete the job." The intended path,
-**not yet implemented, tracked as a TODO**: bake a seeded `dbx-fixtures-pgdata`
+**not yet implemented, tracked as a TODO**: bake a seeded `datagrep-fixtures-pgdata`
 volume (or the whole container) into a versioned image/snapshot, published
 once and pulled by nightly Tier-2 runs — reseed only when `seed.sql`
 changes, not every run.

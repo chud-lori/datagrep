@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds ui/macos and assembles dbx.app by hand.
+# Builds ui/macos and assembles datagrep.app by hand.
 #
 # There is no Xcode on this machine — Command Line Tools 16.4 only — so there is
 # no xcodebuild and no .xcodeproj. `swift build` produces the executable and this
@@ -9,15 +9,15 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 CONFIG="${CONFIG:-release}"
-APP_NAME="dbx"
-BUNDLE_ID="dev.dbx.macos"
+APP_NAME="datagrep"
+BUNDLE_ID="com.lori.datagrep"
 VERSION="0.1.0"
 
-echo "==> swift build -c ${CONFIG}  (DBX_FFI=${DBX_FFI:-stub})"
+echo "==> swift build -c ${CONFIG}  (DATAGREP_FFI=${DATAGREP_FFI:-stub})"
 swift build -c "${CONFIG}"
 
 BIN_DIR="$(swift build -c "${CONFIG}" --show-bin-path)"
-BIN="${BIN_DIR}/dbx-app"
+BIN="${BIN_DIR}/datagrep-app"
 [ -x "${BIN}" ] || { echo "build produced no executable at ${BIN}" >&2; exit 1; }
 
 APP="${PWD}/${APP_NAME}.app"

@@ -1,4 +1,4 @@
-//! dbx xtask — CI helper binary (design doc §5 / §6 / §11.3).
+//! datagrep xtask — CI helper binary (design doc §5 / §6 / §11.3).
 //!
 //! Invoked as `cd xtask && cargo run -- <cmd>`, or by `ci/gates.sh` as a
 //! prebuilt binary. Commands:
@@ -423,10 +423,10 @@ fn scan_content(path: &str, content: &str) -> Vec<Finding> {
                 push("tokio-interval", Severity::Fail);
             }
             // §3.2: "If any channel in the data path is unbounded, we have
-            // re-implemented DBeaver." Hard fail inside dbx-core src; warn
+            // re-implemented DBeaver." Hard fail inside datagrep-core src; warn
             // elsewhere (allowlist justified non-data-path uses).
             if line.contains("unbounded_channel") {
-                let sev = if path.contains("dbx-core/src") {
+                let sev = if path.contains("datagrep-core/src") {
                     Severity::Fail
                 } else {
                     Severity::Warn
@@ -674,7 +674,7 @@ fail = "100ms, or any blank/white frame presented"
     #[test]
     fn counts_unique_crates_in_tree_output() {
         let out = "\
-dbx-api v0.1.0 (/repo/crates/dbx-api)
+datagrep-api v0.1.0 (/repo/crates/datagrep-api)
 serde v1.0.210
 serde_derive v1.0.210 (proc-macro)
 serde v1.0.210 (*)
@@ -692,7 +692,7 @@ serde v1.0.100
     #[test]
     fn flags_controlflow_poll_outside_benches() {
         let f = scan_content(
-            "/crates/dbx-ui/src/event_loop.rs",
+            "/crates/datagrep-ui/src/event_loop.rs",
             "let cf = ControlFlow::Poll;\n",
         );
         assert_eq!(f.len(), 1);
@@ -704,10 +704,10 @@ serde v1.0.100
     #[test]
     fn ignores_banned_patterns_in_bench_spike_and_test_paths() {
         for path in [
-            "/crates/dbx-ui/benches/fling.rs",
+            "/crates/datagrep-ui/benches/fling.rs",
             "/crates/spike-ui/src/main.rs",
-            "/crates/dbx-core/tests/stream.rs",
-            "/crates/dbx-core/src/pipeline_test.rs",
+            "/crates/datagrep-core/tests/stream.rs",
+            "/crates/datagrep-core/src/pipeline_test.rs",
         ] {
             let f = scan_content(path, "ControlFlow::Poll; tokio::time::interval(d);\n");
             assert!(f.is_empty(), "expected no findings for {path}");
@@ -717,7 +717,7 @@ serde v1.0.100
     #[test]
     fn ignores_patterns_in_line_comments() {
         let f = scan_content(
-            "/crates/dbx-core/src/lib.rs",
+            "/crates/datagrep-core/src/lib.rs",
             "// ControlFlow::Poll is banned per design §5.2\n/// never use tokio::time::interval\n",
         );
         assert!(f.is_empty());
@@ -726,12 +726,12 @@ serde v1.0.100
     #[test]
     fn unbounded_channel_severity_depends_on_crate() {
         let core = scan_content(
-            "/crates/dbx-core/src/feeder.rs",
+            "/crates/datagrep-core/src/feeder.rs",
             "let (tx, rx) = mpsc::unbounded_channel();\n",
         );
         assert_eq!(core[0].severity, Severity::Fail);
         let other = scan_content(
-            "/crates/dbx-tui/src/input.rs",
+            "/crates/datagrep-tui/src/input.rs",
             "let (tx, rx) = mpsc::unbounded_channel();\n",
         );
         assert_eq!(other[0].severity, Severity::Warn);
@@ -739,24 +739,24 @@ serde v1.0.100
 
     #[test]
     fn unwrap_warns_only_in_src() {
-        let src = scan_content("/crates/dbx-api/src/value.rs", "x.unwrap();\n");
+        let src = scan_content("/crates/datagrep-api/src/value.rs", "x.unwrap();\n");
         assert_eq!(src.len(), 1);
         assert_eq!(src[0].rule, "unwrap");
         assert_eq!(src[0].severity, Severity::Warn);
-        let build = scan_content("/crates/dbx-api/build.rs", "x.unwrap();\n");
+        let build = scan_content("/crates/datagrep-api/build.rs", "x.unwrap();\n");
         assert!(build.is_empty());
     }
 
     #[test]
     fn format_flagged_only_in_render_paths() {
         let render = scan_content(
-            "/crates/dbx-ui/src/grid_render.rs",
+            "/crates/datagrep-ui/src/grid_render.rs",
             "let s = format!(\"{v}\");\n",
         );
         assert_eq!(render.len(), 1);
         assert_eq!(render[0].rule, "format-in-render");
         let plain = scan_content(
-            "/crates/dbx-ui/src/layout.rs",
+            "/crates/datagrep-ui/src/layout.rs",
             "let s = format!(\"{v}\");\n",
         );
         assert!(plain.is_empty());
@@ -766,18 +766,18 @@ serde v1.0.100
     fn allowlist_waives_by_rule_and_path_fragment() {
         let allow = parse_allowlist(
             "# comment\n\
-             tokio-interval  crates/dbx-tui/src/tick.rs  # justified: ratatui redraw\n",
+             tokio-interval  crates/datagrep-tui/src/tick.rs  # justified: ratatui redraw\n",
         );
         let hit = Finding {
             rule: "tokio-interval",
             severity: Severity::Fail,
-            path: "/crates/dbx-tui/src/tick.rs".into(),
+            path: "/crates/datagrep-tui/src/tick.rs".into(),
             line: 3,
             text: String::new(),
         };
         assert!(is_allowlisted(&allow, &hit));
         let miss = Finding {
-            path: "/crates/dbx-core/src/timer.rs".into(),
+            path: "/crates/datagrep-core/src/timer.rs".into(),
             ..hit.clone()
         };
         assert!(!is_allowlisted(&allow, &miss));
@@ -792,6 +792,6 @@ serde v1.0.100
     fn spike_dirs_are_recognized() {
         assert!(in_test_or_bench("/crates/spike-ui/src/main.rs"));
         assert!(in_test_or_bench("/spikes/s1_idle/src/main.rs"));
-        assert!(!in_test_or_bench("/crates/dbx-core/src/store.rs"));
+        assert!(!in_test_or_bench("/crates/datagrep-core/src/store.rs"));
     }
 }

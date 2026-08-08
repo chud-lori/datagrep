@@ -1,0 +1,33 @@
+[package]
+name = "datagrep-drv-redis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Redis driver for datagrep: SCAN-only browsing over the datagrep-api seam — never KEYS * (design §3.1, §3.2, §3.3, §5.2)."
+
+[dependencies]
+datagrep-api = { path = "../datagrep-api" }
+# Statement splitting, redis-cli argument tokenization, and read/write/admin
+# classification are already built and tested here — this driver consumes
+# them and never reimplements a tokenizer or command table.
+datagrep-lang = { path = "../datagrep-lang" }
+
+# Async client. `connection-manager` gives a cloneable, auto-reconnecting
+# handle so `RedisConnection` can be `Send + Sync` without an internal mutex
+# around the socket; `tokio-comp` selects the tokio runtime backend.
+redis = { version = "1", features = ["tokio-comp", "connection-manager"] }
+
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+futures-util = "0.3"
+
+thiserror = { workspace = true }
+tracing = "0.1"
+
+# Required to implement datagrep-api's #[async_trait] traits (datagrep-api does not
+# re-export the macro) and to build Value::Bytes from binary-unsafe replies.
+async-trait = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

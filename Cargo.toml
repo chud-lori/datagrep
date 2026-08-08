@@ -9,7 +9,7 @@ rust-version = "1.80"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-# The full dependency set allowed in dbx-api (design doc §3, crate rules).
+# The full dependency set allowed in datagrep-api (design doc §3, crate rules).
 async-trait = "0.1"
 bitflags = { version = "2", features = ["serde"] }
 bytes = { version = "1", features = ["serde"] }
@@ -17,7 +17,7 @@ futures-core = "0.3"
 serde = { version = "1", features = ["derive", "rc"] }
 thiserror = "2"
 
-# Dev-only (tests). Never a runtime dependency of dbx-api.
+# Dev-only (tests). Never a runtime dependency of datagrep-api.
 serde_json = "1"
 
 # Release profile per design doc §5.1 / §9.5 / §9.9.

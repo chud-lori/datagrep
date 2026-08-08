@@ -24,7 +24,7 @@ timing variance and a gate that flakes gets disabled within a month (§6,
 3. **`cargo test --workspace`**.
 4. **The §5.2 anti-pattern greps**, via `xtask grep-gates` (source:
    `xtask/src/main.rs`):
-   - `unbounded_channel` in `crates/dbx-core/src` — **hard fail**. Design:
+   - `unbounded_channel` in `crates/datagrep-core/src` — **hard fail**. Design:
      "any unbounded channel in the data path = re-implemented DBeaver."
      (Elsewhere in the tree it's a warning, not a fail — still worth
      justifying via the allowlist if intentional.)
@@ -42,7 +42,7 @@ timing variance and a gate that flakes gets disabled within a month (§6,
    that file's header) — never silence a finding by editing the grep
    logic itself.
 5. **Binary size vs `budget.toml` P10/P11** — **WARN-only for now**,
-   because no crate produces the `dbx` application binary yet. Already
+   because no crate produces the `datagrep` application binary yet. Already
    wired via `xtask budget-check`; the moment a real binary exists, point
    `gates.sh`'s `app_bin` variable at it and this becomes a hard fail on a
    P11 (installed-on-disk, 90 MB) breach with no further changes.
@@ -108,7 +108,7 @@ used regularly enough to matter.
 
 ## Design source
 
-`../dbx-design.md` (repo root's parent directory — the design doc lives
+The design doc (repo root's parent directory — it lives
 one level above this repo) §5 (budget), §5.2 (banned anti-patterns — source
 of the grep rules), §6 (measurement harness — source of the Tier-1/Tier-2
 split and the fixture list), §11 point 3 (why this exists before the first

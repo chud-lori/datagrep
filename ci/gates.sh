@@ -104,7 +104,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # 4. Anti-pattern greps (design doc §5.2), via xtask grep-gates.
-#    HARD FAIL: unbounded_channel in crates/dbx-core/src, ControlFlow::Poll
+#    HARD FAIL: unbounded_channel in crates/datagrep-core/src, ControlFlow::Poll
 #    outside spike/bench/test dirs, tokio::time::interval anywhere in gated
 #    source. WARN (count only): .unwrap() in non-test src/. WARN: format!
 #    in *render*/*paint* files. ci/grep-allowlist.txt waives justified
@@ -122,13 +122,13 @@ fi
 # 5. Binary size vs budget.toml P10 (informational)/P11 (installed-on-disk).
 #    WARN-only for now: no application binary target exists yet (M0 is still
 #    landing crates/*). Wired via `xtask budget-check` so that the moment a
-#    `dbx` binary exists, pointing this step at it turns P11 into a hard
+#    `datagrep` binary exists, pointing this step at it turns P11 into a hard
 #    fail with zero further changes to this script.
 # ---------------------------------------------------------------------------
 
 note "Binary size vs budget.toml (P10/P11) — WARN-only, no bin target yet"
 app_target_dir="${CARGO_TARGET_DIR:-${repo_root}/target}"
-app_bin="${app_target_dir}/release/dbx"
+app_bin="${app_target_dir}/release/datagrep"
 if [[ -f "${app_bin}" ]]; then
   if "${xtask_bin}" budget-check "${app_bin}" --budget "${repo_root}/budget.toml"; then
     echo "budget-check: OK"
@@ -136,7 +136,7 @@ if [[ -f "${app_bin}" ]]; then
     fail_gate "budget-check (P11 fail threshold breached)"
   fi
 else
-  warn "no '${app_bin}' found — P10/P11 size gate is wired (xtask budget-check) but not yet enforced. Once a crate produces the dbx application binary, point app_bin above at it and this becomes a hard fail on P11 breach."
+  warn "no '${app_bin}' found — P10/P11 size gate is wired (xtask budget-check) but not yet enforced. Once a crate produces the datagrep application binary, point app_bin above at it and this becomes a hard fail on P11 breach."
 fi
 
 # ---------------------------------------------------------------------------

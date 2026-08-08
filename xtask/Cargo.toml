@@ -1,4 +1,4 @@
-# xtask — CI/dev task runner for dbx (design doc §5/§6, deliverable of §11.3).
+# xtask — CI/dev task runner for datagrep (design doc §5/§6, deliverable of §11.3).
 #
 # Standalone on purpose: the empty [workspace] table below opts this crate OUT of
 # the root workspace, so the root Cargo.toml's `crates/*` glob is never touched

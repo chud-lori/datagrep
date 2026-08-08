@@ -38,7 +38,7 @@ impl Render for ZeroIdle {
             .justify_center()
             .bg(rgb(0x1e1e1e))
             .text_color(rgb(0xe0e0e0))
-            .child("dbx spike-ui -- S1 zero-idle proof")
+            .child("datagrep spike-ui -- S1 zero-idle proof")
             .child("static text, no animation")
     }
 }

@@ -141,7 +141,7 @@ impl ApplicationHandler for App {
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("dbx spike-ui -- S1 zero-idle (winit+wgpu fallback)")
+                        .with_title("datagrep spike-ui -- S1 zero-idle (winit+wgpu fallback)")
                         .with_inner_size(winit::dpi::LogicalSize::new(480.0, 220.0)),
                 )
                 .expect("create_window"),

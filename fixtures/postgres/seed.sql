@@ -2,7 +2,7 @@
 --
 -- Runs automatically on first container boot via docker-entrypoint-initdb.d
 -- (see docker-compose.yml), or manually:
---   psql "$DBX_FIXTURES_URL" -f fixtures/postgres/seed.sql
+--   psql "$DATAGREP_FIXTURES_URL" -f fixtures/postgres/seed.sql
 --
 -- Deterministic: setseed(0.42) is called once per session-scoped block that
 -- uses random(), matching every seeded table to the same PRNG stream run to
@@ -17,7 +17,7 @@ SET client_min_messages = warning;
 
 -- ===========================================================================
 -- bench_wide — 1,000,000 rows x 24 mixed-type columns (the headline fixture,
--- ~1.2 GB on the wire per design §6). Exercises every Value variant dbx-api
+-- ~1.2 GB on the wire per design §6). Exercises every Value variant datagrep-api
 -- needs to round-trip: ints of three widths, numeric, float, bool, text,
 -- timestamptz/timestamp/date/time/interval, array, jsonb, uuid, inet, bytea.
 -- ===========================================================================
