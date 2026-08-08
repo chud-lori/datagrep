@@ -234,7 +234,7 @@ impl EsCatalog {
                 comment: Some(native.clone()),
             })
             .collect();
-        nodes.sort_by(|a, b| a.path.to_string().cmp(&b.path.to_string()));
+        nodes.sort_by_key(|a| a.path.to_string());
         Ok(paginate_by_name(nodes, opts))
     }
 
@@ -409,7 +409,7 @@ fn record_source(
 /// here — by *name*, not by offset, so a concurrently-created index cannot
 /// make a page skip or repeat an entry.
 fn paginate_by_name(mut nodes: Vec<ObjectNode>, opts: &ListOpts) -> Page<ObjectNode> {
-    nodes.sort_by(|a, b| a.path.to_string().cmp(&b.path.to_string()));
+    nodes.sort_by_key(|a| a.path.to_string());
     nodes.dedup_by(|a, b| a.path == b.path);
     if let Some(after) = opts.resume.as_ref().and_then(decode_name_token) {
         nodes.retain(|n| n.path.to_string() > after);

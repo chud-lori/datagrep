@@ -154,8 +154,15 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # SQLite is bundled and TLS is rustls, so the binary depends on nothing
-      # beyond glibc — no apt packages needed, and the download stays portable.
+      # SQLite is bundled and TLS is rustls, but keyring's Secret Service
+      # backend links libdbus, so this is a build-time requirement on a bare
+      # runner — without it cargo fails in libdbus-sys's build script with
+      # "pkg_config failed". ci.yml installs the same pair.
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Build CLI
         run: cargo build --release -p datagrep-cli
 

@@ -154,9 +154,12 @@ impl<W: Write> TableSink<W> {
         if total > term && term > floor {
             let avail = term - overhead;
             let sum: usize = widths.iter().sum();
-            if sum > 0 {
-                for w in &mut widths {
-                    *w = ((*w * avail) / sum).max(MIN_COL_WIDTH);
+            for w in &mut widths {
+                // sum is the total of `widths`, so it is zero only when every
+                // column is zero-wide — unreachable here, because `total > term`
+                // could not have held. checked_div keeps that provable.
+                if let Some(scaled) = (*w * avail).checked_div(sum) {
+                    *w = scaled.max(MIN_COL_WIDTH);
                 }
             }
         }
