@@ -37,6 +37,7 @@ use datagrep_api::error::DbError;
 use datagrep_api::shape::{LogicalType, ObjectPath};
 
 use crate::http::{EsHttp, Method};
+use crate::json::OrderedJson;
 use crate::value::{json_to_value, FieldTypes};
 
 /// Default sample size for [`Catalog::infer_shape`].
@@ -258,9 +259,9 @@ impl EsCatalog {
             "track_total_hits": false,
             "query": { "function_score": { "query": { "match_all": {} }, "random_score": {} } }
         });
-        let response = self
+        let (response, _) = self
             .http
-            .request(
+            .request_ordered(
                 Method::Post,
                 &format!("/{}/_search", encode_index_expression(index)?),
                 &[],
@@ -270,11 +271,11 @@ impl EsCatalog {
             )
             .await?;
 
-        let hits = response
+        let hits: Vec<OrderedJson> = response
             .get("hits")
             .and_then(|h| h.get("hits"))
-            .and_then(Json::as_array)
-            .cloned()
+            .and_then(OrderedJson::as_array)
+            .map(<[OrderedJson]>::to_vec)
             .unwrap_or_default();
         let mut sampled = 0u64;
         let mut root: Vec<(Arc<str>, FieldTrie)> = Vec::new();
@@ -366,14 +367,14 @@ pub fn merge_mappings(json: &Json) -> FieldTypes {
 /// `FieldTrie` as the Mongo driver's `record_doc`).
 fn record_source(
     root: &mut Vec<(Arc<str>, FieldTrie)>,
-    source: &Json,
+    source: &OrderedJson,
     prefix: &str,
     types: &FieldTypes,
 ) {
-    let Some(obj) = source.as_object() else {
+    let Some(fields) = source.as_object() else {
         return;
     };
-    for (k, v) in obj {
+    for (k, v) in fields {
         let path = if prefix.is_empty() {
             k.clone()
         } else {
@@ -731,6 +732,10 @@ fn prefix_at_caret(text: &str, offset: usize) -> String {
 mod tests {
     use super::*;
 
+    fn ordered(text: &str) -> OrderedJson {
+        OrderedJson::parse(text).expect(text)
+    }
+
     #[test]
     fn cat_indices_rows_are_parsed_and_sorted() {
         let json = json!([
@@ -888,9 +893,9 @@ mod tests {
     fn field_trie_inference_keeps_heterogeneous_types_and_true_presence() {
         let types = FieldTypes::from_properties(&json!({ "age": { "type": "long" } }));
         let mut root: Vec<(Arc<str>, FieldTrie)> = Vec::new();
-        record_source(&mut root, &json!({ "name": "a", "age": 30 }), "", &types);
-        record_source(&mut root, &json!({ "name": "b" }), "", &types);
-        record_source(&mut root, &json!({ "name": "c", "age": "thirty" }), "", &types);
+        record_source(&mut root, &ordered(r#"{"name":"a","age":30}"#), "", &types);
+        record_source(&mut root, &ordered(r#"{"name":"b"}"#), "", &types);
+        record_source(&mut root, &ordered(r#"{"name":"c","age":"thirty"}"#), "", &types);
 
         let name = &root.iter().find(|(n, _)| n.as_ref() == "name").unwrap().1;
         let age = &root.iter().find(|(n, _)| n.as_ref() == "age").unwrap().1;
@@ -910,7 +915,7 @@ mod tests {
         let mut root: Vec<(Arc<str>, FieldTrie)> = Vec::new();
         record_source(
             &mut root,
-            &json!({ "address": { "city": "sg", "zip": "000000" } }),
+            &ordered(r#"{"address":{"city":"sg","zip":"000000"}}"#),
             "",
             &types,
         );
@@ -940,7 +945,8 @@ mod tests {
     #[test]
     fn prefix_at_caret_understands_index_and_field_characters() {
         assert_eq!(prefix_at_caret("GET /logs-2026", 14), "logs-2026");
-        assert_eq!(prefix_at_caret("{\"query\":{\"term\":{\"addr.ci", 25), "addr.ci");
+        let text = "{\"query\":{\"term\":{\"addr.ci";
+        assert_eq!(prefix_at_caret(text, text.len()), "addr.ci");
         assert_eq!(prefix_at_caret("", 0), "");
         assert_eq!(prefix_at_caret("x ", 2), "");
     }

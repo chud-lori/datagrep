@@ -43,6 +43,7 @@ use datagrep_api::value::{Document, FieldPath, Value};
 
 use crate::canceller::{InFlight, InFlightSlot};
 use crate::http::{EsHttp, Method, PageMode};
+use crate::json::OrderedJson;
 use crate::resume::{EsResume, ResumeMode};
 use crate::value::{json_to_value, FieldTypes};
 
@@ -287,7 +288,7 @@ impl SearchCursor {
     }
 
     /// Issue one search and return `(response, wire_bytes)`.
-    async fn run_search(&mut self, size: u32) -> Result<(Json, usize), DbError> {
+    async fn run_search(&mut self, size: u32) -> Result<(OrderedJson, usize), DbError> {
         match (self.mode, self.context.as_ref()) {
             // A scroll continuation is its own endpoint and carries no body
             // beyond the scroll id.
@@ -297,7 +298,7 @@ impl SearchCursor {
                 self.set_inflight(Some(opaque.clone()), None).await;
                 let result = self
                     .http
-                    .request_sized(
+                    .request_ordered(
                         Method::Post,
                         "/_search/scroll",
                         &[],
@@ -335,7 +336,7 @@ impl SearchCursor {
                     self.set_inflight(Some(opaque.clone()), None).await;
                     let result = self
                         .http
-                        .request_sized(
+                        .request_ordered(
                             Method::Post,
                             &format!("{path_index}/_search"),
                             &query,
@@ -360,7 +361,7 @@ impl SearchCursor {
         path_index: &str,
         query: &[(&str, String)],
         body: &Json,
-    ) -> Result<(Json, usize), DbError> {
+    ) -> Result<(OrderedJson, usize), DbError> {
         let opaque = self.next_opaque_id();
         self.set_inflight(Some(opaque.clone()), None).await;
 
@@ -373,7 +374,7 @@ impl SearchCursor {
 
         let (submitted, mut bytes) = self
             .http
-            .request_sized(
+            .request_ordered(
                 Method::Post,
                 &format!("{path_index}/_async_search"),
                 &submit_query,
@@ -386,7 +387,7 @@ impl SearchCursor {
 
         let async_id = submitted
             .get("id")
-            .and_then(Json::as_str)
+            .and_then(OrderedJson::as_str)
             .map(str::to_string);
         if let Some(id) = &async_id {
             self.set_inflight(Some(opaque.clone()), Some(id.clone())).await;
@@ -401,7 +402,7 @@ impl SearchCursor {
             }
             let running = current
                 .get("is_running")
-                .and_then(Json::as_bool)
+                .and_then(OrderedJson::as_bool)
                 .unwrap_or(false);
             if !running {
                 let response = current
@@ -427,7 +428,7 @@ impl SearchCursor {
             }
             let (next, n) = self
                 .http
-                .request_sized(
+                .request_ordered(
                     Method::Get,
                     &format!("/_async_search/{id}"),
                     &[("wait_for_completion_timeout", ASYNC_POLL_WAIT.to_string())],
@@ -506,12 +507,12 @@ impl SearchCursor {
     /// pseudo-fields (`_id`, `_index`, `_score`) are not announced as columns
     /// because they live outside the hinted root — see the crate report's
     /// `datagrep-api` gaps.
-    fn track_schema(&mut self, source: &Json) -> Vec<SchemaDelta> {
-        let Some(obj) = source.as_object() else {
+    fn track_schema(&mut self, source: &OrderedJson) -> Vec<SchemaDelta> {
+        let Some(fields) = source.as_object() else {
             return Vec::new();
         };
         let mut deltas = Vec::new();
-        for (k, v) in obj {
+        for (k, v) in fields {
             if self.seen_fields.contains(k.as_str()) {
                 continue;
             }
@@ -534,12 +535,12 @@ impl SearchCursor {
         deltas
     }
 
-    fn note_total(&mut self, response: &Json) {
+    fn note_total(&mut self, response: &OrderedJson) {
         let Some(total) = response.get("hits").and_then(|h| h.get("total")) else {
             return;
         };
-        let value = total.get("value").and_then(Json::as_i64);
-        let relation = total.get("relation").and_then(Json::as_str);
+        let value = total.get("value").and_then(OrderedJson::as_i64);
+        let relation = total.get("relation").and_then(OrderedJson::as_str);
         if let (Some(value), Some("gte")) = (value, relation) {
             self.pending_notices.push(Notice {
                 severity: NoticeSeverity::Info,
@@ -559,24 +560,24 @@ impl SearchCursor {
 /// Extract an error out of an `_async_search` envelope, distinguishing a
 /// cancellation from a genuine failure so the UI never dresses a user cancel
 /// up as an error (design: "the user cancelled; not a failure").
-fn async_search_error(envelope: &Json) -> Option<DbError> {
+fn async_search_error(envelope: &OrderedJson) -> Option<DbError> {
     let error = envelope.get("error")?;
     let text = error
         .get("type")
-        .and_then(Json::as_str)
+        .and_then(OrderedJson::as_str)
         .unwrap_or_default()
         .to_string()
         + " "
         + error
             .get("reason")
-            .and_then(Json::as_str)
+            .and_then(OrderedJson::as_str)
             .unwrap_or_default();
     if text.contains("cancelled") || text.contains("canceled") {
         return Some(DbError::Cancelled);
     }
     Some(crate::error::map_status_error(
         400,
-        &serde_json::to_string(&json!({ "error": error })).unwrap_or_default(),
+        &serde_json::to_string(&json!({ "error": error.to_serde() })).unwrap_or_default(),
     ))
 }
 
@@ -586,10 +587,10 @@ fn async_search_error(envelope: &Json) -> Option<DbError> {
 /// The driver-injected `sort` array is omitted: it is an artifact of *our*
 /// pagination, not of the user's document, and it is preserved losslessly in
 /// the resume token instead.
-pub fn hit_to_value(hit: &Json, types: &FieldTypes) -> Value {
+pub fn hit_to_value(hit: &OrderedJson, types: &FieldTypes) -> Value {
     let mut doc = Document::new();
-    if let Some(obj) = hit.as_object() {
-        for (k, v) in obj {
+    if let Some(fields) = hit.as_object() {
+        for (k, v) in fields {
             if k == "sort" {
                 continue;
             }
@@ -639,34 +640,37 @@ impl Cursor for SearchCursor {
 
         // Elasticsearch may hand back a rotated PIT id; the newest one is the
         // one that must eventually be released.
-        if let Some(pit) = response.get("pit_id").and_then(Json::as_str) {
+        if let Some(pit) = response.get("pit_id").and_then(OrderedJson::as_str) {
             self.context = Some(Context::Pit(pit.to_string()));
         }
-        if let Some(scroll) = response.get("_scroll_id").and_then(Json::as_str) {
+        if let Some(scroll) = response.get("_scroll_id").and_then(OrderedJson::as_str) {
             self.context = Some(Context::Scroll(Some(scroll.to_string())));
         }
 
         if self.stats.batches == 0 {
             self.note_total(&response);
         }
-        if let Some(took) = response.get("took").and_then(Json::as_i64) {
+        if let Some(took) = response.get("took").and_then(OrderedJson::as_i64) {
             let micros = (took.max(0) as u64).saturating_mul(1_000);
             self.stats.server_elapsed_micros =
                 Some(self.stats.server_elapsed_micros.unwrap_or(0) + micros);
         }
 
-        let hits = response
+        let hits: Vec<OrderedJson> = response
             .get("hits")
             .and_then(|h| h.get("hits"))
-            .and_then(Json::as_array)
-            .cloned()
+            .and_then(OrderedJson::as_array)
+            .map(<[OrderedJson]>::to_vec)
             .unwrap_or_default();
 
         let mut docs = Vec::with_capacity(hits.len());
         let mut deltas = Vec::new();
         for hit in &hits {
-            if let Some(sort) = hit.get("sort").and_then(Json::as_array) {
-                self.last_sort = sort.clone();
+            if let Some(sort) = hit.get("sort").and_then(OrderedJson::as_array) {
+                // Lowered to `serde_json::Value`: these go straight back into
+                // the next request's `search_after` and into the resume token,
+                // where ordering is meaningless.
+                self.last_sort = sort.iter().map(OrderedJson::to_serde).collect();
             }
             if let Some(source) = hit.get("_source") {
                 deltas.extend(self.track_schema(source));
@@ -907,14 +911,15 @@ mod tests {
         })))
     }
 
-    fn hit() -> Json {
-        json!({
-            "_index": "events",
-            "_id": "abc",
-            "_score": null,
-            "_source": { "n": 7, "price": 1.5, "nested": { "a": 1 } },
-            "sort": [1, 2]
-        })
+    fn hit() -> OrderedJson {
+        // Written as text, not `json!`, precisely so the envelope's key order
+        // is the wire order rather than an alphabetized one.
+        OrderedJson::parse(
+            r#"{"_index":"events","_id":"abc","_score":null,
+                "_source":{"n":7,"price":1.5,"nested":{"a":1}},
+                "sort":[1,2]}"#,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -923,7 +928,7 @@ mod tests {
         let Value::Document(doc) = &value else {
             panic!("expected a document")
         };
-        let keys: Vec<&str> = doc.iter().map(|(k, _)| &***k).collect();
+        let keys: Vec<&str> = doc.iter().map(|(k, _)| &**k).collect();
         assert_eq!(
             keys,
             vec!["_index", "_id", "_score", "_source"],
@@ -961,7 +966,10 @@ mod tests {
 
     #[test]
     fn a_hit_without_source_still_yields_its_envelope() {
-        let value = hit_to_value(&json!({ "_index": "i", "_id": "1" }), &types());
+        let value = hit_to_value(
+            &OrderedJson::from_serde(&json!({ "_index": "i", "_id": "1" })),
+            &types(),
+        );
         let Value::Document(doc) = &value else {
             panic!("expected a document")
         };
@@ -971,18 +979,18 @@ mod tests {
 
     #[test]
     fn async_search_cancellation_is_reported_as_cancelled_not_as_an_error() {
-        let cancelled = json!({
+        let cancelled = OrderedJson::from_serde(&json!({
             "is_partial": true, "is_running": false,
             "error": { "type": "task_cancelled_exception", "reason": "task cancelled" }
-        });
+        }));
         assert!(matches!(
             async_search_error(&cancelled),
             Some(DbError::Cancelled)
         ));
 
-        let failed = json!({
+        let failed = OrderedJson::from_serde(&json!({
             "error": { "type": "search_phase_execution_exception", "reason": "all shards failed" }
-        });
+        }));
         match async_search_error(&failed) {
             Some(DbError::Query { code, .. }) => {
                 assert_eq!(code.as_deref(), Some("search_phase_execution_exception"))
@@ -990,7 +998,9 @@ mod tests {
             other => panic!("expected a Query error, got {other:?}"),
         }
 
-        assert!(async_search_error(&json!({ "is_running": true })).is_none());
+        assert!(
+            async_search_error(&OrderedJson::from_serde(&json!({ "is_running": true }))).is_none()
+        );
     }
 
     #[tokio::test]
@@ -1131,7 +1141,8 @@ mod tests {
     #[test]
     fn schema_deltas_are_emitted_once_per_new_source_field_with_the_native_type() {
         let mut cursor = offline_cursor(PageMode::Pit);
-        let first = cursor.track_schema(&json!({ "n": 1, "price": 2.5 }));
+        let first =
+            cursor.track_schema(&OrderedJson::parse(r#"{"n":1,"price":2.5}"#).unwrap());
         assert_eq!(first.len(), 2);
         match &first[0] {
             SchemaDelta::AddColumn { field } => {
@@ -1153,22 +1164,25 @@ mod tests {
             other => panic!("expected AddColumn, got {other:?}"),
         }
         // Already-seen fields are never re-announced; only the genuinely new one is.
-        let second = cursor.track_schema(&json!({ "n": 2, "brand_new": "x" }));
+        let second =
+            cursor.track_schema(&OrderedJson::parse(r#"{"n":2,"brand_new":"x"}"#).unwrap());
         assert_eq!(second.len(), 1);
         match &second[0] {
             SchemaDelta::AddColumn { field } => assert_eq!(&*field.name, "brand_new"),
             other => panic!("expected AddColumn, got {other:?}"),
         }
-        assert!(cursor.track_schema(&json!({ "n": 3 })).is_empty());
+        assert!(cursor
+            .track_schema(&OrderedJson::parse(r#"{"n":3}"#).unwrap())
+            .is_empty());
     }
 
     #[test]
     fn a_capped_total_is_surfaced_as_a_lower_bound_notice() {
         let mut cursor = offline_cursor(PageMode::Pit);
         cursor.pending_notices.clear();
-        cursor.note_total(&json!({
+        cursor.note_total(&OrderedJson::from_serde(&json!({
             "hits": { "total": { "value": 10000, "relation": "gte" }, "hits": [] }
-        }));
+        })));
         assert_eq!(cursor.pending_notices.len(), 1);
         assert_eq!(
             cursor.pending_notices[0].code.as_deref(),
@@ -1178,9 +1192,9 @@ mod tests {
 
         // An exact total says nothing — there is nothing to warn about.
         cursor.pending_notices.clear();
-        cursor.note_total(&json!({
+        cursor.note_total(&OrderedJson::from_serde(&json!({
             "hits": { "total": { "value": 42, "relation": "eq" }, "hits": [] }
-        }));
+        })));
         assert!(cursor.pending_notices.is_empty());
     }
 

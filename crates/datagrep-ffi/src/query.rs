@@ -453,6 +453,7 @@ fn language_for_driver(id: &str) -> Option<LanguageId> {
         "sqlite" => Some(LanguageId::Sql(datagrep_api::SqlDialect::Sqlite)),
         "postgres" => Some(LanguageId::Sql(datagrep_api::SqlDialect::Postgres)),
         "redis" => Some(LanguageId::RedisCli),
+        "mongodb" => Some(LanguageId::MongoShell),
         _ => None,
     }
 }

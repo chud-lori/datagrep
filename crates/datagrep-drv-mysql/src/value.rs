@@ -289,6 +289,10 @@ pub fn decode_value(col: &Column, v: MyValue) -> Value {
         MyValue::Int(i) => {
             if is_bool_column(col) {
                 Value::Bool(i != 0)
+            } else if ct == MYSQL_TYPE_YEAR {
+                // YEAR is flagged UNSIGNED on the wire but is a year number,
+                // mapped to I64 by contract.
+                Value::I64(i)
             } else if unsigned && i >= 0 {
                 Value::U64(i as u64)
             } else {
@@ -298,6 +302,8 @@ pub fn decode_value(col: &Column, v: MyValue) -> Value {
         MyValue::UInt(u) => {
             if is_bool_column(col) {
                 Value::Bool(u != 0)
+            } else if ct == MYSQL_TYPE_YEAR {
+                Value::I64(u as i64)
             } else if unsigned {
                 Value::U64(u)
             } else if let Ok(i) = i64::try_from(u) {
@@ -385,7 +391,8 @@ fn decode_bytes(col: &Column, raw: Vec<u8>) -> Value {
                     Err(_) => unsupported(col, &raw),
                 };
             }
-            if unsigned {
+            // YEAR is flagged UNSIGNED on the wire but maps to I64.
+            if unsigned && ct != MYSQL_TYPE_YEAR {
                 match s.parse::<u64>() {
                     Ok(u) => Value::U64(u),
                     Err(_) => unsupported(col, &raw),
@@ -804,14 +811,17 @@ mod tests {
     }
 
     #[test]
-    fn year_is_i64() {
-        let c = col(ColumnType::MYSQL_TYPE_YEAR);
+    fn year_is_i64_even_though_the_wire_flags_it_unsigned() {
+        // Real servers set UNSIGNED_FLAG on YEAR columns; the mapping
+        // contract is still I64.
+        let c = col_flags(ColumnType::MYSQL_TYPE_YEAR, ColumnFlags::UNSIGNED_FLAG);
         assert_eq!(logical_type_of(&c), LogicalType::I64);
         assert_eq!(
             decode_value(&c, MyValue::Bytes(b"2024".to_vec())),
             Value::I64(2024)
         );
         assert_eq!(decode_value(&c, MyValue::Int(2024)), Value::I64(2024));
+        assert_eq!(decode_value(&c, MyValue::UInt(2024)), Value::I64(2024));
     }
 
     #[test]

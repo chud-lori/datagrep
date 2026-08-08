@@ -50,21 +50,13 @@ private struct DetailArea: View {
 
     var body: some View {
         VSplitView {
-            Chrome.pane(SQLEditorView(controller: model.editor))
+            EditorPane(model: model)
                 .frame(minHeight: 90, idealHeight: 190, maxHeight: .infinity)
                 .padding(.horizontal, 10)
                 .padding(.top, 8)
                 .padding(.bottom, 5)
 
-            Chrome.pane(
-                ZStack {
-                    ResultsGridView(controller: model.results)
-                        .opacity(model.showsGrid ? 1 : 0)
-                    if !model.showsGrid {
-                        ResultsEmptyState(model: model)
-                    }
-                }
-            )
+            ResultsPane(model: model)
             .frame(minHeight: 160, maxHeight: .infinity)
             .padding(.horizontal, 10)
             .padding(.top, 5)
@@ -103,6 +95,56 @@ private struct DetailArea: View {
         .navigationSubtitle(model.connectionSubtitle)
         .toolbar { WorkbenchToolbar(model: model) }
         .toolbarBackground(.visible, for: .windowToolbar)
+    }
+}
+
+// MARK: - the two AppKit bridges, held back until the window is up
+
+/// The SQL editor pane. See `StartupStage`: on the very first pass the pane is
+/// drawn empty, so `NSWindow(contentViewController:)` does not have to build an
+/// `NSTextView`, a TextKit 1 stack, the tab bar's own hosting view and a
+/// restored session before the user sees anything. The pane's frame is
+/// identical either way, so the editor appearing moves no pixels.
+///
+/// Only this view and `ResultsPane` observe `StartupStage`, so the flip
+/// re-renders two subtrees rather than the whole window.
+private struct EditorPane: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject private var stage = StartupStage.shared
+
+    var body: some View {
+        Chrome.pane(
+            Group {
+                if stage.contentReady || StartupStage.deferralDisabled {
+                    SQLEditorView(controller: model.editor)
+                } else {
+                    Color.clear
+                }
+            }
+        )
+    }
+}
+
+/// The results pane. Same deal as `EditorPane` — the `NSTableView`, its ruler
+/// and its 30 columns are not built before first paint. The empty state was
+/// already what an unstarted session shows, so holding the grid back changes
+/// nothing the user sees.
+private struct ResultsPane: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject private var stage = StartupStage.shared
+
+    var body: some View {
+        Chrome.pane(
+            ZStack {
+                if stage.contentReady || StartupStage.deferralDisabled {
+                    ResultsGridView(controller: model.results)
+                        .opacity(model.showsGrid ? 1 : 0)
+                }
+                if !model.showsGrid {
+                    ResultsEmptyState(model: model)
+                }
+            }
+        )
     }
 }
 

@@ -471,6 +471,51 @@ private struct RetentionButton: View {
     }
 }
 
+// MARK: - hosting
+
+/// Presents the panel as a sheet, driven by `HistoryModel.isPresented`.
+///
+/// A modifier and not a raw `.sheet` in `Workbench`: `HistoryModel` is a nested
+/// `ObservableObject`, so whoever owns the `isPresented` binding has to be
+/// observing *it* — a binding reached through `AppModel` would set the flag and
+/// then never redraw. This owns that observation, so the host adds one line.
+///
+///     .historySheet(model.history)
+struct HistorySheet: ViewModifier {
+    @ObservedObject var history: HistoryModel
+
+    func body(content: Content) -> some View {
+        content.sheet(isPresented: $history.isPresented) {
+            HistoryPanel(model: history) { history.isPresented = false }
+        }
+    }
+}
+
+extension View {
+    func historySheet(_ history: HistoryModel) -> some View {
+        modifier(HistorySheet(history: history))
+    }
+}
+
+/// The toolbar control that opens it. Same reason as above — it observes the
+/// history model so the badge-free count in its tooltip stays true.
+struct HistoryToolbarButton: View {
+    @ObservedObject var history: HistoryModel
+
+    var body: some View {
+        Button {
+            history.isPresented = true
+        } label: {
+            Label("History", systemImage: "clock.arrow.circlepath")
+        }
+        .help(
+            history.entries.isEmpty
+                ? "Query history — every statement datagrep runs is logged here  ⌘Y"
+                : "Query history — \(history.entries.count.formatted()) statements, searchable  ⌘Y"
+        )
+    }
+}
+
 // MARK: - colour
 
 /// One definition of what an outcome looks like. All three are system semantic

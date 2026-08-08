@@ -169,8 +169,19 @@ fn profiles_add_postgres_url_with_inline_password_never_stores_it() {
     assert!(toml.contains("keychain:datagrep:"));
 
     // Best-effort cleanup of the real keychain entry this test created.
+    //
+    // MUST be scoped by BOTH service and account. `-s datagrep` alone deletes
+    // the first entry for that service — i.e. one of the user's own saved
+    // connections. That destroyed real credentials twice before this was
+    // caught, so the account is not optional.
     let _ = Command::new("security")
-        .args(["delete-generic-password", "-s", "datagrep"])
+        .args([
+            "delete-generic-password",
+            "-s",
+            "datagrep",
+            "-a",
+            "staging",
+        ])
         .output();
 }
 

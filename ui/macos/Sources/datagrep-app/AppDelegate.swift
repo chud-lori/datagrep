@@ -15,8 +15,14 @@ import SwiftUI
 enum DatagrepMain {
     @MainActor
     static func main() {
+        // First line of Swift that runs. Everything before it — dyld, the Swift
+        // and SwiftUI runtime init, framework mapping — is the floor no amount
+        // of application code can move, so it is measured separately.
+        Startup.mark("pre-main (dyld + runtime)")
         let app = NSApplication.shared
+        Startup.mark("NSApplication.shared")
         let delegate = AppDelegate()
+        Startup.mark("AppDelegate() — includes AppModel()")
         app.delegate = delegate
         app.setActivationPolicy(.regular)
         app.run()
@@ -32,29 +38,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var sidebarMenuItem: NSMenuItem!
     private var inspectorMenuItem: NSMenuItem!
 
+    /// Design §5.1 applied to the GUI: **the window is on screen before anything
+    /// is loaded.** The CLI honours the rule by never opening the profile DB
+    /// until a subcommand needs it and cold-starts in ~17 ms; the GUI's
+    /// equivalent is that nothing which touches the engine, the profile store or
+    /// the disk may sit between `exec` and first paint.
+    ///
+    /// So this method does exactly three things on the critical path — build the
+    /// menu, build the window, paint it — and everything else (`model.boot()`,
+    /// which creates `DatagrepCore`, opens `profiles.sqlite`, lists the profiles
+    /// and restores the editor session) runs in `finishBooting()` on the next
+    /// run-loop turn, after the user is already looking at the window.
+    ///
+    /// The `MEASURE cold start` line is emitted from a forced first display, not
+    /// from an `async` hop that would report a window that has not drawn yet.
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMainMenu()
-
-        model.boot()
+        Startup.mark("buildMainMenu")
 
         let host = NSHostingController(rootView: Workbench(model: model))
         // Empty sizing options: otherwise the hosting controller pushes the
         // SwiftUI ideal size onto the window and the frame set below is
         // silently overridden (it opened at 872×572 instead of 1180×760).
         host.sizingOptions = []
+        Startup.mark("NSHostingController(Workbench)")
+
         window = NSWindow(contentViewController: host)
+        Startup.mark("NSWindow(contentViewController:) — SwiftUI loadView")
         window.setContentSize(NSSize(width: 1180, height: 760))
         window.contentMinSize = NSSize(width: 900, height: 560)
         window.title = "datagrep"
+        Startup.mark("NSWindow size + title")
         window.styleMask.insert(.fullSizeContentView)
         window.titlebarAppearsTransparent = true
+        Startup.mark("fullSizeContentView + transparent titlebar")
         window.toolbarStyle = .unified
         window.tabbingMode = .disallowed
         window.delegate = self
+        Startup.mark("toolbar style + delegate")
         window.setFrameAutosaveName("datagrep.main")
         window.center()
+        Startup.mark("frame autosave + center")
+
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        Startup.mark("makeKeyAndOrderFront")
+
+        // Force the first pass through SwiftUI layout + draw NOW, so the number
+        // printed below is a window the user could actually see and not merely
+        // one that has been ordered in. Without this the measurement moves the
+        // cost off the clock instead of off the critical path.
+        window.contentView?.displayIfNeeded()
+        Startup.mark("first paint")
+
+        let ms = Startup.millisSinceProcessStart()
+        FileHandle.standardError.write(
+            Data(String(format: "MEASURE cold start exec -> window: %.0f ms\n", ms).utf8))
+
+        // Everything below here is off the critical path.
+        DispatchQueue.main.async { [weak self] in self?.finishBooting() }
+    }
+
+    /// Runs on the first run-loop turn after the window is up. Ordered by how
+    /// soon the user can notice it is missing.
+    private func finishBooting() {
+        model.boot()
+        Startup.mark("model.boot() — core + profiles + editor text")
+
+        // Turn 3: the NSTextView and the NSTableView get built into panes that
+        // are already on screen at their final size. `boot()` has already forced
+        // the editor's `loadView` via `setText`, so this is mostly SwiftUI
+        // adopting an existing controller.
+        StartupStage.shared.markContentReady()
+        Startup.mark("editor + grid attached")
 
         // The window chrome follows the connection, not a timer: this fires only
         // when one of these three values actually changes.
@@ -80,15 +136,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .store(in: &cancellables)
 
         model.editor.focus()
+        Startup.mark("combine sinks + editor focus")
 
-        DispatchQueue.main.async { [weak self] in
-            let ms = Startup.millisSinceProcessStart()
-            FileHandle.standardError.write(
-                Data(String(format: "MEASURE cold start exec -> window: %.0f ms\n", ms).utf8))
-            self?.autopilot = Autopilot.fromArguments(model: self?.model)
-            self?.autopilot?.start()
-        }
+        let ms = Startup.millisSinceProcessStart()
+        FileHandle.standardError.write(
+            Data(String(format: "MEASURE cold start exec -> loaded: %.0f ms\n", ms).utf8))
+        Startup.dumpTrace()
 
+        autopilot = Autopilot.fromArguments(model: model)
+        autopilot?.start()
+
+        installLaunchHarnesses()
+    }
+
+    /// The screenshot / diagnostic launch flags. They are all timers hung off an
+    /// already-visible window, so they belong here rather than on the critical
+    /// path — parsing `ProcessInfo.arguments` three times before first paint was
+    /// free, but scheduling from here keeps the launch method to one job.
+    private func installLaunchHarnesses() {
         // `--screenshot <path> [delay]`: the app renders ITSELF to a PNG.
         // `screencapture` needs Screen Recording consent, which a headless
         // agent session does not have, and "I could not look at it" is not an
@@ -300,6 +365,51 @@ enum Startup {
             Double(info.kp_proc.p_starttime.tv_sec)
             + Double(info.kp_proc.p_starttime.tv_usec) / 1e6
         return (Date().timeIntervalSince1970 - start) * 1000
+    }
+
+    // MARK: - phase trace
+    //
+    // `--trace-startup` (or DATAGREP_TRACE_STARTUP=1) prints one line per phase
+    // with both the elapsed-since-exec clock and the cost of that phase alone.
+    // It stays in the binary permanently: the cold-start budget (design §5 P1,
+    // ≤250 ms target / >600 ms FAIL) is a number that regresses silently, and a
+    // breakdown is the only way to see WHICH phase moved.
+
+    nonisolated(unsafe) private static var lastMark: Double = 0
+    nonisolated(unsafe) private static var marks: [(String, Double, Double)] = []
+
+    static let tracing: Bool = {
+        ProcessInfo.processInfo.arguments.contains("--trace-startup")
+            || ProcessInfo.processInfo.environment["DATAGREP_TRACE_STARTUP"] == "1"
+    }()
+
+    /// Records the end of a startup phase. Cheap enough (one sysctl) to leave
+    /// unconditional, but the sysctl is skipped entirely when not tracing.
+    static func mark(_ label: String) {
+        guard tracing else { return }
+        let now = millisSinceProcessStart()
+        marks.append((label, now, now - lastMark))
+        lastMark = now
+    }
+
+    /// Times one phase and marks it. The return value is passed through so a
+    /// phase that produces a value can be wrapped without restructuring.
+    @discardableResult
+    static func phase<T>(_ label: String, _ body: () throws -> T) rethrows -> T {
+        guard tracing else { return try body() }
+        let out = try body()
+        mark(label)
+        return out
+    }
+
+    static func dumpTrace() {
+        guard tracing, !marks.isEmpty else { return }
+        var out = "MEASURE startup breakdown (ms since exec / phase cost)\n"
+        for (label, at, cost) in marks {
+            out += String(format: "  %7.1f  +%7.1f  %@\n", at, cost, label)
+        }
+        FileHandle.standardError.write(Data(out.utf8))
+        marks.removeAll()
     }
 }
 

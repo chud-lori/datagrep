@@ -368,6 +368,7 @@ public final class QueryHistoryStore: @unchecked Sendable {
     private var entries: [QueryHistoryEntry] = []
     private var dirtyDays: Set<String> = []
     private var flushScheduled = false
+    private var didLoad = false
 
     private var retentionValue: HistoryRetention
     private var changeHandler: (([QueryHistoryEntry]) -> Void)?
@@ -425,9 +426,15 @@ public final class QueryHistoryStore: @unchecked Sendable {
     /// Loads everything inside retention, newest day first, and drops what has
     /// aged out. Cheap enough to be synchronous on the queue at launch: 10 000
     /// short JSON lines is a few hundred KB.
+    ///
+    /// Idempotent, and deliberately so: a second `load()` would read the last
+    /// *flushed* state and so would silently discard anything recorded inside
+    /// the debounce window. Reading from disk must never be able to lose a query
+    /// that has already been run.
     public func load() {
         queue.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.didLoad else { return }
+            self.didLoad = true
             var loaded: [QueryHistoryEntry] = []
             let retention = self.retention
             let cutoffKey = Self.cutoffDayKey(days: retention.maxDays)
@@ -675,9 +682,13 @@ public final class QueryHistoryStore: @unchecked Sendable {
         return files.filter { $0.pathExtension == "jsonl" }
     }
 
+    /// Oldest day still inside retention. `days` counts *inclusive* of today, so
+    /// a retention of 1 keeps today and nothing else — "keep 1 day" that quietly
+    /// kept two would be the same class of surprise as an undocumented cap.
     private static func cutoffDayKey(days: Int) -> String {
         let cutoff =
-            Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? Date.distantPast
+            Calendar.current.date(byAdding: .day, value: -(max(1, days) - 1), to: Date())
+            ?? Date.distantPast
         return HistoryFormat.dayKey(for: cutoff)
     }
 

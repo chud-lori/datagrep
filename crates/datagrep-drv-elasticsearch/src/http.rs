@@ -32,6 +32,7 @@ use serde_json::Value as Json;
 use datagrep_api::error::DbError;
 
 use crate::error::{map_reqwest_error, map_status_error};
+use crate::json::OrderedJson;
 
 /// Header Elasticsearch echoes into the tasks API, which is how a cancel finds
 /// the task belonging to *our* in-flight search.
@@ -290,6 +291,53 @@ impl EsHttp {
         opaque_id: Option<&str>,
         timeout: Option<Duration>,
     ) -> Result<(Json, usize), DbError> {
+        let (text, size) = self
+            .send(method, path, query, body, opaque_id, timeout)
+            .await?;
+        if text.trim().is_empty() {
+            return Ok((Json::Null, size));
+        }
+        let json = serde_json::from_str(&text)
+            .map_err(|e| DbError::Protocol(format!("response was not valid JSON: {e}")))?;
+        Ok((json, size))
+    }
+
+    /// As [`EsHttp::request_sized`], but parsing into the **order-preserving**
+    /// [`OrderedJson`]. Used for every response whose object key order ends up
+    /// in front of a human — hits, and single reply documents — because
+    /// `serde_json::Value` would re-alphabetize them (see [`crate::json`]).
+    pub async fn request_ordered(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<&Json>,
+        opaque_id: Option<&str>,
+        timeout: Option<Duration>,
+    ) -> Result<(OrderedJson, usize), DbError> {
+        let (text, size) = self
+            .send(method, path, query, body, opaque_id, timeout)
+            .await?;
+        if text.trim().is_empty() {
+            return Ok((OrderedJson::Null, size));
+        }
+        let json = OrderedJson::parse(&text)
+            .map_err(|e| DbError::Protocol(format!("response was not valid JSON: {e}")))?;
+        Ok((json, size))
+    }
+
+    /// Issue the request and return the raw body plus its wire size. The one
+    /// place a request is actually built, so auth, tagging, timeouts and
+    /// error mapping cannot drift between the two parsing paths.
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<&Json>,
+        opaque_id: Option<&str>,
+        timeout: Option<Duration>,
+    ) -> Result<(String, usize), DbError> {
         let url = self.url(path);
         let mut req = self
             .client
@@ -319,12 +367,7 @@ impl EsHttp {
         if !status.is_success() {
             return Err(map_status_error(status.as_u16(), &text));
         }
-        if text.trim().is_empty() {
-            return Ok((Json::Null, size));
-        }
-        let json = serde_json::from_str(&text)
-            .map_err(|e| DbError::Protocol(format!("response was not valid JSON: {e}")))?;
-        Ok((json, size))
+        Ok((text, size))
     }
 
     /// `GET /` — the product handshake. Returns the parsed root document,

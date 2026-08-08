@@ -80,6 +80,11 @@
 //!   mutation path is the backstop (see `actor.rs::detect_identity`).
 //! - **`Op::Count { exact: false }` still runs a real `COUNT(*)`**; the
 //!   `table_rows` estimate is surfaced via `describe()` instead.
+//! - **MariaDB JSON columns decode as `Value::Str`, not `Value::Json`.**
+//!   MariaDB has no JSON wire type — its `JSON` is an alias for `LONGTEXT`
+//!   and arrives as an ordinary text column; `Str` is the truthful decode of
+//!   what that server declares. MySQL's native JSON type decodes as
+//!   `Value::Json` raw text.
 
 pub mod actor;
 pub mod canceller;

@@ -42,6 +42,8 @@ use serde_json::Value as Json;
 
 use datagrep_api::value::{Document, Value};
 
+use crate::json::OrderedJson;
+
 /// Elasticsearch field types this driver treats specially. Everything not
 /// listed maps structurally (string -> `Str`, object -> `Document`, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,13 +160,13 @@ fn flatten_properties(properties: &Json, prefix: &str, out: &mut FieldTypes) {
 /// `path` is `""` for the root itself. `types` may be empty — with no mapping
 /// available every rule degrades to the structural mapping, which is lossless
 /// for everything except the two precision cases documented at module level.
-pub fn json_to_value(json: &Json, path: &str, types: &FieldTypes) -> Value {
+pub fn json_to_value(json: &OrderedJson, path: &str, types: &FieldTypes) -> Value {
     match json {
-        Json::Null => Value::Null,
-        Json::Bool(b) => Value::Bool(*b),
-        Json::Number(n) => number_to_value(n, path, types),
-        Json::String(s) => string_to_value(s, path, types),
-        Json::Array(items) => {
+        OrderedJson::Null => Value::Null,
+        OrderedJson::Bool(b) => Value::Bool(*b),
+        OrderedJson::Number(n) => number_to_value(n, path, types),
+        OrderedJson::String(s) => string_to_value(s, path, types),
+        OrderedJson::Array(items) => {
             // Elasticsearch arrays are homogeneous by mapping and are not
             // addressable by index, so every element shares the parent's path.
             let converted: Vec<Value> = items
@@ -173,22 +175,28 @@ pub fn json_to_value(json: &Json, path: &str, types: &FieldTypes) -> Value {
                 .collect();
             Value::Array(Arc::from(converted))
         }
-        Json::Object(map) => {
+        OrderedJson::Object(fields) => {
+            // Key order — and duplicate keys — are data (design §3.1), which
+            // is why the input is `OrderedJson` and not `serde_json::Value`.
             let mut doc = Document::new();
-            for (k, v) in map {
+            for (k, v) in fields {
                 let child = if path.is_empty() {
                     k.clone()
                 } else {
                     format!("{path}.{k}")
                 };
-                // Key order is data (design §3.1) — `serde_json`'s
-                // `preserve_order` is not enabled workspace-wide, so this is
-                // the map's own iteration order; see the crate report.
                 doc.push(k.as_str(), json_to_value(v, &child, types));
             }
             Value::Document(Arc::new(doc))
         }
     }
+}
+
+/// Convert a `serde_json::Value` — for the control-plane replies whose key
+/// order was already lost by the time they got here (a `_cluster/health`
+/// document, an `EXPLAIN` plan). Never used for `_source`.
+pub fn serde_to_value(json: &Json, path: &str, types: &FieldTypes) -> Value {
+    json_to_value(&OrderedJson::from_serde(json), path, types)
 }
 
 fn number_to_value(n: &serde_json::Number, path: &str, types: &FieldTypes) -> Value {
@@ -377,7 +385,7 @@ mod tests {
     fn integers_within_i64_are_exact_not_floats() {
         let m = mapping();
         let json = serde_json::json!({ "id": 9007199254740993_i64 });
-        let v = json_to_value(&json, "", &m);
+        let v = json_to_value(&OrderedJson::from_serde(&json), "", &m);
         let Value::Document(doc) = &v else {
             panic!("expected document")
         };
@@ -390,7 +398,7 @@ mod tests {
         let m = mapping();
         // 123.456 is not representable in binary floating point.
         let json: Json = serde_json::from_str(r#"{"price": 123.456}"#).unwrap();
-        let Value::Document(doc) = json_to_value(&json, "", &m) else {
+        let Value::Document(doc) = json_to_value(&OrderedJson::from_serde(&json), "", &m) else {
             panic!("expected document")
         };
         assert_eq!(
@@ -401,7 +409,7 @@ mod tests {
         // The same literal on a `double` field legitimately stays an f64:
         // f64 *is* that field's declared precision.
         let json: Json = serde_json::from_str(r#"{"ratio": 123.456}"#).unwrap();
-        let Value::Document(doc) = json_to_value(&json, "", &m) else {
+        let Value::Document(doc) = json_to_value(&OrderedJson::from_serde(&json), "", &m) else {
             panic!("expected document")
         };
         assert_eq!(doc.get("ratio"), Some(&Value::F64(123.456)));
@@ -413,18 +421,34 @@ mod tests {
         // Written in exponent form, so serde_json parses it as f64 — beyond
         // what the declared `long` can survive as a float.
         let json: Json = serde_json::from_str(r#"{"id": 1.2345678901234567e19}"#).unwrap();
-        let Value::Document(doc) = json_to_value(&json, "", &m) else {
+        let Value::Document(doc) = json_to_value(&OrderedJson::from_serde(&json), "", &m) else {
             panic!("expected document")
         };
         match doc.get("id") {
             Some(Value::Decimal(text)) => {
-                assert!(text.contains("1.2345678901234567e19") || text.contains("12345678901234567"))
+                // The point is not the exact rendering but that the value did
+                // NOT land in an `F64` cell pretending to be an exact `long`.
+                assert!(
+                    text.parse::<f64>().is_ok(),
+                    "the decimal text must still be a number: {text}"
+                );
+                assert!(
+                    (text.parse::<f64>().unwrap() - 1.2345678901234567e19).abs() < 1e4,
+                    "and it must be the same value: {text}"
+                );
             }
             other => panic!("expected Decimal for a lossy long, got {other:?}"),
         }
+        // A `double` holding the same magnitude legitimately stays an f64:
+        // f64 *is* that field's declared precision.
+        let json: Json = serde_json::from_str(r#"{"ratio": 1.2345678901234567e19}"#).unwrap();
+        let Value::Document(doc) = json_to_value(&OrderedJson::from_serde(&json), "", &m) else {
+            panic!("expected document")
+        };
+        assert!(matches!(doc.get("ratio"), Some(Value::F64(_))));
         // An unsigned_long inside u64 range is still exact.
         let json: Json = serde_json::from_str(r#"{"big": 18446744073709551615}"#).unwrap();
-        let Value::Document(doc) = json_to_value(&json, "", &m) else {
+        let Value::Document(doc) = json_to_value(&OrderedJson::from_serde(&json), "", &m) else {
             panic!("expected document")
         };
         assert_eq!(doc.get("big"), Some(&Value::U64(u64::MAX)));
@@ -434,7 +458,7 @@ mod tests {
     fn unmapped_numbers_still_split_integral_from_fractional() {
         let empty = FieldTypes::new();
         let json: Json = serde_json::from_str(r#"{"a": 7, "b": 7.5, "c": -3}"#).unwrap();
-        let Value::Document(doc) = json_to_value(&json, "", &empty) else {
+        let Value::Document(doc) = json_to_value(&OrderedJson::from_serde(&json), "", &empty) else {
             panic!("expected document")
         };
         assert_eq!(doc.get("a"), Some(&Value::I64(7)));
@@ -446,7 +470,7 @@ mod tests {
     fn binary_fields_decode_to_bytes_and_never_lose_a_non_base64_string() {
         let m = mapping();
         let json = serde_json::json!({ "blob": "aGVsbG8=" });
-        let Value::Document(doc) = json_to_value(&json, "", &m) else {
+        let Value::Document(doc) = json_to_value(&OrderedJson::from_serde(&json), "", &m) else {
             panic!("expected document")
         };
         assert_eq!(
@@ -455,7 +479,7 @@ mod tests {
         );
 
         let json = serde_json::json!({ "blob": "!!! not base64 !!!" });
-        let Value::Document(doc) = json_to_value(&json, "", &m) else {
+        let Value::Document(doc) = json_to_value(&OrderedJson::from_serde(&json), "", &m) else {
             panic!("expected document")
         };
         assert_eq!(
@@ -473,7 +497,7 @@ mod tests {
     fn absent_is_never_synthesised_null() {
         let m = mapping();
         let json: Json = serde_json::from_str(r#"{"a": null}"#).unwrap();
-        let value = json_to_value(&json, "", &m);
+        let value = json_to_value(&OrderedJson::from_serde(&json), "", &m);
         let Value::Document(doc) = &value else {
             panic!("expected document")
         };
@@ -494,7 +518,7 @@ mod tests {
         let json: Json =
             serde_json::from_str(r#"{"address":{"city":"sg","geo":[1.5,2.5]},"tags":["a","b"]}"#)
                 .unwrap();
-        let Value::Document(doc) = json_to_value(&json, "", &m) else {
+        let Value::Document(doc) = json_to_value(&OrderedJson::from_serde(&json), "", &m) else {
             panic!("expected document")
         };
         let city: FieldPath = "address.city".parse().unwrap();
@@ -503,7 +527,7 @@ mod tests {
         assert_eq!(doc.get_path(&tag1), Some(&Value::Str(Arc::from("b"))));
         match doc.get("address") {
             Some(Value::Document(a)) => {
-                let keys: Vec<&str> = a.iter().map(|(k, _)| &***k).collect();
+                let keys: Vec<&str> = a.iter().map(|(k, _)| &**k).collect();
                 assert_eq!(keys, vec!["city", "geo"], "key order is data");
             }
             other => panic!("expected nested document, got {other:?}"),

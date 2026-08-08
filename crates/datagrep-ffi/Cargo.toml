@@ -22,6 +22,7 @@ datagrep-secrets = { path = "../datagrep-secrets" }
 datagrep-drv-postgres = { path = "../datagrep-drv-postgres" }
 datagrep-drv-sqlite = { path = "../datagrep-drv-sqlite" }
 datagrep-drv-redis = { path = "../datagrep-drv-redis" }
+datagrep-drv-mongo = { path = "../datagrep-drv-mongo" }
 
 # The one global runtime (design §3.4). `rt-multi-thread` for the 4 workers,
 # `sync` for the broadcast/watch channels CoreApi hands out.

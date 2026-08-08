@@ -25,7 +25,7 @@ pub fn register_drivers(core: &CoreApi) {
         Arc::new(datagrep_drv_postgres::PostgresDriver::new())
     });
     core.register_driver("redis", || Arc::new(datagrep_drv_redis::RedisDriver::new()));
-    // core.register_driver("mongo", || Arc::new(datagrep_drv_mongo::MongoDriver::new()));
+    core.register_driver("mongodb", || Arc::new(datagrep_drv_mongo::MongoDriver::new()));
 }
 
 /// A standalone `Driver` by registry id, for the two things `CoreApi` has no
@@ -41,6 +41,7 @@ pub fn driver_for(id: &str) -> Option<Arc<dyn datagrep_api::Driver>> {
         "sqlite" => Some(Arc::new(datagrep_drv_sqlite::SqliteDriver::new())),
         "postgres" => Some(Arc::new(datagrep_drv_postgres::PostgresDriver::new())),
         "redis" => Some(Arc::new(datagrep_drv_redis::RedisDriver::new())),
+        "mongodb" => Some(Arc::new(datagrep_drv_mongo::MongoDriver::new())),
         _ => None,
     }
 }
@@ -54,6 +55,8 @@ pub fn driver_for_url(url: &str) -> Option<(&'static str, Arc<dyn datagrep_api::
         "postgres"
     } else if url.starts_with("redis://") || url.starts_with("rediss://") {
         "redis"
+    } else if url.starts_with("mongodb://") || url.starts_with("mongodb+srv://") {
+        "mongodb"
     } else {
         return None;
     };
@@ -63,7 +66,7 @@ pub fn driver_for_url(url: &str) -> Option<(&'static str, Arc<dyn datagrep_api::
 /// Registry ids this build knows about — the message
 /// [`driver_for_url`] failures quote back at the user.
 pub fn known_driver_ids() -> &'static [&'static str] {
-    &["sqlite", "postgres", "redis"]
+    &["sqlite", "postgres", "redis", "mongodb"]
 }
 
 #[cfg(test)]
@@ -96,8 +99,10 @@ mod tests {
             driver_for_url("rediss://localhost:6379").map(|(i, _)| i),
             Some("redis")
         );
-        // Not in this build: mongo is a sibling crate this one must not link.
-        assert!(driver_for_url("mongodb://h/db").is_none());
+        assert_eq!(
+            driver_for_url("mongodb://h/db").map(|(i, _)| i),
+            Some("mongodb")
+        );
     }
 
     #[test]
@@ -108,6 +113,6 @@ mod tests {
         register_drivers(&core);
         let mut ids: Vec<String> = core.drivers().iter().map(|s| s.to_string()).collect();
         ids.sort();
-        assert_eq!(ids, ["postgres", "redis", "sqlite"]);
+        assert_eq!(ids, ["mongodb", "postgres", "redis", "sqlite"]);
     }
 }

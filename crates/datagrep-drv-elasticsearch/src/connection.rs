@@ -51,7 +51,7 @@ use crate::console::{self, ConsoleRequest};
 use crate::cursor::{AckCursor, DocsCursor, ScanSpec, SearchCursor, DEFAULT_KEEP_ALIVE};
 use crate::filter::{compile_predicate, compile_sort};
 use crate::http::{EsHttp, Method, PageMode, Product};
-use crate::value::{json_to_value, FieldTypes};
+use crate::value::{serde_to_value, FieldTypes};
 
 /// POST endpoints that only read. Used by the read-only guardrail; a path is a
 /// read if any of these appears as a `/`-delimited segment.
@@ -285,9 +285,9 @@ impl EsConnection {
         // Anything else — cluster health, a mapping read, `_cat`, an aggregation
         // via `_search?size=0`, a scroll continuation — is one round trip whose
         // reply is shown as a single document.
-        let response = self
+        let (response, _) = self
             .http
-            .request(
+            .request_ordered(
                 req.method,
                 &req.path,
                 &req.query
@@ -299,7 +299,7 @@ impl EsConnection {
                 opts.timeout,
             )
             .await?;
-        Ok(Box::new(DocsCursor::new(vec![json_to_value(
+        Ok(Box::new(DocsCursor::new(vec![crate::value::json_to_value(
             &response,
             "",
             &FieldTypes::new(),
@@ -484,7 +484,7 @@ impl EsConnection {
                 .await?
         };
 
-        Ok(Box::new(DocsCursor::new(vec![json_to_value(
+        Ok(Box::new(DocsCursor::new(vec![serde_to_value(
             &response,
             "",
             &FieldTypes::new(),
@@ -569,7 +569,7 @@ fn refuse_if_write(req: &ConsoleRequest) -> Result<(), DbError> {
 #[async_trait]
 impl Connection for EsConnection {
     fn capabilities(&self) -> Capabilities {
-        self.caps
+        self.caps.clone()
     }
 
     fn server_info(&self) -> &ServerInfo {
