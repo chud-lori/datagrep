@@ -116,25 +116,7 @@ impl CoreInner {
             return Ok((id, profile));
         }
 
-        let mut config = profile.config.clone();
-        if let Some(secret_ref) = &profile.secret_ref {
-            let reference: SecretRef = secret_ref
-                .parse()
-                .map_err(|e: datagrep_secrets::SecretError| e.to_string())?;
-            let secret = self
-                .secrets
-                .resolve(&reference)
-                .await
-                .map_err(|e| format!("could not resolve the secret for `{name}`: {e}"))?;
-            if let Some(driver) = crate::drivers::driver_for(&profile.driver_id) {
-                if let Some(field) = driver.config_schema().fields.iter().find(|f| f.secret) {
-                    config.values.insert(
-                        field.key.to_string(),
-                        ConfigValue::Str(secret.expose().to_string()),
-                    );
-                }
-            }
-        }
+        let config = self.plaintext_config(&profile).await?;
 
         let id = self
             .api
@@ -154,6 +136,42 @@ impl CoreInner {
 
         let _ = self.store.touch_profile_last_used(profile.id.clone()).await;
         Ok((id, profile))
+    }
+
+    /// The profile's stored config with its keychain secret folded back in.
+    ///
+    /// Split out of [`CoreInner::open_profile`] because `datagrep_connection_test_json`
+    /// needs exactly the same config a real query would run against — a test
+    /// that dialled with the password left out would go green on a profile
+    /// that cannot actually authenticate, which is the one thing a Test
+    /// Connection button must never do. The trade documented on `open_profile`
+    /// applies here too: the resolved secret sits in a plain `String` for the
+    /// life of the returned config.
+    pub(crate) async fn plaintext_config(
+        &self,
+        profile: &datagrep_profiles::Profile,
+    ) -> Result<datagrep_api::ConnectionConfig, String> {
+        let mut config = profile.config.clone();
+        let Some(secret_ref) = &profile.secret_ref else {
+            return Ok(config);
+        };
+        let reference: SecretRef = secret_ref
+            .parse()
+            .map_err(|e: datagrep_secrets::SecretError| e.to_string())?;
+        let secret = self
+            .secrets
+            .resolve(&reference)
+            .await
+            .map_err(|e| format!("could not resolve the secret for `{}`: {e}", profile.name))?;
+        if let Some(driver) = crate::drivers::driver_for(&profile.driver_id) {
+            if let Some(field) = driver.config_schema().fields.iter().find(|f| f.secret) {
+                config.values.insert(
+                    field.key.to_string(),
+                    ConfigValue::Str(secret.expose().to_string()),
+                );
+            }
+        }
+        Ok(config)
     }
 
     /// Dispatch one request, honouring the profile's read-only flag.

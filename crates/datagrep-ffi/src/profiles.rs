@@ -530,6 +530,128 @@ pub unsafe extern "C" fn datagrep_connection_info_json(
     )
 }
 
+/// Dial a connection once and report what answered, without saving anything.
+///
+/// Exactly one of the two selectors is used, `name` first:
+/// - `name` non-NULL and non-empty — test a **saved** profile, with its
+///   keychain secret folded back in, so what is tested is what a query would
+///   really run against.
+/// - otherwise `url` — test an **unsaved** URL, which is what the New
+///   Connection sheet has: nothing is written to the profile store and no
+///   password reaches the keychain, so a failed test leaves no wreckage.
+///
+/// On success returns
+/// ```json
+/// {"ok":true,"driver":str,"product":str,"version":str,
+///  "details":[[str,str],…],"elapsed_ms":u64}
+/// ```
+/// On failure returns NULL with the driver's real message in `err_out` — a
+/// "could not connect" with the reason stripped out is the thing this call
+/// exists to replace.
+///
+/// The connection is opened straight from the driver rather than through
+/// `CoreApi`, and closed again before returning: a test must not register a
+/// profile, warm a pool, or leave a socket behind for an engine the user may
+/// be about to correct the host of.
+///
+/// # Safety
+/// `core` must come from `datagrep_core_new`; `name`/`url` must each be NULL
+/// or valid NUL-terminated UTF-8; `err_out` must be NULL or writable.
+#[no_mangle]
+pub unsafe extern "C" fn datagrep_connection_test_json(
+    core: *mut DatagrepCore,
+    name: *const c_char,
+    url: *const c_char,
+    err_out: *mut *mut c_char,
+) -> *mut c_char {
+    guard(
+        err_out,
+        std::ptr::null_mut(),
+        "datagrep_connection_test_json",
+        || {
+            let core = core_ref(core)?;
+            let name = if name.is_null() {
+                ""
+            } else {
+                cstr(name, "name")?
+            };
+            let url = if url.is_null() { "" } else { cstr(url, "url")? };
+            if name.trim().is_empty() && url.trim().is_empty() {
+                return Err("pass either a profile name or a connection URL".to_string());
+            }
+            let rt = runtime()?;
+            let payload = rt.block_on(test_connection(core, name.trim(), url.trim()))?;
+            let text = serde_json::to_string(&payload)
+                .map_err(|e| format!("could not encode the test result: {e}"))?;
+            Ok(to_c_string(text))
+        },
+    )
+}
+
+/// How long a Test Connection waits before calling it a failure.
+///
+/// Shorter than the 15 s drivers default to: this runs behind a button the
+/// user is watching, and a quarter minute of nothing is indistinguishable
+/// from the app having hung.
+const TEST_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn test_connection(
+    core: &CoreInner,
+    name: &str,
+    url: &str,
+) -> Result<serde_json::Value, String> {
+    let (driver_id, driver, config) = if !name.is_empty() {
+        let profile = core.saved_profile(name).await?;
+        let driver = crate::drivers::driver_for(&profile.driver_id).ok_or_else(|| {
+            format!(
+                "this build has no `{}` driver (it knows {})",
+                profile.driver_id,
+                crate::drivers::known_driver_ids().join(", ")
+            )
+        })?;
+        let config = core.plaintext_config(&profile).await?;
+        (profile.driver_id.clone(), driver, config)
+    } else {
+        let (id, driver) = crate::drivers::driver_for_url(url).ok_or_else(|| {
+            format!(
+                "could not tell which driver `{url}` is for (this build knows {})",
+                crate::drivers::known_driver_ids().join(", ")
+            )
+        })?;
+        // The password stays inline in the config here on purpose: nothing is
+        // being persisted, so there is no keychain round trip to make, and
+        // every driver reads an inline credential the same way it reads a
+        // resolved one.
+        let config = driver.parse_url(url).map_err(|e| e.to_string())?;
+        (id.to_string(), driver, config)
+    };
+
+    let ctx = datagrep_api::driver::ConnectCtx {
+        connect_timeout: Some(TEST_CONNECT_TIMEOUT),
+        application_name: Some(std::sync::Arc::from("datagrep (test connection)")),
+        ..Default::default()
+    };
+    let started = std::time::Instant::now();
+    let conn = driver
+        .connect(&datagrep_api::ResolvedConfig::without_secrets(config), ctx)
+        .await
+        .map_err(|e| e.to_string())?;
+    let info = conn.server_info().clone();
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    // Best effort: the handshake already answered the question, and a driver
+    // that cannot close cleanly must not turn a successful test red.
+    let _ = conn.close().await;
+
+    Ok(json!({
+        "ok": true,
+        "driver": driver_id,
+        "product": info.product,
+        "version": info.version,
+        "details": info.details,
+        "elapsed_ms": elapsed_ms,
+    }))
+}
+
 /// Delete a saved profile and its keychain entry.
 ///
 /// # Safety
@@ -995,6 +1117,80 @@ mod tests {
             let info: serde_json::Value = serde_json::from_str(&info).unwrap();
             assert_eq!(info["read_only"], serde_json::Value::Null);
             assert_eq!(info["env"], "dev");
+            datagrep_core_free(core);
+        }
+    }
+
+    /// Test Connection dials for real and reports what answered. SQLite is the
+    /// one engine that can prove that without a server on the machine.
+    #[test]
+    fn a_connection_test_reports_the_server_it_reached() {
+        let core = test_core();
+        let url = CString::new(":memory:").unwrap();
+        let mut err: *mut c_char = std::ptr::null_mut();
+        unsafe {
+            let out = take_json(
+                datagrep_connection_test_json(core, std::ptr::null(), url.as_ptr(), &mut err),
+                err,
+                "datagrep_connection_test_json",
+            );
+            let out: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(out["ok"], true);
+            assert_eq!(out["driver"], "sqlite");
+            assert!(
+                out["product"].as_str().is_some_and(|p| !p.is_empty()),
+                "no product in {out}"
+            );
+            // Nothing was saved by testing.
+            let list = take_json(
+                datagrep_profiles_list_json(core, &mut err),
+                err,
+                "datagrep_profiles_list_json",
+            );
+            assert_eq!(list, "[]");
+            datagrep_core_free(core);
+        }
+    }
+
+    /// A saved profile can be tested by name, which is the path that resolves
+    /// the keychain secret.
+    #[test]
+    fn a_saved_profile_can_be_tested_by_name() {
+        let core = test_core();
+        let name = CString::new("local").unwrap();
+        let url = CString::new(":memory:").unwrap();
+        let mut err: *mut c_char = std::ptr::null_mut();
+        unsafe {
+            expect_ok(
+                datagrep_profiles_add(core, name.as_ptr(), url.as_ptr(), &mut err),
+                err,
+                "add",
+            );
+            let out = take_json(
+                datagrep_connection_test_json(core, name.as_ptr(), std::ptr::null(), &mut err),
+                err,
+                "datagrep_connection_test_json",
+            );
+            let out: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(out["ok"], true);
+            datagrep_core_free(core);
+        }
+    }
+
+    /// A URL no driver claims fails with a message that names the engines this
+    /// build does know, rather than a bare "could not connect".
+    #[test]
+    fn testing_an_unroutable_url_says_which_engines_exist() {
+        let core = test_core();
+        let url = CString::new("wat://localhost").unwrap();
+        let mut err: *mut c_char = std::ptr::null_mut();
+        unsafe {
+            let out = datagrep_connection_test_json(core, std::ptr::null(), url.as_ptr(), &mut err);
+            assert!(out.is_null());
+            assert!(!err.is_null());
+            let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+            crate::core::datagrep_string_free(err);
+            assert!(msg.contains("elasticsearch"), "message was {msg:?}");
             datagrep_core_free(core);
         }
     }
