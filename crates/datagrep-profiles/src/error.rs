@@ -51,9 +51,6 @@ pub enum ProfilesError {
     #[error("{what} not found: {id}")]
     NotFound { what: &'static str, id: String },
 
-    /// The `env` column held something other than dev|staging|prod.
-    #[error("invalid env `{0}` (expected dev, staging, or prod)")]
-    InvalidEnv(String),
 
     /// The store's worker thread could not be started.
     #[error("failed to start datagrep-profiles worker thread: {0}")]

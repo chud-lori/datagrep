@@ -99,7 +99,7 @@ type MigrationFn = fn(&Transaction<'_>) -> rusqlite::Result<()>;
 /// Migrations are append-only. Version N is `MIGRATIONS[N - 1]`; the current
 /// schema version lives in SQLite's own `PRAGMA user_version`, so the
 /// database carries its own version and no side-car file can drift from it.
-const MIGRATIONS: &[MigrationFn] = &[migrate_v1];
+const MIGRATIONS: &[MigrationFn] = &[migrate_v1, migrate_v2];
 
 /// Brings `conn` from its current `user_version` up to `MIGRATIONS.len()`.
 /// Refuses to run against a database from a *newer* schema version. Snapshots
@@ -189,7 +189,6 @@ CREATE TABLE profile (
     config_json     TEXT NOT NULL,
     secret_ref      TEXT,
     tunnel_id       TEXT REFERENCES tunnel(id) ON DELETE SET NULL,
-    env             TEXT NOT NULL DEFAULT 'dev' CHECK (env IN ('dev','staging','prod')),
     color           TEXT,
     read_only       INTEGER NOT NULL DEFAULT 0,
     confirm_writes  INTEGER NOT NULL DEFAULT 0,
@@ -285,6 +284,59 @@ fn migrate_v1(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         ),
     }
     Ok(())
+}
+
+/// Drops `profile.env`.
+///
+/// The dev/staging/prod label was a rigid stand-in for three things a
+/// connection already carries: `color` says "this one matters" and means
+/// whatever its owner decides, `read_only` refuses writes, and
+/// `confirm_writes` asks first. `staging` was never read by anything at all.
+///
+/// `ALTER TABLE ... DROP COLUMN` refuses when the column carries a CHECK
+/// constraint, which this one did, so the column goes by rebuilding the table.
+/// The framework wraps this in a transaction and has already snapshotted
+/// `<path>.bak`, so a failure anywhere leaves the old database intact — which
+/// matters, because a lost `secret_ref` orphans a keychain entry and breaks a
+/// working connection.
+fn migrate_v2(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    // Nothing to do for a database created after this landed.
+    let has_env: bool = tx
+        .prepare("SELECT 1 FROM pragma_table_info('profile') WHERE name = 'env'")?
+        .exists([])?;
+    if !has_env {
+        return Ok(());
+    }
+
+    tx.execute_batch(
+        "CREATE TABLE profile_new (
+            id              TEXT PRIMARY KEY,
+            folder_id       TEXT REFERENCES folder(id) ON DELETE SET NULL,
+            name            TEXT NOT NULL,
+            driver_id       TEXT NOT NULL,
+            config_json     TEXT NOT NULL,
+            secret_ref      TEXT,
+            tunnel_id       TEXT REFERENCES tunnel(id) ON DELETE SET NULL,
+            color           TEXT,
+            read_only       INTEGER NOT NULL DEFAULT 0,
+            confirm_writes  INTEGER NOT NULL DEFAULT 0,
+            auto_limit      INTEGER,
+            idle_timeout_s  INTEGER,
+            last_used_at    INTEGER,
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL
+        );
+
+        INSERT INTO profile_new
+            SELECT id, folder_id, name, driver_id, config_json, secret_ref,
+                   tunnel_id, color, read_only, confirm_writes, auto_limit,
+                   idle_timeout_s, last_used_at, created_at, updated_at
+            FROM profile;
+
+        DROP TABLE profile;
+        ALTER TABLE profile_new RENAME TO profile;
+        CREATE INDEX ix_profile_folder ON profile(folder_id);",
+    )
 }
 
 fn fts5_table_exists(conn: &Connection) -> rusqlite::Result<bool> {

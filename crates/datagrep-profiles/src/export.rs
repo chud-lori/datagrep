@@ -132,9 +132,9 @@ pub(crate) fn apply_import(
         let config_json = serde_json::to_string(&p.config)?;
         tx.execute(
             "INSERT INTO profile (
-                id, folder_id, name, driver_id, config_json, secret_ref, tunnel_id, env, color,
+                id, folder_id, name, driver_id, config_json, secret_ref, tunnel_id, color,
                 read_only, confirm_writes, auto_limit, idle_timeout_s, last_used_at, created_at, updated_at
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
              ON CONFLICT(id) DO UPDATE SET
                 folder_id = excluded.folder_id,
                 name = excluded.name,
@@ -142,7 +142,6 @@ pub(crate) fn apply_import(
                 config_json = excluded.config_json,
                 secret_ref = excluded.secret_ref,
                 tunnel_id = excluded.tunnel_id,
-                env = excluded.env,
                 color = excluded.color,
                 read_only = excluded.read_only,
                 confirm_writes = excluded.confirm_writes,
@@ -151,7 +150,7 @@ pub(crate) fn apply_import(
                 updated_at = excluded.updated_at",
             params![
                 p.id, p.folder_id, p.name, p.driver_id, config_json, p.secret_ref, p.tunnel_id,
-                p.env.as_str(), p.color, p.read_only, p.confirm_writes, p.auto_limit,
+                p.color, p.read_only, p.confirm_writes, p.auto_limit,
                 p.idle_timeout_s, p.last_used_at, p.created_at, p.updated_at,
             ],
         )?;
