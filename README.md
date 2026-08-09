@@ -1,80 +1,146 @@
+<div align="center">
+
+<img src="docs/appicon.svg" alt="" width="104" height="104">
+
 # datagrep
 
 **Every database in one native app. Free and open source.**
 
-Postgres, MySQL, SQLite, Redis and MongoDB — SQL and documents as equals, not one
-bolted onto the other. A native macOS app (SwiftUI + AppKit) and a CLI, both over
+Postgres, MySQL, SQLite, Redis, MongoDB and Elasticsearch — SQL and documents as
+equals, not one bolted onto the other. A native macOS app and a CLI, both over
 one Rust engine. No Electron, no JVM.
+
+[![release](https://img.shields.io/github/v/release/chud-lori/datagrep?color=2E7D4F&label=release)](https://github.com/chud-lori/datagrep/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/chud-lori/datagrep/ci.yml?branch=main&label=CI)](https://github.com/chud-lori/datagrep/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+![platform](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey)
+
+[Install](#install) · [Engines](#engines) · [In the app](#in-the-app) ·
+[CLI](#cli-quickstart) · [Security](#security) · [Contributing](#contributing)
+
+</div>
+
+---
+
+## Contents
+
+- [Why](#why)
+- [Engines](#engines)
+- [Install](#install)
+- [Build from source](#build-from-source)
+- [In the app](#in-the-app)
+- [CLI quickstart](#cli-quickstart)
+- [Block directives](#block-directives)
+- [How it stays small](#how-it-stays-small)
+- [Security](#security)
+- [Layout](#layout)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Why
+
+Most clients make you choose. DataGrip and DBeaver cover a lot of engines and
+cost you a JVM and a gigabyte of disk; the lightweight ones tend to speak one
+database well and treat the rest as an afterthought.
+
+datagrep is a **24 MB native app** that cold-starts in about 250 ms, opens SQL
+and NoSQL connections side by side, and streams results instead of loading them
+— a million-row result never becomes a million resident rows. Both numbers are
+printed by the app itself (`MEASURE cold start` on stderr) and by `du -sh`, so
+you do not have to take them on trust.
+
+It is also honest about what it does not do. `NULL`, an empty string, and a
+field *absent* from a document are three different facts, and it renders them
+three different ways. Read-only mode tells you whether the server is enforcing
+it or datagrep is. Where a limit is hit, it says so instead of showing a count
+that looks final.
 
 ## Engines
 
-| Engine | Status |
-|---|---|
-| PostgreSQL | working |
-| SQLite | working |
-| Redis | working |
-| MongoDB | working |
-| MySQL / MariaDB | working |
-| Elasticsearch | working (read-only — no writes yet) |
+| Engine | App | CLI | Notes |
+|---|:---:|:---:|---|
+| PostgreSQL | ✅ | ✅ | |
+| SQLite | ✅ | ✅ | |
+| MySQL / MariaDB | ✅ | — | |
+| MongoDB | ✅ | — | schema inferred from a sample, and labelled as such |
+| Redis | ✅ | — | scan-only enumeration; never `KEYS *` |
+| Elasticsearch | ✅ | — | read-only, no writes yet |
 
-The macOS app reaches all six. The CLI currently registers PostgreSQL and SQLite
-only — the other four surface through the app.
+> [!NOTE]
+> The CLI currently registers PostgreSQL and SQLite only. The other four are
+> reachable from the app. Wiring them into the CLI is one line per driver and is
+> tracked as open work.
 
 ## Install
 
+### DMG
+
 Each [release](https://github.com/chud-lori/datagrep/releases) ships
-`datagrep-macos.dmg`: open it and drag `datagrep.app` onto the Applications
-shortcut. The installer script does the same and also installs the CLI:
+`datagrep-macos.dmg` — open it and drag `datagrep.app` onto the Applications
+shortcut.
+
+> [!WARNING]
+> **First launch from the DMG shows a scary warning.** datagrep is not notarized
+> (there is no Apple Developer account behind it), so macOS says it "could not
+> verify datagrep is free of malware", and on recent versions the only obvious
+> button is *Move to Bin*. The app is fine — macOS simply cannot attribute it to
+> a registered developer. Open it once via **System Settings → Privacy &
+> Security → Open Anyway**, or clear the download flag yourself:
+>
+> ```
+> xattr -dr com.apple.quarantine /Applications/datagrep.app
+> ```
+>
+> Ctrl-click → **Open** worked on older macOS but no longer does on macOS 15.
+
+### Script
+
+Installs the CLI, and the app too with `--app`. Nothing a browser downloaded, so
+nothing is quarantined and the warning above never appears.
 
 ```
-curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh | bash
-curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh | bash -s -- --app
+▶ curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh | bash
+▶ curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh | bash -s -- --app
 ```
 
 The app checks for a newer release once per launch and only notifies you — it
 never downloads or installs anything on its own, and the check can be turned off.
 
-**First launch from the DMG shows a warning.** datagrep is not notarized, so
-macOS says it "could not verify datagrep is free of malware", and on recent
-versions the only obvious button is *Move to Bin*. Open it once via **System
-Settings → Privacy & Security → Open Anyway**, or clear the download flag:
+## Build from source
 
 ```
-xattr -dr com.apple.quarantine /Applications/datagrep.app
+▶ cargo build --release                  # engine + CLI  → target/release/datagrep
+▶ cd ui/macos && ./build-app.sh          # macOS app     → ui/macos/datagrep.app
 ```
 
-Ctrl-click → **Open** worked on older macOS but no longer does on macOS 15.
-Installing with the script avoids this — a file a browser never downloaded is
-never quarantined.
-
-## Build
-
-```
-cargo build --release                  # engine + CLI  → target/release/datagrep
-cd ui/macos && ./build-app.sh          # macOS app     → ui/macos/datagrep.app
-```
-
-The app needs no Xcode — Command Line Tools are enough, since it builds with
-Swift Package Manager rather than `xcodebuild`.
+> [!TIP]
+> No Xcode required — Command Line Tools are enough, because the app builds with
+> Swift Package Manager rather than `xcodebuild`.
 
 ## In the app
 
 Connections are editable, and any of them can be marked read-only. The badge
 says how real that promise is: *enforced by the server* only when the engine
 itself refuses writes, *blocked by datagrep only* when the guard is our
-client-side classifier — it never claims more protection than exists.
+client-side classifier — it never claims more protection than exists. Give a
+connection a colour and it tints the window, the sidebar and the titlebar;
+datagrep does not decide what your colours mean.
 
 Click a table and the schema pane shows its columns with types, nullability and
 primary keys, its indexes, and row/size estimates. For MongoDB the fields are
 inferred from a sample, and the pane says so — a field missing from the sample
 may still exist in the collection.
 
+Editors belong to a connection: each one keeps its own tabs, and closing a tab
+with unsaved SQL asks first. Quitting never does, because the session comes back
+exactly as you left it.
+
 ⌘Y opens the query history, searchable, over the same store the CLI's `history`
 command reads. The grid has a row-number gutter, and a result that stops at the
 500,000-row cap says "stopped at the 500,000-row limit — result incomplete"
 rather than showing a count that looks final.
 
-Not there yet: inline cell editing, autocomplete, an export UI, foreign-key
+**Not there yet:** inline cell editing, autocomplete, an export UI, foreign-key
 click-through, ER diagrams.
 
 ## CLI quickstart
@@ -92,7 +158,7 @@ id  | name  | note
 (3 rows)
 
 $ datagrep export --profile local -c "SELECT * FROM events" --format csv -o events.csv
-$ datagrep query --profile prod -f report.sql --format json | jq '.[].email'
+$ datagrep query --profile reports -f report.sql --format json | jq '.[].email'
 ```
 
 `NULL` (row 1) renders differently from an empty string (row 2), and differently
@@ -110,7 +176,7 @@ Any statement can carry per-block settings as comments:
 ```sql
 -- @limit 200
 -- @timeout 30s
--- @connection staging
+-- @connection reports
 -- @readonly
 SELECT * FROM events;
 ```
@@ -120,8 +186,7 @@ SELECT * FROM events;
 Results stream. The driver, a bounded channel, and the result store form a
 pipeline where nothing runs more than two chunks ahead — so when the UI stops
 consuming, the driver stops reading its socket, the TCP window closes, and the
-server stops producing. A million-row result never becomes a million resident
-rows.
+server stops producing.
 
 Schema browsing is lazy: one cheap query per level you expand, never a crawl of
 the whole catalog on connect.
@@ -131,14 +196,19 @@ enforced by [`ci/gates.sh`](ci/gates.sh).
 
 ## Security
 
-A database client holds live credentials, so this is engineered, not assumed:
-secrets live in the OS keychain and profiles store only a `keychain:` reference
-(exports have no field that can hold a secret), `cargo audit` + `cargo deny`
-gate every PR and run weekly against the unchanged tree, and every FFI entry
-point contains panics behind `catch_unwind`. Two limits worth knowing up front:
-PostgreSQL and MySQL connections are **not** TLS-encrypted yet — use the
-built-in SSH tunnel across untrusted networks — and an imported profile bundle
-can carry `exec:` secret references, so read one before importing it.
+A database client holds live credentials, so this is engineered rather than
+assumed: secrets live in the OS keychain and profiles store only a `keychain:`
+reference (exports have no field that can hold a secret), `cargo audit` and
+`cargo deny` gate every PR and run weekly against the unchanged tree, and every
+FFI entry point contains panics behind `catch_unwind`.
+
+> [!IMPORTANT]
+> Two limits worth knowing before you connect anything real:
+> - **PostgreSQL and MySQL connections are not TLS-encrypted yet.** Both refuse
+>   rather than downgrade silently, and the built-in SSH tunnel is the answer
+>   across untrusted networks.
+> - **An imported profile bundle can carry `exec:` secret references**, which run
+>   on first connect. Read a bundle before importing it.
 
 The full threat model, the open gaps, and how to report a vulnerability
 privately: [SECURITY.md](SECURITY.md).
@@ -167,7 +237,18 @@ Rules that keep it honest: drivers never see Arrow or the UI, `datagrep-core`
 never names a concrete driver, and `if driver_id == …` above `datagrep-api` is
 banned — any such branch means a missing capability flag.
 
-## Testing
+## Contributing
 
-`cargo test --workspace` runs everything that needs no server.
-See [`notes/testing.md`](notes/testing.md) for the live-engine suites.
+```
+▶ ./ci/gates.sh          # the same Tier-1 gate CI runs: fmt, clippy, tests,
+                         # supply-chain scan, anti-pattern greps, size budget
+▶ cargo test --workspace # everything that needs no live server
+```
+
+`ci/gates.sh` is the contract — if it passes locally it passes in CI, because it
+is the same script. The live-engine suites are described in
+[`notes/testing.md`](notes/testing.md).
+
+## License
+
+[Apache-2.0](LICENSE).
