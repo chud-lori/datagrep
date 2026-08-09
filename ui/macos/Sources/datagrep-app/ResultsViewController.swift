@@ -1099,7 +1099,11 @@ struct ResultsGridView: NSViewControllerRepresentable {
         nsViewController: ResultsViewController,
         context: Context
     ) -> CGSize? {
-        guard let width = proposal.width, let height = proposal.height else { return nil }
-        return CGSize(width: width, height: height)
+        // Never `return nil` on an unspecified proposal. SwiftUI proposes nil on
+        // some passes to ask "what size do you want?", and nil hands the answer
+        // back to AppKit's fitting size — the very thing this exists to ignore.
+        // One such pass is enough to blow the pane up again, which looked like
+        // the rows drawing and then vanishing a frame later.
+        CGSize(width: proposal.width ?? 10, height: proposal.height ?? 10)
     }
 }
