@@ -651,9 +651,16 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         // dirty flags included) and closing a *named* query only drops it from
         // the session. So this is the one place a confirmation belongs, and
         // there is deliberately none on quit.
-        if tab.isDirty, tab.name == nil, !tab.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if !confirmDiscard(tab) { return }
+        if tab.isDirty, tab.name == nil,
+            !tab.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            confirmDiscard(tab)
+            return
         }
+        performClose(tab)
+    }
+
+    private func performClose(_ tab: EditorTab) {
         guard let all = allTabs.firstIndex(where: { $0.id == tab.id }) else { return }
         let idx = tabs.tabs.firstIndex { $0.id == tab.id } ?? 0
         let wasActive = tab.id == tabs.activeID
@@ -739,7 +746,7 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     /// "Save…" runs the normal save path, which prompts for a name; if the user
     /// backs out of *that* prompt the tab is left untouched rather than closed,
     /// because cancelling a name prompt is not consent to discard.
-    private func confirmDiscard(_ tab: EditorTab) -> Bool {
+    private func confirmDiscard(_ tab: EditorTab) {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Discard this query?"
@@ -752,16 +759,31 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         // Destructive default: make Return cancel, not discard.
         alert.buttons[0].keyEquivalent = ""
         alert.buttons[1].keyEquivalent = "\r"
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            return true
-        case .alertThirdButtonReturn:
-            activate(tab)
-            saveActiveTab()
-            // Only close if it really did get saved.
-            return tab.name != nil
-        default:
-            return false
+
+        // A SHEET, not `runModal()`. This is reached from a SwiftUI button
+        // inside the tab bar's hosting view, and spinning a nested modal loop
+        // from inside SwiftUI's own event handling left the alert on screen
+        // with every button dead — it could not be dismissed at all. The sheet
+        // hands control back immediately and reports the choice later.
+        let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self else { return }
+            switch response {
+            case .alertFirstButtonReturn:
+                self.performClose(tab)
+            case .alertThirdButtonReturn:
+                self.activate(tab)
+                self.saveActiveTab()
+                // Only close if the name prompt actually completed; backing out
+                // of it is not consent to discard.
+                if tab.name != nil { self.performClose(tab) }
+            default:
+                break  // Cancel: the tab stays exactly as it was.
+            }
+        }
+        if let window = view.window {
+            alert.beginSheetModal(for: window, completionHandler: handle)
+        } else {
+            handle(alert.runModal())
         }
     }
 

@@ -1084,4 +1084,22 @@ struct ResultsGridView: NSViewControllerRepresentable {
     let controller: ResultsViewController
     func makeNSViewController(context: Context) -> ResultsViewController { controller }
     func updateNSViewController(_ nsViewController: ResultsViewController, context: Context) {}
+
+    /// Take the size offered, never the table's own.
+    ///
+    /// Same trap the editor pane fell into: without this SwiftUI sizes the
+    /// representable from the controller view's Auto Layout fitting size, which
+    /// for an `NSTableView` grows with the columns and rows in it. A result
+    /// with two dozen columns laid the grid out far wider and taller than the
+    /// pane, so the rows sat outside the visible area and the pane looked empty
+    /// even though the query had returned. The split and the window decide this
+    /// pane's size; the result set does not.
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        nsViewController: ResultsViewController,
+        context: Context
+    ) -> CGSize? {
+        guard let width = proposal.width, let height = proposal.height else { return nil }
+        return CGSize(width: width, height: height)
+    }
 }
