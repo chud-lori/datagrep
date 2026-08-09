@@ -145,13 +145,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         model.boot()
         Startup.mark("model.boot() — core + profiles + editor session")
 
-        // The window chrome follows the connection, not a timer: this fires only
-        // when one of these three values actually changes.
+        // The window chrome follows the connection's colour, not a timer, and
+        // only fires when the colour actually changes. Colour is the user's own
+        // marker — datagrep does not decide which connections are dangerous.
         model.$activeProfile
-            .combineLatest(model.$activeEnv, model.$prodMarked)
-            .map { profile, env, marked in env == "prod" || marked.contains(profile) }
+            .combineLatest(model.$profilesByName)
+            .map { profile, byName in byName[profile]?.color }
             .removeDuplicates()
-            .sink { [weak self] isProd in self?.applyChromeTint(isProd) }
+            .sink { [weak self] color in self?.applyChromeTint(color) }
             .store(in: &cancellables)
 
         model.$sidebarVisible
@@ -259,13 +260,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Layer 1 of the production guardrail. `titlebarAppearsTransparent` means
     /// the window background *is* the titlebar background, so one property
     /// paints the whole chrome.
-    private func applyChromeTint(_ isProd: Bool) {
+    private func applyChromeTint(_ colorName: String?) {
         guard let window else { return }
-        window.backgroundColor = isProd
-            ? NSColor.systemRed.blended(withFraction: 0.72, of: .windowBackgroundColor)
-                ?? .windowBackgroundColor
-            : .windowBackgroundColor
-        window.title = isProd ? "datagrep — PRODUCTION" : "datagrep"
+        // Blended well down: this has to be unmistakable at a glance without
+        // making the window unreadable to work in all day.
+        window.backgroundColor =
+            colorName
+            .flatMap(ConnectionColor.nsColor)
+            .flatMap { $0.blended(withFraction: 0.78, of: .windowBackgroundColor) }
+            ?? .windowBackgroundColor
+        // The title says which connection, not which tier — the colour is the
+        // user's own marker and only they know what it stands for.
+        window.title =
+            colorName == nil ? "datagrep" : "datagrep — \(model.activeProfile)"
     }
 
     /// Renders the window's own theme frame (titlebar + toolbar + content) into

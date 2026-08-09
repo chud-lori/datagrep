@@ -33,26 +33,12 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        // Layer 2 of the production guardrail. Full width, a word, and an icon —
-        // Sequel Ace shrinking the same signal to a dot produced sustained
-        // backlash, so it is a band and not a tint.
+        // A band, not a tint. Sequel Ace shrinking the same signal to a dot
+        // produced sustained backlash, so a marked connection gets full width.
         .safeAreaInset(edge: .top, spacing: 0) {
-            if model.isProd, !model.activeProfile.isEmpty {
-                VStack(spacing: 0) {
-                    ProdBanner(name: model.activeProfile)
-                    if !model.prodIsStored {
-                        Text(
-                            "Marked in this window only — this engine build cannot store an environment on the profile, so the CLI does not see it."
-                        )
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.ultraThinMaterial)
-                    }
-                }
-                .transition(.move(edge: .top).combined(with: .opacity))
+            if let color = model.activeSafety.color, !model.activeProfile.isEmpty {
+                MarkedBanner(name: model.activeProfile, color: color)
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         // ⌘E on the selected connection. A zero-size button rather than a menu
@@ -72,7 +58,7 @@ struct SidebarView: View {
         .sheet(item: $model.editDraft) { draft in
             ConnectionEditorSheet(model: model, draft: draft)
         }
-        .animation(.smooth(duration: 0.2), value: model.isProd)
+        .animation(.smooth(duration: 0.2), value: model.activeSafety.color)
         // Real window vibrancy. `.listStyle(.sidebar)` alone gives the sidebar
         // *metrics*, not the material — hosted in an NSHostingView it renders
         // as flat window gray without this.
@@ -189,15 +175,11 @@ private struct NodeLabel: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            if let safety, safety.isProd || safety.color != nil {
+            if let safety, let color = safety.color {
                 // A solid bar down the leading edge. Wide enough to see at a
                 // glance, and it does not depend on the row being selected.
                 RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                    .fill(
-                        safety.isProd
-                            ? Color(nsColor: .systemRed)
-                            : (ConnectionColor.color(safety.color) ?? Color.clear)
-                    )
+                    .fill(ConnectionColor.color(color) ?? Color.clear)
                     .frame(width: 3, height: 17)
             }
             if node.isProfile {
@@ -236,9 +218,6 @@ private struct NodeLabel: View {
 
             if let safety, safety.readOnly {
                 ReadOnlyBadge(level: safety.enforcement, compact: true)
-            }
-            if let safety, safety.isProd {
-                ProdRowMarker()
             }
             if let badge = node.badge {
                 Text(badge)
@@ -336,17 +315,6 @@ private struct ConnectionMenu: View {
         // the sidebar, and registering it twice is ambiguous.
         Button("Edit…") { model.editConnection(named: name) }
         Button("Duplicate") { model.duplicateProfile(named: name) }
-        Toggle(
-            "Treat as Production",
-            isOn: Binding(
-                get: { model.prodMarked.contains(name) },
-                set: { _ in model.toggleProdMark(name) })
-        )
-        .help(
-            model.prodIsStored
-                ? "Stores env = prod on the connection itself, so the CLI sees it too"
-                : "Marked in this window only — this engine build cannot store an environment on the profile"
-        )
 
         Divider()
 

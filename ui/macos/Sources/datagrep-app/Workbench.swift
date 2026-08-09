@@ -237,15 +237,6 @@ private struct WorkbenchToolbar: ToolbarContent {
                     .keyboardShortcut("n", modifiers: .command)
                 Button("Remove “\(model.activeProfile)”") { model.removeActiveProfile() }
                     .disabled(model.activeProfile.isEmpty)
-                Divider()
-                Toggle(
-                    "Treat as Production",
-                    isOn: Binding(
-                        get: { model.prodMarked.contains(model.activeProfile) },
-                        set: { _ in model.toggleProdMark(model.activeProfile) })
-                )
-                .disabled(model.activeProfile.isEmpty)
-                .help("Marks this connection as production, stored on the profile.")
             } label: {
                 // Icon AND name: a bare chevron is not a control.
                 HStack(spacing: 5) {

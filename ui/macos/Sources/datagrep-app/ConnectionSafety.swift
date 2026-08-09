@@ -8,17 +8,20 @@ import SwiftUI
 /// titlebar chip and the query path all answer the question the same way.
 struct ConnectionSafety: Equatable {
     var name: String
-    var isProd: Bool
     var readOnly: Bool
     var enforcement: ReadOnlyEnforcement
     var confirmWrites: Bool
     var color: String?
 
     static let empty = ConnectionSafety(
-        name: "", isProd: false, readOnly: false, enforcement: .unknown, confirmWrites: false,
+        name: "", readOnly: false, enforcement: .unknown, confirmWrites: false,
         color: nil)
 
-    var hasAnything: Bool { isProd || readOnly }
+    /// A colour is the user's own "this one matters" marker — datagrep does
+    /// not decide what red means, it just shows it where a mistake would hurt.
+    var isMarked: Bool { color != nil }
+
+    var hasAnything: Bool { isMarked || readOnly }
 }
 
 // MARK: - read-only badge
@@ -63,50 +66,33 @@ struct ReadOnlyBadge: View {
 
 // MARK: - production marker
 
-/// Layer 2 of the production guardrail, in the sidebar. Large and always
+/// The banner for a connection the user has given a colour. Large and always
 /// visible: when Sequel Ace shrank its full-width production colour to a dot it
-/// drew sustained backlash, so this is a filled band with a word in it, not a
-/// tint.
-struct ProdBanner: View {
+/// drew sustained backlash, so this is a filled band with the connection's name
+/// in it, not a tint.
+///
+/// It says the name and nothing else. datagrep does not know what the colour
+/// means — that is the point of letting the user choose it.
+struct MarkedBanner: View {
     let name: String
+    let color: String
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "exclamationmark.octagon.fill")
                 .font(.system(size: 12, weight: .bold))
-            VStack(alignment: .leading, spacing: 0) {
-                Text("PRODUCTION")
-                    .font(.system(size: 11, weight: .heavy))
-                    .tracking(1.1)
-                Text(name)
-                    .font(.system(size: 10))
-                    .opacity(0.9)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
+            Text(name)
+                .font(.system(size: 11, weight: .heavy))
+                .lineLimit(1)
+                .truncationMode(.middle)
             Spacer(minLength: 0)
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .systemRed))
-        .accessibilityLabel("Production connection \(name)")
-    }
-}
-
-/// The per-row marker: a solid red bar down the leading edge plus the word.
-/// Both, so it survives a narrow sidebar and a colour-blind reader alike.
-struct ProdRowMarker: View {
-    var body: some View {
-        Text("PROD")
-            .font(.system(size: 8.5, weight: .heavy))
-            .tracking(0.5)
-            .foregroundStyle(.white)
-            .padding(.horizontal, 4)
-            .padding(.vertical, 1)
-            .background(Capsule().fill(Color(nsColor: .systemRed)))
-            .accessibilityLabel("production")
+        .background(ConnectionColor.color(color) ?? Color(nsColor: .systemGray))
+        .accessibilityLabel("Marked connection \(name)")
     }
 }
 
@@ -122,19 +108,14 @@ struct ConnectionSafetyChip: View {
     var body: some View {
         let safety = model.activeSafety
         HStack(spacing: 6) {
-            if safety.isProd {
-                HStack(spacing: 4) {
-                    Image(systemName: "exclamationmark.octagon.fill")
-                        .font(.system(size: 10, weight: .bold))
-                    Text("PRODUCTION")
-                        .font(.system(size: 9.5, weight: .heavy))
-                        .tracking(0.8)
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(Capsule().fill(Color(nsColor: .systemRed)))
-                .help("This connection is marked production.")
+            if let color = safety.color {
+                // A dot, not a word: the colour is the user's own marker and
+                // datagrep has no name for what it means.
+                Circle()
+                    .fill(ConnectionColor.color(color) ?? Color(nsColor: .systemGray))
+                    .frame(width: 9, height: 9)
+                    .overlay(Circle().strokeBorder(Color.primary.opacity(0.25), lineWidth: 0.5))
+                    .help("This connection is marked \(color).")
             }
             if safety.readOnly {
                 ReadOnlyBadge(level: safety.enforcement)

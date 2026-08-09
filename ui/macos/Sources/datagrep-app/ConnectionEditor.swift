@@ -14,6 +14,21 @@ import SwiftUI
 enum ConnectionColor {
     static let names = ["red", "orange", "yellow", "green", "blue", "purple", "graphite"]
 
+    /// The same palette as `color(_:)`, for AppKit surfaces (the window
+    /// chrome) that cannot take a SwiftUI `Color`.
+    static func nsColor(_ name: String?) -> NSColor? {
+        switch name?.lowercased() {
+        case "red": return .systemRed
+        case "orange": return .systemOrange
+        case "yellow": return .systemYellow
+        case "green": return .systemGreen
+        case "blue": return .systemBlue
+        case "purple": return .systemPurple
+        case "graphite", "gray", "grey": return .systemGray
+        default: return nil
+        }
+    }
+
     static func color(_ name: String?) -> Color? {
         switch name?.lowercased() {
         case "red": return Color(nsColor: .systemRed)
@@ -219,7 +234,6 @@ final class ConnectionDraft: ObservableObject, Identifiable {
     private var nested: [AnyCancellable] = []
 
     @Published var name: String
-    @Published var env: String
     @Published var readOnly: Bool
     @Published var confirmWrites: Bool
     @Published var autoLimitText: String
@@ -250,7 +264,6 @@ final class ConnectionDraft: ObservableObject, Identifiable {
         self.originalName = detail.name
         self.original = detail
         self.name = detail.name
-        self.env = detail.env
         self.readOnly = detail.readOnly
         self.confirmWrites = detail.confirmWrites
         self.autoLimitText = detail.autoLimit.map(String.init) ?? ""
@@ -270,7 +283,6 @@ final class ConnectionDraft: ObservableObject, Identifiable {
     func apply(_ detail: ProfileDetail) {
         original = detail
         name = detail.name
-        env = detail.env
         readOnly = detail.readOnly
         confirmWrites = detail.confirmWrites
         autoLimitText = detail.autoLimit.map(String.init) ?? ""
@@ -374,7 +386,6 @@ final class ConnectionDraft: ObservableObject, Identifiable {
         var p = ProfilePatch()
         if trimmedName != original.name { p.set("name", trimmedName) }
         if let u = urlToSend { p.set("url", u) }
-        if env != original.env { p.set("env", env) }
         if readOnly != original.readOnly { p.set("read_only", readOnly) }
         if confirmWrites != original.confirmWrites { p.set("confirm_writes", confirmWrites) }
         if autoLimit != original.autoLimit { p.set("auto_limit", autoLimit) }
@@ -666,7 +677,6 @@ struct ConnectionEditorSheet: View {
 
             safetySection
 
-            if draft.env == "prod" { prodWarning }
 
             if let err = draft.error {
                 Callout(symbol: "exclamationmark.triangle.fill", tone: .error, text: err)
@@ -677,7 +687,6 @@ struct ConnectionEditorSheet: View {
         .padding(20)
         .frame(width: 512)
         .animation(.smooth(duration: 0.18), value: draft.readOnly)
-        .animation(.smooth(duration: 0.18), value: draft.env)
         .animation(.smooth(duration: 0.18), value: draft.error)
     }
 
@@ -723,16 +732,6 @@ struct ConnectionEditorSheet: View {
     /// on the same label column as the connection half above it.
     private var settings: some View {
         Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
-            GridRow {
-                label("Environment")
-                Picker("", selection: $draft.env) {
-                    Text("Development").tag("dev")
-                    Text("Staging").tag("staging")
-                    Text("Production").tag("prod")
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-            }
             GridRow {
                 label("Colour")
                 HStack(spacing: 6) {
@@ -817,13 +816,6 @@ struct ConnectionEditorSheet: View {
         )
     }
 
-    private var prodWarning: some View {
-        Callout(
-            symbol: "exclamationmark.octagon.fill", tone: .error,
-            text:
-                "Marked production. datagrep will paint the whole window red and flag this connection everywhere it appears, so a statement is never run against it by accident."
-        )
-    }
 
     // MARK: footer
 

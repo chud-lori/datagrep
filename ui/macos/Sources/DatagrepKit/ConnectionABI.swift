@@ -168,7 +168,6 @@ public struct ProfileDetail: Sendable, Hashable {
     public var name: String
     public var url: String
     public var driver: String
-    public var env: String
     public var readOnly: Bool
     public var confirmWrites: Bool
     public var autoLimit: Int?
@@ -186,7 +185,7 @@ public struct ProfileDetail: Sendable, Hashable {
     public var fields: ConnectionFields?
 
     public init(
-        name: String, url: String = "", driver: String = "", env: String = "dev",
+        name: String, url: String = "", driver: String = "",
         readOnly: Bool = false, confirmWrites: Bool = false, autoLimit: Int? = nil,
         idleTimeoutS: Int? = nil, color: String? = nil, hasSecret: Bool = false,
         enforcement: ReadOnlyEnforcement = .unknown, reported: Set<String> = [],
@@ -195,7 +194,6 @@ public struct ProfileDetail: Sendable, Hashable {
         self.name = name
         self.url = url
         self.driver = driver
-        self.env = env
         self.readOnly = readOnly
         self.confirmWrites = confirmWrites
         self.autoLimit = autoLimit
@@ -215,7 +213,6 @@ public struct ProfileDetail: Sendable, Hashable {
         d.url = ProfileDetail.string(dict, "url") ?? ProfileDetail.string(dict, "dsn") ?? ""
         d.driver =
             ProfileDetail.string(dict, "driver") ?? ProfileDetail.string(dict, "driver_id") ?? ""
-        d.env = ProfileDetail.string(dict, "env") ?? "dev"
         d.readOnly = dict["read_only"] as? Bool ?? false
         d.confirmWrites = dict["confirm_writes"] as? Bool ?? false
         d.autoLimit = ProfileDetail.int(dict, "auto_limit")
@@ -355,7 +352,7 @@ extension DatagrepCoreHandle {
     /// Full detail for one profile, for pre-populating the editor.
     ///
     /// Falls back to the list call when `datagrep_profiles_get_json` is absent,
-    /// so the sheet still opens with a name, a driver and an env rather than
+    /// so the sheet still opens with a name and a driver rather than
     /// refusing to appear. The URL is simply blank in that case, and the sheet
     /// says why instead of showing an empty field that looks like a cleared one.
     public func profileDetail(name: String) throws -> ProfileDetail {
@@ -372,9 +369,9 @@ extension DatagrepCoreHandle {
             throw DatagrepError("no connection named `\(name)`")
         }
         return ProfileDetail(
-            name: p.name, url: "", driver: p.driver, env: p.env, readOnly: p.readOnly,
+            name: p.name, url: "", driver: p.driver, readOnly: p.readOnly,
             confirmWrites: p.confirmWrites, color: p.color, hasSecret: p.hasSecret,
-            enforcement: p.enforcement, reported: ["name", "driver", "env"])
+            enforcement: p.enforcement, reported: ["name", "driver"])
     }
 
     /// Applies a JSON patch. Throws — loudly — on a build that cannot save.
