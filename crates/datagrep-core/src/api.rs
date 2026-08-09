@@ -49,17 +49,6 @@ impl fmt::Display for ProfileId {
     }
 }
 
-/// Which environment a profile points at. Load-bearing, not decoration: `Prod`
-/// is what turns on red window chrome, confirm-on-write, and the rest of the
-/// blast-radius guardrails.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum Env {
-    #[default]
-    Dev,
-    Staging,
-    Prod,
-}
-
 /// A saved connection, minus its secrets. Safe to persist, export, and diff —
 /// secrets live in the OS keychain and profiles hold only a reference to them,
 /// so a leaked or shared profile file is not a leaked password.
@@ -71,7 +60,6 @@ pub struct Profile {
     /// above `datagrep-api` where a driver is named, and it is data, not a branch.
     pub driver: Arc<str>,
     pub config: ConnectionConfig,
-    pub env: Env,
     /// Client-side read-only assertion — one layer of the write guardrails,
     /// above the engine's own read-only enforcement.
     pub read_only: bool,
@@ -151,7 +139,6 @@ impl CoreApi {
             name: name.into(),
             driver: config.driver.clone(),
             config,
-            env: Env::default(),
             read_only: false,
         };
         write(&self.profiles).insert(id, profile);

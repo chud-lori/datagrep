@@ -39,7 +39,7 @@ pub use db::RetentionPolicy;
 pub use error::ProfilesError;
 pub use export::{ExportBundle, ImportStrategy, ImportSummary};
 pub use model::{
-    new_id, now_ms, Env, Folder, HistoryEntry, HistoryStatus, NewHistoryEntry, Profile, SavedQuery,
+    new_id, now_ms, Folder, HistoryEntry, HistoryStatus, NewHistoryEntry, Profile, SavedQuery,
     Tunnel,
 };
 pub use secrets::validate_no_secrets;

@@ -1,11 +1,10 @@
 //! Row types for every table in the profile store, plus the small enums
-//! (`Env`, `HistoryStatus`) that back their `CHECK`-constrained columns.
+//! (`HistoryStatus`) that back their `CHECK`-constrained columns.
 //!
 //! Timestamps are milliseconds since the Unix epoch (`i64`), matching
 //! SQLite's `INTEGER` affinity and avoiding a chrono dependency this crate
 //! doesn't otherwise need.
 
-use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -48,42 +47,6 @@ pub struct Folder {
     pub updated_at: i64,
 }
 
-/// The deployment tier a profile targets, driving the red window chrome /
-/// confirm-on-write / blocked-unqualified-write guardrails.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Env {
-    #[default]
-    Dev,
-    Staging,
-    Prod,
-}
-
-impl Env {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Env::Dev => "dev",
-            Env::Staging => "staging",
-            Env::Prod => "prod",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Env> {
-        match s {
-            "dev" => Some(Env::Dev),
-            "staging" => Some(Env::Staging),
-            "prod" => Some(Env::Prod),
-            _ => None,
-        }
-    }
-}
-
-impl fmt::Display for Env {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// The `profile` table. `config` is `datagrep_api::ConnectionConfig` —
 /// the exact type drivers consume — serialized to `config_json`; it is
 /// validated on every save to reject secret-shaped keys (see
@@ -100,7 +63,6 @@ pub struct Profile {
     /// Never a secret value itself.
     pub secret_ref: Option<String>,
     pub tunnel_id: Option<String>,
-    pub env: Env,
     pub color: Option<String>,
     pub read_only: bool,
     pub confirm_writes: bool,

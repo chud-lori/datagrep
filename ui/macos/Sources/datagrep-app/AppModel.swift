@@ -15,14 +15,12 @@ final class CatalogNode: ObservableObject, Identifiable {
     let hasChildren: Bool
     let isProfile: Bool
     let driver: String
-    let env: String
     /// Safety facts, copied off the profile so a row can draw its own badge
     /// without reaching back into the model for every cell.
     let readOnly: Bool
     let enforcement: ReadOnlyEnforcement
     let colorName: String?
 
-    var isProdProfile: Bool { isProfile && env == "prod" }
 
     @Published var children: [CatalogNode] = []
     @Published var isLoading = false
@@ -51,7 +49,6 @@ final class CatalogNode: ObservableObject, Identifiable {
         self.hasChildren = true
         self.isProfile = true
         self.driver = profile.driver
-        self.env = profile.env
         self.readOnly = profile.readOnly
         self.enforcement = profile.enforcement
         self.colorName = profile.color
@@ -66,7 +63,6 @@ final class CatalogNode: ObservableObject, Identifiable {
         self.hasChildren = entry.hasChildren
         self.isProfile = false
         self.driver = ""
-        self.env = ""
         self.readOnly = false
         self.enforcement = .unknown
         self.colorName = nil
@@ -95,7 +91,7 @@ final class CatalogNode: ObservableObject, Identifiable {
 
     var subtitle: String? {
         guard isProfile else { return nil }
-        var s = "\(EngineStyle.displayName(for: driver)) · \(env)"
+        var s = EngineStyle.displayName(for: driver)
         if readOnly { s += " · \(enforcement.headline)" }
         return s
     }
@@ -164,7 +160,6 @@ final class AppModel: ObservableObject {
 
     @Published var roots: [CatalogNode] = []
     @Published var activeProfile: String = ""
-    @Published var activeEnv: String = "dev"
     @Published var sqlText: String = ""
     @Published var searchText: String = ""
 
@@ -207,29 +202,8 @@ final class AppModel: ObservableObject {
     /// statement, so a read-only refusal can name the profile that refused.
     @Published private(set) var profilesByName: [String: Profile] = [:]
 
-    /// Which connections this window treats as production.
-    ///
-    /// Originally a pure client-side fiction: `datagrep_profiles_add` hard-coded
-    /// `env: Env::Dev`, so no profile could ever report `prod` and the red
-    /// production chrome had nothing to fire on. Now it is a **mirror of the
-    /// profile's real `env`** whenever the engine can store one
-    /// (`ProfileABI.canEdit`), and the legacy UserDefaults set is migrated into
-    /// the store and deleted — the CLI and the GUI disagreeing about which
-    /// connection is production is exactly the split brain the guardrail exists
-    /// to prevent.
-    ///
-    /// It stays published under the same name because the window chrome, the
-    /// toolbar menu and the sidebar all observe it.
-    @Published var prodMarked: Set<String> = []
 
-    /// Only still consulted on a build whose engine cannot store an env.
-    private var legacyProdMarks: Set<String> = []
-    private var didMigrateProdMarks = false
-    private static let prodKey = "datagrep.prodMarkedProfiles"
 
-    /// True when production is a real field on the profile rather than a note
-    /// this window keeps to itself. Drives the wording everywhere it is shown.
-    var prodIsStored: Bool { ProfileABI.canEdit }
 
     /// Sidebar visibility, bound to `NavigationSplitView`'s `columnVisibility`
     /// and persisted. Bound rather than driven by `toggleSidebar(_:)` because
@@ -260,7 +234,7 @@ final class AppModel: ObservableObject {
     var activeDriver: String { roots.first { $0.name == activeProfile }?.driver ?? "" }
     var canSortInEngine: Bool { EngineStyle.supportsSubqueryOrderBy(activeDriver) }
 
-    var isProd: Bool { activeEnv == "prod" || prodMarked.contains(activeProfile) }
+    var isProd: Bool { activeSafety.isMarked }
     var isRunning: Bool { state.map { !$0.isTerminal } ?? false }
 
     // MARK: - safety, resolved once
@@ -272,7 +246,6 @@ final class AppModel: ObservableObject {
         let p = profilesByName[name]
         return ConnectionSafety(
             name: name,
-            isProd: p?.env == "prod" || prodMarked.contains(name),
             readOnly: p?.readOnly ?? false,
             enforcement: p?.enforcement ?? .unknown,
             confirmWrites: p?.confirmWrites ?? false,
@@ -287,12 +260,11 @@ final class AppModel: ObservableObject {
     var connectionSubtitle: String {
         guard !activeProfile.isEmpty else { return "no connection" }
         let driver = roots.first { $0.name == activeProfile }?.driver ?? "?"
-        let env = isProd ? "PRODUCTION" : activeEnv
         // The lock is in the toolbar chip too, but the subtitle is the one line
         // that survives a collapsed sidebar and a narrow window.
         let lock = activeSafety.readOnly ? " · \(activeSafety.enforcement.headline)" : ""
-        guard let state else { return "\(driver) · \(env)\(lock) · idle" }
-        return "\(driver) · \(env)\(lock) · \(state.rawValue) · \(rowsLoaded.formatted()) rows"
+        guard let state else { return "\(driver)\(lock) · idle" }
+        return "\(driver)\(lock) · \(state.rawValue) · \(rowsLoaded.formatted()) rows"
     }
 
     /// Where the engine keeps its profile store. Not the temp directory: a
@@ -370,8 +342,6 @@ final class AppModel: ObservableObject {
             self?.isError = false
         }
 
-        legacyProdMarks = Set(UserDefaults.standard.stringArray(forKey: Self.prodKey) ?? [])
-        prodMarked = legacyProdMarks
         if UserDefaults.standard.object(forKey: Self.sidebarKey) != nil {
             sidebarVisible = UserDefaults.standard.bool(forKey: Self.sidebarKey)
         }
@@ -497,12 +467,8 @@ final class AppModel: ObservableObject {
                 return n
             }
             profilesByName = Dictionary(uniqueKeysWithValues: profiles.map { ($0.name, $0) })
-            syncProdMarks(with: profiles)
             if !roots.contains(where: { $0.name == activeProfile }) {
                 activeProfile = profiles.first?.name ?? ""
-                activeEnv = profiles.first?.env ?? "dev"
-            } else {
-                activeEnv = profilesByName[activeProfile]?.env ?? activeEnv
             }
             // Editors are scoped by connection, so the tab bar has to follow
             // the profile list: a connection that just appeared (or vanished)
@@ -594,13 +560,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// `DATAGREP_SAFETY_FIXTURE` overlays env / read-only / enforcement onto the
+    /// `DATAGREP_SAFETY_FIXTURE` overlays read-only / enforcement / colour onto the
     /// listed profiles, in the same family as `DATAGREP_SCHEMA_FIXTURE`: the
     /// stub engine reports neither, and "I could not look at the red chrome or
     /// the lock badge" is not an acceptable answer for safety UI. It is read
     /// once per profile reload and does nothing when the variable is unset.
     ///
-    /// Shape: `{"local_pg":{"env":"prod","read_only":true,"enforcement":"client"}}`
+    /// Shape: `{"local_pg":{"read_only":true,"enforcement":"client","color":"red"}}`
     static func applySafetyFixture(to profiles: [Profile]) -> [Profile] {
         guard let text = ProcessInfo.processInfo.environment["DATAGREP_SAFETY_FIXTURE"],
             let data = text.data(using: .utf8),
@@ -609,7 +575,7 @@ final class AppModel: ObservableObject {
         return profiles.map { p in
             guard let o = map[p.name] else { return p }
             return Profile(
-                name: p.name, driver: p.driver, env: o["env"] as? String ?? p.env,
+                name: p.name, driver: p.driver,
                 hasSecret: o["has_secret"] as? Bool ?? p.hasSecret,
                 readOnly: o["read_only"] as? Bool ?? p.readOnly,
                 confirmWrites: o["confirm_writes"] as? Bool ?? p.confirmWrites,
@@ -630,9 +596,9 @@ final class AppModel: ObservableObject {
         let seed =
             profilesByName[name].map {
                 ProfileDetail(
-                    name: $0.name, url: "", driver: $0.driver, env: $0.env, readOnly: $0.readOnly,
+                    name: $0.name, url: "", driver: $0.driver, readOnly: $0.readOnly,
                     confirmWrites: $0.confirmWrites, color: $0.color, hasSecret: $0.hasSecret,
-                    enforcement: $0.enforcement, reported: ["name", "driver", "env", "read_only"])
+                    enforcement: $0.enforcement, reported: ["name", "driver", "read_only"])
             } ?? ProfileDetail(name: name)
         let draft = ConnectionDraft(detail: seed)
         draft.loading = ProfileABI.canPrefill
@@ -702,63 +668,6 @@ final class AppModel: ObservableObject {
 
     /// Reconcile the window's idea of production with the profile store's.
     ///
-    /// When the engine can store an env, the stored value wins outright and the
-    /// old UserDefaults set is migrated into it once and then deleted. When it
-    /// cannot, the local set is still honoured — but every surface that shows it
-    /// says so (`prodIsStored`), because a marker only this window knows about
-    /// is a different promise from one the CLI will also honour.
-    private func syncProdMarks(with profiles: [Profile]) {
-        let stored = Set(profiles.filter { $0.env == "prod" }.map(\.name))
-        guard prodIsStored else {
-            prodMarked = stored.union(legacyProdMarks)
-            return
-        }
-        prodMarked = stored
-        migrateLegacyProdMarks(profiles)
-    }
-
-    /// One-shot: anything the old UserDefaults workaround called production
-    /// becomes a real `env = prod` on the profile, and the defaults key goes.
-    private func migrateLegacyProdMarks(_ profiles: [Profile]) {
-        guard !didMigrateProdMarks else { return }
-        didMigrateProdMarks = true
-        let pending = profiles.filter { legacyProdMarks.contains($0.name) && $0.env != "prod" }
-        guard !pending.isEmpty else {
-            legacyProdMarks = []
-            UserDefaults.standard.removeObject(forKey: Self.prodKey)
-            return
-        }
-        guard let core else { return }
-        let names = pending.map(\.name)
-        queryQueue.async { [weak self] in
-            var migrated: [String] = []
-            for n in names {
-                var patch = ProfilePatch()
-                patch.set("env", "prod")
-                if (try? core.updateProfile(name: n, patchJSON: patch.json)) != nil {
-                    migrated.append(n)
-                }
-            }
-            DispatchQueue.main.async {
-                guard let self else { return }
-                guard migrated.count == names.count else {
-                    // Partial migration: keep the local set so nothing silently
-                    // stops being marked production.
-                    self.message =
-                        "could not move \(names.count - migrated.count) production marker(s) into the profile store — they are still local to this window"
-                    self.isError = true
-                    return
-                }
-                self.legacyProdMarks = []
-                UserDefaults.standard.removeObject(forKey: Self.prodKey)
-                self.message =
-                    "production marking now lives on the profile itself (\(migrated.joined(separator: ", "))) — the CLI sees it too"
-                self.isError = false
-                self.reloadProfiles()
-            }
-        }
-    }
-
     func removeActiveProfile() {
         guard !activeProfile.isEmpty else { return }
         removeProfile(named: activeProfile)
@@ -782,9 +691,6 @@ final class AppModel: ObservableObject {
             "The connection is deleted from datagrep. The database itself is untouched."
         if profilesByName[name]?.hasSecret == true {
             detail += " Its saved password is removed from the macOS keychain as well."
-        }
-        if safety.isProd {
-            detail += " This connection is marked production."
         }
         detail += " Editors you wrote for it are kept on disk."
         alert.informativeText = detail
@@ -810,8 +716,6 @@ final class AppModel: ObservableObject {
         guard let core else { return }
         do {
             try core.removeProfile(name: name)
-            prodMarked.remove(name)
-            legacyProdMarks.remove(name)
             profilesByName.removeValue(forKey: name)
             editor.forgetEditors(of: name)
             if activeProfile == name { activeProfile = "" }
@@ -890,7 +794,9 @@ final class AppModel: ObservableObject {
     func reconnect(_ name: String) {
         guard let core, profilesByName[name] != nil else { return }
         var patch = ProfilePatch()
-        patch.set("env", profilesByName[name]?.env ?? "dev")
+        // A no-op patch is what makes the engine forget the profile and close
+        // its pool, so the next statement genuinely re-dials.
+        patch.set("name", name)
         let json = patch.json
         message = "reconnecting `\(name)`…"
         isError = false
@@ -923,45 +829,7 @@ final class AppModel: ObservableObject {
     /// would fight the move the editor has just made.
     func selectProfile(_ name: String, scopeEditors: Bool = true) {
         activeProfile = name
-        activeEnv = roots.first { $0.name == name }?.env ?? "dev"
         if scopeEditors { editor.setScope(name.isEmpty ? nil : name) }
-    }
-
-    /// Layer 1 of the production guardrail: the window turns red for a
-    /// connection marked production.
-    ///
-    /// Writes the profile's real `env` when the engine can store one, so the
-    /// CLI and the GUI cannot disagree about which connection is production.
-    /// Only when it cannot does this fall back to the window-local set, and
-    /// `prodIsStored` is false everywhere the marker is shown.
-    func toggleProdMark(_ name: String) {
-        let wasProd = prodMarked.contains(name)
-        guard prodIsStored, let core, profilesByName[name] != nil else {
-            if wasProd { legacyProdMarks.remove(name) } else { legacyProdMarks.insert(name) }
-            UserDefaults.standard.set(Array(legacyProdMarks), forKey: Self.prodKey)
-            prodMarked = legacyProdMarks
-            return
-        }
-        var patch = ProfilePatch()
-        patch.set("env", wasProd ? "dev" : "prod")
-        let json = patch.json
-        // Optimistic, so the red chrome tracks the click; reconciled by the
-        // reload below, which reads the value the store actually holds.
-        if wasProd { prodMarked.remove(name) } else { prodMarked.insert(name) }
-        queryQueue.async { [weak self] in
-            var failure: String?
-            do { try core.updateProfile(name: name, patchJSON: json) } catch {
-                failure = "\(error)"
-            }
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if let failure {
-                    self.message = "could not change the environment of `\(name)`: \(failure)"
-                    self.isError = true
-                }
-                self.reloadProfiles()
-            }
-        }
     }
 
     // MARK: - catalog, one level per call
@@ -1017,7 +885,6 @@ final class AppModel: ObservableObject {
 
     func select(_ node: CatalogNode) {
         selectProfile(node.profile)
-        if let root = roots.first(where: { $0.profile == node.profile }) { activeEnv = root.env }
         if node.isDescribable { showSchema(for: node) }
     }
 
@@ -1342,11 +1209,8 @@ final class AppModel: ObservableObject {
         verb: String, profile: String, safety: ConnectionSafety, proceed: @escaping () -> Void
     ) {
         let alert = NSAlert()
-        alert.alertStyle = safety.isProd ? .critical : .warning
-        alert.messageText =
-            safety.isProd
-            ? "Run a \(verb) against PRODUCTION `\(profile)`?"
-            : "Run a \(verb) against `\(profile)`?"
+        alert.alertStyle = .warning
+        alert.messageText = "Run a \(verb) against `\(profile)`?"
         alert.informativeText =
             "This connection is set to ask before every write. The statement has not been sent yet."
         alert.addButton(withTitle: "Run \(verb)")

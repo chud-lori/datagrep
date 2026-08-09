@@ -126,7 +126,6 @@ impl Context {
             name: Arc::from(profile.name.as_str()),
             driver: Arc::from(profile.driver_id.as_str()),
             config,
-            env: map_env(profile.env),
             read_only: profile.read_only,
         };
         let id = self.core.add_profile_full(core_profile).await;
@@ -138,14 +137,6 @@ impl Context {
 impl Default for Context {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-fn map_env(env: datagrep_profiles::Env) -> datagrep_core::api::Env {
-    match env {
-        datagrep_profiles::Env::Dev => datagrep_core::api::Env::Dev,
-        datagrep_profiles::Env::Staging => datagrep_core::api::Env::Staging,
-        datagrep_profiles::Env::Prod => datagrep_core::api::Env::Prod,
     }
 }
 

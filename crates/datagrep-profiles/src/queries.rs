@@ -6,7 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use crate::db::{hash_text, Db};
 use crate::error::ProfilesError;
 use crate::model::{
-    Env, Folder, HistoryEntry, HistoryStatus, NewHistoryEntry, Profile, SavedQuery, Tunnel,
+    Folder, HistoryEntry, HistoryStatus, NewHistoryEntry, Profile, SavedQuery, Tunnel,
 };
 
 // ---------------------------------------------------------------------
@@ -80,7 +80,7 @@ pub(crate) fn delete_folder(conn: &Connection, id: &str) -> Result<(), ProfilesE
 // profile
 // ---------------------------------------------------------------------
 
-/// Raw columns before `config_json`/`env` are decoded — lets us keep the
+/// Raw columns before `config_json` is decoded — lets us keep the
 /// SQLite row-mapping closure infallible (`rusqlite::Result`) and do the
 /// fallible JSON/enum parsing afterwards as a `ProfilesError`.
 struct ProfileRow {
@@ -91,7 +91,6 @@ struct ProfileRow {
     config_json: String,
     secret_ref: Option<String>,
     tunnel_id: Option<String>,
-    env: String,
     color: Option<String>,
     read_only: bool,
     confirm_writes: bool,
@@ -111,7 +110,6 @@ fn profile_row_from_row(row: &Row<'_>) -> rusqlite::Result<ProfileRow> {
         config_json: row.get("config_json")?,
         secret_ref: row.get("secret_ref")?,
         tunnel_id: row.get("tunnel_id")?,
-        env: row.get("env")?,
         color: row.get("color")?,
         read_only: row.get("read_only")?,
         confirm_writes: row.get("confirm_writes")?,
@@ -125,7 +123,6 @@ fn profile_row_from_row(row: &Row<'_>) -> rusqlite::Result<ProfileRow> {
 
 fn profile_from_row(row: ProfileRow) -> Result<Profile, ProfilesError> {
     let config = serde_json::from_str(&row.config_json)?;
-    let env = Env::parse(&row.env).ok_or(ProfilesError::InvalidEnv(row.env))?;
     Ok(Profile {
         id: row.id,
         folder_id: row.folder_id,
@@ -134,7 +131,6 @@ fn profile_from_row(row: ProfileRow) -> Result<Profile, ProfilesError> {
         config,
         secret_ref: row.secret_ref,
         tunnel_id: row.tunnel_id,
-        env,
         color: row.color,
         read_only: row.read_only,
         confirm_writes: row.confirm_writes,
@@ -150,12 +146,12 @@ pub(crate) fn create_profile(conn: &Connection, p: Profile) -> Result<Profile, P
     let config_json = serde_json::to_string(&p.config)?;
     conn.execute(
         "INSERT INTO profile (
-            id, folder_id, name, driver_id, config_json, secret_ref, tunnel_id, env, color,
+            id, folder_id, name, driver_id, config_json, secret_ref, tunnel_id, color,
             read_only, confirm_writes, auto_limit, idle_timeout_s, last_used_at, created_at, updated_at
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         params![
             p.id, p.folder_id, p.name, p.driver_id, config_json, p.secret_ref, p.tunnel_id,
-            p.env.as_str(), p.color, p.read_only, p.confirm_writes, p.auto_limit,
+            p.color, p.read_only, p.confirm_writes, p.auto_limit,
             p.idle_timeout_s, p.last_used_at, p.created_at, p.updated_at,
         ],
     )?;
@@ -201,8 +197,8 @@ pub(crate) fn update_profile(conn: &Connection, p: Profile) -> Result<Profile, P
     let changed = conn.execute(
         "UPDATE profile SET
             folder_id = ?2, name = ?3, driver_id = ?4, config_json = ?5, secret_ref = ?6,
-            tunnel_id = ?7, env = ?8, color = ?9, read_only = ?10, confirm_writes = ?11,
-            auto_limit = ?12, idle_timeout_s = ?13, updated_at = ?14
+            tunnel_id = ?7, color = ?8, read_only = ?9, confirm_writes = ?10,
+            auto_limit = ?11, idle_timeout_s = ?12, updated_at = ?13
          WHERE id = ?1",
         params![
             p.id,
@@ -212,7 +208,6 @@ pub(crate) fn update_profile(conn: &Connection, p: Profile) -> Result<Profile, P
             config_json,
             p.secret_ref,
             p.tunnel_id,
-            p.env.as_str(),
             p.color,
             p.read_only,
             p.confirm_writes,
@@ -662,7 +657,6 @@ mod tests {
                 },
                 secret_ref: None,
                 tunnel_id: None,
-                env: Env::Dev,
                 color: None,
                 read_only: false,
                 confirm_writes: false,

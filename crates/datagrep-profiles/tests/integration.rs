@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use datagrep_api::{ConfigValue, ConnectionConfig};
 use datagrep_profiles::{
-    new_id, now_ms, Env, Folder, HistoryStatus, ImportStrategy, NewHistoryEntry, ProfilesError,
+    new_id, now_ms, Folder, HistoryStatus, ImportStrategy, NewHistoryEntry, ProfilesError,
     RetentionPolicy, SavedQuery, Store, Tunnel,
 };
 
@@ -48,7 +48,6 @@ fn sample_profile(id: &str, folder_id: Option<String>) -> datagrep_profiles::Pro
         config: sample_config(),
         secret_ref: Some(format!("keychain:datagrep:profile:{id}")),
         tunnel_id: None,
-        env: Env::Dev,
         color: Some("#00ff00".to_string()),
         read_only: false,
         confirm_writes: false,
@@ -120,8 +119,8 @@ async fn migration_brings_empty_db_to_current_version() {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        version, 1,
-        "fresh db should land on the current (only) schema version"
+        version, 2,
+        "fresh db should land on the current schema version"
     );
 
     // The rest of the schema landed too, not just the version pragma.
@@ -186,7 +185,7 @@ async fn reopen_is_idempotent_and_does_not_reapply_migrations() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 1, "version must not change on a no-op reopen");
+    assert_eq!(version, 2, "version must not change on a no-op reopen");
 
     // Nothing left to migrate on the second open, so `backup_before_migrate`
     // must not have run again — the .bak from the first open is untouched.
@@ -539,7 +538,6 @@ async fn toml_export_then_import_round_trips_profiles() {
     let tunnel = source.create_tunnel(sample_tunnel("t1")).await.unwrap();
     let mut profile = sample_profile("p1", Some(folder.id.clone()));
     profile.tunnel_id = Some(tunnel.id.clone());
-    profile.env = Env::Prod;
     let profile = source.create_profile(profile).await.unwrap();
 
     let exported = source.export_profiles().await.unwrap();
@@ -568,7 +566,6 @@ async fn toml_export_then_import_round_trips_profiles() {
     assert_eq!(imported_profile.name, profile.name);
     assert_eq!(imported_profile.config, profile.config);
     assert_eq!(imported_profile.secret_ref, profile.secret_ref);
-    assert_eq!(imported_profile.env, profile.env);
     assert_eq!(imported_profile.tunnel_id, profile.tunnel_id);
     assert_eq!(imported_profile.folder_id, profile.folder_id);
 
@@ -673,4 +670,71 @@ async fn worker_thread_joins_cleanly_on_drop() {
         .await
         .expect("dropping Store hung — worker thread did not join cleanly")
         .expect("drop task panicked");
+}
+
+/// A v1 database carrying a real profile must come through `migrate_v2` with
+/// every other column intact — not just without `env`.
+///
+/// The column had a CHECK constraint, so dropping it means rebuilding the
+/// table, and a rebuild that forgets a column is silent: `secret_ref` in
+/// particular would orphan a keychain entry and break a working connection
+/// while every other test still passed.
+///
+/// The fixture is built by making a current database and then regressing it —
+/// re-adding `env` and winding `user_version` back to 1 — rather than
+/// hand-writing the old schema, so it keeps every other table the open-time
+/// retention pass expects.
+#[tokio::test]
+async fn migrating_off_env_keeps_every_other_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("profiles.db");
+
+    let mut profile = sample_profile("p1", None);
+    profile.secret_ref = Some("keychain:datagrep:p1:password".to_string());
+    profile.color = Some("red".to_string());
+    profile.read_only = true;
+    profile.confirm_writes = true;
+    profile.auto_limit = Some(500);
+    profile.idle_timeout_s = Some(30);
+    {
+        let store = Store::open(&path);
+        store.create_profile(profile.clone()).await.unwrap();
+    }
+
+    // Regress to the v1 shape.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE profile ADD COLUMN env TEXT NOT NULL DEFAULT 'dev';
+             UPDATE profile SET env = 'prod';
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&path);
+    let profiles = store.list_profiles(None).await.unwrap();
+    assert_eq!(profiles.len(), 1, "the profile must survive the rebuild");
+    let p = &profiles[0];
+    assert_eq!(p.id, profile.id);
+    assert_eq!(p.name, profile.name);
+    assert_eq!(
+        p.secret_ref.as_deref(),
+        Some("keychain:datagrep:p1:password"),
+        "a lost secret_ref orphans the keychain entry"
+    );
+    assert_eq!(p.color.as_deref(), Some("red"));
+    assert!(p.read_only);
+    assert!(p.confirm_writes);
+    assert_eq!(p.auto_limit, Some(500));
+    assert_eq!(p.idle_timeout_s, Some(30));
+    assert_eq!(p.config, profile.config);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let has_env: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('profile') WHERE name = 'env'")
+        .unwrap()
+        .exists([])
+        .unwrap();
+    assert!(!has_env, "env should be gone");
 }

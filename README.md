@@ -33,8 +33,19 @@ curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh 
 
 The app checks for a newer release once per launch and only notifies you — it
 never downloads or installs anything on its own, and the check can be turned off.
-datagrep is not notarized, so a browser-downloaded build needs one Ctrl-click →
-**Open** on first launch; installing via the script avoids that.
+
+**First launch from the DMG shows a warning.** datagrep is not notarized, so
+macOS says it "could not verify datagrep is free of malware", and on recent
+versions the only obvious button is *Move to Bin*. Open it once via **System
+Settings → Privacy & Security → Open Anyway**, or clear the download flag:
+
+```
+xattr -dr com.apple.quarantine /Applications/datagrep.app
+```
+
+Ctrl-click → **Open** worked on older macOS but no longer does on macOS 15.
+Installing with the script avoids this — a file a browser never downloaded is
+never quarantined.
 
 ## Build
 

@@ -4,13 +4,12 @@ import Foundation
 /// One saved connection, as `datagrep_profiles_list_json` describes it.
 ///
 /// Everything past `hasSecret` is decoded defensively: the safety fields
-/// (`env`, `read_only`, `enforcement`, …) are being added to the list payload
+/// (`read_only`, `enforcement`, …) are being added to the list payload
 /// by a separate change, and a build without them must degrade to "we do not
 /// know" rather than to "not read-only" — see `ReadOnlyEnforcement`.
 public struct Profile: Sendable, Hashable {
     public let name: String
     public let driver: String
-    public let env: String
     public let hasSecret: Bool
     public let readOnly: Bool
     public let confirmWrites: Bool
@@ -18,13 +17,12 @@ public struct Profile: Sendable, Hashable {
     public let color: String?
 
     public init(
-        name: String, driver: String, env: String, hasSecret: Bool, readOnly: Bool = false,
+        name: String, driver: String, hasSecret: Bool, readOnly: Bool = false,
         confirmWrites: Bool = false, enforcement: ReadOnlyEnforcement = .unknown,
         color: String? = nil
     ) {
         self.name = name
         self.driver = driver
-        self.env = env
         self.hasSecret = hasSecret
         self.readOnly = readOnly
         self.confirmWrites = confirmWrites
@@ -32,7 +30,6 @@ public struct Profile: Sendable, Hashable {
         self.color = color
     }
 
-    public var isProd: Bool { env == "prod" }
 }
 
 public enum Enumeration: String, Sendable {
@@ -77,7 +74,6 @@ public final class DatagrepCoreHandle: @unchecked Sendable {
             return Profile(
                 name: n,
                 driver: d["driver"] as? String ?? "?",
-                env: d["env"] as? String ?? "dev",
                 hasSecret: d["has_secret"] as? Bool ?? false,
                 readOnly: d["read_only"] as? Bool ?? false,
                 confirmWrites: d["confirm_writes"] as? Bool ?? false,
