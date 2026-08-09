@@ -27,6 +27,7 @@ one Rust engine. No Electron, no JVM.
 - [Why](#why)
 - [Engines](#engines)
 - [Install](#install)
+- [Uninstall](#uninstall)
 - [Build from source](#build-from-source)
 - [In the app](#in-the-app)
 - [CLI quickstart](#cli-quickstart)
@@ -95,8 +96,9 @@ shortcut.
 
 ### Script
 
-Installs the CLI, and the app too with `--app`. Nothing a browser downloaded, so
-nothing is quarantined and the warning above never appears.
+Installs the CLI. Add `--app` and you get **both** the CLI and the app — the
+app is added, not swapped in. Nothing a browser downloaded, so nothing is
+quarantined and the warning above never appears.
 
 ```
 ▶ curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh | bash
@@ -105,6 +107,30 @@ nothing is quarantined and the warning above never appears.
 
 The app checks for a newer release once per launch and only notifies you — it
 never downloads or installs anything on its own, and the check can be turned off.
+
+## Uninstall
+
+```
+▶ curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh | bash -s -- --uninstall
+▶ curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh | bash -s -- --uninstall --app
+```
+
+The first removes the CLI from `~/.local/bin`; the second removes
+`datagrep.app` as well. By hand, that is `rm ~/.local/bin/datagrep` and
+`rm -rf /Applications/datagrep.app`.
+
+> [!NOTE]
+> Uninstalling deliberately leaves your data alone — connections, query history
+> and saved editors survive a reinstall. To remove those too:
+>
+> ```
+> rm -rf ~/Library/Application\ Support/datagrep   # connections, history, editor tabs
+> rm -rf ~/.config/datagrep                        # the CLI's own profile store
+> ```
+>
+> Saved passwords live in the login keychain under the service `datagrep` and
+> are removed with the connection that owns them. Any left behind can be deleted
+> in Keychain Access by searching for `datagrep`.
 
 ## Build from source
 

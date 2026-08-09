@@ -100,11 +100,35 @@ PLIST
 
 printf 'APPL????' > "${APP}/Contents/PkgInfo"
 
-# Ad-hoc signature. codesign ships with the Command Line Tools; without this the
-# app still launches but macOS re-validates it on every start.
+# Signature. Prefers a stable identity, falls back to ad-hoc.
+#
+# This is not cosmetic. macOS binds a keychain item's ACL to the signing
+# identity, and an ad-hoc signature has none — so the ACL ends up keyed on the
+# binary's cdhash, which changes on EVERY build. Each rebuild is therefore a
+# different app to the keychain, and the "datagrep wants to access key" prompt
+# comes back no matter how many times you click Always Allow.
+#
+# A self-signed certificate is enough to stop that: it gives every build the
+# same identity. Create one once, no Apple account needed:
+#
+#   Keychain Access → Certificate Assistant → Create a Certificate…
+#     Name: datagrep-dev   Identity Type: Self Signed Root
+#     Certificate Type: Code Signing
+#
+# Override the name with DATAGREP_SIGN_IDENTITY. Releases are signed with a real
+# Developer ID in .github/workflows/release.yml, which is what also clears the
+# Gatekeeper warning.
+SIGN_IDENTITY="${DATAGREP_SIGN_IDENTITY:-datagrep-dev}"
 if command -v codesign >/dev/null 2>&1; then
-  codesign --force --sign - --timestamp=none "${APP}" >/dev/null 2>&1 \
-    && echo "==> ad-hoc signed" || echo "==> codesign failed (app will still run)"
+  if security find-identity -v -p codesigning 2>/dev/null | grep -qF "${SIGN_IDENTITY}"; then
+    codesign --force --sign "${SIGN_IDENTITY}" --timestamp=none "${APP}" >/dev/null 2>&1 \
+      && echo "==> signed as ${SIGN_IDENTITY}" \
+      || echo "==> codesign with ${SIGN_IDENTITY} failed (app will still run)"
+  else
+    codesign --force --sign - --timestamp=none "${APP}" >/dev/null 2>&1 \
+      && echo "==> ad-hoc signed (no '${SIGN_IDENTITY}' identity — the keychain will re-prompt after every build; see the comment above)" \
+      || echo "==> codesign failed (app will still run)"
+  fi
 fi
 
 SIZE=$(du -sh "${APP}" | cut -f1)
