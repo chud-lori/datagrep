@@ -5,7 +5,6 @@
 //! SQLite's `INTEGER` affinity and avoiding a chrono dependency this crate
 //! doesn't otherwise need.
 
-use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 

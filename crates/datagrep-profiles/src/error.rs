@@ -51,7 +51,6 @@ pub enum ProfilesError {
     #[error("{what} not found: {id}")]
     NotFound { what: &'static str, id: String },
 
-
     /// The store's worker thread could not be started.
     #[error("failed to start datagrep-profiles worker thread: {0}")]
     WorkerStart(String),

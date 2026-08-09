@@ -43,7 +43,6 @@ use crate::runtime::runtime;
 struct ProfilePatch {
     name: Option<String>,
     url: Option<String>,
-    env: Option<datagrep_profiles::Env>,
     read_only: Option<bool>,
     confirm_writes: Option<bool>,
     #[serde(default, deserialize_with = "nullable")]
@@ -78,7 +77,7 @@ fn parse_patch(text: &str) -> Result<ProfilePatch, String> {
     })
 }
 
-/// `[{"name":..,"driver":..,"env":"dev"|"staging"|"prod","read_only":bool,
+/// `[{"name":..,"driver":..,"read_only":bool,
 ///    "has_secret":bool}, ...]`
 ///
 /// `env` and `read_only` ride along so the sidebar can tint prod connections
@@ -110,7 +109,6 @@ pub unsafe extern "C" fn datagrep_profiles_list_json(
                     json!({
                         "name": p.name,
                         "driver": p.driver_id,
-                        "env": p.env.to_string(),
                         "read_only": p.read_only,
                         "has_secret": p.secret_ref.is_some(),
                     })
@@ -155,7 +153,7 @@ pub unsafe extern "C" fn datagrep_profiles_add(
 
 /// `datagrep_profiles_add` plus initial settings: `options_json` may be NULL or
 /// `""` (same defaults as `datagrep_profiles_add`) or any subset of
-/// `{"env":"dev"|"staging"|"prod","read_only":bool,"confirm_writes":bool,
+/// `{"read_only":bool,"confirm_writes":bool,
 ///   "auto_limit":i64|null,"idle_timeout_s":i64|null,"color":str|null}`.
 ///
 /// This is how a profile is born prod: `env` is persisted, listed by
@@ -230,7 +228,6 @@ async fn add_profile(
             config,
             secret_ref,
             tunnel_id: None,
-            env: options.env.unwrap_or_default(),
             color: options.color.flatten(),
             read_only: options.read_only.unwrap_or(false),
             confirm_writes: options.confirm_writes.unwrap_or(false),
@@ -286,7 +283,7 @@ async fn parse_and_split_url(
 }
 
 /// Edit an existing profile in place; `patch_json` is any subset of
-/// `{"name":str,"url":str,"env":"dev"|"staging"|"prod","read_only":bool,
+/// `{"name":str,"url":str,"read_only":bool,
 ///   "confirm_writes":bool,"auto_limit":i64|null,"idle_timeout_s":i64|null,
 ///   "color":str|null}`.
 ///
@@ -373,9 +370,6 @@ async fn update_profile(core: &CoreInner, name: &str, patch: ProfilePatch) -> Re
         profile.config = config;
     }
 
-    if let Some(env) = patch.env {
-        profile.env = env;
-    }
     if let Some(read_only) = patch.read_only {
         profile.read_only = read_only;
     }
@@ -410,7 +404,7 @@ async fn update_profile(core: &CoreInner, name: &str, patch: ProfilePatch) -> Re
 /// Full detail for one profile — what an edit dialog populates itself from:
 ///
 /// ```json
-/// {"name":str,"driver":str,"env":"dev"|"staging"|"prod","read_only":bool,
+/// {"name":str,"driver":str,"read_only":bool,
 ///  "confirm_writes":bool,"auto_limit":i64|null,"idle_timeout_s":i64|null,
 ///  "color":str|null,"folder_id":str|null,"has_secret":bool,
 ///  "secret":"••••"|null,"config":{key:str|num|bool, ...},
@@ -477,7 +471,6 @@ pub unsafe extern "C" fn datagrep_profiles_get_json(
             let payload = json!({
                 "name": p.name,
                 "driver": p.driver_id,
-                "env": p.env.to_string(),
                 "read_only": p.read_only,
                 "confirm_writes": p.confirm_writes,
                 "auto_limit": p.auto_limit,
@@ -499,7 +492,7 @@ pub unsafe extern "C" fn datagrep_profiles_get_json(
 /// Connection-safety facts for one profile, keyed by name:
 ///
 /// ```json
-/// {"profile":str,"driver":str,"env":"dev"|"staging"|"prod",
+/// {"profile":str,"driver":str,
 ///  "read_only": null | {"enforcement":"server"|"client"|"none",
 ///                       "server_confirmed":bool}}
 /// ```
@@ -541,7 +534,6 @@ pub unsafe extern "C" fn datagrep_connection_info_json(
             let payload = json!({
                 "profile": p.name,
                 "driver": p.driver_id,
-                "env": p.env.to_string(),
                 "read_only": crate::core::read_only_json(
                     p.read_only,
                     &p.driver_id,
@@ -822,10 +814,8 @@ mod tests {
         let core = test_core();
         let name = CString::new("prod-db").unwrap();
         let url = CString::new(":memory:").unwrap();
-        let options = CString::new(
-            r#"{"env":"prod","read_only":true,"confirm_writes":true,"auto_limit":500}"#,
-        )
-        .unwrap();
+        let options =
+            CString::new(r#"{"read_only":true,"confirm_writes":true,"auto_limit":500}"#).unwrap();
         let mut err: *mut c_char = std::ptr::null_mut();
         unsafe {
             expect_ok(
@@ -842,7 +832,6 @@ mod tests {
 
             // env=prod survived the store round trip — no more hard-coded Dev.
             let p = saved(core, "prod-db");
-            assert_eq!(p.env, datagrep_profiles::Env::Prod);
             assert!(p.read_only);
             assert!(p.confirm_writes);
             assert_eq!(p.auto_limit, Some(500));
@@ -853,7 +842,6 @@ mod tests {
                 err,
                 "datagrep_profiles_list_json",
             );
-            assert!(list.contains(r#""env":"prod""#), "list was {list}");
             assert!(list.contains(r#""read_only":true"#), "list was {list}");
 
             // And the detail payload has everything the edit dialog needs.
@@ -863,7 +851,6 @@ mod tests {
                 "datagrep_profiles_get_json",
             );
             let detail: serde_json::Value = serde_json::from_str(&detail).unwrap();
-            assert_eq!(detail["env"], "prod");
             assert_eq!(detail["read_only"], true);
             assert_eq!(detail["confirm_writes"], true);
             assert_eq!(detail["auto_limit"], 500);
@@ -888,17 +875,14 @@ mod tests {
                 "add",
             );
 
-            let patch = CString::new(
-                r##"{"env":"staging","read_only":true,"auto_limit":100,"color":"#ff2200"}"##,
-            )
-            .unwrap();
+            let patch =
+                CString::new(r##"{"read_only":true,"auto_limit":100,"color":"#ff2200"}"##).unwrap();
             expect_ok(
                 datagrep_profiles_update(core, name.as_ptr(), patch.as_ptr(), &mut err),
                 err,
                 "update",
             );
             let p = saved(core, "editme");
-            assert_eq!(p.env, datagrep_profiles::Env::Staging);
             assert!(p.read_only);
             assert_eq!(p.auto_limit, Some(100));
             assert_eq!(p.color.as_deref(), Some("#ff2200"));
@@ -1166,7 +1150,6 @@ mod tests {
             );
             let info: serde_json::Value = serde_json::from_str(&info).unwrap();
             assert_eq!(info["read_only"], serde_json::Value::Null);
-            assert_eq!(info["env"], "dev");
             datagrep_core_free(core);
         }
     }

@@ -336,7 +336,6 @@ mod tests {
                 },
                 secret_ref: None,
                 tunnel_id: None,
-                env: datagrep_profiles::Env::Dev,
                 color: None,
                 read_only: false,
                 confirm_writes: false,

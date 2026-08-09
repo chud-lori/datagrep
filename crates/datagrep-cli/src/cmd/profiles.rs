@@ -26,7 +26,7 @@ pub async fn list(ctx: &Context) -> Result<(), CliError> {
         } else {
             "no-secret"
         };
-        println!("{}\t{}\t{}\t{}", p.name, p.driver_id, p.env, secret);
+        println!("{}\t{}\t{}", p.name, p.driver_id, secret);
     }
     Ok(())
 }
@@ -75,7 +75,6 @@ pub async fn add(ctx: &Context, name: &str, url: &str) -> Result<(), CliError> {
         config,
         secret_ref,
         tunnel_id: None,
-        env: datagrep_profiles::Env::Dev,
         color: None,
         read_only: false,
         confirm_writes: false,
@@ -116,7 +115,6 @@ pub async fn show(ctx: &Context, name: &str) -> Result<(), CliError> {
     let p = ctx.find_profile(name).await?;
     println!("name:       {}", p.name);
     println!("driver:     {}", p.driver_id);
-    println!("env:        {}", p.env);
     println!("read_only:  {}", p.read_only);
     println!(
         "secret:     {}",
