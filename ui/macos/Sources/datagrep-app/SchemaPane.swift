@@ -109,7 +109,12 @@ struct SchemaPane: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .loaded(let detail):
-            Group {
+            // Scrolls, because a table's structure is not a fixed height: a
+            // wide table's columns, its indexes and the engine block together
+            // run well past the inspector, and without this the overflow was
+            // simply unreachable — clipped at the bottom edge with no way to
+            // get at it. `CellDetailPane` next door already scrolls.
+            ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 14) {
                     StatsStrip(detail: detail)
                     if let c = detail.comment, !c.isEmpty {
