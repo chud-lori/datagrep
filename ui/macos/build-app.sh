@@ -11,7 +11,7 @@ cd "$(dirname "$0")"
 CONFIG="${CONFIG:-release}"
 APP_NAME="datagrep"
 BUNDLE_ID="com.lori.datagrep"
-VERSION="0.3.2"
+VERSION="0.3.3"
 
 # Default to the REAL engine. The stub links a synthetic in-memory dataset and
 # cannot connect to any database, so a stub bundle looks fine and does nothing —
