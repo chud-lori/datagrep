@@ -471,6 +471,14 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         tableView.allowsMultipleSelection = true
         tableView.allowsEmptySelection = true
         tableView.style = .plain
+        // Draw the whole table — rows and cells — into the table's OWN layer
+        // through the normal draw() path, instead of letting each row and cell
+        // composite as its own layer. Under SwiftUI's layer-backed hosting the
+        // per-row layers ended up holding a frame rendered before the data
+        // arrived and never refreshed, so the pane stayed blank until a resize.
+        // draw() is the path a PDF capture used to render the grid perfectly,
+        // and now there is a single layer to invalidate when a result lands.
+        tableView.canDrawSubviewsIntoLayer = true
         tableView.selectionHighlightStyle = .regular
         tableView.gridStyleMask = [.solidVerticalGridLineMask]
         tableView.gridColor = .separatorColor
@@ -595,19 +603,30 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
                 forRowIndexes: IndexSet(integersIn: visible.lowerBound..<visible.upperBound),
                 columnIndexes: IndexSet(integersIn: 0..<tableView.tableColumns.count))
         }
-        // Ask for the pixels, not just for the data.
+        // Put the pixels on screen, on the NEXT runloop turn.
         //
-        // `reloadData(forRowIndexes:)` refreshes the cell VIEWS, and the cells
-        // then draw correctly whenever something asks them to — capturing the
-        // window rendered the whole grid perfectly. What never happened was the
-        // on-screen copy being invalidated, so the pane kept presenting the
-        // blank state from before the rows arrived: the result was in the view,
-        // just never painted. Marking the table and its enclosing scroll view
-        // dirty is what puts it on screen.
-        tableView.needsDisplay = true
-        tableView.headerView?.needsDisplay = true
-        scrollView.needsDisplay = true
-        rowNumberRuler.needsDisplay = true
+        // This runs during the SwiftUI update that delivered the result, and a
+        // display forced inside that pass is thrown away — which is the whole
+        // bug: the cells drew correctly (a capture showed the full grid, the
+        // cell layers held the right content) but the pane stayed blank until
+        // something later — a window resize — triggered a real redraw. Doing it
+        // one hop later is exactly what the resize did, and it sticks.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.tableView.reloadData()
+            // Each row draws its cells into its OWN layer, and that layer was
+            // rendered before the data arrived — so it held a blank frame while
+            // the cell sublayers underneath it had the real text. Re-render
+            // every visible row so its layer picks up the cells it now has.
+            self.tableView.enumerateAvailableRowViews { rowView, _ in
+                rowView.needsDisplay = true
+                for cell in rowView.subviews { cell.needsDisplay = true }
+            }
+            self.tableView.displayIfNeeded()
+            self.tableView.headerView?.displayIfNeeded()
+            self.scrollView.displayIfNeeded()
+            self.rowNumberRuler.needsDisplay = true
+        }
         applySortIndicator()
         tableView.refreshSelectionDecorations()
     }

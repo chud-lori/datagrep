@@ -155,13 +155,21 @@ private struct ResultsPane: View {
                 // opacity on a hosted AppKit view left the layer stuck at 0
                 // after fading in, so rows appeared for a frame and then
                 // vanished with the data still loaded underneath.
+                // The grid is ALWAYS rendered at full opacity, and the empty
+                // state is an opaque cover on top of it. Never `.opacity(0)`:
+                // SwiftUI takes a zero-opacity platform view out of the render
+                // tree, and the moment a result arrived and flipped it back to
+                // 1 the host was re-attached with fresh, EMPTY layer contents —
+                // drawn milliseconds earlier, wiped on arrival. That is why the
+                // pane stayed blank until a window resize forced AppKit to
+                // redraw everything.
                 if stage.contentReady {
                     ResultsGridView(controller: model.results)
-                        .opacity(model.showsGrid ? 1 : 0)
-                        .animation(nil, value: model.showsGrid)
                 }
                 if !model.showsGrid {
                     ResultsEmptyState(model: model)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color(nsColor: .textBackgroundColor))
                 }
             }
         )
