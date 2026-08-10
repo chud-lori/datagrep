@@ -270,11 +270,7 @@ final class AppModel: ObservableObject {
     /// Where the engine keeps its profile store. Not the temp directory: a
     /// connection you added has to still be there tomorrow.
     static var profilesDBPath: String {
-        let dir = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("datagrep", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("profiles.sqlite").path
+        SupportDirectory.ensured().appendingPathComponent("profiles.sqlite").path
     }
 
     private let queryQueue = DispatchQueue(label: "datagrep.query", qos: .userInitiated)

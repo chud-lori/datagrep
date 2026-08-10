@@ -136,10 +136,7 @@ public final class SavedQueryStore: @unchecked Sendable {
     /// `profiles.sqlite`. Not the temp directory: a query you were half way
     /// through writing has to still be there tomorrow.
     public static var defaultDirectory: URL {
-        FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("datagrep", isDirectory: true)
-            .appendingPathComponent("tabs", isDirectory: true)
+        SupportDirectory.base.appendingPathComponent("tabs", isDirectory: true)
     }
 
     public init(directory: URL = SavedQueryStore.defaultDirectory) {

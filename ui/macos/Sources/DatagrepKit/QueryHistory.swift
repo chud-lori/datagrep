@@ -345,10 +345,7 @@ public final class QueryHistoryStore: @unchecked Sendable {
     /// `profiles.sqlite` and the editor's `tabs/`. Not the temp directory: a
     /// statement you ran last month has to still be there next month.
     public static var defaultDirectory: URL {
-        FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("datagrep", isDirectory: true)
-            .appendingPathComponent("history", isDirectory: true)
+        SupportDirectory.base.appendingPathComponent("history", isDirectory: true)
     }
 
     /// Re-running the same statement on the same connection inside this window
