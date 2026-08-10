@@ -471,13 +471,17 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         tableView.allowsMultipleSelection = true
         tableView.allowsEmptySelection = true
         tableView.style = .plain
-        // Draw the whole table — rows and cells — into the table's OWN layer
-        // through the normal draw() path, instead of letting each row and cell
-        // composite as its own layer. Under SwiftUI's layer-backed hosting the
-        // per-row layers ended up holding a frame rendered before the data
-        // arrived and never refreshed, so the pane stayed blank until a resize.
-        // draw() is the path a PDF capture used to render the grid perfectly,
-        // and now there is a single layer to invalidate when a result lands.
+        // Own a layer, and fill it from draw(). Inside SwiftUI's NSHostingView
+        // the table had `wantsLayer == false` while its ancestors were
+        // layer-backed, so its draw() output — which a PDF capture proved was
+        // correct — never reached any on-screen layer: the pane showed its own
+        // background straight through the unpopulated table. Making the table
+        // and its scroll view layer-backed, with the redraw policy that repaints
+        // the layer on `needsDisplay`, is what puts draw() on the screen.
+        for v in [tableView, scrollView, rowNumberRuler] as [NSView] {
+            v.wantsLayer = true
+            v.layerContentsRedrawPolicy = .onSetNeedsDisplay
+        }
         tableView.canDrawSubviewsIntoLayer = true
         tableView.selectionHighlightStyle = .regular
         tableView.gridStyleMask = [.solidVerticalGridLineMask]
