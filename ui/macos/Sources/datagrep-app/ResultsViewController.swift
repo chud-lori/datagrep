@@ -682,6 +682,23 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
                 (col.title as NSString).size(withAttributes: [.font: GridStyle.headerFont]).width
             col.width = min(max(max(widths[ci], header) + 34, 64), 340)
         }
+        // Re-tile after changing widths. NSTableView sizes its own frame from
+        // the sum of its column widths, and setting `col.width` directly does
+        // not always trigger that — the row views and the header were laid out
+        // across the true 3930 pt while the table's frame still claimed 1950,
+        // so rows were drawn into a coordinate space the view did not admit to
+        // having and the horizontal scroller could not reach them.
+        tableView.tile()
+        // Existing row views were built at the old width and do not re-tile with
+        // the table, so they stay wider than the table admits to being. Rebuild
+        // them, then put the viewport back at the first column — otherwise the
+        // first thing shown is somewhere in the middle of a wide result, which
+        // reads as "no results" when the visible slice happens to be past the
+        // data.
+        tableView.reloadData()
+        tableView.scrollRowToVisible(0)
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: scrollView.contentView.bounds.origin.y))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
     // MARK: - NSTableViewDataSource / Delegate
