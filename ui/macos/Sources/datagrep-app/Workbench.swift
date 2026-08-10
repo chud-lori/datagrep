@@ -98,7 +98,6 @@ private struct DetailArea: View {
         // nobody can see yet.
         .modifier(DeferredInspector(model: model))
         .animation(.smooth(duration: 0.22), value: model.isRunning)
-        .animation(.smooth(duration: 0.22), value: model.showsGrid)
         .animation(.smooth(duration: 0.2), value: model.isError)
         .navigationTitle(model.activeProfile.isEmpty ? "datagrep" : model.activeProfile)
         .navigationSubtitle(model.connectionSubtitle)
@@ -150,9 +149,16 @@ private struct ResultsPane: View {
     var body: some View {
         Chrome.pane(
             ZStack {
+                // `.opacity()` and NOT an `if`, so the grid is built once and
+                // keeps its scroll position, column widths and selection across
+                // an empty result. But NO implicit animation on it: animating
+                // opacity on a hosted AppKit view left the layer stuck at 0
+                // after fading in, so rows appeared for a frame and then
+                // vanished with the data still loaded underneath.
                 if stage.contentReady {
                     ResultsGridView(controller: model.results)
                         .opacity(model.showsGrid ? 1 : 0)
+                        .animation(nil, value: model.showsGrid)
                 }
                 if !model.showsGrid {
                     ResultsEmptyState(model: model)
