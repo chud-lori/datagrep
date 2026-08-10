@@ -595,6 +595,19 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
                 forRowIndexes: IndexSet(integersIn: visible.lowerBound..<visible.upperBound),
                 columnIndexes: IndexSet(integersIn: 0..<tableView.tableColumns.count))
         }
+        // Ask for the pixels, not just for the data.
+        //
+        // `reloadData(forRowIndexes:)` refreshes the cell VIEWS, and the cells
+        // then draw correctly whenever something asks them to — capturing the
+        // window rendered the whole grid perfectly. What never happened was the
+        // on-screen copy being invalidated, so the pane kept presenting the
+        // blank state from before the rows arrived: the result was in the view,
+        // just never painted. Marking the table and its enclosing scroll view
+        // dirty is what puts it on screen.
+        tableView.needsDisplay = true
+        tableView.headerView?.needsDisplay = true
+        scrollView.needsDisplay = true
+        rowNumberRuler.needsDisplay = true
         applySortIndicator()
         tableView.refreshSelectionDecorations()
     }
