@@ -89,6 +89,30 @@ final class GridCellView: NSView {
     /// like data instead of a row of identical gray sticks.
     private var skeletonSeed: CGFloat = 0.7
 
+    /// The value text goes through a real `NSTextField`, not `draw()`.
+    ///
+    /// Custom `draw()` output does not reliably reach the screen for this table:
+    /// it is a view-based `NSTableView` hosted inside SwiftUI's layer-backed
+    /// `NSHostingView`, and there the normal on-screen display cycle never calls
+    /// the cell's `draw()` — only a forced render (a PDF export, `cacheDisplay`,
+    /// `CALayer.render`) does, which is why every capture showed the grid while
+    /// the actual window stayed blank. An `NSTextField` composites its text
+    /// itself through AppKit's normal control lifecycle, with no dependency on
+    /// `draw()` running. The decorations that are NOT plain text — the loading
+    /// skeleton, the empty-string mark, the nested-value chip — stay in
+    /// `draw()`, because they are cosmetic and never the reason a query is run.
+    private let label: NSTextField = {
+        let f = NSTextField(labelWithString: "")
+        f.translatesAutoresizingMaskIntoConstraints = false
+        f.lineBreakMode = .byTruncatingTail
+        f.cell?.usesSingleLineMode = true
+        f.drawsBackground = false
+        f.isBordered = false
+        f.isEditable = false
+        f.isSelectable = false
+        return f
+    }()
+
     var onNestedClick: ((GridCellView) -> Void)?
     var row: Int = -1
     /// The ENGINE column index this cell reads from — stable across reordering.
@@ -99,6 +123,18 @@ final class GridCellView: NSView {
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: GridStyle.cellPadX),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -GridStyle.cellPadX),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
 
     func configure(
         kind: CellKind, text: String, row: Int, column: UInt32, position: Int, pending: Bool,
@@ -115,8 +151,50 @@ final class GridCellView: NSView {
         self.isPending = pending
         self.rightAligned = rightAligned
         self.skeletonSeed = 0.45 + CGFloat((row &* 2_654_435_761 &+ Int(column) &* 40_503) % 46) / 100
+        updateLabel()
         needsDisplay = true
         if wasPending && !pending { fadeIn() }
+    }
+
+    /// The text field mirrors the cell's value. Empty for the kinds that draw
+    /// their own thing (a skeleton, an empty-string mark, a nested chip drawn
+    /// in `draw()`).
+    private func updateLabel() {
+        let selected = isSelectedRow
+        let attrs: [NSAttributedString.Key: Any]
+        let string: String
+        switch (isPending, kind) {
+        case (true, _):
+            label.isHidden = true
+            return
+        case (_, .value):
+            if text.isEmpty {
+                label.isHidden = true
+                return
+            }
+            string = text
+            attrs = (selected ? GridStyle.selected : GridStyle.value).of(rightAligned)
+        case (_, .null):
+            string = "NULL"
+            attrs = (selected ? GridStyle.selected : GridStyle.null).of(rightAligned)
+        case (_, .absent):
+            string = "—"
+            attrs = (selected ? GridStyle.selected : GridStyle.absent).of(rightAligned)
+        case (_, .nested):
+            // The chip background is drawn in draw(); its text rides in the
+            // label, left-aligned inside the chip's padding.
+            string = text
+            attrs = (selected ? GridStyle.selected : GridStyle.chip).left
+        }
+        label.isHidden = false
+        label.alignment = rightAligned ? .right : .left
+        label.attributedStringValue = NSAttributedString(string: string, attributes: attrs)
+    }
+
+    /// Called by the row view when selection changes, so the value text can flip
+    /// to the selected colour without a full reconfigure.
+    func refreshSelectionColour() {
+        updateLabel()
     }
 
     /// 120 ms, once, on the cell that changed. Not a view-wide animation and
@@ -143,19 +221,9 @@ final class GridCellView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // Draw under THIS view's appearance. When the table flattens its
-        // subtree into one layer (canDrawSubviewsIntoLayer), the cells' draw()
-        // runs without the view's NSAppearance made current, so semantic colors
-        // like `labelColor` resolve to their LIGHT-mode value — black text,
-        // invisible on the dark grid. Row numbers and the selection highlight
-        // use appearance-independent colors, which is why only the cell text
-        // vanished.
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            drawContent(dirtyRect)
-        }
-    }
-
-    private func drawContent(_ dirtyRect: NSRect) {
+        // Only the decorations. The value text is an NSTextField subview (see
+        // the `label` declaration) because custom draw() does not reliably reach
+        // the screen for this SwiftUI-hosted table.
         let inset = bounds.insetBy(dx: GridStyle.cellPadX, dy: 4)
         if isPending {
             drawSkeleton(in: inset)
@@ -163,29 +231,16 @@ final class GridCellView: NSView {
         }
         let selected = isSelectedRow
         switch kind {
-        case .value:
-            if text.isEmpty {
-                // EMPTY STRING: present, and empty. A thin baseline mark, so it is
-                // tellable apart from NULL and from ABSENT at a glance.
-                let y = inset.maxY - 2.5
-                let x = rightAligned ? inset.maxX - 11 : inset.minX
-                (selected ? NSColor.alternateSelectedControlTextColor : NSColor.quaternaryLabelColor)
-                    .setFill()
-                NSBezierPath(rect: NSRect(x: x, y: y, width: 11, height: 1)).fill()
-                return
-            }
-            (text as NSString).draw(
-                in: inset,
-                withAttributes: (selected ? GridStyle.selected : GridStyle.value).of(rightAligned))
-        case .null:
-            ("NULL" as NSString).draw(
-                in: inset,
-                withAttributes: (selected ? GridStyle.selected : GridStyle.null).of(rightAligned))
-        case .absent:
-            ("—" as NSString).draw(
-                in: inset,
-                withAttributes: (selected ? GridStyle.selected : GridStyle.absent).of(rightAligned))
+        case .value where text.isEmpty:
+            // EMPTY STRING: present, and empty. A thin baseline mark, so it is
+            // tellable apart from NULL and from ABSENT at a glance.
+            let y = inset.maxY - 2.5
+            let x = rightAligned ? inset.maxX - 11 : inset.minX
+            (selected ? NSColor.alternateSelectedControlTextColor : NSColor.quaternaryLabelColor)
+                .setFill()
+            NSBezierPath(rect: NSRect(x: x, y: y, width: 11, height: 1)).fill()
         case .nested:
+            // The chip background; its text rides in the label above it.
             let w = min(GridStyle.chipWidth(text) + 14, inset.width)
             chipRect = NSRect(
                 x: inset.minX, y: inset.minY + 1, width: w, height: inset.height - 2)
@@ -194,9 +249,8 @@ final class GridCellView: NSView {
             NSColor.controlAccentColor.withAlphaComponent(selected ? 0.5 : 0.28).setStroke()
             NSBezierPath(roundedRect: chipRect.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
                 .stroke()
-            (text as NSString).draw(
-                in: chipRect.insetBy(dx: 7, dy: 0),
-                withAttributes: (selected ? GridStyle.selected : GridStyle.chip).left)
+        default:
+            break
         }
     }
 
@@ -286,7 +340,10 @@ final class GridRowView: NSTableRowView {
             guard rangeColumns != oldValue else { return }
             needsDisplay = true
             // The text colour inside vs outside the block changes with it.
-            for sub in subviews { sub.needsDisplay = true }
+            for sub in subviews {
+                sub.needsDisplay = true
+                (sub as? GridCellView)?.refreshSelectionColour()
+            }
         }
     }
     var isRangeTop = false {

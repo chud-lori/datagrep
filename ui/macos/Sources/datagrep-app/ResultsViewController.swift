@@ -471,18 +471,10 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         tableView.allowsMultipleSelection = true
         tableView.allowsEmptySelection = true
         tableView.style = .plain
-        // Own a layer, and fill it from draw(). Inside SwiftUI's NSHostingView
-        // the table had `wantsLayer == false` while its ancestors were
-        // layer-backed, so its draw() output — which a PDF capture proved was
-        // correct — never reached any on-screen layer: the pane showed its own
-        // background straight through the unpopulated table. Making the table
-        // and its scroll view layer-backed, with the redraw policy that repaints
-        // the layer on `needsDisplay`, is what puts draw() on the screen.
-        for v in [tableView, scrollView, rowNumberRuler] as [NSView] {
-            v.wantsLayer = true
-            v.layerContentsRedrawPolicy = .onSetNeedsDisplay
-        }
-        tableView.canDrawSubviewsIntoLayer = true
+        // No layer forcing here on purpose. The cells render their text through
+        // a real NSTextField (see GridCellView), which composites itself, so the
+        // table uses AppKit's normal view-based compositing rather than being
+        // flattened into one hand-managed layer.
         tableView.selectionHighlightStyle = .regular
         tableView.gridStyleMask = [.solidVerticalGridLineMask]
         tableView.gridColor = .separatorColor
@@ -615,35 +607,42 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         // cell layers held the right content) but the pane stayed blank until
         // something later — a window resize — triggered a real redraw. Doing it
         // one hop later is exactly what the resize did, and it sticks.
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.tableView.reloadData()
-            // Each row draws its cells into its OWN layer, and that layer was
-            // rendered before the data arrived — so it held a blank frame while
-            // the cell sublayers underneath it had the real text. Re-render
-            // every visible row so its layer picks up the cells it now has.
-            self.tableView.enumerateAvailableRowViews { rowView, _ in
-                rowView.needsDisplay = true
-                for cell in rowView.subviews { cell.needsDisplay = true }
-            }
-            self.tableView.displayIfNeeded()
-            self.tableView.headerView?.displayIfNeeded()
-            self.scrollView.displayIfNeeded()
-            self.rowNumberRuler.needsDisplay = true
-        }
+        DispatchQueue.main.async { [weak self] in self?.flushToScreen() }
         applySortIndicator()
         tableView.refreshSelectionDecorations()
     }
 
-    /// Repaint the whole grid now. Called from the representable's SwiftUI
-    /// update so the hosting layer's snapshot is refreshed when a result lands.
+    /// Called from the representable's SwiftUI update when a result lands. Do
+    /// NOT flush here — this runs inside SwiftUI's own update pass, and forcing
+    /// a CoreAnimation flush mid-update fights SwiftUI's layer commit (it blanks
+    /// the neighbouring panes). Invalidate now, flush one runloop later.
     func forceRedraw() {
         tableView.reloadData()
+        invalidateGrid()
+        DispatchQueue.main.async { [weak self] in self?.flushToScreen() }
+    }
+
+    private func invalidateGrid() {
         tableView.needsDisplay = true
         tableView.headerView?.needsDisplay = true
         scrollView.needsDisplay = true
         rowNumberRuler.needsDisplay = true
+    }
+
+    /// Invalidate everything, then COMMIT the CoreAnimation transaction.
+    ///
+    /// The piece the earlier attempts missed. The table is layer-backed
+    /// (SwiftUI's NSHostingView layer-backs its whole subtree), so `needsDisplay`
+    /// only marks the layer dirty — the redraw does not reach the screen until a
+    /// CoreAnimation transaction is committed. Nothing committed one after a
+    /// result arrived, so the pane stayed blank until a user interaction (a
+    /// click, a resize) ran the event loop and flushed it — which is exactly why
+    /// clicking made the row numbers appear. This does that flush explicitly,
+    /// but only on a clean runloop turn, never inside a SwiftUI update.
+    func flushToScreen() {
+        invalidateGrid()
         view.displayIfNeeded()
+        CATransaction.flush()
     }
 
     private func applySchema(_ columns: [ColumnSpec]) {
