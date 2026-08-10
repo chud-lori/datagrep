@@ -20,15 +20,37 @@ if [ "${DATAGREP_FFI:-real}" != "stub" ]; then
     export DATAGREP_FFI=real
     REPO_ROOT="$(cd ../.. && pwd)"
     export DATAGREP_FFI_LIB_DIR="${DATAGREP_FFI_LIB_DIR:-${REPO_ROOT}/target/release}"
-    if [ ! -f "${DATAGREP_FFI_LIB_DIR}/libdatagrep_ffi.a" ]; then
+    # ALWAYS, not just when the archive is missing. A stale .a is silently
+    # linked against fresh Swift, and the mismatch surfaces as nonsense far from
+    # here — an archive predating a profile-store migration produced "database
+    # schema version 2 is newer than this build supports (max 1)" against a
+    # database the same checkout had just migrated. cargo is incremental, so a
+    # no-op rebuild costs about a second.
+    if [ -z "${DATAGREP_SKIP_FFI_BUILD:-}" ]; then
         echo "==> building the engine (cargo build --release -p datagrep-ffi)"
-        (cd "${REPO_ROOT}" && cargo build --release -p datagrep-ffi)
+        (cd "${REPO_ROOT}" && cargo build --release -p datagrep-ffi) || {
+            echo "engine build failed" >&2
+            exit 1
+        }
     fi
     [ -f "${DATAGREP_FFI_LIB_DIR}/libdatagrep_ffi.a" ] || {
         echo "no libdatagrep_ffi.a in ${DATAGREP_FFI_LIB_DIR}" >&2
         echo "build it with: cargo build --release -p datagrep-ffi" >&2
         exit 1
     }
+fi
+
+# SwiftPM does not treat libdatagrep_ffi.a as an input, so a rebuilt engine does
+# NOT trigger a relink — it happily keeps the executable it linked last time.
+# That is silent and evil: the Swift half is current, the Rust half is whatever
+# it was, and the mismatch surfaces somewhere unrelated. It shipped an app whose
+# engine predated a profile-store migration, which then refused to open the very
+# database this checkout had just migrated. Deleting the product forces the link
+# step; compilation is still cached, so this costs seconds.
+PRELINK_BIN="$(swift build -c "${CONFIG}" --show-bin-path)/datagrep-app"
+if [ -f "${PRELINK_BIN}" ] && [ "${DATAGREP_FFI_LIB_DIR:-}/libdatagrep_ffi.a" -nt "${PRELINK_BIN}" ]; then
+    echo "==> engine is newer than the last link; forcing a relink"
+    rm -f "${PRELINK_BIN}"
 fi
 
 echo "==> swift build -c ${CONFIG}  (DATAGREP_FFI=${DATAGREP_FFI:-stub})"

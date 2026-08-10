@@ -266,7 +266,12 @@ private struct WorkbenchToolbar: ToolbarContent {
             } label: {
                 Label("Run", systemImage: "play.fill")
             }
-            .keyboardShortcut(.return, modifiers: .command)
+            // NO `.keyboardShortcut` here. ⌘↩ is owned by the Query menu item
+            // in AppDelegate, and binding it in both places fired the statement
+            // TWICE on one press: the first result painted, then the second
+            // run's opening status — zero rows, zero columns — wiped the grid a
+            // frame later and left "running on …" behind. The menu keeps it
+            // because that is where the shortcut is discoverable.
             .disabled(model.activeProfile.isEmpty || model.isRunning)
             .help("Run the statement under the caret  ⌘↩")
 
