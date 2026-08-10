@@ -165,6 +165,9 @@ final class AppModel: ObservableObject {
 
     @Published var state: QueryState? = nil
     @Published var rowsLoaded: UInt64 = 0
+    /// Bumped every time a result status is applied, purely so the SwiftUI
+    /// host of the results grid re-runs its update and re-snapshots the table.
+    @Published var resultGeneration: Int = 0
     @Published var totalKnown = true
     @Published var elapsedMs: UInt64 = 0
     @Published var message: String = "starting…"
@@ -1269,6 +1272,7 @@ final class AppModel: ObservableObject {
     private func refreshFromCore() {
         guard let query, let status = try? query.status() else { return }
         results.apply(status: status)
+        resultGeneration &+= 1
         state = status.state
         // One notch per progress event. This is the ONLY thing that moves the
         // activity bar — no timer, no display link.

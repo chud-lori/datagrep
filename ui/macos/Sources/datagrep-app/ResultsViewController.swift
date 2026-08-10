@@ -631,6 +631,17 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         tableView.refreshSelectionDecorations()
     }
 
+    /// Repaint the whole grid now. Called from the representable's SwiftUI
+    /// update so the hosting layer's snapshot is refreshed when a result lands.
+    func forceRedraw() {
+        tableView.reloadData()
+        tableView.needsDisplay = true
+        tableView.headerView?.needsDisplay = true
+        scrollView.needsDisplay = true
+        rowNumberRuler.needsDisplay = true
+        view.displayIfNeeded()
+    }
+
     private func applySchema(_ columns: [ColumnSpec]) {
         var newlyHidden = hiddenColumnCount
         for (i, spec) in columns.enumerated() {
@@ -1138,8 +1149,19 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
 /// re-evaluation can never rebuild the table or drop the page cache.
 struct ResultsGridView: NSViewControllerRepresentable {
     let controller: ResultsViewController
+    /// Changes every time a result is applied. SwiftUI's `PlatformViewHost`
+    /// snapshots the hosted AppKit view's layer and only re-snapshots when this
+    /// representable's `body`/`update` runs — and the result data flows through
+    /// the controller, not through SwiftUI state, so without a value SwiftUI can
+    /// see change, the stale (empty) snapshot stayed on screen until a resize
+    /// forced a re-layout. Reading `generation` here is what makes the update
+    /// fire, and re-displaying the table in it is what refreshes the snapshot.
+    let generation: Int
     func makeNSViewController(context: Context) -> ResultsViewController { controller }
-    func updateNSViewController(_ nsViewController: ResultsViewController, context: Context) {}
+    func updateNSViewController(_ nsViewController: ResultsViewController, context: Context) {
+        _ = generation
+        nsViewController.forceRedraw()
+    }
 
     /// Take the size offered, never the table's own.
     ///

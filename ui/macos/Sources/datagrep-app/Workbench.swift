@@ -164,7 +164,7 @@ private struct ResultsPane: View {
                 // pane stayed blank until a window resize forced AppKit to
                 // redraw everything.
                 if stage.contentReady {
-                    ResultsGridView(controller: model.results)
+                    ResultsGridView(controller: model.results, generation: model.resultGeneration)
                 }
                 if !model.showsGrid {
                     ResultsEmptyState(model: model)
