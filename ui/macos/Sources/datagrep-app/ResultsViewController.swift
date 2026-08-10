@@ -710,7 +710,14 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         // data.
         tableView.reloadData()
         tableView.scrollRowToVisible(0)
-        scrollView.contentView.scroll(to: NSPoint(x: 0, y: scrollView.contentView.bounds.origin.y))
+        // Vertically only. The clip view's resting x is -ruleThickness when a
+        // vertical ruler is installed — that negative origin is the gutter's
+        // space, not a scroll offset. Forcing x to 0 slid the first column left
+        // underneath the ruler, which is why its text came out clipped ("lo"
+        // instead of "hello") and the first value looked missing entirely.
+        //
+        // The clip view still has to be re-reflected, though: that is what keeps
+        // the ruler in step, and without it the row numbers stop being drawn.
         scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
