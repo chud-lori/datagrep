@@ -143,6 +143,19 @@ final class GridCellView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        // Draw under THIS view's appearance. When the table flattens its
+        // subtree into one layer (canDrawSubviewsIntoLayer), the cells' draw()
+        // runs without the view's NSAppearance made current, so semantic colors
+        // like `labelColor` resolve to their LIGHT-mode value — black text,
+        // invisible on the dark grid. Row numbers and the selection highlight
+        // use appearance-independent colors, which is why only the cell text
+        // vanished.
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            drawContent(dirtyRect)
+        }
+    }
+
+    private func drawContent(_ dirtyRect: NSRect) {
         let inset = bounds.insetBy(dx: GridStyle.cellPadX, dy: 4)
         if isPending {
             drawSkeleton(in: inset)
