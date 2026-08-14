@@ -929,6 +929,47 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         return out
     }
 
+    /// The whole loaded result as a monospaced, column-aligned text table —
+    /// the "Text" view. Pipe-separated with a dashed rule under the header, so a
+    /// user can select-all and paste the result somewhere as readable plain
+    /// text. Capped: a virtualised million-row grid is not turned into a
+    /// million-line string; past the cap it says how many rows were left off.
+    func resultAsAlignedText(maxRows: Int = 5000) -> String {
+        guard let pager, rowCount > 0 else { return "" }
+        let cols = visibleColumnPairs()
+        guard !cols.isEmpty else { return "" }
+        let n = min(rowCount, maxRows)
+
+        var widths = cols.map { $0.name.count }
+        var body: [[String]] = []
+        body.reserveCapacity(n)
+        for r in 0..<n {
+            guard let win = pager.window(for: UInt64(r)) else { break }
+            var cells: [String] = []
+            cells.reserveCapacity(cols.count)
+            for (i, c) in cols.enumerated() {
+                let s = displayText(win, row: r, col: c.index)
+                cells.append(s)
+                if s.count > widths[i] { widths[i] = s.count }
+            }
+            body.append(cells)
+        }
+        func pad(_ s: String, _ w: Int) -> String {
+            s + String(repeating: " ", count: max(0, w - s.count))
+        }
+        func row(_ cells: [String]) -> String {
+            cells.enumerated().map { pad($0.element, widths[$0.offset]) }.joined(separator: " | ")
+        }
+        var lines = [row(cols.map(\.name))]
+        lines.append(widths.map { String(repeating: "-", count: $0) }.joined(separator: "-+-"))
+        for cells in body { lines.append(row(cells)) }
+        if rowCount > n {
+            lines.append("")
+            lines.append("… \(rowCount - n) more row(s) not shown")
+        }
+        return lines.joined(separator: "\n")
+    }
+
     /// What ⌘C and "Copy Selection as TSV" put on the pasteboard.
     ///
     /// A single cell copies bare (a header line above one value is noise);

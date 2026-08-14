@@ -168,6 +168,9 @@ final class AppModel: ObservableObject {
     /// Bumped every time a result status is applied, purely so the SwiftUI
     /// host of the results grid re-runs its update and re-snapshots the table.
     @Published var resultGeneration: Int = 0
+    /// The results pane can render as the grid (default) or as a plain,
+    /// column-aligned monospaced text table the user can select and copy.
+    @Published var showResultAsText = false
     @Published var totalKnown = true
     @Published var elapsedMs: UInt64 = 0
     @Published var message: String = "starting…"

@@ -53,41 +53,52 @@ private struct DetailArea: View {
     @ObservedObject var stage = StartupStage.shared
 
     var body: some View {
-        VSplitView {
-            EditorPane(model: model)
-                .frame(minHeight: 90, idealHeight: 190, maxHeight: .infinity)
-                .padding(.horizontal, 10)
-                .padding(.top, 8)
-                .padding(.bottom, 5)
+        VStack(spacing: 0) {
+            VSplitView {
+                EditorPane(model: model)
+                    .frame(minHeight: 90, idealHeight: 190, maxHeight: .infinity)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 8)
+                    .padding(.bottom, 5)
 
-            ResultsPane(model: model)
-            .frame(minHeight: 160, maxHeight: .infinity)
-            .padding(.horizontal, 10)
-            .padding(.top, 5)
-            .padding(.bottom, 8)
-            .overlay(alignment: .top) {
-                if model.isError, model.state == .failed {
-                    ErrorCard(message: model.message) {
-                        withAnimation(.smooth(duration: 0.2)) { model.isError = false }
+                ResultsPane(model: model)
+                    // A low floor, not a real minimum: the grid scrolls its own
+                    // content, so the pane must be free to shrink well below a
+                    // "show every row" height — otherwise a short window pushes
+                    // the whole detail past the window edge instead of scrolling.
+                    .frame(minHeight: 80, maxHeight: .infinity)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 5)
+                    .padding(.bottom, 8)
+                    .overlay(alignment: .top) {
+                        if model.isError, model.state == .failed {
+                            ErrorCard(message: model.message) {
+                                withAnimation(.smooth(duration: 0.2)) { model.isError = false }
+                            }
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                        }
                     }
-                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+            // The window's own plane, so the two panes above read as raised
+            // layers against it rather than as one continuous sheet of gray.
+            .background(Color(nsColor: .underPageBackgroundColor))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if model.isRunning {
+                    QueryProgressBar(model: model)
+                        .transition(.opacity)
                 }
             }
+            .overlay(alignment: .top) { ProdStripe(isProd: model.isProd) }
+
+            // A real bottom row, NOT a `.safeAreaInset`: an always-present bar
+            // laid out via safeAreaInset did not reserve its height until the
+            // window was resized, so the grid filled to the window edge and the
+            // status bar sat off-screen. As a VStack row it is always laid out,
+            // and the split above simply takes the remaining height.
+            StatusBar(model: model)
         }
-        // The window's own plane, so the two panes above read as raised layers
-        // against it rather than as one continuous sheet of gray.
-        .background(Color(nsColor: .underPageBackgroundColor))
         .frame(minWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
-        // Inset, not a VStack row: the grid keeps the height it thinks it has,
-        // so the status bar appearing can never shift the rows.
-        .safeAreaInset(edge: .bottom, spacing: 0) { StatusBar(model: model) }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            if model.isRunning {
-                QueryProgressBar(model: model)
-                    .transition(.opacity)
-            }
-        }
-        .overlay(alignment: .top) { ProdStripe(isProd: model.isProd) }
         // `HistoryModel` is a nested ObservableObject, so the presentation flag
         // has to be observed by something that observes *it* — that is what the
         // modifier is for. One line here, no state in this view.
@@ -166,13 +177,62 @@ private struct ResultsPane: View {
                 if stage.contentReady {
                     ResultsGridView(controller: model.results, generation: model.resultGeneration)
                 }
+                // Text view: an opaque cover over the grid (same reasoning as the
+                // empty state — the grid stays in the render tree underneath).
+                if model.showsGrid && model.showResultAsText {
+                    ResultTextView(model: model)
+                }
                 if !model.showsGrid {
                     ResultsEmptyState(model: model)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(Color(nsColor: .textBackgroundColor))
                 }
             }
+            .overlay(alignment: .topTrailing) {
+                if model.showsGrid {
+                    ResultViewModeToggle(model: model)
+                        .padding(8)
+                }
+            }
         )
+    }
+}
+
+/// Grid ⇄ Text switch, floated in the results pane's top-right corner.
+private struct ResultViewModeToggle: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        Picker("View", selection: $model.showResultAsText) {
+            Image(systemName: "tablecells").tag(false)
+            Image(systemName: "text.alignleft").tag(true)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(width: 82)
+        .help("Switch between the grid and a copyable plain-text table")
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+}
+
+/// The result as a selectable, column-aligned monospaced table. Rebuilt only
+/// when a new result lands (keyed on `resultGeneration`), never per frame.
+private struct ResultTextView: View {
+    @ObservedObject var model: AppModel
+    @State private var text = ""
+
+    var body: some View {
+        ScrollView([.horizontal, .vertical]) {
+            Text(text.isEmpty ? "No rows." : text)
+                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                .textSelection(.enabled)
+                .foregroundStyle(.primary)
+                .padding(12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .textBackgroundColor))
+        .task(id: model.resultGeneration) { text = model.results.resultAsAlignedText() }
     }
 }
 

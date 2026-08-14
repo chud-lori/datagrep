@@ -94,6 +94,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window.setContentSize(size)
         } else {
             window.setFrameAutosaveName("datagrep.main")
+            // A frame restored from a previous session (or an older build with a
+            // smaller minimum) can come back BELOW contentMinSize, and AppKit does
+            // not re-clamp a restored frame — which let the window open narrow
+            // enough to push the sidebar off its own leading edge. Clamp it back
+            // up to the content minimum so the sidebar is never clipped.
+            let minC = window.contentMinSize
+            let cur = window.contentRect(forFrameRect: window.frame).size
+            if cur.width < minC.width || cur.height < minC.height {
+                window.setContentSize(
+                    NSSize(width: max(cur.width, minC.width), height: max(cur.height, minC.height)))
+            }
         }
         window.center()
         Startup.mark("frame autosave + center")

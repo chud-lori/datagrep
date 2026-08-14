@@ -40,7 +40,10 @@ final class GridRowNumberRuler: NSRulerView {
     private static let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
     private static let para: NSParagraphStyle = {
         let p = NSMutableParagraphStyle()
-        p.alignment = .right
+        // Left-aligned and tight against the leading padding — a compact gutter
+        // where the number sits at a fixed x, not floating at the right edge of
+        // an over-wide strip (which read as dead space beside the data).
+        p.alignment = .left
         p.lineBreakMode = .byClipping
         return p
     }()
@@ -56,10 +59,10 @@ final class GridRowNumberRuler: NSRulerView {
     private static let digitWidth: CGFloat = ("0" as NSString).size(withAttributes: normal).width
     private static let lineHeight: CGFloat = ("0" as NSString).size(withAttributes: normal).height
 
-    private static let padLeft: CGFloat = 6
-    private static let padRight: CGFloat = 7
+    private static let padLeft: CGFloat = 10
+    private static let padRight: CGFloat = 8
 
-    private var digits = 3
+    private var digits = 2
 
     override init(scrollView: NSScrollView?, orientation: NSRulerView.Orientation) {
         super.init(scrollView: scrollView, orientation: orientation)
@@ -77,7 +80,10 @@ final class GridRowNumberRuler: NSRulerView {
     /// gutter to 7 digits instead of clipping. Still narrower than the
     /// narrowest data column (64 pt): 7 digits at 10 pt monospaced is ~56 pt.
     func update(rowCount: Int) {
-        let d = max(3, String(max(rowCount, 1)).count)
+        // Fit the actual magnitude (min two digits, so single-digit results
+        // still read as a column, not a sliver). No fixed 3-digit floor — that
+        // is what padded small results out into a wide empty strip.
+        let d = max(2, String(max(rowCount, 1)).count)
         if d != digits {
             digits = d
             ruleThickness = requiredThickness
@@ -94,25 +100,24 @@ final class GridRowNumberRuler: NSRulerView {
     override func drawHashMarksAndLabels(in rect: NSRect) {
         // Flat chrome background (no alternating stripes — the flatness is what
         // separates the gutter from the data), plus a hairline on the right.
-        // Semantic colors only, so dark mode needs no extra code. Confine every
-        // fill to `bounds`: AppKit can hand us a `rect` larger than the ruler,
-        // and painting outside `bounds` is exactly what blanked the table.
-        let paint = rect.intersection(bounds)
-        NSColor.textBackgroundColor.setFill()
-        paint.fill()
+        // Fill the whole bounds (clipsToBounds confines it to the gutter), so a
+        // dirty rect narrower than the ruler never leaves an unpainted band.
+        // A hair of contrast against the data area so the gutter reads as chrome,
+        // not a first data column — the same faint tint a code editor's line-number
+        // margin uses. Falls back cleanly in both light and dark.
+        (NSColor.textBackgroundColor.blended(withFraction: 0.5, of: .windowBackgroundColor)
+            ?? .textBackgroundColor).setFill()
+        bounds.fill()
         NSColor.separatorColor.setFill()
-        NSRect(x: bounds.maxX - 1, y: paint.minY, width: 1, height: paint.height).fill()
+        NSRect(x: bounds.maxX - 1, y: bounds.minY, width: 1, height: bounds.height).fill()
 
         guard let grid, grid.numberOfRows > 0 else { return }
-        // Only the rows whose rects intersect the dirty rect are drawn — the
-        // gutter is exactly as virtual as the table it annotates. The converted
-        // rect's x-range lies OUTSIDE the table (the gutter is left of it), and
-        // `rows(in:)` intersects rects, not y-bands — so re-anchor x inside the
-        // table's visible area and keep only the y-band.
-        var dirtyInGrid = grid.convert(rect, from: self)
-        dirtyInGrid.origin.x = grid.visibleRect.minX
-        dirtyInGrid.size.width = 1
-        let visible = grid.rows(in: dirtyInGrid)
+        // Number every row currently on screen, positioned by converting each
+        // row's rect from the table into the ruler. Deriving the set from the
+        // table's own visibleRect (not the passed-in dirty rect, whose converted
+        // Y-band went empty once the ruler clipped to its bounds) is what keeps
+        // the numbers actually drawing. It is still O(viewport), never O(rows).
+        let visible = grid.rows(in: grid.visibleRect)
         guard visible.length > 0 else { return }
         let sel = grid.selectedRowIndexes
         let textWidth = bounds.width - Self.padLeft - Self.padRight
