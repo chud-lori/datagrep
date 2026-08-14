@@ -427,6 +427,10 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     let tableView = GridTableView()
     private let scrollView = NSScrollView()
     private let rowNumberRuler = GridRowNumberRuler(scrollView: nil, orientation: .verticalRuler)
+    /// The gutter's header cell (the corner above the row numbers). Pinned to the
+    /// top-left; its width tracks the ruler's thickness as the digit count grows.
+    private let gutterHeader = GridGutterHeader()
+    private var gutterHeaderWidth: NSLayoutConstraint?
 
     private(set) var pager: RowPager?
     private var rowCount: Int = 0
@@ -529,7 +533,27 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
         ])
+
+        // The gutter header, filling the blank corner above the row numbers so
+        // the header row is continuous. Fixed at the top-left (it never scrolls);
+        // width follows the ruler, height matches the column-header band.
+        gutterHeader.translatesAutoresizingMaskIntoConstraints = false
+        gutterHeader.onSelectAll = { [weak self] in self?.tableView.selectAll(nil) }
+        root.addSubview(gutterHeader)
+        let gw = gutterHeader.widthAnchor.constraint(equalToConstant: rowNumberRuler.requiredThickness)
+        gutterHeaderWidth = gw
+        NSLayoutConstraint.activate([
+            gutterHeader.topAnchor.constraint(equalTo: root.topAnchor),
+            gutterHeader.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            gutterHeader.heightAnchor.constraint(equalToConstant: GridStyle.headerHeight),
+            gw,
+        ])
         self.view = root
+    }
+
+    /// Keep the gutter header the same width as the ruler below it.
+    private func syncGutterHeaderWidth() {
+        gutterHeaderWidth?.constant = rowNumberRuler.requiredThickness
     }
 
     // MARK: - result lifecycle
@@ -540,6 +564,7 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         self.pager = pager
         rowCount = 0
         rowNumberRuler.update(rowCount: 0)
+        syncGutterHeaderWidth()
         tableView.resetSelection()
         onSelectionChanged?(nil)
         didSizeColumns = false
@@ -558,6 +583,7 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         pager = nil
         rowCount = 0
         rowNumberRuler.update(rowCount: 0)
+        syncGutterHeaderWidth()
         tableView.resetSelection()
         onSelectionChanged?(nil)
         for c in tableView.tableColumns { tableView.removeTableColumn(c) }
@@ -578,7 +604,7 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         rowCount = newCount
         // Gutter width follows the magnitude of the row count (1,000,000 must
         // not clip). Derived from the count alone — no row fetch involved.
-        if grew { rowNumberRuler.update(rowCount: newCount) }
+        if grew { rowNumberRuler.update(rowCount: newCount); syncGutterHeaderWidth() }
         isStreaming = !status.state.isTerminal
         resultIsCapped = status.state == .capped
 

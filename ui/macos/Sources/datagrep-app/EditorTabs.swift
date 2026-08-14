@@ -113,7 +113,9 @@ struct EditorTabBar: View {
     var body: some View {
         HStack(spacing: 6) {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
+                // No gap between tabs: they abut like real window tabs, divided
+                // by a hairline, not floated as separate rounded chips.
+                HStack(spacing: 0) {
                     ForEach(model.tabs) { tab in
                         EditorTabChip(
                             tab: tab,
@@ -123,7 +125,6 @@ struct EditorTabBar: View {
                             close: { model.onClose?(tab) })
                     }
                 }
-                .padding(.horizontal, 2)
             }
 
             // Closing a named tab keeps its .sql on disk, so there has to be a
@@ -171,20 +172,18 @@ private struct EditorTabChip: View {
 
     var body: some View {
         HStack(spacing: 5) {
-            // 12 pt: the chip is 22 pt tall and the brand marks are square, so
-            // anything larger crowds the title and pushes the close dot off the
-            // end. Small, but these are logos — shape and colour still read.
+            // 12 pt brand mark — square, so anything larger crowds the title.
             if !driver.isEmpty {
                 EngineIcon(driver, size: 12)
             }
             Text(tab.displayTitle)
                 .font(.system(size: 11, weight: isActive ? .semibold : .regular))
+                .foregroundStyle(isActive ? Color.primary : Color.secondary)
                 .lineLimit(1)
 
             // The unsaved dot keeps its own slot instead of sharing the close
-            // button's. Sharing meant it disappeared the moment the pointer
-            // touched the chip — i.e. exactly when someone is looking at the
-            // tab to find out whether they have unsaved work.
+            // button's — sharing meant it vanished the instant the pointer
+            // touched the tab, i.e. exactly when you look to check for edits.
             HStack(spacing: 3) {
                 if tab.isDirty {
                     Circle()
@@ -203,20 +202,28 @@ private struct EditorTabChip: View {
                 .frame(width: 10, height: 10)
             }
         }
-        .padding(.horizontal, 9)
-        .frame(height: 22)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(
-                    isActive
-                        ? Color(nsColor: .textBackgroundColor)
-                        : Color(nsColor: .quaternaryLabelColor).opacity(0.22))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .strokeBorder(
-                    isActive ? Color.accentColor.opacity(0.55) : Color.clear, lineWidth: 1)
-        )
+        .padding(.horizontal, 11)
+        // Fill the whole bar height so tabs read as part of the bar, not chips
+        // floating in it. The active tab takes the editor's own background and
+        // an accent underline — it "connects" to the content below it — while
+        // inactive tabs stay flush with the bar and are split by a hairline.
+        .frame(maxHeight: .infinity)
+        .background(isActive ? Color(nsColor: .textBackgroundColor) : Color.clear)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(isActive ? Color.accentColor : Color.clear)
+                .frame(height: 2)
+        }
+        .overlay(alignment: .trailing) {
+            // Divider between neighbouring tabs; hidden on the active one so its
+            // fill reads as a single continuous surface.
+            if !isActive {
+                Rectangle()
+                    .fill(Color(nsColor: .separatorColor))
+                    .frame(width: 1)
+                    .padding(.vertical, 6)
+            }
+        }
         .contentShape(Rectangle())
         .onTapGesture(perform: activate)
         .onHover { hovering = $0 }

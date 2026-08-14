@@ -1,5 +1,46 @@
 import AppKit
 
+/// The header cell of the row-number gutter — the small square at the top-left,
+/// level with the column headers, that turns the gutter from a bare strip of
+/// numbers into a proper labelled column (the "⊙"/"#" corner every data grid
+/// has). The scroll view leaves this corner blank; this fills it so the header
+/// row reads as continuous across the gutter and the data columns.
+///
+/// Clicking it selects every row — the gutter's header is the natural
+/// "select all" affordance, matching the numbers below it that select one row.
+final class GridGutterHeader: NSView {
+    var onSelectAll: (() -> Void)?
+
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // Same faint tint as the gutter body, so the column is one surface.
+        (NSColor.textBackgroundColor.blended(withFraction: 0.5, of: .windowBackgroundColor)
+            ?? .textBackgroundColor).setFill()
+        bounds.fill()
+        // Hairlines: right (against the first data column) and bottom (against
+        // the rows), the same borders the column-header row draws.
+        NSColor.separatorColor.setFill()
+        NSRect(x: bounds.maxX - 1, y: 0, width: 1, height: bounds.height).fill()
+        NSRect(x: 0, y: bounds.maxY - 1, width: bounds.width, height: 1).fill()
+
+        // A small hash mark, centred — the column's "label". Secondary weight:
+        // it is chrome, like the numbers it heads.
+        let s = "#" as NSString
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: NSColor.tertiaryLabelColor,
+        ]
+        let size = s.size(withAttributes: attrs)
+        s.draw(
+            at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2),
+            withAttributes: attrs)
+    }
+
+    override func mouseDown(with event: NSEvent) { onSelectAll?() }
+}
+
 /// The pinned row-number gutter (the P0 "row-number column" from the UX study).
 ///
 /// This is an `NSRulerView`, NOT an `NSTableColumn`, and that choice is
