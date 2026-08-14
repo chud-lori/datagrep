@@ -220,6 +220,24 @@ final class AppModel: ObservableObject {
     }
     private static let sidebarKey = "datagrep.sidebarVisible"
 
+    /// Live content width, fed by a GeometryReader on the split view. Below the
+    /// width where the sidebar and a usable detail can coexist, SwiftUI's
+    /// `.balanced` split squeezes the sidebar off its own leading edge instead
+    /// of collapsing it — so we collapse it ourselves. This is the macOS-native
+    /// answer (HIG: a sidebar auto-hides when its window gets too narrow), not a
+    /// horizontally-scrolling sidebar.
+    @Published var windowContentWidth: CGFloat = 1180
+    /// The width at/above which the sidebar is allowed to show. Empirically the
+    /// balanced split starts clipping the sidebar below ~900.
+    static let sidebarFitsWidth: CGFloat = 900
+
+    /// Whether the sidebar is actually shown: the user wants it AND the window
+    /// is wide enough to hold it without clipping. Narrowing past the threshold
+    /// collapses it (revealed again by widening, or by the toolbar toggle / ⌃⌘S
+    /// once there is room). The user's own show/hide choice is remembered in
+    /// `sidebarVisible` and re-applied the moment the window is wide enough.
+    var sidebarShown: Bool { sidebarVisible && windowContentWidth >= Self.sidebarFitsWidth }
+
     /// Advances one notch per progress callback. The only thing driving the
     /// activity bar — no timer anywhere.
     @Published var progressPhase: Double = 0

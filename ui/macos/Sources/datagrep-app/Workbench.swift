@@ -20,7 +20,9 @@ struct Workbench: View {
     /// the button, the ⌃⌘S shortcut and the View menu all drive.
     private var visibility: Binding<NavigationSplitViewVisibility> {
         Binding(
-            get: { model.sidebarVisible ? .all : .detailOnly },
+            // Shown only when the user wants it AND the window is wide enough —
+            // below that it collapses cleanly rather than clipping off-screen.
+            get: { model.sidebarShown ? .all : .detailOnly },
             set: { v in model.sidebarVisible = (v != .detailOnly) })
     }
 
@@ -41,8 +43,20 @@ struct Workbench: View {
         // every accent in the window red.
         .tint(model.isProd ? Color.red : nil)
         .sheet(isPresented: $model.showNewConnection) { NewConnectionSheet(model: model) }
-        .animation(.smooth(duration: 0.25), value: model.sidebarVisible)
-        .frame(minWidth: 900, minHeight: 560)
+        .animation(.smooth(duration: 0.25), value: model.sidebarShown)
+        // Feed the live content width so the sidebar can auto-collapse before the
+        // balanced split would clip it. The window's own contentMinSize is the
+        // hard floor (set on the NSWindow); this frame minimum only needs to
+        // agree with it, not enforce the 900-wide "sidebar fits" width.
+        .frame(minWidth: 480, minHeight: 400)
+        .background {
+            GeometryReader { proxy in
+                Color.clear
+                    .onChange(of: proxy.size.width, initial: true) { _, w in
+                        model.windowContentWidth = w
+                    }
+            }
+        }
     }
 }
 
@@ -98,7 +112,13 @@ private struct DetailArea: View {
             // and the split above simply takes the remaining height.
             StatusBar(model: model)
         }
-        .frame(minWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
+        // A low detail minimum so narrowing the window shrinks the EDITOR/GRID
+        // first (the grid scrolls its own columns) while the sidebar keeps its
+        // fixed width — `.balanced` shrinks the detail to make room for the
+        // sidebar, so the sidebar never gets squeezed off its leading edge. The
+        // window minimum (set on the NSWindow) is sidebar-min + this + slack, so
+        // the two can always coexist without clipping.
+        .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
         // `HistoryModel` is a nested ObservableObject, so the presentation flag
         // has to be observed by something that observes *it* — that is what the
         // modifier is for. One line here, no state in this view.

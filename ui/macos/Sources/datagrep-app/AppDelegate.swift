@@ -77,8 +77,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // an answer. It relaxes contentMinSize only as far as it has to.
         let size = Self.requestedWindowSize() ?? NSSize(width: 1180, height: 760)
         window.setContentSize(size)
+        // Sidebar-min (190) + detail-min (380, set on the SwiftUI detail) + a
+        // little slack. The window cannot be dragged narrower than the sidebar
+        // and a usable detail need TOGETHER, so the sidebar never clips; above
+        // this, narrowing shrinks the detail first and the grid scrolls.
         window.contentMinSize = NSSize(
-            width: min(900, size.width), height: min(560, size.height))
+            width: min(600, size.width), height: min(480, size.height))
         window.title = "datagrep"
         Startup.mark("NSWindow size + title")
         window.styleMask.insert(.fullSizeContentView)
