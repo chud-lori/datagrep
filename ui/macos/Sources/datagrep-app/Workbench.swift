@@ -208,30 +208,7 @@ private struct ResultsPane: View {
                         .background(Color(nsColor: .textBackgroundColor))
                 }
             }
-            .overlay(alignment: .topTrailing) {
-                if model.showsGrid {
-                    ResultViewModeToggle(model: model)
-                        .padding(8)
-                }
-            }
         )
-    }
-}
-
-/// Grid ⇄ Text switch, floated in the results pane's top-right corner.
-private struct ResultViewModeToggle: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        Picker("View", selection: $model.showResultAsText) {
-            Image(systemName: "tablecells").tag(false)
-            Image(systemName: "text.alignleft").tag(true)
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .frame(width: 82)
-        .help("Switch between the grid and a copyable plain-text table")
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 }
 
@@ -346,6 +323,19 @@ private struct WorkbenchToolbar: ToolbarContent {
         }
 
         ToolbarItemGroup(placement: .primaryAction) {
+            // Grid ⇄ Text result view. In the toolbar (the way Finder keeps its
+            // icon/list/column switcher) rather than floated over the grid, where
+            // it covered the last column's header.
+            if model.showsGrid {
+                Picker("Result view", selection: $model.showResultAsText) {
+                    Image(systemName: "tablecells").tag(false)
+                    Image(systemName: "text.alignleft").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .help("Show the result as a grid or as a copyable plain-text table")
+            }
+
             if model.hasDerivedClauses {
                 Button {
                     model.clearDerived()
