@@ -275,10 +275,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             colorName == nil ? "datagrep" : "datagrep — \(model.activeProfile)"
     }
 
-    /// Renders the window's own theme frame (titlebar + toolbar + content) into
-    /// a PNG. Not a screen grab — the app draws itself, so no capture consent
-    /// is involved and the result is exactly the pixels this app produced.
+    /// Writes a PNG of the app's own window for headless verification.
+    ///
+    /// Primary path is `CGWindowListCreateImage` of THIS window — the real
+    /// composited pixels from the window server, i.e. exactly what is on screen.
+    /// That matters because the obvious in-process alternative, `cacheDisplay`,
+    /// is BLIND to the SwiftUI-hosted results grid: it copies layer contents and
+    /// the scroll view's document subtree never shows up, so a cacheDisplay shot
+    /// of a populated grid comes back blank. `cacheDisplay` is kept only as a
+    /// fallback for the (rare) case the window-server capture returns nil.
     private func writeScreenshot(to path: String) {
+        if let w = window,
+            let cg = CGWindowListCreateImage(
+                .null, .optionIncludingWindow, CGWindowID(w.windowNumber),
+                [.boundsIgnoreFraming, .bestResolution])
+        {
+            let rep = NSBitmapImageRep(cgImage: cg)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                try? data.write(to: URL(fileURLWithPath: path))
+                FileHandle.standardError.write(
+                    Data("SHOT wrote \(path) (\(cg.width)×\(cg.height))\n".utf8))
+                return
+            }
+        }
+        // Fallback only: this path cannot capture the results grid.
         guard let content = window.contentView else { return }
         let target = content.superview ?? content
         guard let rep = target.bitmapImageRepForCachingDisplay(in: target.bounds) else { return }

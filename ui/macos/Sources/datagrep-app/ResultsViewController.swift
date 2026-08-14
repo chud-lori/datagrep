@@ -508,10 +508,11 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         scrollView.backgroundColor = .textBackgroundColor
         scrollView.scrollerStyle = .overlay
 
-        // The row-number gutter. A vertical RULER, not a table column, which is
+        // The row-number gutter: a vertical RULER, not a table column, which is
         // what pins it against horizontal scrolling and keeps it out of every
-        // copy path (those enumerate `tableColumns` only) — see
-        // GridRowNumberRuler for the full rationale.
+        // copy path (those enumerate `tableColumns` only). It is set to clip to
+        // its bounds on install — see GridRowNumberRuler for why that is what
+        // stops it blanking the table inside the SwiftUI host.
         rowNumberRuler.grid = tableView
         rowNumberRuler.clientView = tableView
         rowNumberRuler.onSelectRow = { [weak self] row, extend in
@@ -629,16 +630,9 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         rowNumberRuler.needsDisplay = true
     }
 
-    /// Invalidate everything, then COMMIT the CoreAnimation transaction.
-    ///
-    /// The piece the earlier attempts missed. The table is layer-backed
-    /// (SwiftUI's NSHostingView layer-backs its whole subtree), so `needsDisplay`
-    /// only marks the layer dirty — the redraw does not reach the screen until a
-    /// CoreAnimation transaction is committed. Nothing committed one after a
-    /// result arrived, so the pane stayed blank until a user interaction (a
-    /// click, a resize) ran the event loop and flushed it — which is exactly why
-    /// clicking made the row numbers appear. This does that flush explicitly,
-    /// but only on a clean runloop turn, never inside a SwiftUI update.
+    /// Invalidate the grid and commit the CoreAnimation transaction on a clean
+    /// runloop turn (never inside a SwiftUI update, which would fight SwiftUI's
+    /// own layer commit and blank the neighbouring panes).
     func flushToScreen() {
         invalidateGrid()
         view.displayIfNeeded()

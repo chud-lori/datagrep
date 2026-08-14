@@ -15,6 +15,17 @@ import AppKit
 ///     row INDEX. Drawing never touches the pager, so scrolling the gutter
 ///     costs zero row fetches and zero page-cache churn.
 ///
+/// ### Why `clipsToBounds` is set true on install
+///
+/// macOS 14 changed `NSView.clipsToBounds` to default **false**, and since
+/// Mojave a vertical ruler *overlays* the clip view rather than tiling beside
+/// it. An unclipped ruler is handed a dirty rect that can be LARGER than its own
+/// bounds, and its `drawHashMarksAndLabels(in:)` then paints its chrome
+/// background across the neighbouring clip-view region — inside SwiftUI's
+/// layer-backed `NSHostingView` that leaves the whole table blank until a live
+/// resize. Clipping the ruler to its bounds confines the paint to the gutter and
+/// the table composites normally. (Apple Dev Forums 767825; Scintilla bug 2402.)
+///
 /// Idle cost is zero: the ruler redraws only when AppKit invalidates it (the
 /// clip view scrolled) or when the grid explicitly pokes it (row count grew,
 /// selection changed). No timers, no animations.
@@ -50,6 +61,18 @@ final class GridRowNumberRuler: NSRulerView {
 
     private var digits = 3
 
+    override init(scrollView: NSScrollView?, orientation: NSRulerView.Orientation) {
+        super.init(scrollView: scrollView, orientation: orientation)
+        // See the type doc: without this the ruler's over-sized draw pass paints
+        // over the clip view and the table never composites inside NSHostingView.
+        clipsToBounds = true
+    }
+
+    required init(coder: NSCoder) {
+        super.init(coder: coder)
+        clipsToBounds = true
+    }
+
     /// Width adapts to the magnitude of the row count: 1,000,000 rows widen the
     /// gutter to 7 digits instead of clipping. Still narrower than the
     /// narrowest data column (64 pt): 7 digits at 10 pt monospaced is ~56 pt.
@@ -71,11 +94,14 @@ final class GridRowNumberRuler: NSRulerView {
     override func drawHashMarksAndLabels(in rect: NSRect) {
         // Flat chrome background (no alternating stripes — the flatness is what
         // separates the gutter from the data), plus a hairline on the right.
-        // Semantic colors only, so dark mode needs no extra code.
+        // Semantic colors only, so dark mode needs no extra code. Confine every
+        // fill to `bounds`: AppKit can hand us a `rect` larger than the ruler,
+        // and painting outside `bounds` is exactly what blanked the table.
+        let paint = rect.intersection(bounds)
         NSColor.textBackgroundColor.setFill()
-        rect.fill()
+        paint.fill()
         NSColor.separatorColor.setFill()
-        NSRect(x: bounds.maxX - 1, y: rect.minY, width: 1, height: rect.height).fill()
+        NSRect(x: bounds.maxX - 1, y: paint.minY, width: 1, height: paint.height).fill()
 
         guard let grid, grid.numberOfRows > 0 else { return }
         // Only the rows whose rects intersect the dirty rect are drawn — the
@@ -104,7 +130,7 @@ final class GridRowNumberRuler: NSRulerView {
 
     // MARK: - click / drag -> whole-row selection
 
-    /// Clicking a number selects the whole row (DataGrip's convention).
+    /// Clicking a number selects the whole row (the row-header convention).
     /// Shift-click extends, and a drag sweeps a row range. All of it routes
     /// through `GridTableView.selectWholeRow`, i.e. the existing block model.
     override func mouseDown(with event: NSEvent) {
