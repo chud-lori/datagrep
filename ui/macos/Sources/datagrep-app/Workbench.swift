@@ -212,24 +212,91 @@ private struct ResultsPane: View {
     }
 }
 
-/// The result as a selectable, column-aligned monospaced table. Rebuilt only
-/// when a new result lands (keyed on `resultGeneration`), never per frame.
-private struct ResultTextView: View {
+/// The result as a selectable, column-aligned monospaced table. An AppKit
+/// `NSTextView` rather than a SwiftUI `Text` in a `ScrollView`: a two-axis
+/// SwiftUI scroll view centres content smaller than the viewport (the table
+/// floated in the middle of the pane), while a text view top-left-aligns and
+/// scrolls both axes natively — and it selects/copies for free.
+///
+/// Styled by line so it does not read as a wall of grey: the header row is bold
+/// in the accent colour, the rule under it dimmed, the "N more rows" footer
+/// secondary — the structure a plain string loses.
+private struct ResultTextView: NSViewControllerRepresentable {
     @ObservedObject var model: AppModel
-    @State private var text = ""
 
-    var body: some View {
-        ScrollView([.horizontal, .vertical]) {
-            Text(text.isEmpty ? "No rows." : text)
-                .font(.system(size: 12, weight: .regular, design: .monospaced))
-                .textSelection(.enabled)
-                .foregroundStyle(.primary)
-                .padding(12)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    func makeNSViewController(context: Context) -> ResultTextController { ResultTextController() }
+
+    func updateNSViewController(_ vc: ResultTextController, context: Context) {
+        _ = model.resultGeneration
+        vc.setText(Self.style(model.results.resultAsAlignedText()))
+    }
+
+    static func style(_ raw: String) -> NSAttributedString {
+        let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let monoBold = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = 3
+        guard !raw.isEmpty else {
+            return NSAttributedString(
+                string: "No rows.",
+                attributes: [.font: mono, .foregroundColor: NSColor.secondaryLabelColor])
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .textBackgroundColor))
-        .task(id: model.resultGeneration) { text = model.results.resultAsAlignedText() }
+        let out = NSMutableAttributedString()
+        for (i, line) in raw.components(separatedBy: "\n").enumerated() {
+            let color: NSColor
+            var font = mono
+            if i == 0 {
+                color = .controlAccentColor
+                font = monoBold
+            } else if i == 1 {
+                color = .tertiaryLabelColor
+            } else if line.hasPrefix("…") {
+                color = .secondaryLabelColor
+            } else {
+                color = .labelColor
+            }
+            out.append(
+                NSAttributedString(
+                    string: i == 0 ? line : "\n" + line,
+                    attributes: [.font: font, .foregroundColor: color, .paragraphStyle: para]))
+        }
+        return out
+    }
+}
+
+/// Hosts the read-only, selectable text view for `ResultTextView`.
+final class ResultTextController: NSViewController {
+    private let textView = NSTextView()
+
+    override func loadView() {
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = true
+        scroll.backgroundColor = .textBackgroundColor
+        scroll.borderType = .noBorder
+
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = true
+        textView.backgroundColor = .textBackgroundColor
+        textView.textContainerInset = NSSize(width: 16, height: 16)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = true
+        textView.autoresizingMask = []
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+
+        scroll.documentView = textView
+        self.view = scroll
+    }
+
+    func setText(_ attributed: NSAttributedString) {
+        textView.textStorage?.setAttributedString(attributed)
     }
 }
 
