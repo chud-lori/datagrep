@@ -44,15 +44,30 @@ ResultTableView::ResultTableView(QWidget* parent) : QTableView(parent) {
 }
 
 void ResultTableView::setModel(QAbstractItemModel* model) {
+    if (model == this->model()) {
+        return;  // re-setting the same model must not duplicate connections
+    }
+    // Drop the previous model's connections first: they capture `this` and
+    // would otherwise keep firing after the model is swapped — dereferencing
+    // model() (nullptr after setModel(nullptr)) or resizing the gutter from a
+    // model this view no longer shows.
+    if (QAbstractItemModel* old = this->model(); old != nullptr) {
+        disconnect(old, nullptr, this, nullptr);
+    }
     QTableView::setModel(model);
     if (model != nullptr) {
         connect(model, &QAbstractItemModel::modelReset, this, [this]() {
-            rowHeader_->updateWidthForRowCount(this->model()->rowCount());
+            if (this->model() != nullptr) {
+                rowHeader_->updateWidthForRowCount(this->model()->rowCount());
+            }
         });
         connect(model, &QAbstractItemModel::rowsInserted, this,
                 [this](const QModelIndex&, int, int) {
-                    rowHeader_->updateWidthForRowCount(this->model()->rowCount());
+                    if (this->model() != nullptr) {
+                        rowHeader_->updateWidthForRowCount(this->model()->rowCount());
+                    }
                 });
+        rowHeader_->updateWidthForRowCount(model->rowCount());
     }
 }
 

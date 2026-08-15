@@ -22,9 +22,15 @@ class RowPager {
 public:
     // 512-row pages, 4 pages resident => at most 2,048 rows materialised, exactly
     // as the macOS grid is tuned. `query` must outlive the pager.
+    // maxPages is clamped to >= 1: the eviction loop in window() must never be
+    // able to evict the page it just inserted, or the returned pointer would
+    // dangle. (pageSize is likewise kept >= 1 so page arithmetic can't divide
+    // by zero.)
     explicit RowPager(const Query& query, std::uint64_t pageSize = 512,
                       int maxPages = 4)
-        : query_(query), pageSize_(pageSize), maxPages_(maxPages) {}
+        : query_(query),
+          pageSize_(pageSize == 0 ? 1 : pageSize),
+          maxPages_(maxPages < 1 ? 1 : maxPages) {}
 
     std::uint64_t pageSize() const { return pageSize_; }
 

@@ -6,6 +6,7 @@
 #include <QPalette>
 
 #include <algorithm>
+#include <limits>
 
 ResultModel::ResultModel(QObject* parent) : QAbstractTableModel(parent) {}
 
@@ -102,6 +103,16 @@ QVariant ResultModel::data(const QModelIndex& index, int role) const {
     try {
         window = pager_->window(absRow);
     } catch (const dg::Error&) {
+        window = nullptr;
+    }
+
+    // A window narrower than the announced schema (fetched before a schema
+    // delta appended columns) must never be asked for a column it does not
+    // have: the ABI indexes row*cols+col into a flat cell array, so an
+    // out-of-range column returns ANOTHER ROW'S cell, not an error. Render as
+    // pending instead — refreshStatus() already dropped such windows, and the
+    // re-fetch comes back full-width.
+    if (window != nullptr && absCol >= window->columns()) {
         window = nullptr;
     }
 
@@ -274,6 +285,13 @@ void ResultModel::refreshStatus() {
         }
         columnCount_ = newColumnCount;
         endInsertColumns();
+        // Every resident window predates the wider schema and only carries the
+        // OLD column count. Asking such a window for a new column would index
+        // row*oldCols+col into its flat cell array — aliasing another row's
+        // cell, not erroring. Drop them all; they re-fetch with the new width.
+        if (pager_) {
+            pager_->invalidateAll();
+        }
     }
 
     // Streaming pages may have been short; drop only those so they re-fetch.
@@ -298,6 +316,12 @@ void ResultModel::revealMore() {
 }
 
 void ResultModel::revealTo(std::uint64_t target) {
+    // rows_loaded is u64 on the wire but a QModelIndex row is an int: clamp the
+    // exposure ceiling so the beginInsertRows arithmetic below can never
+    // overflow. (Every cast of exposedRows_ elsewhere relies on this clamp.)
+    constexpr std::uint64_t kMaxRows =
+        static_cast<std::uint64_t>(std::numeric_limits<int>::max());
+    target = std::min(target, kMaxRows);
     if (target <= exposedRows_) {
         return;
     }
@@ -319,7 +343,8 @@ QString ResultModel::cancel() {
 }
 
 QString ResultModel::cellDetailJson(int row, int column) const {
-    if (!pager_ || row < 0 || column < 0) {
+    if (!pager_ || row < 0 || column < 0 ||
+        static_cast<std::uint64_t>(row) >= exposedRows_ || column >= columnCount_) {
         return QString();
     }
     const dg::RowWindow* window = nullptr;
@@ -328,7 +353,10 @@ QString ResultModel::cellDetailJson(int row, int column) const {
     } catch (const dg::Error&) {
         return QString();
     }
-    if (window == nullptr) {
+    if (window == nullptr ||
+        static_cast<std::uint32_t>(column) >= window->columns()) {
+        // Same out-of-range hazard as data(): a stale narrow window would hand
+        // back the WRONG cell, never an error. Refuse instead.
         return QString();
     }
     if (auto detail = window->cellDetailJson(static_cast<std::uint64_t>(row),

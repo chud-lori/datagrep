@@ -294,8 +294,14 @@ public:
     // model does this with a queued Qt signal). The closure is stored heap-stable
     // and kept alive for exactly as long as this Query lives.
     void onProgress(std::function<void()> handler) {
-        progress_ = std::make_unique<std::function<void()>>(std::move(handler));
-        datagrep_query_on_progress(raw_, &Query::trampoline, progress_.get());
+        auto next = std::make_unique<std::function<void()>>(std::move(handler));
+        // Register the NEW ctx before releasing the old one. The ABI swaps the
+        // (cb, ctx) pair under the same lock it holds while firing, so once this
+        // call returns no in-flight callback can still be using the old closure —
+        // only then is destroying it safe. Assigning progress_ first would open a
+        // window where the feeder fires into freed memory.
+        datagrep_query_on_progress(raw_, &Query::trampoline, next.get());
+        progress_ = std::move(next);
     }
 
     // Materialises exactly one window [offset, offset+len). The returned RowWindow
