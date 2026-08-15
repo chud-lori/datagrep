@@ -205,10 +205,9 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     /// pane never reflows when the last editor closes.
     private var welcomeHost: NSHostingView<EditorWelcomeState>!
 
-    /// Every open editor, across every connection. `tabs.tabs` is the slice of
-    /// this belonging to `tabs.scope` — editors are per connection, so the tab
-    /// bar shows one connection's editors and switching connection switches the
-    /// whole bar.
+    /// Every open editor, across every connection. `publishTabs()` mirrors this
+    /// whole list into `tabs.tabs`, so the bar shows every editor at once and
+    /// selecting a connection never hides or rearranges them.
     private var allTabs: [EditorTab] = []
 
     var onSelectionChanged: (() -> Void)?
@@ -412,49 +411,37 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     /// frontmost tab is remembered, so coming back to a connection brings back
     /// the editor that was in front of it — not whichever tab was last touched
     /// anywhere in the app.
+    /// Selecting a connection. It only sets which connection a NEW editor (⌘T)
+    /// is created for, and which saved queries the reopen list offers — it no
+    /// longer hides the other connections' editors. The tab bar always shows
+    /// every open editor, and the active tab does not change just because the
+    /// window's connection did.
     func setScope(_ connection: String?) {
         loadViewIfNeeded()
         let next = (connection?.isEmpty ?? true) ? nil : connection
         guard next != tabs.scope else { return }
         flushActive()
-        rememberActive()
         tabs.scope = next
-        applyScope()
+        updateWelcomeState()
+        refreshSavedList()
         persistSession()
     }
 
-    /// Republish the visible tab slice and load whichever of them is frontmost.
-    private func applyScope() {
-        let scope = tabs.scope
-        tabs.tabs = allTabs.filter { $0.connection == scope }
-        let remembered = activeByScope[scope ?? EditorSession.unbound]
-        let next = tabs.tabs.first { $0.id == remembered } ?? tabs.tabs.first
-        tabs.activeID = next?.id
-        if let next {
-            load(next)
-        } else {
-            // Nothing to show. The text view is emptied so a stale buffer from
-            // the previous connection cannot be read as this one's, and the
-            // welcome state covers it.
-            highlighter.isSuspended = true
-            textView.string = ""
-            highlighter.isSuspended = false
-            highlighter.documentDidChangeWholesale()
-            textView.undoManager?.removeAllActions()
-            onSelectionChanged?()
-        }
-        updateWelcomeState()
-        refreshSavedList()
+    /// Publish every open editor to the tab bar, whatever connection it targets.
+    private func publishTabs() {
+        tabs.tabs = allTabs
     }
 
-    private func rememberActive() {
-        guard let id = tabs.activeID else { return }
-        activeByScope[tabs.scope ?? EditorSession.unbound] = id
+    /// Empty the text view — no editor is active (the welcome state covers it).
+    private func showEmptyEditor() {
+        tabs.activeID = nil
+        highlighter.isSuspended = true
+        textView.string = ""
+        highlighter.isSuspended = false
+        highlighter.documentDidChangeWholesale()
+        textView.undoManager?.removeAllActions()
+        onSelectionChanged?()
     }
-
-    /// Frontmost tab per connection. Mirrored into `session.json` so it
-    /// survives a relaunch.
-    private var activeByScope: [String: String] = [:]
 
 
     private func updateWelcomeState() {
@@ -480,11 +467,10 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         return out
     }
 
-    /// Open (or focus) one editor, switching scope to the connection it belongs
-    /// to so the tab bar is showing the right set when it appears.
+    /// Open (or focus) one editor. It is already visible in the unified bar, so
+    /// this just activates it — no scope switch, no rearranging.
     func openEditor(_ record: SavedQueryRecord) {
         loadViewIfNeeded()
-        if record.connection != tabs.scope { setScope(record.connection) }
         openSaved(record)
     }
 
@@ -532,13 +518,13 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         refreshSavedList()
     }
 
-    /// Closed editors that could be reopened. Scoped like everything else — the
-    /// menu on a connection must not offer another connection's queries.
+    /// Closed editors that could be reopened, across every connection — the
+    /// unified bar's "+" menu offers them all, not just the selected one's.
     private func refreshSavedList() {
         let open = Set(allTabs.map(\.id))
         tabs.savedQueries =
             store.allRecords()
-            .filter { !open.contains($0.id) && $0.connection == tabs.scope }
+            .filter { !open.contains($0.id) }
             .sorted { ($0.name ?? "\u{10FFFF}") < ($1.name ?? "\u{10FFFF}") }
     }
 
@@ -557,9 +543,8 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
             isDirty: false)
         if tab.name == nil { tab.untitledNumber = nextUntitledNumber(in: tab.connection) }
         allTabs.append(tab)
-        tabs.tabs = allTabs.filter { $0.connection == tabs.scope }
+        publishTabs()
         tabs.activeID = tab.id
-        activeByScope[tab.connection ?? EditorSession.unbound] = tab.id
         load(tab)
         updateWelcomeState()
         persistSession()
@@ -598,14 +583,12 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
             tab.untitledNumber =
                 tab.name == nil ? self.nextUntitledNumber(in: name) : tab.untitledNumber
             self.persist(tab)
-            // Rebinding moves the editor into another connection's bar, so the
-            // scope follows it — otherwise the tab the user just retargeted
-            // would vanish from in front of them.
-            self.activeByScope[name ?? EditorSession.unbound] = tab.id
-            self.tabs.scope = name
-            self.applyScope()
+            // The tab stays exactly where it is — the bar shows every connection
+            // — so rebinding just updates its connection label and reopen list.
+            self.publishTabs()
             self.persistSession()
-            self.onConnectionChanged?(name)
+            self.refreshConnections()
+            self.refreshSavedList()
         }
     }
 
@@ -621,9 +604,8 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         let tab = EditorTab(connection: tabs.scope)
         tab.untitledNumber = nextUntitledNumber(in: tab.connection)
         allTabs.append(tab)
-        tabs.tabs = allTabs.filter { $0.connection == tabs.scope }
+        publishTabs()
         tabs.activeID = tab.id
-        activeByScope[tabs.scope ?? EditorSession.unbound] = tab.id
         load(tab)
         updateWelcomeState()
         persist(tab)
@@ -639,7 +621,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         }
         flushActive()
         tabs.activeID = tab.id
-        rememberActive()
         load(tab)
         persistSession()
         focus()
@@ -672,24 +653,16 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         // closing it is the only way the user has to say "throw this away".
         if tab.name == nil { store.delete(tab.record) }
 
-        tabs.tabs = allTabs.filter { $0.connection == tabs.scope }
+        publishTabs()
         if wasActive {
-            // Closing the last editor of a connection leaves the welcome state,
-            // not a manufactured replacement tab. "Nothing open" is a state the
-            // user asked for by closing it.
-            let next = tabs.tabs.isEmpty ? nil : tabs.tabs[min(idx, tabs.tabs.count - 1)]
-            tabs.activeID = next?.id
-            if let next {
-                activeByScope[tabs.scope ?? EditorSession.unbound] = next.id
+            // Closing the last editor leaves the welcome state, not a
+            // manufactured replacement tab. "Nothing open" is a state the user
+            // asked for by closing it.
+            if let next = tabs.tabs.isEmpty ? nil : tabs.tabs[min(idx, tabs.tabs.count - 1)] {
+                tabs.activeID = next.id
                 load(next)
             } else {
-                activeByScope.removeValue(forKey: tabs.scope ?? EditorSession.unbound)
-                highlighter.isSuspended = true
-                textView.string = ""
-                highlighter.isSuspended = false
-                highlighter.documentDidChangeWholesale()
-                textView.undoManager?.removeAllActions()
-                onSelectionChanged?()
+                showEmptyEditor()
             }
         }
         updateWelcomeState()
@@ -703,15 +676,20 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     /// that no longer exists.
     func forgetEditors(of connection: String) {
         loadViewIfNeeded()
+        let losingActive = allTabs.first { $0.id == tabs.activeID }?.connection == connection
         allTabs.removeAll { $0.connection == connection }
-        activeByScope.removeValue(forKey: connection)
-        if tabs.scope == connection {
-            tabs.scope = nil
-            applyScope()
-        } else {
-            tabs.tabs = allTabs.filter { $0.connection == tabs.scope }
-            updateWelcomeState()
+        if tabs.scope == connection { tabs.scope = nil }
+        publishTabs()
+        if losingActive {
+            if let next = tabs.tabs.first {
+                tabs.activeID = next.id
+                load(next)
+            } else {
+                showEmptyEditor()
+            }
         }
+        updateWelcomeState()
+        refreshSavedList()
         persistSession()
     }
 
@@ -878,10 +856,18 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         }
 
         didRestoreSession = !allTabs.isEmpty
-        activeByScope = loaded.session.activeByConnection
         tabs.scope = loaded.session.activeConnection
-        applyScope()
+        publishTabs()
+        let active = allTabs.first { $0.id == loaded.session.activeID } ?? allTabs.first
+        tabs.activeID = active?.id
+        if let active {
+            load(active)
+        } else {
+            showEmptyEditor()
+        }
+        updateWelcomeState()
         refreshConnections()
+        refreshSavedList()
     }
 
     /// One-shot, cancelled and re-armed on every edit — the same discipline as
@@ -902,10 +888,9 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     }
 
     private func persistSession() {
-        rememberActive()
         store.saveSession(
             EditorSession(
-                order: allTabs.map(\.id), activeByConnection: activeByScope,
+                order: allTabs.map(\.id), activeID: tabs.activeID,
                 activeConnection: tabs.scope))
     }
 

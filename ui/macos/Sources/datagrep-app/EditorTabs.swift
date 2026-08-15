@@ -181,6 +181,20 @@ private struct EditorTabChip: View {
                 .foregroundStyle(isActive ? Color.primary : Color.secondary)
                 .lineLimit(1)
 
+            // Which connection this editor runs against — the whole point of the
+            // unified bar is that tabs for different databases sit side by side,
+            // so two "Untitled 1" on different connections must be told apart.
+            if let conn = tab.connection, !conn.isEmpty {
+                Text(conn)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(
+                        Capsule().fill(Color(nsColor: .quaternaryLabelColor).opacity(0.5)))
+            }
+
             // The unsaved dot keeps its own slot instead of sharing the close
             // button's — sharing meant it vanished the instant the pointer
             // touched the tab, i.e. exactly when you look to check for edits.
@@ -256,18 +270,19 @@ struct EditorWelcomeState: View {
                 .foregroundStyle(.tertiary)
 
             VStack(spacing: 3) {
-                Text(model.scope.map { "No editor open for \($0)" } ?? "No editor open")
+                Text("No editor open")
                     .font(.callout.weight(.medium))
                 Text(
-                    model.scope == nil
-                        ? "Editors belong to a connection. Add one, or pick one in the sidebar, and its editors appear here."
-                        : "Editors belong to a connection, so this one keeps its own. ⌘T opens a new editor for it."
+                    model.scope.map {
+                        "⌘T opens a new SQL editor for \($0). Every editor you open stays in the tab bar, whatever connection it targets."
+                    }
+                        ?? "Add a connection, or pick one in the sidebar, then ⌘T opens an editor. Every editor stays in the tab bar, whatever connection it targets."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 420)
+                .frame(maxWidth: 440)
             }
 
             HStack(spacing: 8) {
