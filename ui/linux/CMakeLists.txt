@@ -75,6 +75,10 @@ set_target_properties(datagrep_ffi PROPERTIES
 #     * z (libz)   — flate2, via the Mongo/Elasticsearch HTTP stacks.
 # ---------------------------------------------------------------------------
 find_package(Threads REQUIRED)
+# The Rust archive pulls in flate2, whose miniz_oxide/zlib path references
+# libz (inflateEnd, ...). A static archive does not carry that, so the final
+# link needs -lz explicitly, or ld reports "DSO missing from command line".
+find_package(ZLIB REQUIRED)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(DBUS REQUIRED dbus-1)
@@ -116,6 +120,7 @@ target_link_libraries(datagrep PRIVATE
     Threads::Threads      # pthread
     ${CMAKE_DL_LIBS}      # dl
     m                     # libm
+    ZLIB::ZLIB            # libz (flate2 in the Rust archive)
     ${DBUS_LIBRARIES}     # dbus-1 (keyring Secret Service)
 )
 

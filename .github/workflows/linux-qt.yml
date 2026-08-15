@@ -60,6 +60,7 @@ jobs:
             cmake ninja-build g++ pkg-config \
             qt6-base-dev qt6-base-dev-tools \
             libgl1-mesa-dev \
+            zlib1g-dev \
             libdbus-1-dev
 
       - name: Install Rust (stable)
