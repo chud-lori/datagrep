@@ -112,20 +112,23 @@ struct EditorTabBar: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                // No gap between tabs: they abut like real window tabs, divided
-                // by a hairline, not floated as separate rounded chips.
-                HStack(spacing: 0) {
-                    ForEach(model.tabs) { tab in
-                        EditorTabChip(
-                            tab: tab,
-                            driver: model.driver(for: tab.connection ?? model.scope),
-                            isActive: tab.id == model.activeID,
-                            activate: { model.onActivate?(tab) },
-                            close: { model.onClose?(tab) })
-                    }
+            // No ScrollView: a horizontal SwiftUI ScrollView arbitrates every
+            // press as a possible scroll-drag, which wedged the tab Buttons after
+            // the first switch (they stopped registering). A plain HStack keeps
+            // the tabs reliably clickable; they abut like real window tabs,
+            // divided by a hairline. Many tabs compress rather than scroll — a
+            // dedicated overflow affordance can come later if it is ever needed.
+            HStack(spacing: 0) {
+                ForEach(model.tabs) { tab in
+                    EditorTabChip(
+                        tab: tab,
+                        driver: model.driver(for: tab.connection ?? model.scope),
+                        isActive: tab.id == model.activeID,
+                        activate: { model.onActivate?(tab) },
+                        close: { model.onClose?(tab) })
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             // Closing a named tab keeps its .sql on disk, so there has to be a
             // way back to it. This is that way.

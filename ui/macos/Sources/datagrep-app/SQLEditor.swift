@@ -168,6 +168,16 @@ final class EditorContainerView: NSView {
     }
 }
 
+/// Hosts the tab bar. Tabs behave like window chrome (Safari's and Xcode's tabs
+/// both do this): the click that brings the window forward also lands on the
+/// tab, so switching tabs from an unfocused window is one click, not two. A
+/// plain `NSHostingView` refuses first mouse, which made the first tab click
+/// after app-switching vanish into window activation — indistinguishable, from
+/// the user's side, from the tab being unclickable.
+private final class TabBarHostingView: NSHostingView<EditorTabBar> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 /// Owns the real NSTextView. SwiftUI's `TextEditor` is deliberately NOT used:
 /// this needs syntax highlighting driven off `NSTextStorage`, background
 /// decoration behind the glyphs, and later completion popovers anchored to the
@@ -228,6 +238,21 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     private(set) var didRestoreSession = false
     private var autosaveItem: DispatchWorkItem?
 
+    /// True while `load(_:)` / `showEmptyEditor()` are swapping the document
+    /// under the text view. The swap fires `NSTextViewDidChangeSelection`
+    /// *synchronously from inside the text system's `endEditing`*, at a moment
+    /// when the highlighter is suspended and its block map still describes the
+    /// OUTGOING document. `currentBlock()`, reached from that notification via
+    /// `onSelectionChanged`, then substring'd a stale range out of the new,
+    /// shorter string and threw `NSRangeException` in the middle of the tab
+    /// chip's mouseUp. AppKit's event loop swallows the exception, which
+    /// aborts SwiftUI's in-flight update and leaves its button gesture state
+    /// wedged — the visible symptom was "editor tabs cannot be clicked": the
+    /// first cross-tab switch died silently and every later chip click was
+    /// dead. The delegate callbacks are gated on this flag; `load` delivers
+    /// one clean `onSelectionChanged` itself once the swap is consistent.
+    private var isSwappingDocument = false
+
     // MARK: - view
 
     override func loadView() {
@@ -284,7 +309,7 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
             name: NSView.boundsDidChangeNotification, object: scroll.contentView)
 
         wireTabCommands()
-        tabBarHost = NSHostingView(rootView: EditorTabBar(model: tabs))
+        tabBarHost = TabBarHostingView(rootView: EditorTabBar(model: tabs))
         tabBarHost.translatesAutoresizingMaskIntoConstraints = false
         welcomeHost = NSHostingView(rootView: EditorWelcomeState(model: tabs))
         welcomeHost.translatesAutoresizingMaskIntoConstraints = false
@@ -435,11 +460,13 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     /// Empty the text view — no editor is active (the welcome state covers it).
     private func showEmptyEditor() {
         tabs.activeID = nil
+        isSwappingDocument = true
         highlighter.isSuspended = true
         textView.string = ""
         highlighter.isSuspended = false
         highlighter.documentDidChangeWholesale()
         textView.undoManager?.removeAllActions()
+        isSwappingDocument = false
         onSelectionChanged?()
     }
 
@@ -492,12 +519,21 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         guard ns.length > 0 else { return nil }
         let caret = min(textView.selectedRange().location, ns.length)
 
-        var range = highlighter.blockRange(containing: caret)
+        // Clamp every highlighter range to THIS string. The block map is
+        // rebuilt asynchronously to edits, so a range can momentarily describe
+        // a longer, previous document; a stale range must degrade to a smaller
+        // block, never to an NSRangeException thrown mid-event (which AppKit
+        // swallows, wedging SwiftUI's in-flight click — see
+        // `isSwappingDocument`).
+        func clamped(_ r: NSRange) -> NSRange {
+            NSIntersectionRange(r, NSRange(location: 0, length: ns.length))
+        }
+        var range = clamped(highlighter.blockRange(containing: caret))
         var body = ns.substring(with: range)
         if body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, range.location > 0 {
             // Caret parked in the whitespace after the final `;` — run the
             // statement that just ended, same fallback the old splitter had.
-            range = highlighter.blockRange(containing: range.location - 1)
+            range = clamped(highlighter.blockRange(containing: range.location - 1))
             body = ns.substring(with: range)
         }
         guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
@@ -515,16 +551,70 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     /// Re-reads the profile list. Call after profiles are added or removed.
     func refreshConnections() {
         tabs.connections = profilesProvider?() ?? fallbackConnections()
+        pruneOrphanEditors()
         refreshSavedList()
+    }
+
+    /// Drops from the bar every editor bound to a connection that no longer
+    /// exists. Profiles can disappear without `forgetEditors` ever running —
+    /// removed while the app was not open, or straight out of
+    /// `profiles.sqlite` — and a tab bound to a profile the app cannot resolve
+    /// can never run, draws no engine mark, and crowds the bar with stale
+    /// "Untitled n" chips.
+    ///
+    /// The `.sql`/`.json` pairs stay on disk — same rule as `forgetEditors`: a
+    /// missing connection is not a reason to destroy SQL someone wrote. The
+    /// files re-load on the next launch and are pruned again right here when
+    /// `AppModel.boot()` republishes the profile list, so they never resurface.
+    ///
+    /// Prunes only against an authoritative, NON-EMPTY profile list: before
+    /// `profilesProvider` is wired (or if the engine failed to boot) there is
+    /// no ground truth, and guessing would throw away valid tabs. Tabs with no
+    /// binding (`connection == nil`) follow the window and are never orphans.
+    private func pruneOrphanEditors() {
+        guard profilesProvider != nil else { return }
+        let known = Set(tabs.connections.map(\.name))
+        guard !known.isEmpty else { return }
+        let orphanIDs = Set(
+            allTabs.compactMap { tab -> String? in
+                guard let c = tab.connection, !c.isEmpty, !known.contains(c) else { return nil }
+                return tab.id
+            })
+        guard !orphanIDs.isEmpty else { return }
+        let losingActive = tabs.activeID.map(orphanIDs.contains) ?? false
+        allTabs.removeAll { orphanIDs.contains($0.id) }
+        if let scope = tabs.scope, !known.contains(scope) { tabs.scope = nil }
+        publishTabs()
+        if losingActive {
+            if let next = tabs.tabs.first {
+                tabs.activeID = next.id
+                load(next)
+            } else {
+                showEmptyEditor()
+            }
+        }
+        updateWelcomeState()
+        persistSession()
     }
 
     /// Closed editors that could be reopened, across every connection — the
     /// unified bar's "+" menu offers them all, not just the selected one's.
+    /// Records bound to a connection that no longer exists are hidden under the
+    /// same rule as `pruneOrphanEditors`, so pruned tabs do not reappear in the
+    /// menu as bare UUID entries.
     private func refreshSavedList() {
         let open = Set(allTabs.map(\.id))
+        let known: Set<String>? =
+            profilesProvider != nil ? Set(tabs.connections.map(\.name)) : nil
         tabs.savedQueries =
             store.allRecords()
             .filter { !open.contains($0.id) }
+            .filter { record in
+                guard let known, !known.isEmpty, let c = record.connection, !c.isEmpty else {
+                    return true
+                }
+                return known.contains(c)
+            }
             .sorted { ($0.name ?? "\u{10FFFF}") < ($1.name ?? "\u{10FFFF}") }
     }
 
@@ -805,6 +895,11 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     }
 
     private func load(_ tab: EditorTab) {
+        // Everything up to the flag reset happens with the delegate callbacks
+        // gated — see `isSwappingDocument`: the text system posts selection
+        // changes synchronously mid-swap, while the highlighter's block map
+        // still describes the outgoing document.
+        isSwappingDocument = true
         // A wholesale replacement carries no incremental information, so the
         // highlighter is told to ignore the edit and re-seed once instead of
         // lexing the new document twice.
@@ -821,6 +916,7 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         // Undo is per-document; carrying a previous tab's edits into this one
         // would let ⌘Z type another tab's text into this buffer.
         textView.undoManager?.removeAllActions()
+        isSwappingDocument = false
 
         updateDecorations()
         onSelectionChanged?()
@@ -940,6 +1036,9 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     // MARK: - NSTextViewDelegate
 
     func textDidChange(_ notification: Notification) {
+        // Mid-swap edits are the controller's own, not the user's — reacting to
+        // them runs `currentBlock()` against a stale highlighter map.
+        guard !isSwappingDocument else { return }
         // Every tab, not just named ones. An untitled scratch tab is the case
         // that actually needs the marker: `close(_:)` deletes its record, so
         // closing it is the one action in the app that destroys typed SQL for
@@ -955,6 +1054,10 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
+        // See `isSwappingDocument`: this fires from INSIDE a document swap,
+        // when the highlighter still maps the outgoing text. `load` posts one
+        // clean `onSelectionChanged` itself once the swap is consistent.
+        guard !isSwappingDocument else { return }
         updateDecorations()
         onSelectionChanged?()
     }
