@@ -171,75 +171,86 @@ private struct EditorTabChip: View {
     @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: 5) {
-            // 12 pt brand mark — square, so anything larger crowds the title.
-            if !driver.isEmpty {
-                EngineIcon(driver, size: 12)
-            }
-            Text(tab.displayTitle)
-                .font(.system(size: 11, weight: isActive ? .semibold : .regular))
-                .foregroundStyle(isActive ? Color.primary : Color.secondary)
-                .lineLimit(1)
-
-            // Which connection this editor runs against — the whole point of the
-            // unified bar is that tabs for different databases sit side by side,
-            // so two "Untitled 1" on different connections must be told apart.
-            if let conn = tab.connection, !conn.isEmpty {
-                Text(conn)
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(.tertiary)
+        // A real Button, not `.onTapGesture`: inside a horizontal ScrollView the
+        // scroll gesture swallows tap gestures on the non-active tabs, so only
+        // the frontmost one activated. A plain Button routes the click reliably,
+        // and the close control is its own nested Button so clicking the × does
+        // not also activate the tab.
+        Button(action: activate) {
+            HStack(spacing: 5) {
+                // 12 pt brand mark — square, so anything larger crowds the title.
+                if !driver.isEmpty {
+                    EngineIcon(driver, size: 12)
+                }
+                Text(tab.displayTitle)
+                    .font(.system(size: 11, weight: isActive ? .semibold : .regular))
+                    .foregroundStyle(isActive ? Color.primary : Color.secondary)
                     .lineLimit(1)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(
-                        Capsule().fill(Color(nsColor: .quaternaryLabelColor).opacity(0.5)))
-            }
 
-            // The unsaved dot keeps its own slot instead of sharing the close
-            // button's — sharing meant it vanished the instant the pointer
-            // touched the tab, i.e. exactly when you look to check for edits.
-            HStack(spacing: 3) {
-                if tab.isDirty {
-                    Circle()
-                        .fill(Color.accentColor)
-                        .frame(width: 6, height: 6)
-                        .help("Unsaved changes")
+                // Which connection this editor runs against — the point of the
+                // unified bar is that tabs for different databases sit side by
+                // side, so two "Untitled 1" on different connections must differ.
+                if let conn = tab.connection, !conn.isEmpty {
+                    Text(conn)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(
+                            Capsule().fill(Color(nsColor: .quaternaryLabelColor).opacity(0.5)))
                 }
-                ZStack {
-                    if hovering {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(.secondary)
-                            .onTapGesture(perform: close)
+
+                // The unsaved dot keeps its own slot instead of sharing the close
+                // button's — sharing meant it vanished the instant the pointer
+                // touched the tab, i.e. exactly when you look to check for edits.
+                HStack(spacing: 3) {
+                    if tab.isDirty {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 6, height: 6)
+                            .help("Unsaved changes")
                     }
+                    ZStack {
+                        if hovering {
+                            Button(action: close) {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Close tab")
+                        }
+                    }
+                    .frame(width: 10, height: 10)
                 }
-                .frame(width: 10, height: 10)
             }
+            .padding(.horizontal, 11)
+            // Fill the whole bar height so tabs read as part of the bar, not
+            // chips floating in it.
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 11)
-        // Fill the whole bar height so tabs read as part of the bar, not chips
-        // floating in it. The active tab takes the editor's own background and
-        // an accent underline — it "connects" to the content below it — while
-        // inactive tabs stay flush with the bar and are split by a hairline.
-        .frame(maxHeight: .infinity)
+        .buttonStyle(.plain)
+        // The active tab takes the editor's own background and an accent underline
+        // — it "connects" to the content below it — while inactive tabs stay flush
+        // with the bar and are split by a hairline.
         .background(isActive ? Color(nsColor: .textBackgroundColor) : Color.clear)
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(isActive ? Color.accentColor : Color.clear)
                 .frame(height: 2)
+                .allowsHitTesting(false)
         }
         .overlay(alignment: .trailing) {
-            // Divider between neighbouring tabs; hidden on the active one so its
-            // fill reads as a single continuous surface.
             if !isActive {
                 Rectangle()
                     .fill(Color(nsColor: .separatorColor))
                     .frame(width: 1)
                     .padding(.vertical, 6)
+                    .allowsHitTesting(false)
             }
         }
-        .contentShape(Rectangle())
-        .onTapGesture(perform: activate)
         .onHover { hovering = $0 }
         .help(tab.name.map { "\($0)  ·  ⌘S saves" } ?? "Unsaved scratch tab — ⌘S names it")
     }
