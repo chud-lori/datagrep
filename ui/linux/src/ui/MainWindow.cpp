@@ -2,17 +2,21 @@
 
 #include "ffi/DatagrepFfi.hpp"
 #include "model/ResultModel.hpp"
+#include "ui/ConnectionDialog.hpp"
 #include "ui/ResultTableView.hpp"
 #include "ui/SchemaTree.hpp"
 #include "ui/SqlEditor.hpp"
+#include "ui/StatusBar.hpp"
 
 #include <QAction>
+#include <QBrush>
+#include <QColor>
 #include <QDir>
-#include <QGuiApplication>
+#include <QFont>
+#include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QLabel>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
@@ -23,6 +27,8 @@
 #include <QToolBar>
 #include <QVBoxLayout>
 #include <QWidget>
+
+#include <optional>
 
 namespace {
 
@@ -35,23 +41,35 @@ QString profilesDbPath() {
     return dir + QStringLiteral("/profiles.db");
 }
 
-QString formatCount(std::uint64_t n) {
-    // Grouped with thin separators for the status bar (the grid gutter stays
-    // ungrouped; this is prose, not a row number).
-    QString s = QString::number(static_cast<qulonglong>(n));
-    int pos = s.size() - 3;
-    while (pos > 0) {
-        s.insert(pos, QLatin1Char(','));
-        pos -= 3;
+// The @limit N block directive parsed from the statement being run. Mirrors
+// DatagrepKit.SQLBlocks.directives: a line that is a `--` comment whose body
+// starts with `@limit`. Used ONLY so the status bar can say "first N rows
+// (@limit)" honestly when a result sits at the limit — it never bounds the query
+// itself (the engine does that).
+std::optional<std::uint64_t> parseLimitDirective(const QString& sql) {
+    const QStringList lines = sql.split(QLatin1Char('\n'));
+    for (const QString& raw : lines) {
+        const QString line = raw.trimmed();
+        if (!line.startsWith(QStringLiteral("--"))) {
+            continue;
+        }
+        const QString body = line.mid(2).trimmed();
+        if (!body.startsWith(QLatin1Char('@'))) {
+            continue;
+        }
+        const QString rest = body.mid(1);
+        const int sp = rest.indexOf(QLatin1Char(' '));
+        const QString key = (sp >= 0 ? rest.left(sp) : rest).toLower();
+        if (key != QStringLiteral("limit") || sp < 0) {
+            continue;
+        }
+        bool ok = false;
+        const qlonglong n = rest.mid(sp + 1).trimmed().toLongLong(&ok);
+        if (ok && n >= 0) {
+            return static_cast<std::uint64_t>(n);
+        }
     }
-    return s;
-}
-
-QString formatElapsed(std::uint64_t ms) {
-    if (ms < 1000) {
-        return QStringLiteral("%1 ms").arg(ms);
-    }
-    return QStringLiteral("%1 s").arg(QString::number(ms / 1000.0, 'f', 2));
+    return std::nullopt;
 }
 
 }  // namespace
@@ -70,11 +88,40 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                                   .arg(QString::fromUtf8(e.what())));
     }
 
-    // --- sidebar: connections over a lazy schema tree ----------------------
+    // --- sidebar: connection list + management over a lazy schema tree ------
     connections_ = new QListWidget(this);
     connections_->setAlternatingRowColors(true);
     connect(connections_, &QListWidget::itemSelectionChanged, this,
             &MainWindow::onConnectionSelected);
+    // Double-clicking a connection edits it, matching the macOS sidebar.
+    connect(connections_, &QListWidget::itemDoubleClicked, this,
+            &MainWindow::onEditConnection);
+
+    addButton_ = new QPushButton(QStringLiteral("Add"), this);
+    editButton_ = new QPushButton(QStringLiteral("Edit"), this);
+    removeButton_ = new QPushButton(QStringLiteral("Remove"), this);
+    editButton_->setEnabled(false);
+    removeButton_->setEnabled(false);
+    connect(addButton_, &QPushButton::clicked, this, &MainWindow::onAddConnection);
+    connect(editButton_, &QPushButton::clicked, this, &MainWindow::onEditConnection);
+    connect(removeButton_, &QPushButton::clicked, this,
+            &MainWindow::onRemoveConnection);
+
+    auto* connButtons = new QWidget(this);
+    auto* connButtonsLayout = new QHBoxLayout(connButtons);
+    connButtonsLayout->setContentsMargins(4, 4, 4, 0);
+    connButtonsLayout->setSpacing(4);
+    connButtonsLayout->addWidget(addButton_);
+    connButtonsLayout->addWidget(editButton_);
+    connButtonsLayout->addWidget(removeButton_);
+    connButtonsLayout->addStretch(1);
+
+    auto* connPane = new QWidget(this);
+    auto* connLayout = new QVBoxLayout(connPane);
+    connLayout->setContentsMargins(0, 0, 0, 0);
+    connLayout->setSpacing(0);
+    connLayout->addWidget(connButtons);
+    connLayout->addWidget(connections_, 1);
 
     schema_ = new SchemaTree(this);
     schema_->setCore(core_.get());
@@ -82,7 +129,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &MainWindow::onSchemaObjectActivated);
 
     auto* sidebar = new QSplitter(Qt::Vertical, this);
-    sidebar->addWidget(connections_);
+    sidebar->addWidget(connPane);
     sidebar->addWidget(schema_);
     sidebar->setStretchFactor(0, 0);
     sidebar->setStretchFactor(1, 1);
@@ -123,23 +170,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     root->setSizes({260, 900});
     setCentralWidget(root);
 
-    // --- status bar: rows / elapsed / state / read-only / cancel -----------
-    rowsLabel_ = new QLabel(this);
-    elapsedLabel_ = new QLabel(this);
-    stateLabel_ = new QLabel(this);
-    readOnlyLabel_ = new QLabel(this);
-    messageLabel_ = new QLabel(this);
-    messageLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    cancelButton_ = new QPushButton(QStringLiteral("Cancel"), this);
-    cancelButton_->setEnabled(false);
-    connect(cancelButton_, &QPushButton::clicked, this, &MainWindow::cancelQuery);
-
-    statusBar()->addWidget(stateLabel_);
-    statusBar()->addWidget(rowsLabel_);
-    statusBar()->addWidget(elapsedLabel_);
-    statusBar()->addWidget(readOnlyLabel_);
-    statusBar()->addWidget(messageLabel_, 1);
-    statusBar()->addPermanentWidget(cancelButton_);
+    // --- status bar --------------------------------------------------------
+    status_ = new StatusBar(this);
+    connect(status_, &StatusBar::cancelRequested, this, &MainWindow::cancelQuery);
+    statusBar()->addWidget(status_, 1);
 
     resize(1200, 760);
     reloadProfiles();
@@ -161,8 +195,8 @@ void MainWindow::reloadProfiles() {
     try {
         json = QString::fromStdString(core_->profilesListJson());
     } catch (const dg::Error& e) {
-        messageLabel_->setText(
-            QStringLiteral("profiles: %1").arg(QString::fromUtf8(e.what())));
+        status_->showMessage(
+            QStringLiteral("profiles: %1").arg(QString::fromUtf8(e.what())), true);
         return;
     }
     const QJsonArray arr = QJsonDocument::fromJson(json.toUtf8()).array();
@@ -170,16 +204,119 @@ void MainWindow::reloadProfiles() {
         const QJsonObject o = v.toObject();
         const QString name = o.value(QStringLiteral("name")).toString();
         const QString driver = o.value(QStringLiteral("driver")).toString();
+        const QString env = o.value(QStringLiteral("env")).toString();
+        const bool readOnly = o.value(QStringLiteral("read_only")).toBool(false);
+
         auto* item = new QListWidgetItem(name, connections_);
-        item->setToolTip(driver);
+
+        // Tooltip carries the facts the row cannot spell out at a glance.
+        QStringList tip;
+        if (!driver.isEmpty()) {
+            tip << driver;
+        }
+        if (!env.isEmpty()) {
+            tip << env;
+        }
+        if (readOnly) {
+            tip << QStringLiteral("read-only");
+        }
+        item->setToolTip(tip.join(QStringLiteral(" · ")));
+
+        // A prod row is tinted so it is unmistakable — the guardrail that keeps a
+        // production connection from looking like any other. Carried by weight
+        // AND colour, never colour alone.
+        if (env == QStringLiteral("prod")) {
+            item->setForeground(QBrush(QColor(0xC0, 0x39, 0x2B)));
+            QFont f = item->font();
+            f.setBold(true);
+            item->setFont(f);
+        }
+        // A read-only profile is italicised, so the badge survives in both themes.
+        if (readOnly) {
+            QFont f = item->font();
+            f.setItalic(true);
+            item->setFont(f);
+        }
     }
 }
 
 void MainWindow::onConnectionSelected() {
     const QString profile = selectedProfile();
-    if (!profile.isEmpty()) {
+    const bool have = !profile.isEmpty();
+    editButton_->setEnabled(have);
+    removeButton_->setEnabled(have);
+    if (have) {
         schema_->showProfile(profile);
     }
+}
+
+void MainWindow::onAddConnection() {
+    if (!core_) {
+        return;
+    }
+    ConnectionDialog* dialog = ConnectionDialog::forNewConnection(core_.get(), this);
+    if (dialog->exec() == QDialog::Accepted) {
+        const QString name = dialog->savedName();
+        reloadProfiles();
+        // Reselect the newly-added connection so queries scope to it immediately.
+        const auto matches = connections_->findItems(name, Qt::MatchExactly);
+        if (!matches.isEmpty()) {
+            connections_->setCurrentItem(matches.first());
+        }
+        status_->showMessage(QStringLiteral("added connection ‘%1’").arg(name));
+    }
+    dialog->deleteLater();
+}
+
+void MainWindow::onEditConnection() {
+    if (!core_) {
+        return;
+    }
+    const QString profile = selectedProfile();
+    if (profile.isEmpty()) {
+        return;
+    }
+    ConnectionDialog* dialog = ConnectionDialog::forEditing(core_.get(), profile, this);
+    if (dialog->exec() == QDialog::Accepted) {
+        const QString name = dialog->savedName();
+        reloadProfiles();
+        const auto matches = connections_->findItems(name, Qt::MatchExactly);
+        if (!matches.isEmpty()) {
+            connections_->setCurrentItem(matches.first());
+        }
+        status_->showMessage(QStringLiteral("saved connection ‘%1’").arg(name));
+    }
+    dialog->deleteLater();
+}
+
+void MainWindow::onRemoveConnection() {
+    if (!core_) {
+        return;
+    }
+    const QString profile = selectedProfile();
+    if (profile.isEmpty()) {
+        return;
+    }
+    QMessageBox box(QMessageBox::Warning, QStringLiteral("Remove connection"),
+                    QStringLiteral("Remove the connection ‘%1’? This cannot be undone.")
+                        .arg(profile),
+                    QMessageBox::Cancel, this);
+    QPushButton* removeButton =
+        box.addButton(QStringLiteral("Remove"), QMessageBox::DestructiveRole);
+    box.setDefaultButton(QMessageBox::Cancel);
+    box.exec();
+    if (box.clickedButton() != removeButton) {
+        return;
+    }
+    try {
+        core_->removeProfile(profile.toStdString());
+    } catch (const dg::Error& e) {
+        status_->showMessage(QString::fromUtf8(e.what()), true);
+        return;
+    }
+    reloadProfiles();
+    schema_->showProfile(QString());  // clear the tree for the gone profile
+    status_->showMessage(QStringLiteral("removed connection ‘%1’").arg(profile));
 }
 
 void MainWindow::runStatement() {
@@ -188,7 +325,7 @@ void MainWindow::runStatement() {
     }
     const QString profile = selectedProfile();
     if (profile.isEmpty()) {
-        messageLabel_->setText(QStringLiteral("Select a connection first."));
+        status_->showMessage(QStringLiteral("Select a connection first."), true);
         return;
     }
     const QString sql = editor_->statementUnderCursor();
@@ -198,17 +335,23 @@ void MainWindow::runStatement() {
     try {
         auto query = std::make_unique<dg::Query>(
             core_->run(profile.toStdString(), sql.toStdString()));
+        // Reset the status bar's per-result honesty state and tell it whether the
+        // statement carried an @limit BEFORE handing the query to the model — the
+        // model reads the first status snapshot synchronously inside setQuery, so
+        // the hint must already be in place for that first tick.
+        status_->beginQuery();
+        status_->setLimitHint(parseLimitDirective(sql));
+        status_->showMessage(QString());
         model_->setQuery(std::move(query));
-        cancelButton_->setEnabled(true);
-        messageLabel_->clear();
     } catch (const dg::Error& e) {
-        messageLabel_->setText(QString::fromUtf8(e.what()));
+        status_->showMessage(QString::fromUtf8(e.what()), true);
     }
 }
 
 void MainWindow::cancelQuery() {
     // The outcome string describes what the SERVER actually did — for engines
-    // that cannot truly cancel it says so. Shown to the user verbatim.
+    // that cannot truly cancel it says so. model_->cancel() owns the
+    // datagrep_query_cancel call and frees its outcome JSON; we only display it.
     const QString outcome = model_->cancel();
     if (!outcome.isEmpty()) {
         // The ABI returns a JSON object; surface its "message" if present, else
@@ -218,65 +361,14 @@ void MainWindow::cancelQuery() {
             doc.isObject()
                 ? doc.object().value(QStringLiteral("message")).toString(outcome)
                 : outcome;
-        messageLabel_->setText(message);
+        status_->showMessage(message);
     } else {
-        messageLabel_->setText(QStringLiteral("Cancellation requested."));
+        status_->showMessage(QStringLiteral("Cancellation requested."));
     }
 }
 
 void MainWindow::onStatusChanged(const dg::QueryStatus& status) {
-    // State chip.
-    QString stateText;
-    switch (status.state) {
-        case dg::QueryState::Streaming: stateText = QStringLiteral("Streaming…"); break;
-        case dg::QueryState::Parked: stateText = QStringLiteral("Parked"); break;
-        case dg::QueryState::Capped: stateText = QStringLiteral("Capped"); break;
-        case dg::QueryState::Done: stateText = QStringLiteral("Done"); break;
-        case dg::QueryState::Cancelled: stateText = QStringLiteral("Cancelled"); break;
-        case dg::QueryState::Failed: stateText = QStringLiteral("Failed"); break;
-    }
-    stateLabel_->setText(stateText);
-
-    // Row count, honest about whether it is final. A capped result must SAY it is
-    // capped — the count is the server's cap, not the table's size.
-    if (status.affectedRows.has_value()) {
-        rowsLabel_->setText(
-            QStringLiteral("%1 affected").arg(formatCount(*status.affectedRows)));
-    } else if (status.capped()) {
-        rowsLabel_->setText(QStringLiteral("first %1 rows (server capped)")
-                                .arg(formatCount(status.rowsLoaded)));
-    } else if (status.streaming()) {
-        rowsLabel_->setText(
-            QStringLiteral("%1 rows so far…").arg(formatCount(status.rowsLoaded)));
-    } else if (status.totalKnown) {
-        rowsLabel_->setText(QStringLiteral("%1 rows").arg(formatCount(status.rowsLoaded)));
-    } else {
-        rowsLabel_->setText(
-            QStringLiteral("%1 rows (partial)").arg(formatCount(status.rowsLoaded)));
-    }
-
-    elapsedLabel_->setText(formatElapsed(status.elapsedMs));
-
-    // Read-only badge — name WHICH protection is in force, never imply server
-    // enforcement that is not there (matching the ABI's honesty contract).
-    if (status.readOnlyEnforcement.isEmpty()) {
-        readOnlyLabel_->clear();
-    } else if (status.readOnlyEnforcement == QStringLiteral("server")) {
-        readOnlyLabel_->setText(status.readOnlyServerConfirmed
-                                    ? QStringLiteral("read-only (server)")
-                                    : QStringLiteral("read-only (server, unconfirmed)"));
-    } else if (status.readOnlyEnforcement == QStringLiteral("client")) {
-        readOnlyLabel_->setText(QStringLiteral("read-only (client only)"));
-    } else {
-        readOnlyLabel_->setText(QStringLiteral("read-only (none)"));
-    }
-
-    if (!status.error.isEmpty()) {
-        messageLabel_->setText(status.error);
-    }
-
-    // The cancel button is live only while there is something to cancel.
-    cancelButton_->setEnabled(status.streaming());
+    status_->updateStatus(status);
 }
 
 void MainWindow::onSchemaObjectActivated(const QString& /*profile*/,

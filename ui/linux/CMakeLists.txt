@@ -88,12 +88,14 @@ add_executable(datagrep
     src/main.cpp
     src/model/QueryStatus.cpp
     src/model/ResultModel.cpp
+    src/ui/ConnectionDialog.cpp
     src/ui/MainWindow.cpp
     src/ui/ResultTableView.cpp
     src/ui/RowNumberHeader.cpp
     src/ui/SchemaTree.cpp
     src/ui/SqlEditor.cpp
     src/ui/SqlHighlighter.cpp
+    src/ui/StatusBar.cpp
 )
 
 target_include_directories(datagrep PRIVATE

@@ -40,12 +40,23 @@ signals:
 private slots:
     void onItemExpanded(QTreeWidgetItem* item);
     void onItemActivated(QTreeWidgetItem* item, int column);
+    // Lazily describes the newly-selected object (columns/indexes/stats) into its
+    // tooltip via datagrep_catalog_describe_json — one object, only when picked,
+    // never on expansion.
+    void onCurrentItemChanged(QTreeWidgetItem* current, QTreeWidgetItem* previous);
 
 private:
-    // Fetches one level of children for `item` (or the roots when item==nullptr)
-    // and populates them. Adds a lazy placeholder under any child that itself has
-    // children, so the expand arrow appears without fetching that level yet.
-    void populateChildren(QTreeWidgetItem* item);
+    // Fetches one level of children UNDER `parent` by enumerating `fetchPath`,
+    // and populates them. Child paths are built on `fetchPath`, so a scan_only
+    // node whose prefix was supplied enumerates fetchPath = node-path + [prefix].
+    // Adds a lazy placeholder under any child that itself has children, so the
+    // expand arrow appears without fetching that level yet.
+    void fetchInto(QTreeWidgetItem* parent, const QStringList& fetchPath);
+
+    // A scan_only node refuses to enumerate without a prefix (the one rule that
+    // stops the app firing KEYS * at a 40 GB keyspace). Prompts for a prefix and,
+    // if given, enumerates node-path + [prefix] under the node.
+    void promptScan(QTreeWidgetItem* node);
 
     static QString encodePath(const QStringList& segments);
 

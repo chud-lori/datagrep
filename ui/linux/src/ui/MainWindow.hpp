@@ -21,8 +21,8 @@ class ResultModel;
 class ResultTableView;
 class SqlEditor;
 class SchemaTree;
+class StatusBar;
 class QListWidget;
-class QLabel;
 class QPushButton;
 
 class MainWindow : public QMainWindow {
@@ -35,6 +35,9 @@ public:
 private slots:
     void reloadProfiles();
     void onConnectionSelected();
+    void onAddConnection();
+    void onEditConnection();
+    void onRemoveConnection();
     void runStatement();
     void cancelQuery();
     void onStatusChanged(const dg::QueryStatus& status);
@@ -46,18 +49,14 @@ private:
     std::unique_ptr<dg::Core> core_;
 
     QListWidget* connections_;
+    QPushButton* addButton_;
+    QPushButton* editButton_;
+    QPushButton* removeButton_;
     SchemaTree* schema_;
     SqlEditor* editor_;
     ResultTableView* grid_;
     ResultModel* model_;
-
-    // Status bar widgets.
-    QLabel* rowsLabel_;
-    QLabel* elapsedLabel_;
-    QLabel* stateLabel_;
-    QLabel* readOnlyLabel_;
-    QLabel* messageLabel_;
-    QPushButton* cancelButton_;
+    StatusBar* status_;
 };
 
 #endif  // DATAGREP_MAIN_WINDOW_HPP
