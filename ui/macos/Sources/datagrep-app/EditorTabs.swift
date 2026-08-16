@@ -112,20 +112,23 @@ struct EditorTabBar: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                // No gap between tabs: they abut like real window tabs, divided
-                // by a hairline, not floated as separate rounded chips.
-                HStack(spacing: 0) {
-                    ForEach(model.tabs) { tab in
-                        EditorTabChip(
-                            tab: tab,
-                            driver: model.driver(for: tab.connection ?? model.scope),
-                            isActive: tab.id == model.activeID,
-                            activate: { model.onActivate?(tab) },
-                            close: { model.onClose?(tab) })
-                    }
+            // No ScrollView: a horizontal SwiftUI ScrollView arbitrates every
+            // press as a possible scroll-drag, which wedged the tab Buttons after
+            // the first switch (they stopped registering). A plain HStack keeps
+            // the tabs reliably clickable; they abut like real window tabs,
+            // divided by a hairline. Many tabs compress rather than scroll — a
+            // dedicated overflow affordance can come later if it is ever needed.
+            HStack(spacing: 0) {
+                ForEach(model.tabs) { tab in
+                    EditorTabChip(
+                        tab: tab,
+                        driver: model.driver(for: tab.connection ?? model.scope),
+                        isActive: tab.id == model.activeID,
+                        activate: { model.onActivate?(tab) },
+                        close: { model.onClose?(tab) })
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             // Closing a named tab keeps its .sql on disk, so there has to be a
             // way back to it. This is that way.
@@ -171,61 +174,86 @@ private struct EditorTabChip: View {
     @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: 5) {
-            // 12 pt brand mark — square, so anything larger crowds the title.
-            if !driver.isEmpty {
-                EngineIcon(driver, size: 12)
-            }
-            Text(tab.displayTitle)
-                .font(.system(size: 11, weight: isActive ? .semibold : .regular))
-                .foregroundStyle(isActive ? Color.primary : Color.secondary)
-                .lineLimit(1)
+        // A real Button, not `.onTapGesture`: inside a horizontal ScrollView the
+        // scroll gesture swallows tap gestures on the non-active tabs, so only
+        // the frontmost one activated. A plain Button routes the click reliably,
+        // and the close control is its own nested Button so clicking the × does
+        // not also activate the tab.
+        Button(action: activate) {
+            HStack(spacing: 5) {
+                // 12 pt brand mark — square, so anything larger crowds the title.
+                if !driver.isEmpty {
+                    EngineIcon(driver, size: 12)
+                }
+                Text(tab.displayTitle)
+                    .font(.system(size: 11, weight: isActive ? .semibold : .regular))
+                    .foregroundStyle(isActive ? Color.primary : Color.secondary)
+                    .lineLimit(1)
 
-            // The unsaved dot keeps its own slot instead of sharing the close
-            // button's — sharing meant it vanished the instant the pointer
-            // touched the tab, i.e. exactly when you look to check for edits.
-            HStack(spacing: 3) {
-                if tab.isDirty {
-                    Circle()
-                        .fill(Color.accentColor)
-                        .frame(width: 6, height: 6)
-                        .help("Unsaved changes")
+                // Which connection this editor runs against — the point of the
+                // unified bar is that tabs for different databases sit side by
+                // side, so two "Untitled 1" on different connections must differ.
+                if let conn = tab.connection, !conn.isEmpty {
+                    Text(conn)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(
+                            Capsule().fill(Color(nsColor: .quaternaryLabelColor).opacity(0.5)))
                 }
-                ZStack {
-                    if hovering {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(.secondary)
-                            .onTapGesture(perform: close)
+
+                // The unsaved dot keeps its own slot instead of sharing the close
+                // button's — sharing meant it vanished the instant the pointer
+                // touched the tab, i.e. exactly when you look to check for edits.
+                HStack(spacing: 3) {
+                    if tab.isDirty {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 6, height: 6)
+                            .help("Unsaved changes")
                     }
+                    ZStack {
+                        if hovering {
+                            Button(action: close) {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Close tab")
+                        }
+                    }
+                    .frame(width: 10, height: 10)
                 }
-                .frame(width: 10, height: 10)
             }
+            .padding(.horizontal, 11)
+            // Fill the whole bar height so tabs read as part of the bar, not
+            // chips floating in it.
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 11)
-        // Fill the whole bar height so tabs read as part of the bar, not chips
-        // floating in it. The active tab takes the editor's own background and
-        // an accent underline — it "connects" to the content below it — while
-        // inactive tabs stay flush with the bar and are split by a hairline.
-        .frame(maxHeight: .infinity)
+        .buttonStyle(.plain)
+        // The active tab takes the editor's own background and an accent underline
+        // — it "connects" to the content below it — while inactive tabs stay flush
+        // with the bar and are split by a hairline.
         .background(isActive ? Color(nsColor: .textBackgroundColor) : Color.clear)
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(isActive ? Color.accentColor : Color.clear)
                 .frame(height: 2)
+                .allowsHitTesting(false)
         }
         .overlay(alignment: .trailing) {
-            // Divider between neighbouring tabs; hidden on the active one so its
-            // fill reads as a single continuous surface.
             if !isActive {
                 Rectangle()
                     .fill(Color(nsColor: .separatorColor))
                     .frame(width: 1)
                     .padding(.vertical, 6)
+                    .allowsHitTesting(false)
             }
         }
-        .contentShape(Rectangle())
-        .onTapGesture(perform: activate)
         .onHover { hovering = $0 }
         .help(tab.name.map { "\($0)  ·  ⌘S saves" } ?? "Unsaved scratch tab — ⌘S names it")
     }
@@ -256,18 +284,19 @@ struct EditorWelcomeState: View {
                 .foregroundStyle(.tertiary)
 
             VStack(spacing: 3) {
-                Text(model.scope.map { "No editor open for \($0)" } ?? "No editor open")
+                Text("No editor open")
                     .font(.callout.weight(.medium))
                 Text(
-                    model.scope == nil
-                        ? "Editors belong to a connection. Add one, or pick one in the sidebar, and its editors appear here."
-                        : "Editors belong to a connection, so this one keeps its own. ⌘T opens a new editor for it."
+                    model.scope.map {
+                        "⌘T opens a new SQL editor for \($0). Every editor you open stays in the tab bar, whatever connection it targets."
+                    }
+                        ?? "Add a connection, or pick one in the sidebar, then ⌘T opens an editor. Every editor stays in the tab bar, whatever connection it targets."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 420)
+                .frame(maxWidth: 440)
             }
 
             HStack(spacing: 8) {

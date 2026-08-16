@@ -63,67 +63,67 @@ public struct SavedQueryRecord: Codable, Sendable, Equatable {
     }
 }
 
-/// Tab order and which tab was frontmost **in each connection**. Separate from
-/// the per-tab sidecars so that rewriting the order (a cheap, frequent event)
-/// never rewrites SQL.
+/// Tab order and which single tab was frontmost. Separate from the per-tab
+/// sidecars so that rewriting the order (a cheap, frequent event) never
+/// rewrites SQL.
 ///
-/// Editors belong to a connection, so "which tab is frontmost" is a question
-/// per connection and not per window: switching from the MySQL connection to
-/// the Postgres one has to bring back the Postgres tab that was open, not
-/// whichever tab happened to be last touched anywhere.
+/// The tab bar shows every open editor at once, whatever connection it targets,
+/// so there is ONE active tab across the whole window — not one per connection.
+/// `activeConnection` records the sidebar selection only, which seeds the
+/// connection a new (⌘T) editor is created for; it does not hide the others.
 ///
-/// `order` stays one global list. A tab's position is a property of the tab,
-/// not of the connection it is currently filed under, so rebinding one does not
-/// shuffle the rest.
+/// `order` is one global list. A tab's position is a property of the tab, not of
+/// the connection it is filed under, so rebinding one does not shuffle the rest.
 public struct EditorSession: Codable, Sendable, Equatable {
     public var order: [String]
-    /// Frontmost tab per connection name. `Self.unbound` is the key for tabs
-    /// that belong to no connection.
-    public var activeByConnection: [String: String]
-    /// The connection whose tabs were showing.
+    /// The single globally-active editor tab. The tab bar shows every editor at
+    /// once (across all connections), so there is ONE active tab — not one per
+    /// connection as an earlier, scoped design kept.
+    public var activeID: String?
+    /// The connection a NEW editor is created for — the sidebar selection. It no
+    /// longer hides the other connections' editors; it only seeds ⌘T.
     public var activeConnection: String?
 
-    /// The key for tabs with no connection — the scope a pre-scoping
-    /// `session.json` restores into, and the one a window with no connection
-    /// selected shows.
+    /// The key for tabs with no connection — kept for decoding an older,
+    /// per-connection `session.json`.
     public static let unbound = ""
 
     public init(
-        order: [String] = [], activeByConnection: [String: String] = [:],
-        activeConnection: String? = nil
+        order: [String] = [], activeID: String? = nil, activeConnection: String? = nil
     ) {
         self.order = order
-        self.activeByConnection = activeByConnection
+        self.activeID = activeID
         self.activeConnection = activeConnection
     }
 
-    /// Hand-rolled so a `session.json` written before tabs were scoped — one
-    /// global `{"order":[…],"activeID":"…"}` — still restores every tab
-    /// instead of being discarded as undecodable. Losing someone's open SQL to
-    /// a schema change is not a trade this store is allowed to make.
+    /// Hand-rolled for backward compatibility: a `session.json` written by the
+    /// oldest (global) build carried `activeID` directly, and the intermediate
+    /// (scoped) build carried `activeByConnection`. Both still restore every tab
+    /// and a sensible active one — losing someone's open SQL to a format change
+    /// is not a trade this store is allowed to make.
     private enum CodingKeys: String, CodingKey {
-        case order, activeByConnection, activeConnection, activeID
+        case order, activeID, activeConnection, activeByConnection
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         order = try c.decodeIfPresent([String].self, forKey: .order) ?? []
-        activeByConnection =
-            try c.decodeIfPresent([String: String].self, forKey: .activeByConnection) ?? [:]
         activeConnection = try c.decodeIfPresent(String.self, forKey: .activeConnection)
-        if activeByConnection.isEmpty,
-            let legacy = try c.decodeIfPresent(String.self, forKey: .activeID)
-        {
-            activeByConnection[Self.unbound] = legacy
+        if let a = try c.decodeIfPresent(String.self, forKey: .activeID) {
+            activeID = a
+        } else {
+            // Scoped format: the active tab was recorded per connection. Take the
+            // one for whichever connection was showing, or any as a fallback.
+            let byConn =
+                try c.decodeIfPresent([String: String].self, forKey: .activeByConnection) ?? [:]
+            activeID = byConn[activeConnection ?? Self.unbound] ?? byConn.values.first
         }
     }
 
-    /// `activeID` is decode-only — it is the shape this store used to write and
-    /// writing it again would keep a second, stale answer alive in the file.
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(order, forKey: .order)
-        try c.encode(activeByConnection, forKey: .activeByConnection)
+        try c.encodeIfPresent(activeID, forKey: .activeID)
         try c.encodeIfPresent(activeConnection, forKey: .activeConnection)
     }
 }
@@ -225,10 +225,10 @@ public final class SavedQueryStore: @unchecked Sendable {
             ordered.append(entry)
         }
 
-        // Drop remembered frontmost tabs that are no longer on disk, so a
-        // scope never restores pointing at a tab that cannot be loaded.
+        // Drop a remembered active tab that is no longer on disk, so the session
+        // never restores pointing at a tab that cannot be loaded.
         var cleaned = session
-        cleaned.activeByConnection = session.activeByConnection.filter { seen.contains($0.value) }
+        if let a = cleaned.activeID, !seen.contains(a) { cleaned.activeID = nil }
         return (ordered, cleaned)
     }
 
