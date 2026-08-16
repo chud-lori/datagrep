@@ -49,6 +49,10 @@ jobs:
       # GL headers Qt6Gui's CMake config insists on even for a widgets app.
       # libdbus-1-dev is a link dependency of the Rust staticlib (keyring's
       # Secret Service backend), named explicitly on the final link line.
+      # libkf6syntaxhighlighting-dev provides KF6::SyntaxHighlighting (the
+      # KSyntaxHighlighting engine + bundled SQL definition and themes) that the
+      # SQL editor uses; without it CMake silently falls back to the built-in
+      # basic highlighter, so this is what exercises the real highlighting path.
       #
       # apt is deliberately NOT cached: these packages install in well under a
       # minute from the runner-local mirror, and apt cache actions are the
@@ -59,6 +63,7 @@ jobs:
           sudo apt-get install -y \
             cmake ninja-build g++ pkg-config \
             qt6-base-dev qt6-base-dev-tools \
+            libkf6syntaxhighlighting-dev \
             libgl1-mesa-dev \
             zlib1g-dev \
             libdbus-1-dev
