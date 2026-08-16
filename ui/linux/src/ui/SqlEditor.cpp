@@ -1,11 +1,22 @@
 #include "SqlEditor.hpp"
 
-#include "SqlHighlighter.hpp"
-
+#include <QEvent>
 #include <QFont>
 #include <QFontDatabase>
 #include <QKeyEvent>
 #include <QVector>
+
+#ifdef HAVE_KSYNTAXHIGHLIGHTING
+#include <QColor>
+#include <QPalette>
+
+#include <KSyntaxHighlighting/Definition>
+#include <KSyntaxHighlighting/Repository>
+#include <KSyntaxHighlighting/SyntaxHighlighter>
+#include <KSyntaxHighlighting/Theme>
+#else
+#include "SqlHighlighter.hpp"
+#endif
 
 namespace {
 
@@ -94,7 +105,61 @@ SqlEditor::SqlEditor(QWidget* parent) : QPlainTextEdit(parent) {
     setTabChangesFocus(false);
     setLineWrapMode(QPlainTextEdit::NoWrap);
     setPlaceholderText(QStringLiteral("SELECT …   (Ctrl+Return to run)"));
+
+#ifdef HAVE_KSYNTAXHIGHLIGHTING
+    // Preferred path: the maintained KSyntaxHighlighting engine. The Repository
+    // owns the bundled syntax definitions and themes; construct the highlighter
+    // against this editor's document and point it at the "SQL" definition.
+    repository_ = new KSyntaxHighlighting::Repository();
+    auto* ksh = new KSyntaxHighlighting::SyntaxHighlighter(document());
+    ksh->setDefinition(repository_->definitionForName(QStringLiteral("SQL")));
+    highlighter_ = ksh;
+    applyTheme();
+#else
+    // Fallback path: the built-in basic highlighter (no external dependency).
     highlighter_ = new SqlHighlighter(document());
+#endif
+}
+
+void SqlEditor::applyTheme() {
+#ifdef HAVE_KSYNTAXHIGHLIGHTING
+    if (repository_ == nullptr || applyingTheme_) {
+        return;
+    }
+    auto* ksh = static_cast<KSyntaxHighlighting::SyntaxHighlighter*>(highlighter_);
+
+    // Pick a bundled theme (light or dark) that matches the current palette, so
+    // the highlight colours agree with the surrounding UI chrome.
+    const KSyntaxHighlighting::Theme theme = repository_->themeForPalette(palette());
+    ksh->setTheme(theme);
+
+    if (theme.isValid()) {
+        // Align the editor's own background / default text colour with the theme
+        // so untokenised text and the caret line read correctly. Guard the
+        // re-entrant PaletteChange this setPalette() triggers.
+        applyingTheme_ = true;
+        QPalette pal = palette();
+        pal.setColor(QPalette::Base,
+                     QColor(theme.editorColor(
+                         KSyntaxHighlighting::Theme::BackgroundColor)));
+        pal.setColor(
+            QPalette::Text,
+            QColor(theme.textColor(KSyntaxHighlighting::Theme::Normal)));
+        setPalette(pal);
+        applyingTheme_ = false;
+    }
+
+    ksh->rehighlight();
+#endif
+}
+
+void SqlEditor::changeEvent(QEvent* event) {
+    QPlainTextEdit::changeEvent(event);
+#ifdef HAVE_KSYNTAXHIGHLIGHTING
+    if (event != nullptr && event->type() == QEvent::PaletteChange) {
+        applyTheme();
+    }
+#endif
 }
 
 QString SqlEditor::allText() const { return toPlainText().trimmed(); }
