@@ -1,0 +1,14 @@
+# Desktop entry for the datagrep Linux Qt UI.
+# Installed to /usr/share/applications by the .deb/.rpm, and embedded into the
+# AppImage by linuxdeploy. Icon=datagrep resolves against the hicolor theme
+# (usr/share/icons/hicolor/{256x256,scalable}/apps/datagrep.{png,svg}).
+[Desktop Entry]
+Type=Application
+Name=datagrep
+GenericName=Database Query Tool
+Comment=Browse schemas and run queries against your databases
+Exec=datagrep
+Icon=datagrep
+Terminal=false
+Categories=Development;Database;
+StartupWMClass=datagrep
