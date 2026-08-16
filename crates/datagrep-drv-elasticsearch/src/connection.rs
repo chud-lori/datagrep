@@ -54,6 +54,15 @@ use crate::value::{serde_to_value, FieldTypes};
 
 /// POST endpoints that only read. Used by the read-only guardrail; a path is a
 /// read if any of these appears as a `/`-delimited segment.
+///
+/// `_mapping` is deliberately absent: `POST /<index>/_mapping` *writes* the
+/// mapping. Reading a mapping is `GET`, which passes as a read on the method
+/// alone.
+///
+/// This table MUST stay in sync with `datagrep-lang`'s `esdsl::READ_ACTIONS`
+/// (the editor-side classifier) until the two are unified into one table in
+/// `datagrep-lang`, per the plan's recommendation
+/// (notes/elasticsearch-plan.md §6, "classify").
 const READ_ONLY_POST_ENDPOINTS: &[&str] = &[
     "_search",
     "_msearch",
@@ -66,9 +75,11 @@ const READ_ONLY_POST_ENDPOINTS: &[&str] = &[
     "_async_search",
     "_terms_enum",
     "_rank_eval",
-    "_mapping",
     "_search_shards",
     "_resolve",
+    "_mget",
+    "_termvectors",
+    "_mtermvectors",
 ];
 
 pub struct EsConnection {
@@ -751,6 +762,35 @@ mod tests {
                 err.to_string().contains("client-side"),
                 "the refusal must admit it is only client-side: {err}"
             );
+        }
+    }
+
+    /// Regression: `_mapping` used to sit in the POST allow-list, so a
+    /// `POST /<index>/_mapping` body — a mapping WRITE — sailed through
+    /// read-only mode. Reading a mapping is `GET`, which needs no allow-list
+    /// entry.
+    #[test]
+    fn post_mapping_is_a_write_and_is_refused_in_read_only_mode() {
+        let req = console("POST /events/_mapping\n{\"properties\":{\"x\":{\"type\":\"keyword\"}}}");
+        assert!(!is_read_request(&req), "POST _mapping writes the mapping");
+        let err = refuse_if_write(&req).unwrap_err();
+        assert!(matches!(err, DbError::Unsupported { .. }));
+        // GET stays a read purely on the method.
+        assert!(is_read_request(&console("GET /events/_mapping")));
+    }
+
+    /// Regression: `_mget`/`_termvectors`/`_mtermvectors` are genuine reads
+    /// (and classified `Read` by `datagrep-lang`'s EsDsl), but were missing
+    /// from the driver allow-list, so read-only mode wrongly refused them.
+    #[test]
+    fn mget_and_termvectors_are_reads_in_read_only_mode() {
+        for text in [
+            "POST /i/_mget\n{\"ids\":[\"1\",\"2\"]}",
+            "POST /i/_termvectors/1",
+            "POST /i/_mtermvectors\n{\"ids\":[\"1\"]}",
+        ] {
+            assert!(is_read_request(&console(text)), "{text} should be a read");
+            assert!(refuse_if_write(&console(text)).is_ok());
         }
     }
 
