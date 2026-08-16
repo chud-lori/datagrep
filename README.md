@@ -8,7 +8,8 @@
 
 Postgres, MySQL, SQLite, Redis, MongoDB and Elasticsearch — SQL and documents as
 equals, not one bolted onto the other. A native macOS app and a CLI, both over
-one Rust engine. No Electron, no JVM.
+one Rust engine. No Electron, no JVM. A native Linux app (Qt6/C++) over the same
+engine is in progress — see [`ui/linux`](ui/linux/).
 
 [![release](https://img.shields.io/github/v/release/chud-lori/datagrep?color=2E7D4F&label=release)](https://github.com/chud-lori/datagrep/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/chud-lori/datagrep/ci.yml?branch=main&label=CI)](https://github.com/chud-lori/datagrep/actions/workflows/ci.yml)
@@ -137,6 +138,7 @@ The first removes the CLI from `~/.local/bin`; the second removes
 ```
 ▶ cargo build --release                  # engine + CLI  → target/release/datagrep
 ▶ cd ui/macos && ./build-app.sh          # macOS app     → ui/macos/datagrep.app
+▶ cd ui/linux && cmake -S . -B build && cmake --build build   # Linux app (Qt6, in progress)
 ```
 
 > [!TIP]
