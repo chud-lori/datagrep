@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="datagrep">
+  <rect width="1024" height="1024" rx="228" fill="#262A31"/>
+
+  <!-- Rows of data. Widths are deliberately unequal: equal-length bars read as
+       an equals sign rather than a table. -->
+  <g fill="#E6E8EB">
+    <rect x="148" y="300" width="520" height="88" rx="44"/>
+    <rect x="148" y="548" width="440" height="88" rx="44"/>
+    <rect x="148" y="672" width="260" height="88" rx="44"/>
+  </g>
+
+  <!-- The row grep matched. Kept clear of the lens so it is never obscured —
+       this single bar carries the whole idea. -->
+  <rect x="148" y="424" width="320" height="88" rx="44" fill="#5C9E6B"/>
+
+  <!-- Halo in the tile colour: the gap that makes the lens read as sitting on
+       top of the rows. Without it the glass and the bars fuse at small sizes. -->
+  <circle cx="720" cy="620" r="182" fill="#262A31"/>
+
+  <g fill="none" stroke="#E6E8EB" stroke-width="52" stroke-linecap="round">
+    <circle cx="720" cy="620" r="130"/>
+    <line x1="814" y1="714" x2="884" y2="784"/>
+  </g>
+</svg>

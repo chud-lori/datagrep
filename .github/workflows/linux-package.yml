@@ -1,0 +1,106 @@
+name: Linux packages
+
+# Packages the Linux Qt UI into .deb, .rpm and AppImage artifacts.
+#
+# Deliberately NOT on every push — compile verification of ui/linux is
+# linux-qt.yml's job. This workflow runs on release tags and on demand, builds
+# the same thing that workflow builds (Rust FFI archive, then the CMake app),
+# and then packages the resulting binary:
+#   * .deb / .rpm  via fpm from a staged FHS tree   (packaging/build-packages.sh)
+#   * AppImage     via linuxdeploy + the qt plugin  (packaging/build-appimage.sh)
+#
+# The packaging scripts are the single source of truth; run them locally the
+# same way (see packaging/README.md).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: linux-package-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: package (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Build deps mirror linux-qt.yml (same build), plus packaging tools:
+      # ruby/ruby-dev to gem-install fpm, rpm for its rpmbuild backend, and
+      # desktop-file-utils to validate the .desktop entry.
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build g++ pkg-config \
+            qt6-base-dev qt6-base-dev-tools \
+            libgl1-mesa-dev \
+            zlib1g-dev \
+            libdbus-1-dev \
+            ruby ruby-dev rpm \
+            desktop-file-utils
+
+      - name: Install fpm
+        run: sudo gem install --no-document fpm
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build FFI static library
+        run: cargo build -p datagrep-ffi --release
+
+      - name: Configure UI (CMake)
+        run: >
+          cmake -S ui/linux -B ui/linux/build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DDATAGREP_BUILD_RUST=OFF
+
+      - name: Build UI
+        run: cmake --build ui/linux/build
+
+      - name: Validate desktop entry
+        run: desktop-file-validate packaging/datagrep.desktop
+
+      - name: Build .deb and .rpm
+        run: bash packaging/build-packages.sh
+
+      - name: Build AppImage
+        run: bash packaging/build-appimage.sh
+
+      # Honest sanity checks on the produced artifacts (metadata + contents),
+      # so a malformed package fails the job instead of shipping.
+      - name: Inspect packages
+        run: |
+          set -x
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb
+          rpm -qpi dist/*.rpm
+          rpm -qp --requires dist/*.rpm
+          ls -l dist/
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: datagrep-linux-packages
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.AppImage
+            dist/SHA256SUMS
+          if-no-files-found: error
