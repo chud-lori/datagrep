@@ -903,7 +903,13 @@ fn add_mutation_to_pipe(pipe: &mut redis::Pipeline, m: &Mutation) -> Result<(), 
                 }
             }
         }
-        Mutation::Update { path, key, sets } => {
+        Mutation::Update {
+            path,
+            key,
+            sets,
+            expect,
+        } => {
+            refuse_expect(expect)?;
             if sets.is_empty() {
                 return Err(DbError::Query {
                     code: None,
@@ -924,12 +930,26 @@ fn add_mutation_to_pipe(pipe: &mut redis::Pipeline, m: &Mutation) -> Result<(), 
                 }
             }
         }
-        Mutation::Delete { path, key } => {
+        Mutation::Delete { path, key, expect } => {
+            refuse_expect(expect)?;
             let redis_key = mutation_key(path, key)?;
             pipe.cmd("DEL").arg(&redis_key);
         }
     }
     Ok(())
+}
+
+/// A non-empty `expect` precondition must be honoured or refused, never
+/// dropped — dropping it would turn a guarded write into a clobber. This
+/// driver does not compile preconditions (a `WATCH`-based check-and-set is
+/// not built), so it refuses.
+fn refuse_expect(expect: &[(datagrep_api::FieldPath, Value)]) -> Result<(), DbError> {
+    if expect.is_empty() {
+        return Ok(());
+    }
+    Err(DbError::Unsupported {
+        feature: "conditional mutation (`expect`) — this driver cannot check-and-set".into(),
+    })
 }
 
 /// Each mutation's own Redis reply, taken at face value rather than coerced

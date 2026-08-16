@@ -65,7 +65,10 @@ impl Driver for SqliteDriver {
                 | Caps::EXACT_COUNT_CHEAP
                 | Caps::RANDOM_ACCESS_PAGE
                 | Caps::SCHEMA_DECLARED
-                | Caps::READ_ONLY_SESSION,
+                | Caps::READ_ONLY_SESSION
+                // `handle_mutate` wraps the batch in BEGIN…COMMIT and rolls
+                // back on any failure — all-or-nothing, honestly claimable.
+                | Caps::ATOMIC_BATCH,
             max_statement_bytes: None,
             default_fetch_rows: 2000,
             param_style: ParamStyle::QuestionMark,

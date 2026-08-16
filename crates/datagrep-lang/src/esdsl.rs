@@ -536,9 +536,9 @@ fn highlight(src: &str) -> Vec<Token> {
                     i += 1;
                 }
                 let word = &src[start..i];
-                let kind = if at_line_start && METHODS.iter().any(|m| word.eq_ignore_ascii_case(m)) {
-                    TokenKind::Keyword
-                } else if matches!(word, "true" | "false" | "null") {
+                let is_method =
+                    at_line_start && METHODS.iter().any(|m| word.eq_ignore_ascii_case(m));
+                let kind = if is_method || matches!(word, "true" | "false" | "null") {
                     TokenKind::Keyword
                 } else {
                     TokenKind::Ident
@@ -618,7 +618,10 @@ mod tests {
         let src = "POST _bulk\n{\"index\":{}}\n{\"a\":1}\nGET /i/_search\n{}";
         assert_eq!(
             texts(src),
-            vec!["POST _bulk\n{\"index\":{}}\n{\"a\":1}", "GET /i/_search\n{}"]
+            vec![
+                "POST _bulk\n{\"index\":{}}\n{\"a\":1}",
+                "GET /i/_search\n{}"
+            ]
         );
     }
 
@@ -645,7 +648,8 @@ mod tests {
 
     #[test]
     fn comment_forms_between_requests_are_skipped() {
-        let src = "# a pound comment\nGET /i/_search\n// a slash comment\n/* block */\nDELETE /i/_doc/1";
+        let src =
+            "# a pound comment\nGET /i/_search\n// a slash comment\n/* block */\nDELETE /i/_doc/1";
         assert_eq!(texts(src), vec!["GET /i/_search", "DELETE /i/_doc/1"]);
     }
 

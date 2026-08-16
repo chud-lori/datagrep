@@ -18,7 +18,15 @@ pub enum Shape {
     Table(Arc<RowSchema>),
     /// Heterogeneous documents: Mongo, ES hits, DynamoDB items. `root_hint`
     /// points at the payload root (e.g. `_source`) when the envelope is noise.
-    Documents { root_hint: Option<FieldPath> },
+    Documents {
+        root_hint: Option<FieldPath>,
+        /// Which paths identify a document, relative to the emitted hit (not
+        /// to `root_hint`) — e.g. `_index` + `_id` (+ `_routing`) for ES,
+        /// `_id` for Mongo. The document-shaped mirror of
+        /// [`RowSchema::identity`]: `None` means the stream carries no usable
+        /// identity and is not editable — we never guess what to mutate.
+        identity: Option<Vec<FieldPath>>,
+    },
     /// Key/value pairs: Redis SCAN, HGETALL.
     Pairs { value_kind: ValueKind },
     /// Graph results: Neo4j. Designed in from day one, not retrofitted.

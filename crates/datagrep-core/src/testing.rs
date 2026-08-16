@@ -402,7 +402,10 @@ impl MockCursor {
     pub fn new(plan: MockPlan, counters: Arc<MockCounters>) -> Self {
         let shape = match plan.payload {
             MockPayload::Rows => Shape::Table(Arc::new(mock_row_schema())),
-            MockPayload::Docs => Shape::Documents { root_hint: None },
+            MockPayload::Docs => Shape::Documents {
+                root_hint: None,
+                identity: None,
+            },
             MockPayload::Ack { affected } => Shape::Ack {
                 affected,
                 message: None,

@@ -49,7 +49,13 @@ use crate::error::map_redis_error;
 /// `KEY_ENUMERATION` is intentionally *not* included in this constant: it
 /// depends on a post-handshake `DBSIZE` probe and is added by
 /// [`RedisConnection::capabilities`], never here.
-pub const REDIS_CAPS: Caps = Caps::EDITABLE_RESULTS.union(Caps::EXPRESSION_FILTER);
+/// `ATOMIC_BATCH`: `execute_mutate` sends the whole batch as one
+/// `MULTI`/`EXEC` pipeline (`pipe.atomic()`), so a `MutationBatch` really is
+/// all-or-nothing — distinct from `TRANSACTIONS`, which stays off because
+/// Redis has no interactive `begin`.
+pub const REDIS_CAPS: Caps = Caps::EDITABLE_RESULTS
+    .union(Caps::EXPRESSION_FILTER)
+    .union(Caps::ATOMIC_BATCH);
 
 /// Baseline (pre-handshake) capabilities. `KEY_ENUMERATION` is optimistically
 /// set here — before connecting there is no `DBSIZE` to probe — and is the

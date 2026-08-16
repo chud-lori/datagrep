@@ -60,7 +60,13 @@ impl MongoCursor {
     pub fn plain(cursor: mongodb::Cursor<BsonDocument>, resume: ResumeStrategy) -> Self {
         Self {
             inner: Some(Inner::Plain(cursor)),
-            shape: Shape::Documents { root_hint: None },
+            shape: Shape::Documents {
+                root_hint: None,
+                // Mongo documents do carry `_id`, but declaring it here waits
+                // for the write path to consume it — `None` keeps the stream
+                // truthfully non-editable for now.
+                identity: None,
+            },
             resume,
             seen_fields: HashSet::new(),
             last_id: None,
@@ -75,7 +81,13 @@ impl MongoCursor {
     ) -> Self {
         Self {
             inner: Some(Inner::Session { cursor, session }),
-            shape: Shape::Documents { root_hint: None },
+            shape: Shape::Documents {
+                root_hint: None,
+                // Mongo documents do carry `_id`, but declaring it here waits
+                // for the write path to consume it — `None` keeps the stream
+                // truthfully non-editable for now.
+                identity: None,
+            },
             resume,
             seen_fields: HashSet::new(),
             last_id: None,
@@ -238,7 +250,13 @@ pub struct DocsCursor {
 impl DocsCursor {
     pub fn new(docs: Vec<Value>) -> Self {
         Self {
-            shape: Shape::Documents { root_hint: None },
+            shape: Shape::Documents {
+                root_hint: None,
+                // Mongo documents do carry `_id`, but declaring it here waits
+                // for the write path to consume it — `None` keeps the stream
+                // truthfully non-editable for now.
+                identity: None,
+            },
             docs,
             done: false,
         }

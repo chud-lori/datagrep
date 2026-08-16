@@ -42,6 +42,11 @@ bitflags! {
         /// The driver can compile a `Predicate` at all; false greys out the
         /// filter box rather than erroring at run time.
         const EXPRESSION_FILTER = 1 << 16;
+        /// A `MutationBatch` applies all-or-nothing (a real transaction or an
+        /// atomic pipeline). Off means a failing batch can leave a prefix
+        /// applied — the commit UI must say so *before* the click. Distinct
+        /// from `TRANSACTIONS`, which is about interactive `begin`.
+        const ATOMIC_BATCH      = 1 << 17;
     }
 }
 

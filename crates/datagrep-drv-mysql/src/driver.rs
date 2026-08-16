@@ -42,7 +42,10 @@ pub const MYSQL_BASE_CAPS: Caps = Caps::TRANSACTIONS
     .union(Caps::MULTI_STATEMENT)
     .union(Caps::POSITIONAL_PARAMS)
     .union(Caps::EXPORT_STREAMING)
-    .union(Caps::EXPRESSION_FILTER);
+    .union(Caps::EXPRESSION_FILTER)
+    // `execute_mutate` wraps the batch in an explicit transaction and rolls
+    // back on any failure — all-or-nothing, honestly claimable.
+    .union(Caps::ATOMIC_BATCH);
 
 /// Does this server version support a real "execute and report timings"
 /// EXPLAIN? MySQL grew `EXPLAIN ANALYZE` in 8.0.18; MariaDB has had

@@ -198,7 +198,13 @@ impl MongoTransaction {
                     .map_err(map_mongo_error)?;
                 Ok(1)
             }
-            Mutation::Update { path, key, sets } => {
+            Mutation::Update {
+                path,
+                key,
+                sets,
+                expect,
+            } => {
+                crate::connection::refuse_expect(expect)?;
                 let (db, coll_name) = resolve_object_path(&self.default_database, path)?;
                 let coll = self.collection(&db, &coll_name);
                 let id_filter = id_filter(key)?;
@@ -225,7 +231,8 @@ impl MongoTransaction {
                 }
                 Ok(1)
             }
-            Mutation::Delete { path, key } => {
+            Mutation::Delete { path, key, expect } => {
+                crate::connection::refuse_expect(expect)?;
                 let (db, coll_name) = resolve_object_path(&self.default_database, path)?;
                 let coll = self.collection(&db, &coll_name);
                 let id_filter_doc = id_filter(key)?;

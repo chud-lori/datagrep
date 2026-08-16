@@ -335,6 +335,7 @@ async fn op_mutate_set_hset_del_are_atomic_and_report_native_counts() {
                     FieldPath::field("key"),
                     Value::Str(Arc::from("datagreptest:mut:str")),
                 )],
+                expect: vec![],
             },
             Mutation::Delete {
                 path: ObjectPath::new(vec![Arc::from("0")]),
@@ -342,6 +343,7 @@ async fn op_mutate_set_hset_del_are_atomic_and_report_native_counts() {
                     FieldPath::field("key"),
                     Value::Str(Arc::from("datagreptest:mut:h")),
                 )],
+                expect: vec![],
             },
         ],
     };

@@ -158,9 +158,17 @@ impl SearchCursor {
             types,
             // `root_hint` points the grid at `_source`, so document fields
             // render as top-level columns and the `_index`/`_id`/`_score`
-            // envelope stays available in the detail pane.
+            // envelope stays available in the detail pane. `identity` names
+            // the envelope paths that identify a hit — `_routing` is part of
+            // identity whenever present (a custom-routed index needs it on
+            // every write, or the write lands on the wrong shard).
             shape: Shape::Documents {
                 root_hint: Some(FieldPath::field("_source")),
+                identity: Some(vec![
+                    FieldPath::field("_index"),
+                    FieldPath::field("_id"),
+                    FieldPath::field("_routing"),
+                ]),
             },
             seen_fields: HashSet::new(),
             stats: CursorStats::default(),
@@ -925,7 +933,12 @@ pub struct DocsCursor {
 impl DocsCursor {
     pub fn new(docs: Vec<Value>) -> Self {
         Self {
-            shape: Shape::Documents { root_hint: None },
+            shape: Shape::Documents {
+                root_hint: None,
+                // Console replies / EXPLAIN output are not hits — no identity,
+                // not editable.
+                identity: None,
+            },
             docs,
             notices: Vec::new(),
             done: false,
@@ -1111,7 +1124,10 @@ mod tests {
         };
         assert_eq!(doc.get("_seq_no"), Some(&Value::I64(41)));
         assert_eq!(doc.get("_primary_term"), Some(&Value::I64(3)));
-        assert_eq!(doc.get("_routing"), Some(&Value::Str(Arc::from("tenant-7"))));
+        assert_eq!(
+            doc.get("_routing"),
+            Some(&Value::Str(Arc::from("tenant-7")))
+        );
         // Still no `sort` leaking through — that stays an artifact of paging.
         assert_eq!(doc.get("sort"), None);
     }

@@ -216,6 +216,7 @@ async fn op_mutate_insert_update_delete_round_trip() {
             path: path.clone(),
             key: vec![(FieldPath::field("id"), Value::I64(1))],
             sets: vec![(FieldPath::field("v"), Value::Str(Arc::from("second")))],
+            expect: vec![],
         }],
     })))
     .await
@@ -230,6 +231,7 @@ async fn op_mutate_insert_update_delete_round_trip() {
         mutations: vec![Mutation::Delete {
             path,
             key: vec![(FieldPath::field("id"), Value::I64(1))],
+            expect: vec![],
         }],
     })))
     .await
@@ -280,6 +282,7 @@ async fn named_key_mutation_round_trips_regardless_of_declared_pk_order() {
                 (FieldPath::field("tenant"), Value::I64(2)),
             ],
             sets: vec![(FieldPath::field("v"), Value::Str(Arc::from("updated")))],
+            expect: vec![],
         }],
     })))
     .await
@@ -306,6 +309,7 @@ async fn named_key_mutation_round_trips_regardless_of_declared_pk_order() {
                     (FieldPath::field("tenant"), Value::I64(2)),
                     (FieldPath::field("id"), Value::I64(1)),
                 ],
+                expect: vec![],
             }],
         })))
         .await
@@ -321,6 +325,7 @@ async fn named_key_mutation_round_trips_regardless_of_declared_pk_order() {
             mutations: vec![Mutation::Delete {
                 path: datagrep_api::ObjectPath::new(vec![Arc::from("t")]),
                 key: vec![],
+                expect: vec![],
             }],
         })))
         .await
@@ -329,4 +334,44 @@ async fn named_key_mutation_round_trips_regardless_of_declared_pk_order() {
         Ok(_) => panic!("an empty row identity must be rejected"),
     };
     assert!(err.to_string().contains("row identity"), "got: {err}");
+}
+
+/// A non-empty `expect` precondition is refused, never silently dropped —
+/// this driver cannot check-and-set, and dropping the guard would turn a
+/// conditional write into a clobber.
+#[tokio::test]
+async fn non_empty_expect_is_refused_not_dropped() {
+    let conn = common::connect_memory().await;
+    conn.execute(Request::native(
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)",
+    ))
+    .await
+    .unwrap();
+    conn.execute(Request::native("INSERT INTO t(id, v) VALUES (1, 'a')"))
+        .await
+        .unwrap();
+
+    let err = match conn
+        .execute(Request::Op(Op::Mutate(MutationBatch {
+            mutations: vec![Mutation::Update {
+                path: datagrep_api::ObjectPath::new(vec![Arc::from("t")]),
+                key: vec![(FieldPath::field("id"), Value::I64(1))],
+                sets: vec![(FieldPath::field("v"), Value::Str(Arc::from("b")))],
+                expect: vec![(FieldPath::field("v"), Value::Str(Arc::from("a")))],
+            }],
+        })))
+        .await
+    {
+        Err(err) => err,
+        Ok(_) => panic!("a non-empty `expect` must be rejected, not dropped"),
+    };
+    assert!(
+        matches!(err, datagrep_api::DbError::Unsupported { .. }),
+        "got: {err}"
+    );
+    // And the guarded write must not have been applied.
+    assert_eq!(
+        first_row(&*conn, "SELECT v FROM t WHERE id = 1").await[0],
+        Value::Str(Arc::from("a"))
+    );
 }

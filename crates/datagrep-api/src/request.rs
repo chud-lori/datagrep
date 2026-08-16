@@ -157,6 +157,14 @@ pub enum Mutation {
         /// Row identity: identity fields paired with this row's values.
         key: Vec<(FieldPath, Value)>,
         sets: Vec<(FieldPath, Value)>,
+        /// Precondition, **not** identity: "only apply if these fields still
+        /// hold these values" (check-and-set). ES compiles this to
+        /// `if_seq_no`/`if_primary_term`; SQL engines can compile it into
+        /// extra `WHERE` conjuncts. A driver that cannot honour a precondition
+        /// MUST reject a non-empty `expect` with [`crate::DbError::Unsupported`]
+        /// — silently dropping it would turn a guarded write into a clobber.
+        #[serde(default)]
+        expect: Vec<(FieldPath, Value)>,
     },
     Insert {
         path: ObjectPath,
@@ -167,6 +175,10 @@ pub enum Mutation {
         path: ObjectPath,
         /// Row identity: identity fields paired with this row's values.
         key: Vec<(FieldPath, Value)>,
+        /// Precondition, same contract as [`Mutation::Update::expect`]:
+        /// non-empty means check-and-set or refuse, never drop.
+        #[serde(default)]
+        expect: Vec<(FieldPath, Value)>,
     },
 }
 
@@ -224,10 +236,12 @@ mod tests {
                         (FieldPath::field("id"), Value::I64(42)),
                     ],
                     sets: vec![(FieldPath::field("name"), Value::Str(Arc::from("amy")))],
+                    expect: vec![(FieldPath::field("version"), Value::I64(9))],
                 },
                 Mutation::Delete {
                     path: ObjectPath::new(vec![Arc::from("app"), Arc::from("users")]),
                     key: vec![(FieldPath::field("id"), Value::I64(43))],
+                    expect: Vec::new(),
                 },
             ],
         });
@@ -242,6 +256,38 @@ mod tests {
         };
         assert_eq!(key[0].0, FieldPath::field("tenant"));
         assert_eq!(key[1].1, Value::I64(42));
+    }
+
+    #[test]
+    fn mutation_without_expect_still_deserializes() {
+        // `expect` is `#[serde(default)]`: a payload serialized before the
+        // field existed (or by a caller that never sets preconditions) must
+        // keep deserializing, as an empty precondition.
+        let mutations = vec![
+            Mutation::Update {
+                path: ObjectPath::new(vec![Arc::from("app"), Arc::from("users")]),
+                key: vec![(FieldPath::field("id"), Value::I64(1))],
+                sets: vec![(FieldPath::field("name"), Value::Str(Arc::from("amy")))],
+                expect: Vec::new(),
+            },
+            Mutation::Delete {
+                path: ObjectPath::new(vec![Arc::from("app"), Arc::from("users")]),
+                key: vec![(FieldPath::field("id"), Value::I64(2))],
+                expect: Vec::new(),
+            },
+        ];
+        for m in mutations {
+            // Build the pre-`expect` wire form by dropping the key outright.
+            let mut json = serde_json::to_value(&m).unwrap();
+            let body = json
+                .as_object_mut()
+                .and_then(|variant| variant.values_mut().next())
+                .and_then(|b| b.as_object_mut())
+                .expect("externally tagged enum body");
+            assert!(body.remove("expect").is_some(), "expect must serialize");
+            let back: Mutation = serde_json::from_value(json).expect("legacy payload");
+            assert_eq!(back, m);
+        }
     }
 
     #[test]

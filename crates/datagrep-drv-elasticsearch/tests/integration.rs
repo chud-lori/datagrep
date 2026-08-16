@@ -225,7 +225,7 @@ async fn streams_100k_documents_in_incremental_batches_with_flat_rss() {
         .expect("open scan");
 
     assert!(
-        matches!(cursor.shape(), Shape::Documents { root_hint: Some(h) } if h.to_string() == "_source"),
+        matches!(cursor.shape(), Shape::Documents { root_hint: Some(h), .. } if h.to_string() == "_source"),
         "the grid must be pointed at _source"
     );
 
