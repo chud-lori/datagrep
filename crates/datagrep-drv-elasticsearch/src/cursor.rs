@@ -289,6 +289,14 @@ impl SearchCursor {
         let map = body.as_object_mut().expect("search body is an object");
         map.insert("size".into(), json!(size));
         map.insert("sort".into(), Json::Array(self.full_sort()));
+        // Ask every hit to carry its `_seq_no`/`_primary_term`. They are the
+        // per-document compare-and-swap guard (`if_seq_no`/`if_primary_term`) a
+        // later mutation needs; without requesting them here there is nothing
+        // to guard a write with. `_routing` rides along in the hit envelope on
+        // its own when the index uses custom routing. Requested unconditionally
+        // because a read cursor cannot know whether the rows it streams will
+        // later be edited, and the cost is two integers per hit.
+        map.insert("seq_no_primary_term".into(), json!(true));
         if let Some(t) = self.spec.timeout {
             // Push the deadline server-side too, so even an uncancellable
             // shard is bounded.
@@ -1085,6 +1093,30 @@ mod tests {
     }
 
     #[test]
+    fn the_cas_guard_and_routing_ride_through_the_hit_envelope() {
+        // With `seq_no_primary_term` requested, a hit carries `_seq_no` and
+        // `_primary_term`; a custom-routed document also carries `_routing`.
+        // All three must survive into the emitted document so a later mutation
+        // can use them as its precondition/identity — the whole point of P0-1.
+        let hit = OrderedJson::parse(
+            r#"{"_index":"events","_id":"abc","_routing":"tenant-7","_score":null,
+                "_seq_no":41,"_primary_term":3,
+                "_source":{"n":7},
+                "sort":[1,2]}"#,
+        )
+        .unwrap();
+        let value = hit_to_value(&hit, &types());
+        let Value::Document(doc) = &value else {
+            panic!("expected a document")
+        };
+        assert_eq!(doc.get("_seq_no"), Some(&Value::I64(41)));
+        assert_eq!(doc.get("_primary_term"), Some(&Value::I64(3)));
+        assert_eq!(doc.get("_routing"), Some(&Value::Str(Arc::from("tenant-7"))));
+        // Still no `sort` leaking through — that stays an artifact of paging.
+        assert_eq!(doc.get("sort"), None);
+    }
+
+    #[test]
     fn a_hit_without_source_still_yields_its_envelope() {
         let value = hit_to_value(
             &OrderedJson::from_serde(&json!({ "_index": "i", "_id": "1" })),
@@ -1294,6 +1326,21 @@ mod tests {
         let mut cursor = offline_cursor(PageMode::Pit);
         cursor.spec.timeout = Some(Duration::from_millis(2500));
         assert_eq!(cursor.page_body(10)["timeout"], json!("2500ms"));
+    }
+
+    #[test]
+    fn every_page_requests_the_seq_no_primary_term_guard() {
+        // Both pagination mechanisms must ask for the per-document CAS guard;
+        // without it a later mutation has no `if_seq_no`/`if_primary_term` to
+        // send and would have to write blind.
+        for mode in [PageMode::Pit, PageMode::Scroll] {
+            let cursor = offline_cursor(mode);
+            assert_eq!(
+                cursor.page_body(10)["seq_no_primary_term"],
+                json!(true),
+                "{mode:?} page must request seq_no_primary_term"
+            );
+        }
     }
 
     #[test]

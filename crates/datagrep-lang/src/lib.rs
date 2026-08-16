@@ -30,6 +30,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod directives;
+pub mod esdsl;
 pub mod mongo;
 pub mod redis;
 pub mod sql;
@@ -150,12 +151,11 @@ pub trait Language: fmt::Debug + Send + Sync {
 /// Registry: the one language impl for a given connection's
 /// `Capabilities::language`.
 ///
-/// `EsDsl`, `Cypher`, and `PartiQl` are members of [`LanguageId`] that this
-/// crate does not yet implement (out of scope for this milestone); they
-/// resolve to a minimal
-/// [`fallback::FallbackLanguage`] rather than making this function partial,
-/// so the registry stays total and no caller has to handle a missing
-/// language.
+/// `Cypher` and `PartiQl` are members of [`LanguageId`] that this crate does
+/// not yet implement (out of scope for this milestone); they resolve to a
+/// minimal [`fallback::FallbackLanguage`] rather than making this function
+/// partial, so the registry stays total and no caller has to handle a missing
+/// language. `EsDsl` is implemented in [`esdsl`].
 pub fn language_for(id: LanguageId) -> &'static dyn Language {
     use datagrep_api::SqlDialect;
 
@@ -174,7 +174,8 @@ pub fn language_for(id: LanguageId) -> &'static dyn Language {
         LanguageId::Sql(SqlDialect::Duckdb) => &sql::POSTGRES,
         LanguageId::MongoShell => &mongo::MONGO,
         LanguageId::RedisCli => &redis::REDIS,
-        LanguageId::EsDsl | LanguageId::Cypher | LanguageId::PartiQl => &fallback::FALLBACK,
+        LanguageId::EsDsl => &esdsl::ES_DSL,
+        LanguageId::Cypher | LanguageId::PartiQl => &fallback::FALLBACK,
     }
 }
 
@@ -190,10 +191,11 @@ pub mod fallback {
 
     impl Language for FallbackLanguage {
         fn id(&self) -> LanguageId {
-            // Arbitrary: this impl is never selected for `Sql`/`MongoShell`/
-            // `RedisCli`, only for the not-yet-implemented variants, and
-            // `id()` is not used to distinguish among those.
-            LanguageId::EsDsl
+            // Arbitrary: this impl is never selected for the implemented
+            // languages, only for the not-yet-implemented variants
+            // (`Cypher`/`PartiQl`), and `id()` is not used to distinguish among
+            // those.
+            LanguageId::Cypher
         }
 
         fn split(&self, src: &str) -> Vec<StatementSpan> {
