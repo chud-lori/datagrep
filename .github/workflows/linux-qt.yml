@@ -63,10 +63,16 @@ jobs:
           sudo apt-get install -y \
             cmake ninja-build g++ pkg-config \
             qt6-base-dev qt6-base-dev-tools \
-            libkf6syntaxhighlighting-dev \
             libgl1-mesa-dev \
             zlib1g-dev \
             libdbus-1-dev
+          # KSyntaxHighlighting is OPTIONAL: CMake finds it with find_package
+          # and otherwise compiles the built-in fallback highlighter. The KF6
+          # dev package is not in every runner image's archive (partial KF6 on
+          # 24.04), so install it best-effort — its absence must not fail the
+          # build, it just exercises the fallback path.
+          sudo apt-get install -y libkf6syntaxhighlighting-dev || \
+            echo "KF6SyntaxHighlighting unavailable — building the fallback highlighter"
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
