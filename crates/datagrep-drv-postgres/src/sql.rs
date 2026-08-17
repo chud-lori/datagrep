@@ -325,7 +325,13 @@ pub fn compile_mutation(m: &datagrep_api::Mutation) -> Result<MutationSql, DbErr
                 params: pb.params,
             })
         }
-        Mutation::Update { path, key, sets } => {
+        Mutation::Update {
+            path,
+            key,
+            sets,
+            expect,
+        } => {
+            refuse_expect(expect)?;
             let table = quote_object_path(path)?;
             if sets.is_empty() {
                 return Err(DbError::Unsupported {
@@ -348,7 +354,8 @@ pub fn compile_mutation(m: &datagrep_api::Mutation) -> Result<MutationSql, DbErr
                 params: pb.params,
             })
         }
-        Mutation::Delete { path, key } => {
+        Mutation::Delete { path, key, expect } => {
+            refuse_expect(expect)?;
             let table = quote_object_path(path)?;
             let where_clause = key_where(key, &mut pb)?;
             let sql = format!("DELETE FROM {table} WHERE {where_clause}");
@@ -358,6 +365,18 @@ pub fn compile_mutation(m: &datagrep_api::Mutation) -> Result<MutationSql, DbErr
             })
         }
     }
+}
+
+/// A non-empty `expect` precondition must be honoured or refused, never
+/// dropped — dropping it would turn a guarded write into a clobber. This
+/// driver does not compile preconditions yet, so it refuses.
+fn refuse_expect(expect: &[(FieldPath, Value)]) -> Result<(), DbError> {
+    if expect.is_empty() {
+        return Ok(());
+    }
+    Err(DbError::Unsupported {
+        feature: "conditional mutation (`expect`) — this driver cannot check-and-set".into(),
+    })
 }
 
 /// The named row identity as `"col" = $n AND …`. An empty key is refused —
@@ -506,5 +525,31 @@ mod tests {
             assert_eq!(sql, "SELECT * FROM \"t\"");
             assert!(params.is_empty());
         }
+    }
+
+    #[test]
+    fn non_empty_expect_is_refused_not_dropped() {
+        // This driver does not compile `expect` preconditions yet; a caller
+        // asking for check-and-set must get Unsupported, never a plain write.
+        let expect = vec![(FieldPath::field("version"), Value::I64(3))];
+        let update = datagrep_api::Mutation::Update {
+            path: ObjectPath::new(vec![Arc::from("t")]),
+            key: vec![(FieldPath::field("id"), Value::I64(1))],
+            sets: vec![(FieldPath::field("name"), Value::Str(Arc::from("x")))],
+            expect: expect.clone(),
+        };
+        assert!(matches!(
+            compile_mutation(&update),
+            Err(DbError::Unsupported { .. })
+        ));
+        let delete = datagrep_api::Mutation::Delete {
+            path: ObjectPath::new(vec![Arc::from("t")]),
+            key: vec![(FieldPath::field("id"), Value::I64(1))],
+            expect,
+        };
+        assert!(matches!(
+            compile_mutation(&delete),
+            Err(DbError::Unsupported { .. })
+        ));
     }
 }

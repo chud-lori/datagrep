@@ -98,13 +98,21 @@
 //!    splitting, classification and highlighting for `EsDsl` are consequently
 //!    unavailable to the editor.
 //!
-//! # Deliberately not implemented
+//! # Writes: guarded, single-document, non-atomic
 //!
-//! - **Writes.** `Caps::EDITABLE_RESULTS` and `Caps::DDL` are off and
-//!   `Op::Mutate`/`Op::Ddl` are refused. Hits carry a real `_index`/`_id`
-//!   identity so this is a scope decision rather than an engine limitation,
-//!   but a half-built write path with no transaction to roll back into is
-//!   worse than an honest capability flag.
+//! - **`Op::Mutate` generates guarded single-document update/delete.**
+//!   `Caps::EDITABLE_RESULTS` is on. Every generated write carries the
+//!   `if_seq_no`/`if_primary_term` compare-and-swap the scan requested per hit,
+//!   or is refused — a write without the guard is never sent. The batch is
+//!   serial and halt-and-report (Elasticsearch has no multi-document
+//!   transaction, so `Caps::ATOMIC_BATCH` stays off and the first failure stops
+//!   the batch with the applied prefix left written). See [`mutate`] and
+//!   [`connection::EsConnection`]'s mutate path.
+//! - **Inserts, `_bulk`, field-removal and DDL are not generated yet.**
+//!   `Op::Ddl` is refused (`Caps::DDL` is off — index/mapping management is a
+//!   native `PUT /<index>` request, not SQL DDL), inserts and multi-document
+//!   `_bulk` batching are P1, and an `Absent` in `sets` (field removal) is
+//!   refused rather than turned into a `null`.
 //! - **Date and geo-point mapping.** An Elasticsearch `date` arrives as either
 //!   epoch millis or one of many configurable formats; parsing those without a
 //!   date library would mean guessing at a `Value::Timestamp`, and a wrong
@@ -147,6 +155,7 @@ pub mod error;
 pub mod filter;
 pub mod http;
 pub mod json;
+pub mod mutate;
 pub mod resume;
 pub mod value;
 

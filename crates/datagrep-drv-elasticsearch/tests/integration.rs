@@ -41,9 +41,10 @@ fn unique_index(label: &str) -> String {
     format!("datagrep_es_test_{label}_{nanos}_{n}")
 }
 
-/// A bare HTTP client for *seeding* only. The driver deliberately refuses to
-/// generate writes (`EDITABLE_RESULTS` and `DDL` are off), so fixtures are set
-/// up out of band rather than through the seam under test.
+/// A bare HTTP client for *seeding* only. Fixtures are set up out of band —
+/// the driver now generates guarded single-document `Op::Mutate` writes, but a
+/// read test must not depend on the write path it is not exercising, and bulk
+/// seeding is not something the (deliberately non-`_bulk`) write path does.
 fn seeder() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
@@ -225,7 +226,7 @@ async fn streams_100k_documents_in_incremental_batches_with_flat_rss() {
         .expect("open scan");
 
     assert!(
-        matches!(cursor.shape(), Shape::Documents { root_hint: Some(h) } if h.to_string() == "_source"),
+        matches!(cursor.shape(), Shape::Documents { root_hint: Some(h), .. } if h.to_string() == "_source"),
         "the grid must be pointed at _source"
     );
 

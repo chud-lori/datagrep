@@ -12,7 +12,8 @@
 //! | `Op::Count { exact: false }` | `_search?size=0`, whose `hits.total` is a **lower bound** |
 //! | `Op::Explain { analyze: false }` | `_validate/query?explain&rewrite` — the plan without running it |
 //! | `Op::Explain { analyze: true }` | `_search` with `"profile": true` — real per-shard timings |
-//! | `Op::Mutate` / `Op::Ddl` | refused: `EDITABLE_RESULTS` and `DDL` are both off |
+//! | `Op::Mutate` | guarded, serial, halt-and-report single-document `_update`/`_doc` writes (`EDITABLE_RESULTS` is on; `ATOMIC_BATCH` is off — no transaction) |
+//! | `Op::Ddl` | refused: `DDL` is off (index/mapping management is a native `PUT /<index>` request, not SQL DDL) |
 //!
 //! # Read-only enforcement is `Client`, and says so
 //!
@@ -25,9 +26,10 @@
 //! genuinely server-side control, but it applies to *every* client on the
 //! cluster, so setting it from a data browser would be indefensible.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value as Json};
@@ -40,7 +42,7 @@ use datagrep_api::driver::{
     TxOpts,
 };
 use datagrep_api::error::DbError;
-use datagrep_api::request::{ExecOpts, Op, Request};
+use datagrep_api::request::{ExecOpts, MutationBatch, Op, Request};
 use datagrep_api::shape::ObjectPath;
 use datagrep_api::value::Value;
 
@@ -50,10 +52,23 @@ use crate::console::{self, ConsoleRequest};
 use crate::cursor::{AckCursor, DocsCursor, ScanSpec, SearchCursor, DEFAULT_KEEP_ALIVE};
 use crate::filter::{compile_predicate, compile_sort};
 use crate::http::{EsHttp, Method, PageMode, Product};
+use crate::mutate::{
+    batch_report, compile_mutation, guard_unsupported_reason, supports_include_source_on_error,
+    CompiledWrite, WriteOutcome,
+};
 use crate::value::{serde_to_value, FieldTypes};
 
 /// POST endpoints that only read. Used by the read-only guardrail; a path is a
 /// read if any of these appears as a `/`-delimited segment.
+///
+/// `_mapping` is deliberately absent: `POST /<index>/_mapping` *writes* the
+/// mapping. Reading a mapping is `GET`, which passes as a read on the method
+/// alone.
+///
+/// This table MUST stay in sync with `datagrep-lang`'s `esdsl::READ_ACTIONS`
+/// (the editor-side classifier) until the two are unified into one table in
+/// `datagrep-lang`, per the plan's recommendation
+/// (notes/elasticsearch-plan.md §6, "classify").
 const READ_ONLY_POST_ENDPOINTS: &[&str] = &[
     "_search",
     "_msearch",
@@ -66,9 +81,11 @@ const READ_ONLY_POST_ENDPOINTS: &[&str] = &[
     "_async_search",
     "_terms_enum",
     "_rank_eval",
-    "_mapping",
     "_search_shards",
     "_resolve",
+    "_mget",
+    "_termvectors",
+    "_mtermvectors",
 ];
 
 pub struct EsConnection {
@@ -509,6 +526,154 @@ impl EsConnection {
         )])))
     }
 
+    /// `Op::Mutate` — guarded, serial, halt-and-report single-document writes.
+    ///
+    /// The whole batch is compiled *before* a single write leaves the process
+    /// (a refused mutation therefore touches no document), the target indices
+    /// are checked for the TSDB sentinel-`_seq_no` hazard up front, and the
+    /// compiled writes are then issued one at a time. The first failure halts:
+    /// Elasticsearch has no transaction, so the applied prefix stays written
+    /// and the rest is deliberately never sent. See [`crate::mutate`] for the
+    /// model and the per-operation rules.
+    async fn execute_mutate(
+        &self,
+        batch: &MutationBatch,
+        opts: &ExecOpts,
+    ) -> Result<Box<dyn Cursor>, DbError> {
+        // Read-only mode refuses generated writes before anything is compiled
+        // or sent — the same client-side guarantee `execute_native` gives the
+        // console path. Elasticsearch has no server-side read-only session, so
+        // this is our enforcement (`Enforcement::Client`) and says so.
+        if self.read_only_active(opts) {
+            return Err(DbError::Unsupported {
+                feature: "generated writes: this connection is in read-only mode (enforced \
+                          client-side — Elasticsearch has no read-only session)"
+                    .into(),
+            });
+        }
+        if batch.mutations.is_empty() {
+            return Ok(Box::new(AckCursor::new(
+                Some(0),
+                Some(Arc::from("no mutations")),
+            )));
+        }
+
+        // Pre-flight: compile every mutation before anything is sent. A compile
+        // refusal (guard absent, an `Absent` set, an array-element edit, a
+        // sentinel guard, an unwritable envelope field) refuses the whole batch
+        // with the reason, having touched nothing.
+        let include_source_on_error = supports_include_source_on_error(
+            product_of(&self.server_info),
+            &self.server_info.version,
+        );
+        let writes: Vec<CompiledWrite> = batch
+            .mutations
+            .iter()
+            .map(|m| compile_mutation(m, include_source_on_error))
+            .collect::<Result<_, _>>()?;
+
+        // TSDB hazard (plan §3.2.3, the sharpest one): a time-series-mode index
+        // on ES >= 9.4 returns *sentinel* `_seq_no` values and rejects (or, for
+        // by-query ops, silently ignores) an `if_seq_no` guard. Index mode is a
+        // capability question that belongs in the per-index catalog, but the
+        // catalog does not carry it today — so the least-hacky truthful option
+        // is to read the target index's settings once, up front, and refuse the
+        // whole batch with the reason rather than discover it as a per-document
+        // 400. This is best-effort by design: see `refuse_tsdb_indices`.
+        self.refuse_tsdb_indices(&writes, opts.timeout).await?;
+
+        // Serial, halt-and-report: issue each write in order, stopping at the
+        // first failure. `outcomes` ends up as long as `writes` when everything
+        // applied, or exactly one longer than the applied prefix on a halt —
+        // everything after the failure is deliberately never sent.
+        let mut outcomes = Vec::with_capacity(writes.len());
+        for write in &writes {
+            let query: Vec<(&str, String)> =
+                write.query.iter().map(|(k, v)| (*k, v.clone())).collect();
+            let opaque = self.next_opaque_prefix();
+            match self
+                .http
+                .request(
+                    write.method,
+                    &write.path,
+                    &query,
+                    write.body.as_ref(),
+                    Some(&opaque),
+                    opts.timeout,
+                )
+                .await
+            {
+                Ok(response) => outcomes.push(WriteOutcome::Applied(response)),
+                Err(error) => {
+                    // Halt: record the failure and send nothing further. A 409
+                    // arrives here as `DbError::Conflict` (recoverable); the
+                    // report surfaces it as a per-row conflict.
+                    outcomes.push(WriteOutcome::Failed(error));
+                    break;
+                }
+            }
+        }
+
+        let (docs, notices) = batch_report(&writes, outcomes);
+        Ok(Box::new(DocsCursor::new(docs).with_notices(notices)))
+    }
+
+    /// Refuse a batch whose target index cannot honour the optimistic-
+    /// concurrency guard (a time-series index on ES >= 9.4, whose `_seq_no` is
+    /// a sentinel). Reads `GET /<index>/_settings?flat_settings=true` once per
+    /// distinct concrete index and classifies it with
+    /// [`guard_unsupported_reason`].
+    ///
+    /// **Best-effort on purpose.** If the settings are unreadable (no
+    /// permission, a transient error) the check is skipped rather than failing
+    /// the batch: the compiled write still carries `if_seq_no`, and a
+    /// sequence-numbers-disabled index rejects a guarded single-document write
+    /// at write time rather than applying it — so a missing settings read
+    /// downgrades to that per-document guard, it does not open a silent clobber.
+    async fn refuse_tsdb_indices(
+        &self,
+        writes: &[CompiledWrite],
+        timeout: Option<Duration>,
+    ) -> Result<(), DbError> {
+        let mut checked: HashSet<&str> = HashSet::new();
+        for write in writes {
+            if !checked.insert(write.index.as_str()) {
+                continue;
+            }
+            let path = format!("/{}/_settings", encode_index_expression(&write.index)?);
+            match self
+                .http
+                .request(
+                    Method::Get,
+                    &path,
+                    &[("flat_settings", "true".to_string())],
+                    None,
+                    None,
+                    timeout,
+                )
+                .await
+            {
+                Ok(settings) => {
+                    if let Some(reason) =
+                        guard_unsupported_reason(&settings, self.server_info.version.as_ref())
+                    {
+                        return Err(DbError::Unsupported { feature: reason });
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        index = write.index,
+                        "index settings unavailable before a guarded write; relying on the \
+                         if_seq_no guard, which a sequence-numbers-disabled index rejects rather \
+                         than applies"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Reduce an inner request to `(index, query)` for `EXPLAIN`.
     fn explainable(&self, inner: &Request) -> Result<(String, Option<Json>), DbError> {
         match inner {
@@ -623,14 +788,10 @@ impl Connection for EsConnection {
                     Op::Explain { inner, analyze } => {
                         self.execute_explain(inner, *analyze, &opts).await
                     }
-                    // `EDITABLE_RESULTS` is off: this driver does not generate
-                    // writes, so there is no half-built mutation path to trip
-                    // over. See the crate report.
-                    Op::Mutate(_) => Err(DbError::Unsupported {
-                        feature: "writing through the grid (EDITABLE_RESULTS is off for this \
-                                  driver; use a native `POST /<index>/_update/<id>` request)"
-                            .into(),
-                    }),
+                    // Guarded, serial, halt-and-report single-document writes.
+                    // `EDITABLE_RESULTS` is on; `ATOMIC_BATCH` stays off because
+                    // Elasticsearch has no multi-document transaction.
+                    Op::Mutate(batch) => self.execute_mutate(batch, &opts).await,
                     // `DDL` is off: Elasticsearch's index/mapping management is
                     // not SQL DDL, and generating it from a `DdlOp::Native`
                     // blob would be an untyped passthrough pretending to be a
@@ -754,6 +915,35 @@ mod tests {
         }
     }
 
+    /// Regression: `_mapping` used to sit in the POST allow-list, so a
+    /// `POST /<index>/_mapping` body — a mapping WRITE — sailed through
+    /// read-only mode. Reading a mapping is `GET`, which needs no allow-list
+    /// entry.
+    #[test]
+    fn post_mapping_is_a_write_and_is_refused_in_read_only_mode() {
+        let req = console("POST /events/_mapping\n{\"properties\":{\"x\":{\"type\":\"keyword\"}}}");
+        assert!(!is_read_request(&req), "POST _mapping writes the mapping");
+        let err = refuse_if_write(&req).unwrap_err();
+        assert!(matches!(err, DbError::Unsupported { .. }));
+        // GET stays a read purely on the method.
+        assert!(is_read_request(&console("GET /events/_mapping")));
+    }
+
+    /// Regression: `_mget`/`_termvectors`/`_mtermvectors` are genuine reads
+    /// (and classified `Read` by `datagrep-lang`'s EsDsl), but were missing
+    /// from the driver allow-list, so read-only mode wrongly refused them.
+    #[test]
+    fn mget_and_termvectors_are_reads_in_read_only_mode() {
+        for text in [
+            "POST /i/_mget\n{\"ids\":[\"1\",\"2\"]}",
+            "POST /i/_termvectors/1",
+            "POST /i/_mtermvectors\n{\"ids\":[\"1\"]}",
+        ] {
+            assert!(is_read_request(&console(text)), "{text} should be a read");
+            assert!(refuse_if_write(&console(text)).is_ok());
+        }
+    }
+
     /// The allow-list must not be fooled by an endpoint name appearing as a
     /// substring of an index name.
     #[test]
@@ -793,5 +983,59 @@ mod tests {
             details: vec![(Arc::from("distribution"), Arc::from("elasticsearch"))],
         };
         assert_eq!(product_of(&es), Product::Elasticsearch);
+    }
+
+    /// A non-dialing connection: `EsHttp::new` opens no socket, and the
+    /// read-only refusal fires before any request would be built, so this
+    /// exercises the guard without a cluster.
+    fn offline_connection() -> EsConnection {
+        let http = Arc::new(
+            EsHttp::new(
+                "http://localhost:9200".into(),
+                crate::http::Auth::None,
+                std::time::Duration::from_secs(5),
+                false,
+            )
+            .unwrap(),
+        );
+        let server_info = ServerInfo {
+            product: Arc::from("Elasticsearch"),
+            version: Arc::from("9.0.0"),
+            details: Vec::new(),
+        };
+        let caps = crate::driver::es_capabilities(Product::Elasticsearch, PageMode::Pit);
+        EsConnection::new(http, server_info, caps, PageMode::Pit, true, None, None)
+    }
+
+    #[tokio::test]
+    async fn a_read_only_connection_refuses_generated_writes_before_they_leave_the_process() {
+        use datagrep_api::request::Mutation;
+        use datagrep_api::value::FieldPath;
+
+        let conn = offline_connection();
+        conn.set_read_only(true).await.unwrap();
+
+        let batch = MutationBatch {
+            mutations: vec![Mutation::Delete {
+                path: ObjectPath::new(vec![Arc::from("events")]),
+                key: vec![
+                    (FieldPath::field("_index"), Value::Str(Arc::from("events"))),
+                    (FieldPath::field("_id"), Value::Str(Arc::from("abc"))),
+                ],
+                expect: vec![
+                    (FieldPath::field("_seq_no"), Value::I64(1)),
+                    (FieldPath::field("_primary_term"), Value::I64(1)),
+                ],
+            }],
+        };
+        let err = match conn.execute(Request::Op(Op::Mutate(batch))).await {
+            Err(e) => e,
+            Ok(_) => panic!("a read-only connection must refuse Op::Mutate"),
+        };
+        assert!(matches!(err, DbError::Unsupported { .. }));
+        assert!(
+            err.to_string().contains("read-only"),
+            "the refusal must name read-only mode: {err}"
+        );
     }
 }

@@ -533,6 +533,18 @@ fn keyed_where(
     Ok(clauses.join(" AND "))
 }
 
+/// A non-empty `expect` precondition must be honoured or refused, never
+/// dropped — dropping it would turn a guarded write into a clobber. This
+/// driver does not compile preconditions yet, so it refuses.
+fn refuse_expect(expect: &[(datagrep_api::FieldPath, Value)]) -> Result<(), DbError> {
+    if expect.is_empty() {
+        return Ok(());
+    }
+    Err(DbError::Unsupported {
+        feature: "conditional mutation (`expect`) — this driver cannot check-and-set".into(),
+    })
+}
+
 fn apply_mutation(conn: &rusqlite::Connection, m: &Mutation) -> Result<u64, DbError> {
     match m {
         Mutation::Insert { path, doc } => {
@@ -559,7 +571,13 @@ fn apply_mutation(conn: &rusqlite::Connection, m: &Mutation) -> Result<u64, DbEr
                 .map_err(map_sqlite_err)?;
             Ok(n as u64)
         }
-        Mutation::Update { path, key, sets } => {
+        Mutation::Update {
+            path,
+            key,
+            sets,
+            expect,
+        } => {
+            refuse_expect(expect)?;
             if sets.is_empty() {
                 return Err(DbError::Query {
                     code: None,
@@ -590,7 +608,8 @@ fn apply_mutation(conn: &rusqlite::Connection, m: &Mutation) -> Result<u64, DbEr
             expect_exactly_one(n, "change")?;
             Ok(n as u64)
         }
-        Mutation::Delete { path, key } => {
+        Mutation::Delete { path, key, expect } => {
+            refuse_expect(expect)?;
             let table = crate::compile::compile_object_path(path)?;
             let mut params: Vec<Value> = Vec::new();
             let where_sql = keyed_where(key, &mut params)?;

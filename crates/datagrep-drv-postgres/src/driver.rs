@@ -39,7 +39,10 @@ pub const PG_CAPS: Caps = Caps::TRANSACTIONS
     .union(Caps::RANDOM_ACCESS_PAGE)
     .union(Caps::SCHEMA_DECLARED)
     .union(Caps::KEY_ENUMERATION)
-    .union(Caps::READ_ONLY_SESSION);
+    .union(Caps::READ_ONLY_SESSION)
+    // `execute_mutate` wraps the batch in a real transaction and rolls back
+    // on any failure — all-or-nothing, honestly claimable.
+    .union(Caps::ATOMIC_BATCH);
 
 /// Baseline capabilities shared by [`Driver::capabilities`] (pre-handshake)
 /// and [`PgConnection::capabilities`](crate::connection::PgConnection)

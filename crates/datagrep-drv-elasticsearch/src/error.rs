@@ -97,6 +97,11 @@ pub fn map_status_error(status: u16, body: &str) -> DbError {
     match status {
         401 | 403 => DbError::Auth(message),
         408 | 504 => DbError::Timeout,
+        // Optimistic-concurrency loss (`version_conflict_engine_exception`) or
+        // an `op_type=create` collision. Keyed off the HTTP status plus the
+        // structured `error.type` preserved in `code` — never off the reason
+        // prose, which varies by index mode.
+        409 => DbError::Conflict { code, message },
         429 => DbError::ResourceExhausted(message),
         _ => DbError::Query {
             code,
@@ -173,6 +178,21 @@ mod tests {
             map_status_error(504, "gateway timeout"),
             DbError::Timeout
         ));
+    }
+
+    #[test]
+    fn http_409_maps_to_conflict_with_engine_type_as_code() {
+        let body = r#"{"error":{"root_cause":[{"type":"version_conflict_engine_exception","reason":"[1]: version conflict, required seqNo [3], primary term [1]. current document has seqNo [7] and primary term [1]"}],"type":"version_conflict_engine_exception","reason":"[1]: version conflict, required seqNo [3], primary term [1]. current document has seqNo [7] and primary term [1]"},"status":409}"#;
+        match map_status_error(409, body) {
+            DbError::Conflict { code, message } => {
+                assert_eq!(code.as_deref(), Some("version_conflict_engine_exception"));
+                assert!(message.contains("version conflict"));
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        // A conflict is recoverable: the connection survives, the caller
+        // re-reads and decides.
+        assert!(map_status_error(409, body).is_recoverable());
     }
 
     #[test]

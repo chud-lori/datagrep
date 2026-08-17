@@ -48,6 +48,18 @@ pub enum DbError {
         position: Option<u32>,
     },
 
+    /// A concurrent modification beat this write: an optimistic-concurrency
+    /// precondition (`Mutation::*::expect`) no longer held, a serialization
+    /// failure, a write-write conflict. Recoverable — the caller re-reads and
+    /// decides (rebase/discard); the connection itself is fine.
+    #[error("conflict{}: {message}", .code.as_deref().map(|c| format!(" [{c}]")).unwrap_or_default())]
+    Conflict {
+        /// Engine-native code (`version_conflict_engine_exception`, SQLSTATE
+        /// `40001`, …), preserved verbatim.
+        code: Option<String>,
+        message: String,
+    },
+
     /// A driver panicked and was caught at the task boundary; the connection
     /// is poisoned and evicted, the app lives.
     #[error("driver panicked: {0}")]
@@ -80,6 +92,7 @@ impl DbError {
                 | DbError::Cancelled
                 | DbError::Unsupported { .. }
                 | DbError::Query { .. }
+                | DbError::Conflict { .. }
                 | DbError::Config(_)
                 | DbError::ResourceExhausted(_)
         )
@@ -99,6 +112,11 @@ mod tests {
             position: Some(15),
         }
         .is_recoverable());
+        assert!(DbError::Conflict {
+            code: Some("version_conflict_engine_exception".into()),
+            message: "required seqNo [3], current [7]".into(),
+        }
+        .is_recoverable());
         assert!(!DbError::Protocol("bad frame".into()).is_recoverable());
         assert!(!DbError::DriverPanic("index out of bounds".into()).is_recoverable());
         assert!(!DbError::Closed.is_recoverable());
@@ -112,5 +130,22 @@ mod tests {
             position: None,
         };
         assert_eq!(e.to_string(), "query failed [42P01]: no such table");
+    }
+
+    #[test]
+    fn conflict_display_includes_code() {
+        let e = DbError::Conflict {
+            code: Some("version_conflict_engine_exception".into()),
+            message: "somebody else wrote first".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "conflict [version_conflict_engine_exception]: somebody else wrote first"
+        );
+        let bare = DbError::Conflict {
+            code: None,
+            message: "write-write conflict".into(),
+        };
+        assert_eq!(bare.to_string(), "conflict: write-write conflict");
     }
 }

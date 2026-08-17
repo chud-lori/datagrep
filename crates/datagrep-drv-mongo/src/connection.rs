@@ -729,7 +729,13 @@ impl MongoConnection {
                 coll.insert_one(bson_doc).await.map_err(map_mongo_error)?;
                 Ok(1)
             }
-            Mutation::Update { path, key, sets } => {
+            Mutation::Update {
+                path,
+                key,
+                sets,
+                expect,
+            } => {
+                refuse_expect(expect)?;
                 let (db, coll_name) = self.resolve_path(path)?;
                 let coll = self.collection(&db, &coll_name);
                 let id_filter = self.id_filter(key)?;
@@ -760,7 +766,8 @@ impl MongoConnection {
                 }
                 Ok(1)
             }
-            Mutation::Delete { path, key } => {
+            Mutation::Delete { path, key, expect } => {
+                refuse_expect(expect)?;
                 let (db, coll_name) = self.resolve_path(path)?;
                 let coll = self.collection(&db, &coll_name);
                 let id_filter = self.id_filter(key)?;
@@ -955,6 +962,19 @@ pub(crate) fn id_filter_from_key(key: &[(FieldPath, Value)]) -> Result<BsonDocum
         filter.insert(f, bson);
     }
     Ok(filter)
+}
+
+/// A non-empty `expect` precondition must be honoured or refused, never
+/// dropped — dropping it would turn a guarded write into a clobber. This
+/// driver does not compile preconditions into the update/delete filter yet,
+/// so it refuses. Shared by [`MongoConnection`] and `transaction.rs`.
+pub(crate) fn refuse_expect(expect: &[(FieldPath, Value)]) -> Result<(), DbError> {
+    if expect.is_empty() {
+        return Ok(());
+    }
+    Err(DbError::Unsupported {
+        feature: "conditional mutation (`expect`) — this driver cannot check-and-set".into(),
+    })
 }
 
 pub(crate) fn as_bson_doc(v: &Value) -> Result<BsonDocument, DbError> {

@@ -84,6 +84,7 @@ fn describe_caps(flags: &datagrep_api::Caps) -> String {
         (Caps::NAMED_PARAMS, "named-params"),
         (Caps::EXPORT_STREAMING, "export-streaming"),
         (Caps::EXPRESSION_FILTER, "expression-filter"),
+        (Caps::ATOMIC_BATCH, "atomic-batch"),
     ];
     let names: Vec<&str> = NAMED
         .iter()
