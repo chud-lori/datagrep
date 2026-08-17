@@ -125,7 +125,8 @@ docker rm -f dg-test-es
 
 ## Note on seeding
 
-The driver deliberately generates no writes (`EDITABLE_RESULTS` and `DDL` are
-both off), so fixtures are created with a plain `reqwest` client rather than
-through the seam under test. That is intentional: the tests exercise the read
-path, and nothing in the write path is being silently vouched for.
+Fixtures are created with a plain `reqwest` client rather than through the seam
+under test. The driver now generates guarded single-document `Op::Mutate`
+writes (`EDITABLE_RESULTS` on), but not `_bulk` (that is P1), so bulk seeding
+stays out of band — and a read test should not depend on the write path it is
+not exercising anyway.

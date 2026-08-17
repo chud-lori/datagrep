@@ -43,15 +43,21 @@ pub const DRIVER_ID: &str = "elasticsearch";
 /// - `SCHEMA_DECLARED` — mappings exist, but dynamic mapping means they are
 ///   not exhaustive: a document can carry a field the mapping has never seen.
 ///   The catalog uses sampling, and says so.
-/// - `EDITABLE_RESULTS` — this driver does not generate writes (see the crate
-///   report); hits do have a real `_index`/`_id` identity, so this is a
-///   scope decision, not an engine limitation.
+///
+/// `EDITABLE_RESULTS` **is** on: hits carry a real `_index`/`_id` (+ `_routing`)
+/// identity and a per-hit `_seq_no`/`_primary_term` guard, so `Op::Mutate`
+/// generates guarded single-document update/delete (see [`crate::mutate`]).
+/// `ATOMIC_BATCH` stays off — Elasticsearch has no multi-document transaction,
+/// so a batch is serial and halt-and-report, not atomic.
 const BASE_CAPS: Caps = Caps::EXPLAIN
     .union(Caps::SERVER_CANCEL)
     .union(Caps::EXPRESSION_FILTER)
     .union(Caps::KEY_ENUMERATION)
     // `profile: true` runs the search and reports real per-shard timings.
     .union(Caps::EXPLAIN_ANALYZE)
+    // Guarded single-document `Op::Mutate` (update/delete) with
+    // `if_seq_no`/`if_primary_term`; `ATOMIC_BATCH` deliberately stays off.
+    .union(Caps::EDITABLE_RESULTS)
     // The cursor streams page by page and never materializes a result set, so
     // "export all" genuinely is not "load all".
     .union(Caps::EXPORT_STREAMING);
@@ -596,9 +602,12 @@ mod tests {
         assert!(!caps.flags.contains(Caps::EXACT_COUNT_CHEAP));
         assert!(!caps.flags.contains(Caps::RANDOM_ACCESS_PAGE));
         assert!(!caps.flags.contains(Caps::SCHEMA_DECLARED));
-        assert!(!caps.flags.contains(Caps::EDITABLE_RESULTS));
         assert!(!caps.flags.contains(Caps::READ_ONLY_SESSION));
+        // No multi-document transaction, so a batch is never atomic.
+        assert!(!caps.flags.contains(Caps::ATOMIC_BATCH));
 
+        // Guarded single-document writes are generated; batch atomicity is not.
+        assert!(caps.flags.contains(Caps::EDITABLE_RESULTS));
         assert!(caps.flags.contains(Caps::EXPLAIN));
         assert!(caps.flags.contains(Caps::SERVER_CANCEL));
         assert!(caps.flags.contains(Caps::EXPRESSION_FILTER));
