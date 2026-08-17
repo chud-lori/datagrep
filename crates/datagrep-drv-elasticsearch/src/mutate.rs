@@ -176,6 +176,7 @@ fn identity_from_key(key: &[(FieldPath, Value)]) -> Result<WriteIdentity, DbErro
     let mut index: Option<String> = None;
     let mut id: Option<String> = None;
     let mut routing: Option<String> = None;
+    let mut routing_seen = false;
     for (path, value) in key {
         let name = single_field(path).ok_or_else(|| DbError::Unsupported {
             feature: format!(
@@ -187,6 +188,16 @@ fn identity_from_key(key: &[(FieldPath, Value)]) -> Result<WriteIdentity, DbErro
             "_index" => &mut index,
             "_id" => &mut id,
             "_routing" => {
+                // `_routing` is refused twice regardless of value: a null entry
+                // used to `continue` before the ambiguity check, so a key that
+                // named `_routing` a second time slipped through.
+                if routing_seen {
+                    return Err(DbError::Unsupported {
+                        feature: "mutation key names `_routing` twice — refusing an ambiguous key"
+                            .into(),
+                    });
+                }
+                routing_seen = true;
                 // A hit without custom routing legitimately carries no
                 // `_routing`; a null/absent value means exactly that.
                 if matches!(value, Value::Null | Value::Absent) {
@@ -223,6 +234,21 @@ fn identity_from_key(key: &[(FieldPath, Value)]) -> Result<WriteIdentity, DbErro
             feature: format!(
                 "writing to the index expression `{index}`: a guarded write targets exactly one \
                  concrete index, never a wildcard or a list"
+            ),
+        });
+    }
+    // A `_id` of `.` or `..` is a legal document id (creatable via `_bulk`) but
+    // an unaddressable write target: URL path resolution (WHATWG, which
+    // reqwest's `url` applies) normalises the dot-segment away — `/<index>/_doc/..`
+    // collapses to `/<index>`, the delete-index endpoint — and percent-encoding
+    // does not save it, because that normalisation also folds `%2e`. Refuse it
+    // rather than write to the wrong resource.
+    if id == "." || id == ".." {
+        return Err(DbError::Unsupported {
+            feature: format!(
+                "a `_id` of `{id}`: a single/double-dot segment is normalised away by URL path \
+                 resolution (a write to it would collapse onto the index endpoint), so a guarded \
+                 write cannot address it safely"
             ),
         });
     }
@@ -342,12 +368,13 @@ fn sets_to_partial_doc(sets: &[(FieldPath, Value)]) -> Result<Json, DbError> {
     }
     let mut root = Map::new();
     for (path, value) in sets {
-        if matches!(value, Value::Absent) {
-            // `value_to_json` would degrade Absent to null, and in a partial
-            // document a null SETS the field to null — it does not remove it.
-            // Removal is a scripted `ctx._source.remove(…)`, not yet
-            // generated, so the ambiguity is refused instead of resolved by
-            // accident.
+        if contains_absent(value) {
+            // `value_to_json` would degrade Absent to null *recursively* — a
+            // nested Absent inside an object/array set-value degrades just as
+            // silently as a top-level one — and in a partial document a null
+            // SETS the field to null rather than removing it. Removal is a
+            // scripted `ctx._source.remove(…)`, not yet generated, so the
+            // ambiguity is refused instead of resolved by accident.
             return Err(DbError::Unsupported {
                 feature: format!(
                     "removing field `{path}`: field removal needs a scripted update \
@@ -430,12 +457,35 @@ fn overlap(path: &FieldPath) -> DbError {
     }
 }
 
+/// Whether `value` is, or nests, a [`Value::Absent`]. `value_to_json` degrades
+/// Absent to a JSON null *recursively*, so a document/array set-value carrying a
+/// nested Absent would silently set that leaf to null in the partial document —
+/// the same field-removal ambiguity refused at the top level, hidden one level
+/// down.
+fn contains_absent(value: &Value) -> bool {
+    match value {
+        Value::Absent => true,
+        Value::Array(items) => items.iter().any(contains_absent),
+        Value::Document(doc) => doc.iter().any(|(_, v)| contains_absent(v)),
+        _ => false,
+    }
+}
+
 /// From a `GET /<index>/_settings?flat_settings=true` response, the reason a
 /// guarded write against that index must be refused — or `None` when the
 /// guard is real. An alias/data-stream write target may expand to several
 /// concrete indices; if *any* of them cannot honour the guard, the whole
 /// target is refused.
-pub fn guard_unsupported_reason(settings: &Json) -> Option<String> {
+///
+/// `version` is the server's reported version. The time-series-mode hazard is
+/// **ES >= 9.4 only** (plan §3.2.3): that is where TSDB indices default to
+/// disabled sequence numbers and return sentinel `_seq_no` values. On 8.7–9.3 a
+/// time-series index tracks sequence numbers normally and the
+/// `disable_sequence_numbers` setting does not exist, so refusing there would
+/// reject legitimate edits and point at an unfollowable escape hatch. An index
+/// with sequence numbers *explicitly* disabled is refused on any version.
+pub fn guard_unsupported_reason(settings: &Json, version: &str) -> Option<String> {
+    let sentinel_era = version_pair(version) >= (9, 4);
     let indices = settings.as_object()?;
     for (name, entry) in indices {
         let index_settings = entry.get("settings").and_then(Json::as_object);
@@ -455,7 +505,8 @@ pub fn guard_unsupported_reason(settings: &Json) -> Option<String> {
                  values there, so the optimistic-concurrency guard cannot protect a write"
             ));
         }
-        if get("index.mode").as_deref() == Some("time_series")
+        if sentinel_era
+            && get("index.mode").as_deref() == Some("time_series")
             && disabled.as_deref() != Some("false")
         {
             return Some(format!(
@@ -895,6 +946,86 @@ mod tests {
     }
 
     #[test]
+    fn a_dot_or_dotdot_id_is_refused_as_unaddressable() {
+        for bad in [".", ".."] {
+            let m = Mutation::Delete {
+                path: path(),
+                key: key("events", bad),
+                expect: guard(1, 1),
+            };
+            let err = compile_mutation(&m, true).unwrap_err();
+            assert!(
+                matches!(err, DbError::Unsupported { .. }),
+                "`_id` of {bad:?} must be refused"
+            );
+            assert!(err.to_string().contains("normalised away"));
+        }
+        // A dot *inside* an id is fine — only a whole `.`/`..` segment collapses.
+        let ok = compile_mutation(
+            &Mutation::Delete {
+                path: path(),
+                key: key("events", "a.b"),
+                expect: guard(1, 1),
+            },
+            true,
+        )
+        .unwrap();
+        assert_eq!(ok.path, "/events/_doc/a.b");
+    }
+
+    #[test]
+    fn a_nested_absent_in_a_set_value_is_refused_not_turned_into_a_null() {
+        // An object set-value carrying a nested Absent: `value_to_json` would
+        // degrade it to `{"obj":{"f":null}}`, silently setting `f` to null.
+        let nested_doc = Value::Document(Arc::new(Document::from_fields(vec![
+            (Arc::from("keep"), Value::I64(1)),
+            (Arc::from("f"), Value::Absent),
+        ])));
+        let m = Mutation::Update {
+            path: path(),
+            key: key("events", "abc"),
+            sets: vec![(fp("obj"), nested_doc)],
+            expect: guard(1, 1),
+        };
+        assert!(matches!(
+            compile_mutation(&m, true),
+            Err(DbError::Unsupported { .. })
+        ));
+
+        // Same hazard one level down inside an array.
+        let arr = Value::Array(vec![Value::I64(1), Value::Absent].into());
+        let m = Mutation::Update {
+            path: path(),
+            key: key("events", "abc"),
+            sets: vec![(fp("tags"), arr)],
+            expect: guard(1, 1),
+        };
+        assert!(matches!(
+            compile_mutation(&m, true),
+            Err(DbError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn a_duplicate_routing_key_is_refused_even_when_the_first_is_null() {
+        // The null entry used to `continue` before the ambiguity check, so a
+        // second `_routing` slipped through.
+        let m = Mutation::Delete {
+            path: path(),
+            key: vec![
+                (fp("_index"), Value::Str(Arc::from("events"))),
+                (fp("_id"), Value::Str(Arc::from("abc"))),
+                (fp("_routing"), Value::Null),
+                (fp("_routing"), Value::Str(Arc::from("tenant-7"))),
+            ],
+            expect: guard(1, 1),
+        };
+        let err = compile_mutation(&m, true).unwrap_err();
+        assert!(matches!(err, DbError::Unsupported { .. }));
+        assert!(err.to_string().contains("_routing` twice"));
+    }
+
+    #[test]
     fn an_empty_update_is_refused() {
         let m = Mutation::Update {
             path: path(),
@@ -968,19 +1099,22 @@ mod tests {
 
     #[test]
     fn guard_unsupported_reason_flags_time_series_and_disabled_sequence_numbers() {
+        // Explicitly disabled: refused on any version — even one before the
+        // setting nominally existed.
         let disabled = json!({
             "metrics-000001": {
                 "settings": { "index.disable_sequence_numbers": "true" }
             }
         });
-        assert!(guard_unsupported_reason(&disabled)
+        assert!(guard_unsupported_reason(&disabled, "8.10.0")
             .unwrap()
             .contains("sequence numbers disabled"));
 
+        // Time-series mode on ES >= 9.4: refused (sentinel `_seq_no`).
         let tsdb = json!({
             "metrics-000001": { "settings": { "index.mode": "time_series" } }
         });
-        assert!(guard_unsupported_reason(&tsdb)
+        assert!(guard_unsupported_reason(&tsdb, "9.4.0")
             .unwrap()
             .contains("time-series"));
 
@@ -993,11 +1127,31 @@ mod tests {
                 }
             }
         });
-        assert!(guard_unsupported_reason(&reenabled).is_none());
+        assert!(guard_unsupported_reason(&reenabled, "9.4.0").is_none());
 
         // A plain index is fine.
         let plain = json!({ "events": { "settings": { "index.mode": "standard" } } });
-        assert!(guard_unsupported_reason(&plain).is_none());
+        assert!(guard_unsupported_reason(&plain, "9.4.0").is_none());
+    }
+
+    #[test]
+    fn time_series_refusal_is_gated_on_es_9_4_and_up() {
+        let tsdb = json!({
+            "metrics-000001": { "settings": { "index.mode": "time_series" } }
+        });
+        // Before 9.4 a TSDB index tracks sequence numbers normally: editing it
+        // is legitimate, and refusing would point at an escape hatch (the
+        // `disable_sequence_numbers` setting) that does not exist there.
+        assert!(guard_unsupported_reason(&tsdb, "9.3.0").is_none());
+        assert!(guard_unsupported_reason(&tsdb, "8.13.0").is_none());
+        // 9.4 and up: refused.
+        assert!(guard_unsupported_reason(&tsdb, "9.4.0").is_some());
+        assert!(guard_unsupported_reason(&tsdb, "10.0.0").is_some());
+        // Explicit disable is version-independent even on an old server.
+        let disabled = json!({
+            "metrics-000001": { "settings": { "index.disable_sequence_numbers": "true" } }
+        });
+        assert!(guard_unsupported_reason(&disabled, "9.3.0").is_some());
     }
 
     #[test]

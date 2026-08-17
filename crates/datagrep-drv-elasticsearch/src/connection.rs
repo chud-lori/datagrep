@@ -540,6 +540,17 @@ impl EsConnection {
         batch: &MutationBatch,
         opts: &ExecOpts,
     ) -> Result<Box<dyn Cursor>, DbError> {
+        // Read-only mode refuses generated writes before anything is compiled
+        // or sent — the same client-side guarantee `execute_native` gives the
+        // console path. Elasticsearch has no server-side read-only session, so
+        // this is our enforcement (`Enforcement::Client`) and says so.
+        if self.read_only_active(opts) {
+            return Err(DbError::Unsupported {
+                feature: "generated writes: this connection is in read-only mode (enforced \
+                          client-side — Elasticsearch has no read-only session)"
+                    .into(),
+            });
+        }
         if batch.mutations.is_empty() {
             return Ok(Box::new(AckCursor::new(
                 Some(0),
@@ -643,7 +654,9 @@ impl EsConnection {
                 .await
             {
                 Ok(settings) => {
-                    if let Some(reason) = guard_unsupported_reason(&settings) {
+                    if let Some(reason) =
+                        guard_unsupported_reason(&settings, self.server_info.version.as_ref())
+                    {
                         return Err(DbError::Unsupported { feature: reason });
                     }
                 }
@@ -970,5 +983,59 @@ mod tests {
             details: vec![(Arc::from("distribution"), Arc::from("elasticsearch"))],
         };
         assert_eq!(product_of(&es), Product::Elasticsearch);
+    }
+
+    /// A non-dialing connection: `EsHttp::new` opens no socket, and the
+    /// read-only refusal fires before any request would be built, so this
+    /// exercises the guard without a cluster.
+    fn offline_connection() -> EsConnection {
+        let http = Arc::new(
+            EsHttp::new(
+                "http://localhost:9200".into(),
+                crate::http::Auth::None,
+                std::time::Duration::from_secs(5),
+                false,
+            )
+            .unwrap(),
+        );
+        let server_info = ServerInfo {
+            product: Arc::from("Elasticsearch"),
+            version: Arc::from("9.0.0"),
+            details: Vec::new(),
+        };
+        let caps = crate::driver::es_capabilities(Product::Elasticsearch, PageMode::Pit);
+        EsConnection::new(http, server_info, caps, PageMode::Pit, true, None, None)
+    }
+
+    #[tokio::test]
+    async fn a_read_only_connection_refuses_generated_writes_before_they_leave_the_process() {
+        use datagrep_api::request::Mutation;
+        use datagrep_api::value::FieldPath;
+
+        let conn = offline_connection();
+        conn.set_read_only(true).await.unwrap();
+
+        let batch = MutationBatch {
+            mutations: vec![Mutation::Delete {
+                path: ObjectPath::new(vec![Arc::from("events")]),
+                key: vec![
+                    (FieldPath::field("_index"), Value::Str(Arc::from("events"))),
+                    (FieldPath::field("_id"), Value::Str(Arc::from("abc"))),
+                ],
+                expect: vec![
+                    (FieldPath::field("_seq_no"), Value::I64(1)),
+                    (FieldPath::field("_primary_term"), Value::I64(1)),
+                ],
+            }],
+        };
+        let err = match conn.execute(Request::Op(Op::Mutate(batch))).await {
+            Err(e) => e,
+            Ok(_) => panic!("a read-only connection must refuse Op::Mutate"),
+        };
+        assert!(matches!(err, DbError::Unsupported { .. }));
+        assert!(
+            err.to_string().contains("read-only"),
+            "the refusal must name read-only mode: {err}"
+        );
     }
 }
