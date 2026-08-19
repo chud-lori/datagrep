@@ -53,8 +53,8 @@ use crate::cursor::{AckCursor, DocsCursor, ScanSpec, SearchCursor, DEFAULT_KEEP_
 use crate::filter::{compile_predicate, compile_sort};
 use crate::http::{EsHttp, Method, PageMode, Product};
 use crate::mutate::{
-    batch_report, compile_mutation, guard_unsupported_reason, supports_include_source_on_error,
-    CompiledWrite, WriteOutcome,
+    batch_report, bulk_report, compile_bulk_body, compile_mutation, guard_unsupported_reason,
+    supports_include_source_on_error, CompiledWrite, WriteOutcome, MAX_BULK_BODY_BYTES,
 };
 use crate::value::{serde_to_value, FieldTypes};
 
@@ -582,12 +582,32 @@ impl EsConnection {
         // 400. This is best-effort by design: see `refuse_tsdb_indices`.
         self.refuse_tsdb_indices(&writes, opts.timeout).await?;
 
-        // Serial, halt-and-report: issue each write in order, stopping at the
-        // first failure. `outcomes` ends up as long as `writes` when everything
-        // applied, or exactly one longer than the applied prefix on a halt —
-        // everything after the failure is deliberately never sent.
+        // One mutation is cheaper as a single guarded round-trip than as a
+        // one-item `_bulk` (no NDJSON framing, no per-item envelope); more than
+        // one goes in a single `_bulk` request — N round-trips collapse to one,
+        // and one refresh-listener slot per shard instead of N. Both keep the
+        // guarded, per-document, halt-and-report contract; the single-document
+        // path is unchanged.
+        if writes.len() == 1 {
+            self.execute_mutate_serial(&writes, opts).await
+        } else {
+            self.execute_mutate_bulk(&writes, opts).await
+        }
+    }
+
+    /// Issue the compiled writes one at a time, stopping at the first failure —
+    /// the single-document commit path. `outcomes` ends up as long as `writes`
+    /// when everything applied, or exactly one longer than the applied prefix on
+    /// a halt: everything after the failure is deliberately never sent. A 409
+    /// arrives here as [`DbError::Conflict`] (recoverable); the report surfaces
+    /// it as a per-row conflict. See [`crate::mutate::batch_report`].
+    async fn execute_mutate_serial(
+        &self,
+        writes: &[CompiledWrite],
+        opts: &ExecOpts,
+    ) -> Result<Box<dyn Cursor>, DbError> {
         let mut outcomes = Vec::with_capacity(writes.len());
-        for write in &writes {
+        for write in writes {
             let query: Vec<(&str, String)> =
                 write.query.iter().map(|(k, v)| (*k, v.clone())).collect();
             let opaque = self.next_opaque_prefix();
@@ -605,16 +625,70 @@ impl EsConnection {
             {
                 Ok(response) => outcomes.push(WriteOutcome::Applied(response)),
                 Err(error) => {
-                    // Halt: record the failure and send nothing further. A 409
-                    // arrives here as `DbError::Conflict` (recoverable); the
-                    // report surfaces it as a per-row conflict.
+                    // Halt: record the failure and send nothing further.
                     outcomes.push(WriteOutcome::Failed(error));
                     break;
                 }
             }
         }
 
-        let (docs, notices) = batch_report(&writes, outcomes);
+        let (docs, notices) = batch_report(writes, outcomes);
+        Ok(Box::new(DocsCursor::new(docs).with_notices(notices)))
+    }
+
+    /// Frame the whole batch into one `_bulk` NDJSON request and report per
+    /// item. Bulk is **not atomic** and returns HTTP 200 even when items fail,
+    /// so a whole-request `Err` only surfaces a transport/`_bulk`-level failure;
+    /// the real signal is each item's `status`/`error`, folded by
+    /// [`crate::mutate::bulk_report`]. The guard rides each action line;
+    /// `refresh=wait_for` and the response filter are `_bulk` URL params.
+    async fn execute_mutate_bulk(
+        &self,
+        writes: &[CompiledWrite],
+        opts: &ExecOpts,
+    ) -> Result<Box<dyn Cursor>, DbError> {
+        // Frame first: an oversize body (over http.max_content_length) or an
+        // unguarded action line is refused here, having sent nothing.
+        let body = compile_bulk_body(writes, MAX_BULK_BODY_BYTES)?;
+
+        let mut query: Vec<(&str, String)> = vec![
+            // One refresh for the whole batch — wait_for, never true (see the
+            // mutate module doc); a shard that degrades it to an immediate
+            // refresh surfaces `forced_refresh` per item.
+            ("refresh", "wait_for".to_string()),
+            // Keep the response small: only the per-item fields the report reads
+            // plus the top-level `errors` flag. Every item always carries
+            // `status`, so no item is filtered away and the one-item-per-action
+            // invariant `bulk_report` checks still holds.
+            (
+                "filter_path",
+                "errors,items.*.status,items.*.error,items.*.result,items.*._id,\
+                 items.*._seq_no,items.*._primary_term,items.*.forced_refresh"
+                    .to_string(),
+            ),
+        ];
+        if supports_include_source_on_error(
+            product_of(&self.server_info),
+            &self.server_info.version,
+        ) {
+            // Never let a malformed-document item error echo the document.
+            query.push(("include_source_on_error", "false".to_string()));
+        }
+
+        let opaque = self.next_opaque_prefix();
+        let response = self
+            .http
+            .request_ndjson(
+                Method::Post,
+                "/_bulk",
+                &query,
+                &body,
+                Some(&opaque),
+                opts.timeout,
+            )
+            .await?;
+
+        let (docs, notices) = bulk_report(writes, &response)?;
         Ok(Box::new(DocsCursor::new(docs).with_notices(notices)))
     }
 
