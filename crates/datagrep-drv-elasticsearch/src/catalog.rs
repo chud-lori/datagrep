@@ -20,6 +20,23 @@
 //! reported through `extra` as a `fields` JSON array clearly labelled with the
 //! index's `dynamic` setting. `infer_shape` is the honest, explicitly-labelled
 //! substitute, exactly as for Mongo.
+//!
+//! # Root-level describe: cluster / node / shard health
+//!
+//! `describe(ObjectPath::root())` reports cluster health through the existing
+//! `ObjectDetail::extra` — not a new screen: `_cluster/health`, `_cat/nodes`
+//! and `_cat/shards`, three bounded `GET`s. Two rules, both learned from
+//! Elasticvue's tracker:
+//!
+//! - **each source degrades independently** — a cluster where `_cat/shards`
+//!   is forbidden still shows health and nodes, with the failed source marked
+//!   under its own `*_error` key (Elasticvue's cars10/elasticvue#358 is the
+//!   cautionary `Promise.all` tale: one failing alias call blanked the whole
+//!   index listing);
+//! - **cat APIs are human-formatted by default** ("3.5mb", "12.1h") and
+//!   Elastic says they are "not intended for use by applications" — so every
+//!   `_cat` call here passes `format=json`, `bytes=b` and `time=ms`, and the
+//!   surfaced keys carry their unit (`disk_avail_bytes`, `uptime_ms`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -47,6 +64,17 @@ const MAX_SAMPLE_SIZE: u32 = 10_000;
 /// Completion candidate cap: completion is a *server-side* prefix query with
 /// a small limit, never a client-side filter over everything.
 const COMPLETE_LIMIT: usize = 50;
+/// Cap on the `problem_shards` array the root-level describe reports: enough
+/// to see what is broken, never 18 071 rows (the scale that took out
+/// Elasticvue's shard view, cars10/elasticvue#354). Full per-state counts are
+/// always in `shard_states`.
+const PROBLEM_SHARD_CAP: usize = 50;
+/// Columns requested from `_cat/nodes` — exactly the ones the root describe
+/// surfaces, nothing speculative.
+const CAT_NODES_COLUMNS: &str =
+    "name,ip,node.role,master,heap.percent,ram.percent,cpu,load_1m,disk.used_percent,disk.avail,uptime,version";
+/// Columns requested from `_cat/shards` — likewise only what is surfaced.
+const CAT_SHARDS_COLUMNS: &str = "index,shard,prirep,state,docs,store,node,unassigned.reason";
 
 pub struct EsCatalog {
     http: Arc<EsHttp>,
@@ -251,6 +279,70 @@ impl EsCatalog {
             .await
     }
 
+    async fn cluster_health(&self) -> Result<Json, DbError> {
+        // `_cluster/health` is a real JSON API (numbers are numbers); no unit
+        // params to pass — its one time-valued field carries `_millis` in its
+        // own name.
+        self.http
+            .request(Method::Get, "/_cluster/health", &[], None, None, None)
+            .await
+    }
+
+    async fn cat_nodes(&self) -> Result<Json, DbError> {
+        self.http
+            .request(
+                Method::Get,
+                "/_cat/nodes",
+                &cat_unit_params(CAT_NODES_COLUMNS),
+                None,
+                None,
+                None,
+            )
+            .await
+    }
+
+    /// `_cat/shards`, cluster-wide (`None`) or scoped to one index
+    /// expression.
+    async fn cat_shards(&self, index: Option<&str>) -> Result<Json, DbError> {
+        self.http
+            .request(
+                Method::Get,
+                &cat_shards_path(index)?,
+                &cat_unit_params(CAT_SHARDS_COLUMNS),
+                None,
+                None,
+                None,
+            )
+            .await
+    }
+
+    /// The root-level describe: cluster / node / shard health in
+    /// `ObjectDetail::extra`. Never fails as a whole — each of the three
+    /// sources is fetched and folded in independently, so a permissions or
+    /// version problem on one endpoint marks that source and leaves the
+    /// others intact (see the module doc).
+    async fn describe_root(&self) -> Result<ObjectDetail, DbError> {
+        let health = self.cluster_health().await;
+        let nodes = self.cat_nodes().await;
+        let shards = self.cat_shards(None).await;
+
+        let mut extra: Vec<(Arc<str>, Arc<str>)> = Vec::new();
+        push_cluster_health_extra(&mut extra, &health);
+        push_nodes_extra(&mut extra, &nodes);
+        push_shards_extra(&mut extra, &shards);
+
+        Ok(ObjectDetail {
+            node: ObjectNode {
+                path: ObjectPath::root(),
+                kind: ObjectKind::Database,
+                has_children: true,
+                comment: None,
+            },
+            schema: None,
+            extra,
+        })
+    }
+
     async fn sample(&self, index: &str, sample_size: u32) -> Result<InferredSchema, DbError> {
         let size = sample_size.clamp(1, MAX_SAMPLE_SIZE);
         let types = self.mapping(index).await.unwrap_or_default();
@@ -343,6 +435,248 @@ pub fn parse_aliases(json: &Json) -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+/// Query params for a `_cat` call. The cat APIs are "only intended for human
+/// consumption" and format values as `3.5mb` / `12.1h` by default;
+/// `bytes=b` and `time=ms` make them machine-parseable, `format=json` makes
+/// them rows, and `h=` bounds the response to the columns actually surfaced.
+fn cat_unit_params(columns: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("format", "json".to_string()),
+        ("bytes", "b".to_string()),
+        ("time", "ms".to_string()),
+        ("h", columns.to_string()),
+    ]
+}
+
+/// Path for `_cat/shards`, cluster-wide or scoped to one index expression.
+/// The expression goes through [`encode_index_expression`] like every other
+/// server-returned or user-typed name that becomes part of a URL path.
+fn cat_shards_path(index: Option<&str>) -> Result<String, DbError> {
+    Ok(match index {
+        Some(expr) => format!("/_cat/shards/{}", encode_index_expression(expr)?),
+        None => "/_cat/shards".to_string(),
+    })
+}
+
+/// `_cat` responses under `format=json` still encode most values as strings
+/// (`"docs.count": "100000"`). With `bytes=b`/`time=ms` those strings are
+/// plain numbers — parse them when they are, keep the raw string when they
+/// are not (never invent a value), `null` when absent.
+fn cat_num(v: Option<&Json>) -> Json {
+    let Some(s) = v.and_then(Json::as_str) else {
+        // Some servers already emit real numbers under `format=json`.
+        return v.cloned().unwrap_or(Json::Null);
+    };
+    if let Ok(n) = s.parse::<i64>() {
+        return json!(n);
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return json!(f);
+    }
+    json!(s)
+}
+
+fn push_pair(extra: &mut Vec<(Arc<str>, Arc<str>)>, k: &str, v: &str) {
+    extra.push((Arc::from(k), Arc::from(v)));
+}
+
+/// Fold a `_cluster/health` result into `extra`, under the server's own field
+/// names (nothing invented, units stay in the names the server chose:
+/// `task_max_waiting_in_queue_millis`, `active_shards_percent_as_number`).
+/// On failure the source is marked under `cluster_health_error` and the other
+/// sources still render.
+fn push_cluster_health_extra(
+    extra: &mut Vec<(Arc<str>, Arc<str>)>,
+    result: &Result<Json, DbError>,
+) {
+    let health = match result {
+        Ok(json) => json,
+        Err(e) => {
+            push_pair(extra, "cluster_health_error", &e.to_string());
+            return;
+        }
+    };
+    for key in ["cluster_name", "status"] {
+        if let Some(s) = health.get(key).and_then(Json::as_str) {
+            push_pair(extra, key, s);
+        }
+    }
+    for key in [
+        "number_of_nodes",
+        "number_of_data_nodes",
+        "active_primary_shards",
+        "active_shards",
+        "relocating_shards",
+        "initializing_shards",
+        "unassigned_shards",
+        "delayed_unassigned_shards",
+        "number_of_pending_tasks",
+        "task_max_waiting_in_queue_millis",
+    ] {
+        if let Some(n) = health.get(key).and_then(Json::as_i64) {
+            push_pair(extra, key, &n.to_string());
+        }
+    }
+    if let Some(n) = health
+        .get("active_shards_percent_as_number")
+        .and_then(Json::as_f64)
+    {
+        push_pair(extra, "active_shards_percent_as_number", &format!("{n}"));
+    }
+}
+
+/// Fold a `_cat/nodes` result into `extra` as one `nodes` JSON array (the
+/// same convention as the `fields`/`indexes` arrays in the per-index
+/// describe). On failure: marked under `nodes_error`, others still render.
+fn push_nodes_extra(extra: &mut Vec<(Arc<str>, Arc<str>)>, result: &Result<Json, DbError>) {
+    match result {
+        Ok(json) => push_pair(extra, "nodes", &parse_cat_nodes(json).to_string()),
+        Err(e) => push_pair(extra, "nodes_error", &e.to_string()),
+    }
+}
+
+/// Fold a `_cat/shards` result into `extra`: total, per-state counts, and a
+/// capped `problem_shards` array (everything not `STARTED`). On failure:
+/// marked under `shards_error`, others still render.
+fn push_shards_extra(extra: &mut Vec<(Arc<str>, Arc<str>)>, result: &Result<Json, DbError>) {
+    let json = match result {
+        Ok(json) => json,
+        Err(e) => {
+            push_pair(extra, "shards_error", &e.to_string());
+            return;
+        }
+    };
+    let summary = parse_cat_shards(json, PROBLEM_SHARD_CAP);
+    push_pair(extra, "shard_count", &summary.total.to_string());
+    let mut states = serde_json::Map::new();
+    for (state, n) in &summary.by_state {
+        states.insert(state.clone(), json!(n));
+    }
+    push_pair(extra, "shard_states", &Json::Object(states).to_string());
+    push_pair(extra, "problem_shards", &summary.problems.to_string());
+    if summary.problems_truncated {
+        push_pair(
+            extra,
+            "problem_shards_truncated",
+            &format!("listing capped at {PROBLEM_SHARD_CAP}; shard_states has the full counts"),
+        );
+    }
+}
+
+/// One `_cat/nodes?format=json&bytes=b&time=ms` response as a JSON array of
+/// display objects, sorted by node name. Keys carry their unit
+/// (`disk_avail_bytes`, `uptime_ms`); rows without a `name` are skipped, not
+/// fatal.
+pub fn parse_cat_nodes(json: &Json) -> Json {
+    let Some(rows) = json.as_array() else {
+        return Json::Array(Vec::new());
+    };
+    let mut out: Vec<Json> = rows
+        .iter()
+        .filter_map(|row| {
+            let name = row.get("name").and_then(Json::as_str)?;
+            Some(json!({
+                "name": name,
+                "ip": row.get("ip").and_then(Json::as_str),
+                "roles": row.get("node.role").and_then(Json::as_str),
+                "master": row.get("master").and_then(Json::as_str) == Some("*"),
+                "heap_percent": cat_num(row.get("heap.percent")),
+                "ram_percent": cat_num(row.get("ram.percent")),
+                "cpu_percent": cat_num(row.get("cpu")),
+                "load_1m": cat_num(row.get("load_1m")),
+                "disk_used_percent": cat_num(row.get("disk.used_percent")),
+                "disk_avail_bytes": cat_num(row.get("disk.avail")),
+                "uptime_ms": cat_num(row.get("uptime")),
+                "version": row.get("version").and_then(Json::as_str),
+            }))
+        })
+        .collect();
+    out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    Json::Array(out)
+}
+
+/// What the root describe reports about `_cat/shards` without ever carrying
+/// every row of a very wide cluster.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShardSummary {
+    pub total: usize,
+    /// Per-state counts (`STARTED`, `UNASSIGNED`, …), sorted by state name.
+    pub by_state: Vec<(String, usize)>,
+    /// JSON array of the first `problem_cap` shards whose state is not
+    /// `STARTED`.
+    pub problems: Json,
+    pub problems_truncated: bool,
+}
+
+/// Summarise a `_cat/shards?format=json&bytes=b` response. Rows without a
+/// `state` are skipped, not fatal.
+pub fn parse_cat_shards(json: &Json, problem_cap: usize) -> ShardSummary {
+    let mut total = 0usize;
+    let mut by_state: Vec<(String, usize)> = Vec::new();
+    let mut problems: Vec<Json> = Vec::new();
+    let mut truncated = false;
+    if let Some(rows) = json.as_array() {
+        for row in rows {
+            let Some(state) = row.get("state").and_then(Json::as_str) else {
+                continue;
+            };
+            total += 1;
+            match by_state.iter_mut().find(|(s, _)| s == state) {
+                Some((_, n)) => *n += 1,
+                None => by_state.push((state.to_string(), 1)),
+            }
+            if state != "STARTED" {
+                if problems.len() < problem_cap {
+                    problems.push(shard_row_json(row));
+                } else {
+                    truncated = true;
+                }
+            }
+        }
+    }
+    by_state.sort_by(|a, b| a.0.cmp(&b.0));
+    ShardSummary {
+        total,
+        by_state,
+        problems: Json::Array(problems),
+        problems_truncated: truncated,
+    }
+}
+
+/// Every row of a *single index's* `_cat/shards/<index>` response as a JSON
+/// array — bounded by that index's own shard count, unlike the cluster-wide
+/// listing the root describe deliberately summarises.
+pub fn shard_rows_json(json: &Json) -> Json {
+    let Some(rows) = json.as_array() else {
+        return Json::Array(Vec::new());
+    };
+    Json::Array(
+        rows.iter()
+            .filter(|row| row.get("state").and_then(Json::as_str).is_some())
+            .map(shard_row_json)
+            .collect(),
+    )
+}
+
+/// One `_cat/shards` row as a display object. `store` was requested with
+/// `bytes=b`, so it is a byte count and the key says so.
+fn shard_row_json(row: &Json) -> Json {
+    json!({
+        "index": row.get("index").and_then(Json::as_str),
+        "shard": cat_num(row.get("shard")),
+        "kind": match row.get("prirep").and_then(Json::as_str) {
+            Some("p") => Some("primary"),
+            Some("r") => Some("replica"),
+            other => other,
+        },
+        "state": row.get("state").and_then(Json::as_str),
+        "docs": cat_num(row.get("docs")),
+        "store_bytes": cat_num(row.get("store")),
+        "node": row.get("node").and_then(Json::as_str),
+        "unassigned_reason": row.get("unassigned.reason").and_then(Json::as_str),
+    })
 }
 
 /// Merge every concrete index's `mappings.properties` in a `_mapping`
@@ -572,9 +906,15 @@ impl Catalog for EsCatalog {
 
     async fn describe(&self, path: &ObjectPath) -> Result<ObjectDetail, DbError> {
         match path.parts() {
+            // The cluster itself: health, nodes, shards (see the module doc).
+            [] => self.describe_root().await,
             [index] => {
                 let types = self.mapping(index).await?;
                 let stats = self.index_stats(index).await.unwrap_or(Json::Null);
+                // This index's own shard placement — bounded by its shard
+                // count. Fetched independently: an error here marks itself
+                // below rather than sinking the whole describe.
+                let shards = self.cat_shards(Some(index.as_ref())).await;
                 let (fields, indexes) = describe_arrays(&types);
 
                 let mut extra: Vec<(Arc<str>, Arc<str>)> = Vec::new();
@@ -594,6 +934,19 @@ impl Catalog for EsCatalog {
                 }
                 if let Some(n) = stat_number(&stats, &["_all", "total", "store", "size_in_bytes"]) {
                     push("store_size_bytes_with_replicas", n.to_string());
+                }
+                match &shards {
+                    Ok(json) => {
+                        let rows = shard_rows_json(json);
+                        push(
+                            "shard_count",
+                            rows.as_array().map_or(0, Vec::len).to_string(),
+                        );
+                        push("shards", rows.to_string());
+                    }
+                    // Degrades alone: no shard listing must not blank the
+                    // mapping-derived detail (or vice versa).
+                    Err(e) => push("shards_error", e.to_string()),
                 }
                 // The honesty label that goes with `SCHEMA_DECLARED = false`.
                 push(
@@ -647,7 +1000,7 @@ impl Catalog for EsCatalog {
                 })
             }
             _ => Err(DbError::Unsupported {
-                feature: "describe() needs an [index] or [index, field] path".into(),
+                feature: "describe() needs the root, an [index], or an [index, field] path".into(),
             }),
         }
     }
@@ -965,6 +1318,260 @@ mod tests {
             position: None,
         };
         assert!(not_found_is_empty_array(other).is_err());
+    }
+
+    #[test]
+    fn cat_calls_always_request_machine_readable_units() {
+        for columns in [CAT_NODES_COLUMNS, CAT_SHARDS_COLUMNS] {
+            let params = cat_unit_params(columns);
+            let get = |k: &str| {
+                params
+                    .iter()
+                    .find(|(key, _)| *key == k)
+                    .map(|(_, v)| v.as_str())
+            };
+            assert_eq!(get("format"), Some("json"));
+            // The cat APIs are "only intended for human consumption": without
+            // these, sizes come back as "3.5mb" and times as "12.1h".
+            assert_eq!(get("bytes"), Some("b"));
+            assert_eq!(get("time"), Some("ms"));
+            assert_eq!(
+                get("h"),
+                Some(columns),
+                "only the columns actually surfaced are requested"
+            );
+            assert!(!columns.contains(' '));
+        }
+    }
+
+    #[test]
+    fn cat_shards_path_is_cluster_wide_or_one_encoded_expression() {
+        assert_eq!(cat_shards_path(None).unwrap(), "/_cat/shards");
+        assert_eq!(
+            cat_shards_path(Some("logs-*")).unwrap(),
+            "/_cat/shards/logs-*"
+        );
+        assert_eq!(
+            cat_shards_path(Some("../_cluster/settings")).unwrap(),
+            "/_cat/shards/..%2F_cluster%2Fsettings",
+            "an index name must not be able to retarget the request"
+        );
+        assert!(cat_shards_path(Some("")).is_err());
+    }
+
+    #[test]
+    fn cluster_health_keeps_the_servers_own_field_names() {
+        let health = json!({
+            "cluster_name": "prod-search",
+            "status": "yellow",
+            "timed_out": false,
+            "number_of_nodes": 3,
+            "number_of_data_nodes": 2,
+            "active_primary_shards": 10,
+            "active_shards": 19,
+            "relocating_shards": 0,
+            "initializing_shards": 1,
+            "unassigned_shards": 2,
+            "delayed_unassigned_shards": 0,
+            "number_of_pending_tasks": 0,
+            "number_of_in_flight_fetch": 0,
+            "task_max_waiting_in_queue_millis": 0,
+            "active_shards_percent_as_number": 86.4
+        });
+        let mut extra: Vec<(Arc<str>, Arc<str>)> = Vec::new();
+        push_cluster_health_extra(&mut extra, &Ok(health));
+        let get = |k: &str| {
+            extra
+                .iter()
+                .find(|(key, _)| &**key == k)
+                .map(|(_, v)| v.to_string())
+        };
+        assert_eq!(get("cluster_name").as_deref(), Some("prod-search"));
+        assert_eq!(get("status").as_deref(), Some("yellow"));
+        assert_eq!(get("number_of_nodes").as_deref(), Some("3"));
+        assert_eq!(get("unassigned_shards").as_deref(), Some("2"));
+        assert_eq!(
+            get("task_max_waiting_in_queue_millis").as_deref(),
+            Some("0"),
+            "the unit stays in the name the server chose"
+        );
+        assert_eq!(
+            get("active_shards_percent_as_number").as_deref(),
+            Some("86.4")
+        );
+        assert_eq!(get("timed_out"), None, "unlisted fields are not invented");
+    }
+
+    #[test]
+    fn cat_nodes_rows_become_unit_labelled_json() {
+        let json = json!([
+            { "name": "node-2", "ip": "10.0.0.2", "node.role": "cdfhilmrstw", "master": "-",
+              "heap.percent": "43", "ram.percent": "91", "cpu": "7", "load_1m": "0.52",
+              "disk.used_percent": "61.5", "disk.avail": "52613349376",
+              "uptime": "864000000", "version": "8.15.0" },
+            { "name": "node-1", "master": "*" },
+            { "not-a-node": true }
+        ]);
+        let nodes = parse_cat_nodes(&json);
+        let rows = nodes.as_array().unwrap();
+        assert_eq!(rows.len(), 2, "a row without a name is skipped, not fatal");
+        assert_eq!(rows[0]["name"], json!("node-1"), "sorted by name");
+        assert_eq!(rows[0]["master"], json!(true), "\"*\" means elected master");
+        assert_eq!(rows[1]["master"], json!(false));
+        // `bytes=b`/`time=ms` values arrive as string-encoded numbers and are
+        // surfaced as real numbers under unit-labelled keys.
+        assert_eq!(rows[1]["disk_avail_bytes"], json!(52_613_349_376_i64));
+        assert_eq!(rows[1]["uptime_ms"], json!(864_000_000_i64));
+        assert_eq!(rows[1]["load_1m"], json!(0.52));
+        assert_eq!(rows[1]["heap_percent"], json!(43));
+        assert_eq!(
+            rows[0]["ip"],
+            Json::Null,
+            "absent columns are null, never invented"
+        );
+        assert!(parse_cat_nodes(&json!({})).as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cat_shards_summarise_by_state_and_cap_the_problem_list() {
+        let json = json!([
+            { "index": "logs", "shard": "0", "prirep": "p", "state": "STARTED",
+              "docs": "100", "store": "12345", "node": "node-1" },
+            { "index": "logs", "shard": "0", "prirep": "r", "state": "UNASSIGNED",
+              "unassigned.reason": "NODE_LEFT" },
+            { "index": "logs", "shard": "1", "prirep": "p", "state": "RELOCATING",
+              "node": "node-2" },
+            { "malformed": true }
+        ]);
+        let summary = parse_cat_shards(&json, 1);
+        assert_eq!(
+            summary.total, 3,
+            "a row without a state is skipped, not fatal"
+        );
+        assert_eq!(
+            summary.by_state,
+            vec![
+                ("RELOCATING".to_string(), 1),
+                ("STARTED".to_string(), 1),
+                ("UNASSIGNED".to_string(), 1)
+            ]
+        );
+        let problems = summary.problems.as_array().unwrap();
+        assert_eq!(problems.len(), 1, "the problem list is capped");
+        assert!(summary.problems_truncated);
+        assert_eq!(problems[0]["state"], json!("UNASSIGNED"));
+        assert_eq!(problems[0]["kind"], json!("replica"));
+        assert_eq!(problems[0]["unassigned_reason"], json!("NODE_LEFT"));
+
+        let uncapped = parse_cat_shards(&json, 50);
+        assert!(!uncapped.problems_truncated);
+        assert_eq!(uncapped.problems.as_array().unwrap().len(), 2);
+
+        let empty = parse_cat_shards(&json!(null), 50);
+        assert_eq!(empty.total, 0);
+        assert!(empty.by_state.is_empty());
+    }
+
+    #[test]
+    fn one_indexs_shards_are_reported_row_by_row_with_byte_stores() {
+        let json = json!([
+            { "index": "logs", "shard": "0", "prirep": "p", "state": "STARTED",
+              "docs": "100", "store": "12345", "node": "node-1" },
+            { "index": "logs", "shard": "0", "prirep": "r", "state": "UNASSIGNED",
+              "unassigned.reason": "INDEX_CREATED" }
+        ]);
+        let rows_json = shard_rows_json(&json);
+        let rows = rows_json.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["kind"], json!("primary"));
+        assert_eq!(
+            rows[0]["store_bytes"],
+            json!(12345),
+            "bytes=b, so a byte count"
+        );
+        assert_eq!(rows[0]["shard"], json!(0));
+        assert_eq!(rows[1]["node"], Json::Null);
+        assert_eq!(rows[1]["unassigned_reason"], json!("INDEX_CREATED"));
+        assert!(shard_rows_json(&json!(null)).as_array().unwrap().is_empty());
+    }
+
+    /// The P1-4 constraint: one endpoint failing (permissions, an older
+    /// server) must not blank the others — Elasticvue's cars10/elasticvue#358
+    /// `Promise.all` failure is the counterexample this guards against.
+    #[test]
+    fn health_sources_degrade_independently() {
+        let mut extra: Vec<(Arc<str>, Arc<str>)> = Vec::new();
+        push_cluster_health_extra(
+            &mut extra,
+            &Ok(json!({ "status": "green", "number_of_nodes": 1 })),
+        );
+        push_nodes_extra(
+            &mut extra,
+            &Err(DbError::Auth(
+                "action [cluster:monitor/nodes] is unauthorized".into(),
+            )),
+        );
+        push_shards_extra(
+            &mut extra,
+            &Ok(json!([{ "index": "a", "shard": "0", "prirep": "p", "state": "STARTED" }])),
+        );
+
+        let get = |k: &str| {
+            extra
+                .iter()
+                .find(|(key, _)| &**key == k)
+                .map(|(_, v)| v.to_string())
+        };
+        // The healthy sources are populated…
+        assert_eq!(get("status").as_deref(), Some("green"));
+        assert_eq!(get("shard_count").as_deref(), Some("1"));
+        // …the failed one is marked, not silently absent…
+        assert!(get("nodes_error").unwrap().contains("unauthorized"));
+        // …and contributes no fabricated data.
+        assert_eq!(get("nodes"), None);
+    }
+
+    #[test]
+    fn even_every_source_failing_yields_marked_rows_not_an_error() {
+        let err = || DbError::Auth("denied".into());
+        let mut extra: Vec<(Arc<str>, Arc<str>)> = Vec::new();
+        push_cluster_health_extra(&mut extra, &Err(err()));
+        push_nodes_extra(&mut extra, &Err(err()));
+        push_shards_extra(&mut extra, &Err(err()));
+        let keys: Vec<&str> = extra.iter().map(|(k, _)| &**k).collect();
+        assert_eq!(
+            keys,
+            vec!["cluster_health_error", "nodes_error", "shards_error"]
+        );
+    }
+
+    #[test]
+    fn shard_states_extra_reports_counts_and_problems() {
+        let mut extra: Vec<(Arc<str>, Arc<str>)> = Vec::new();
+        push_shards_extra(
+            &mut extra,
+            &Ok(json!([
+                { "index": "a", "shard": "0", "prirep": "p", "state": "STARTED" },
+                { "index": "a", "shard": "0", "prirep": "r", "state": "UNASSIGNED",
+                  "unassigned.reason": "NODE_LEFT" }
+            ])),
+        );
+        let get = |k: &str| {
+            extra
+                .iter()
+                .find(|(key, _)| &**key == k)
+                .map(|(_, v)| v.to_string())
+        };
+        assert_eq!(get("shard_count").as_deref(), Some("2"));
+        let states: Json = serde_json::from_str(&get("shard_states").unwrap()).unwrap();
+        assert_eq!(states, json!({ "STARTED": 1, "UNASSIGNED": 1 }));
+        let problems: Json = serde_json::from_str(&get("problem_shards").unwrap()).unwrap();
+        assert_eq!(problems.as_array().unwrap().len(), 1);
+        assert_eq!(
+            get("problem_shards_truncated"),
+            None,
+            "no truncation note under the cap"
+        );
     }
 
     #[test]
