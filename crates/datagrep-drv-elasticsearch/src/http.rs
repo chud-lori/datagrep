@@ -12,7 +12,8 @@
 //! is not a substitute (it forked at ES 7.10.2 and has diverged). So this
 //! module speaks the handful of endpoints we actually need over plain HTTP:
 //! `_search`, `_pit`, `_search/scroll`, `_count`, `_tasks`, `_async_search`,
-//! `_cat/indices`, `_mapping`, `_alias`, `_data_stream`, `_validate/query`.
+//! `_cat/indices`, `_mapping`, `_alias`, `_data_stream`, `_validate/query`,
+//! `_cluster/health`, `_cat/nodes`, `_cat/shards`.
 //!
 //! # Credentials
 //!
