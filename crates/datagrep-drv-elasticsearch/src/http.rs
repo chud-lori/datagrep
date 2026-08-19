@@ -13,7 +13,7 @@
 //! module speaks the handful of endpoints we actually need over plain HTTP:
 //! `_search`, `_pit`, `_search/scroll`, `_count`, `_tasks`, `_async_search`,
 //! `_cat/indices`, `_mapping`, `_alias`, `_data_stream`, `_validate/query`,
-//! `_cluster/health`, `_cat/nodes`, `_cat/shards`.
+//! `_cluster/health`, `_cat/nodes`, `_cat/shards`, `_bulk`.
 //!
 //! # Credentials
 //!
@@ -333,6 +333,40 @@ impl EsHttp {
         Ok((json, size))
     }
 
+    /// Issue one `application/x-ndjson` request — the `_bulk` path — and parse
+    /// the JSON response. Unlike [`EsHttp::request`], the body is sent **raw**:
+    /// pre-framed NDJSON (one compact JSON per line, terminated by a trailing
+    /// `\n`), never re-serialized as a single JSON value. Bulk returns HTTP 200
+    /// even when individual items fail, so the caller inspects the parsed
+    /// response's per-item `status`/`error`; only a whole-request failure (a
+    /// 4xx/5xx on the `_bulk` call itself) surfaces here as an `Err`.
+    pub async fn request_ndjson(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: &str,
+        opaque_id: Option<&str>,
+        timeout: Option<Duration>,
+    ) -> Result<Json, DbError> {
+        let (text, _size) = self
+            .send_raw(
+                method,
+                path,
+                query,
+                body,
+                "application/x-ndjson",
+                opaque_id,
+                timeout,
+            )
+            .await?;
+        if text.trim().is_empty() {
+            return Ok(Json::Null);
+        }
+        serde_json::from_str(&text)
+            .map_err(|e| DbError::Protocol(format!("response was not valid JSON: {e}")))
+    }
+
     /// Issue the request and return the raw body plus its wire size. The one
     /// place a request is actually built, so auth, tagging, timeouts and
     /// error mapping cannot drift between the two parsing paths.
@@ -366,6 +400,53 @@ impl EsHttp {
         // Deliberately logs the path only. A body can contain user data and a
         // URL can contain userinfo; neither belongs in a log line.
         tracing::debug!(method = method.as_str(), path, "elasticsearch request");
+
+        let resp = req.send().await.map_err(map_reqwest_error)?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(map_reqwest_error)?;
+        let size = text.len();
+        if !status.is_success() {
+            return Err(map_status_error(status.as_u16(), &text));
+        }
+        Ok((text, size))
+    }
+
+    /// As [`EsHttp::send`], but for a body that is a pre-serialized raw string
+    /// with an explicit content type — the `_bulk` NDJSON path, whose body must
+    /// go over the wire verbatim (`application/x-ndjson`, not re-encoded as one
+    /// JSON value). Kept structurally identical to [`EsHttp::send`] so auth, the
+    /// `X-Opaque-Id` tag, the per-request timeout and error mapping never drift
+    /// between the two.
+    #[allow(clippy::too_many_arguments)] // mirrors `send` plus an explicit content type
+    async fn send_raw(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: &str,
+        content_type: &'static str,
+        opaque_id: Option<&str>,
+        timeout: Option<Duration>,
+    ) -> Result<(String, usize), DbError> {
+        let url = self.url(path);
+        let mut req = self
+            .client
+            .request(method.to_reqwest(), &url)
+            .timeout(timeout.unwrap_or(self.request_timeout))
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body.to_string());
+        if !query.is_empty() {
+            req = req.query(query);
+        }
+        if let Some(v) = self.auth.header_value() {
+            req = req.header(reqwest::header::AUTHORIZATION, v);
+        }
+        if let Some(id) = opaque_id {
+            req = req.header(OPAQUE_ID_HEADER, id);
+        }
+
+        // Path only, never the body: an NDJSON body can carry user documents.
+        tracing::debug!(method = method.as_str(), path, "elasticsearch raw request");
 
         let resp = req.send().await.map_err(map_reqwest_error)?;
         let status = resp.status();

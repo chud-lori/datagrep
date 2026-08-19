@@ -867,9 +867,96 @@ fn target_label(write: &CompiledWrite) -> String {
     }
 }
 
+/// The identity columns every report row carries whatever the outcome: `op`,
+/// `_index`, `_id` (omitted for a not-yet-assigned server-generated insert id)
+/// and `_routing`.
+fn push_identity(doc: &mut Document, write: &CompiledWrite) {
+    doc.push("op", Value::Str(Arc::from(write.op)));
+    doc.push("_index", Value::Str(Arc::from(write.index.as_str())));
+    // An insert with no user-supplied id has an empty compile-time id; the
+    // server generates one, echoed back from the response by the applied path.
+    if !write.id.is_empty() {
+        doc.push("_id", Value::Str(Arc::from(write.id.as_str())));
+    }
+    if let Some(routing) = &write.routing {
+        doc.push("_routing", Value::Str(Arc::from(routing.as_str())));
+    }
+}
+
+/// The fields describing a write that applied — `outcome=applied`, the engine
+/// `result`, a server-assigned insert id, and the NEW `_seq_no`/`_primary_term`
+/// so a follow-up edit of the same row can be guarded without re-reading. A
+/// `forced_refresh: true` (refresh=wait_for silently degraded to an immediate
+/// refresh) is surfaced as a `Notice`. `response` is the single-write response
+/// body or, in a bulk report, the per-item object — the two share this shape.
+fn push_applied_fields(
+    doc: &mut Document,
+    write: &CompiledWrite,
+    response: &Json,
+    notices: &mut Vec<Notice>,
+) {
+    doc.push("outcome", Value::Str(Arc::from("applied")));
+    // A server-generated insert id is only known now: echo it so the grid can
+    // address the new document on a follow-up edit.
+    if write.id.is_empty() {
+        if let Some(new_id) = response.get("_id").and_then(Json::as_str) {
+            doc.push("_id", Value::Str(Arc::from(new_id)));
+        }
+    }
+    if let Some(result) = response.get("result").and_then(Json::as_str) {
+        doc.push("result", Value::Str(Arc::from(result)));
+    }
+    for key in ["_seq_no", "_primary_term"] {
+        if let Some(n) = response.get(key).and_then(Json::as_i64) {
+            doc.push(key, Value::I64(n));
+        }
+    }
+    if response.get("forced_refresh") == Some(&Json::Bool(true)) {
+        doc.push("forced_refresh", Value::Bool(true));
+        notices.push(Notice {
+            severity: NoticeSeverity::Warning,
+            code: Some(Arc::from("es.mutate.forced_refresh")),
+            message: Arc::from(
+                format!(
+                    "the write to `{}` forced an immediate refresh: the shard's \
+                     refresh-listener queue was full, so refresh=wait_for degraded \
+                     to refresh=true",
+                    target_label(write)
+                )
+                .as_str(),
+            ),
+        });
+    }
+}
+
+/// The fields describing a write that failed — `outcome=failed`, the `conflict`
+/// flag (a precondition/409 loss, which is a UI state not a toast), the engine
+/// `error_code` and the `error` message. Returns whether it was a conflict so
+/// the caller can count them.
+fn push_failed_fields(doc: &mut Document, error: &DbError) -> bool {
+    doc.push("outcome", Value::Str(Arc::from("failed")));
+    let (code, message, conflict) = match error {
+        DbError::Conflict { code, message } => (code.clone(), message.clone(), true),
+        DbError::Query { code, message, .. } => (code.clone(), message.clone(), false),
+        other => (None, other.to_string(), false),
+    };
+    if conflict {
+        // The precondition no longer held: someone else wrote the document
+        // since it was read.
+        doc.push("conflict", Value::Bool(true));
+    }
+    if let Some(code) = code {
+        doc.push("error_code", Value::Str(Arc::from(code.as_str())));
+    }
+    doc.push("error", Value::Str(Arc::from(message.as_str())));
+    conflict
+}
+
 /// Fold the compiled writes plus the outcomes gathered before the halt into
 /// the batch report: one `Value::Document` per mutation (applied / failed /
-/// not attempted) plus the summary and refresh notices.
+/// not attempted) plus the summary and refresh notices. This is the
+/// **single-document, serial** path (a batch of one); more than one mutation
+/// goes through [`bulk_report`] instead.
 ///
 /// `outcomes` is as long as `writes` when everything applied; on a halt it is
 /// exactly one longer than the applied prefix, ending in the failure —
@@ -887,71 +974,15 @@ pub fn batch_report(
     let mut outcomes = outcomes.into_iter();
     for (i, write) in writes.iter().enumerate() {
         let mut doc = Document::new();
-        doc.push("op", Value::Str(Arc::from(write.op)));
-        doc.push("_index", Value::Str(Arc::from(write.index.as_str())));
-        // An insert with no user-supplied id has an empty compile-time id; the
-        // server generates one, echoed back from the response below.
-        if !write.id.is_empty() {
-            doc.push("_id", Value::Str(Arc::from(write.id.as_str())));
-        }
-        if let Some(routing) = &write.routing {
-            doc.push("_routing", Value::Str(Arc::from(routing.as_str())));
-        }
+        push_identity(&mut doc, write);
         match outcomes.next() {
             Some(WriteOutcome::Applied(response)) => {
                 applied += 1;
-                doc.push("outcome", Value::Str(Arc::from("applied")));
-                // A server-generated insert id is only known now: echo it so the
-                // grid can address the new document on a follow-up edit.
-                if write.id.is_empty() {
-                    if let Some(new_id) = response.get("_id").and_then(Json::as_str) {
-                        doc.push("_id", Value::Str(Arc::from(new_id)));
-                    }
-                }
-                if let Some(result) = response.get("result").and_then(Json::as_str) {
-                    doc.push("result", Value::Str(Arc::from(result)));
-                }
-                // The NEW guard values, so a follow-up edit of the same row
-                // can be guarded without re-reading.
-                for key in ["_seq_no", "_primary_term"] {
-                    if let Some(n) = response.get(key).and_then(Json::as_i64) {
-                        doc.push(key, Value::I64(n));
-                    }
-                }
-                if response.get("forced_refresh") == Some(&Json::Bool(true)) {
-                    doc.push("forced_refresh", Value::Bool(true));
-                    notices.push(Notice {
-                        severity: NoticeSeverity::Warning,
-                        code: Some(Arc::from("es.mutate.forced_refresh")),
-                        message: Arc::from(
-                            format!(
-                                "the write to `{}` forced an immediate refresh: the shard's \
-                                 refresh-listener queue was full, so refresh=wait_for degraded \
-                                 to refresh=true",
-                                target_label(write)
-                            )
-                            .as_str(),
-                        ),
-                    });
-                }
+                push_applied_fields(&mut doc, write, &response, &mut notices);
             }
             Some(WriteOutcome::Failed(error)) => {
                 failed = Some(i);
-                doc.push("outcome", Value::Str(Arc::from("failed")));
-                let (code, message, conflict) = match &error {
-                    DbError::Conflict { code, message } => (code.clone(), message.clone(), true),
-                    DbError::Query { code, message, .. } => (code.clone(), message.clone(), false),
-                    other => (None, other.to_string(), false),
-                };
-                if conflict {
-                    // The precondition no longer held: someone else wrote the
-                    // document since it was read. A UI state, not a toast.
-                    doc.push("conflict", Value::Bool(true));
-                }
-                if let Some(code) = code {
-                    doc.push("error_code", Value::Str(Arc::from(code.as_str())));
-                }
-                doc.push("error", Value::Str(Arc::from(message.as_str())));
+                push_failed_fields(&mut doc, &error);
             }
             None => {
                 doc.push("outcome", Value::Str(Arc::from("not attempted")));
@@ -995,6 +1026,292 @@ pub fn batch_report(
         }
     }
     (docs, notices)
+}
+
+/// Elasticsearch's default `http.max_content_length`. A `_bulk` body larger
+/// than this is rejected by the node before it is read, so the batch is refused
+/// up front with a clear message rather than sent as a body the server drops
+/// whole. 100 MB is the shipped default (a cluster may raise or lower it in
+/// `elasticsearch.yml`, but that is not visible from here).
+pub const MAX_BULK_BODY_BYTES: usize = 100 * 1024 * 1024;
+
+/// Frame already-compiled writes into ONE `_bulk` request body: newline-
+/// delimited JSON (`application/x-ndjson`), each value on a single compact
+/// line, the whole body terminated by a trailing `\n`.
+///
+/// For each mutation this emits an **action line** and, for everything except a
+/// delete, a **source line**:
+///
+/// - update → `{"update":{"_index","_id","if_seq_no","if_primary_term",…}}`
+///   then `{"doc":…}` or `{"script":…}` — the compiled update body, reused
+///   verbatim (a removal is a `script`, a pure set a `doc`).
+/// - delete → `{"delete":{…,"if_seq_no","if_primary_term"}}` — no source line.
+/// - insert → `{"create":{"_index","_id",…}}` (id present; `op_type=create`
+///   semantics, so it 409s instead of overwriting) or `{"index":{"_index",…}}`
+///   (no id; the server generates one) then the `_source` line. NEVER a bare
+///   `index` with an id — that is the blind overwrite the guard exists to
+///   prevent.
+///
+/// The optimistic-concurrency guard rides on the **action line**
+/// (`if_seq_no`/`if_primary_term` are action-line fields in bulk, not query
+/// params); `refresh` and `include_source_on_error` are `_bulk` URL params and
+/// are set by the caller, not here. `retry_on_conflict` — also an action-line
+/// field — is deliberately NEVER emitted: silently retrying is exactly the
+/// clobber the guard prevents (plan §3.2.6).
+///
+/// Refuses (having framed nothing that leaves the process) if the body would
+/// exceed `max_bytes`, rather than send a body Elasticsearch rejects whole.
+pub fn compile_bulk_body(writes: &[CompiledWrite], max_bytes: usize) -> Result<String, DbError> {
+    let mut body = String::new();
+    for write in writes {
+        let (action, source) = bulk_lines(write)?;
+        body.push_str(&action);
+        body.push('\n');
+        if let Some(source) = source {
+            body.push_str(&source);
+            body.push('\n');
+        }
+    }
+    if body.len() > max_bytes {
+        return Err(DbError::Unsupported {
+            feature: format!(
+                "this batch frames to {} bytes of _bulk NDJSON, over the {} MB \
+                 http.max_content_length ceiling — split it into smaller batches rather than send \
+                 a body Elasticsearch rejects whole",
+                body.len(),
+                max_bytes / (1024 * 1024)
+            ),
+        });
+    }
+    Ok(body)
+}
+
+/// The action line, and where one exists the source line, for one compiled
+/// write — each a compact single-line JSON string. See [`compile_bulk_body`].
+///
+/// `serde_json::to_string` is compact (no pretty-printing) and escapes any
+/// newline inside a string value as `\n`, so a field value that contains a
+/// newline cannot break the one-JSON-per-line NDJSON framing.
+fn bulk_lines(write: &CompiledWrite) -> Result<(String, Option<String>), DbError> {
+    let mut meta = Map::new();
+    meta.insert("_index".to_string(), Json::String(write.index.clone()));
+    let (action_name, source) = match write.op {
+        "update" => {
+            meta.insert("_id".to_string(), Json::String(write.id.clone()));
+            add_bulk_guard(&mut meta, write)?;
+            add_bulk_routing(&mut meta, write);
+            ("update", write.body.clone())
+        }
+        "delete" => {
+            meta.insert("_id".to_string(), Json::String(write.id.clone()));
+            add_bulk_guard(&mut meta, write)?;
+            add_bulk_routing(&mut meta, write);
+            ("delete", None)
+        }
+        "insert" => {
+            add_bulk_routing(&mut meta, write);
+            if write.id.is_empty() {
+                // No id: the server generates one. `index` with no `_id`.
+                ("index", write.body.clone())
+            } else {
+                // `create` = op_type=create semantics: 409s on an existing id
+                // instead of blind-overwriting. NEVER a bare `index` with an id.
+                meta.insert("_id".to_string(), Json::String(write.id.clone()));
+                ("create", write.body.clone())
+            }
+        }
+        other => {
+            return Err(DbError::Protocol(format!(
+                "cannot frame a _bulk action for the unknown write op `{other}`"
+            )))
+        }
+    };
+    let mut action = Map::new();
+    action.insert(action_name.to_string(), Json::Object(meta));
+    let action_line = serde_json::to_string(&Json::Object(action))
+        .map_err(|e| DbError::Protocol(format!("serializing a _bulk action line: {e}")))?;
+    let source_line = match source {
+        Some(body) => Some(
+            serde_json::to_string(&body)
+                .map_err(|e| DbError::Protocol(format!("serializing a _bulk source line: {e}")))?,
+        ),
+        None => None,
+    };
+    Ok((action_line, source_line))
+}
+
+/// Lift the compiled guard (`if_seq_no`/`if_primary_term`, carried as query
+/// params on the single-document request) onto the bulk **action line**, where
+/// bulk wants it — as JSON numbers, not strings. Belt-and-braces: an update/
+/// delete is already refused at [`compile_mutation`] if it has no guard, so a
+/// compiled one always carries it, but an unguarded action line is refused here
+/// too rather than silently framed.
+fn add_bulk_guard(meta: &mut Map<String, Json>, write: &CompiledWrite) -> Result<(), DbError> {
+    match (
+        query_u64(write, "if_seq_no"),
+        query_u64(write, "if_primary_term"),
+    ) {
+        (Some(seq_no), Some(primary_term)) => {
+            meta.insert("if_seq_no".to_string(), Json::from(seq_no));
+            meta.insert("if_primary_term".to_string(), Json::from(primary_term));
+            Ok(())
+        }
+        _ => Err(DbError::Unsupported {
+            feature: format!(
+                "framing an unguarded `{}` into a _bulk batch: its \
+                 `if_seq_no`/`if_primary_term` precondition is missing",
+                write.op
+            ),
+        }),
+    }
+}
+
+/// Routing is part of identity, and in bulk it rides on the action line too.
+fn add_bulk_routing(meta: &mut Map<String, Json>, write: &CompiledWrite) {
+    if let Some(routing) = &write.routing {
+        meta.insert("routing".to_string(), Json::String(routing.clone()));
+    }
+}
+
+/// Read one integer query parameter off a compiled write, for lifting the
+/// guard onto the bulk action line. `if_seq_no`/`if_primary_term` were rendered
+/// from `u64`s, so parsing them back is lossless.
+fn query_u64(write: &CompiledWrite, key: &str) -> Option<u64> {
+    write
+        .query
+        .iter()
+        .find(|(k, _)| *k == key)
+        .and_then(|(_, v)| v.parse().ok())
+}
+
+/// Fold a `_bulk` response into the batch report: one `Value::Document` per
+/// submitted action (applied / failed, with the conflict flag on a 409) plus a
+/// summary and any per-item refresh notices.
+///
+/// **Bulk is not atomic and returns HTTP 200 even when items fail.** Every
+/// action is executed server-side — there is no early stop — so this is the
+/// honest shape of halt-and-report on bulk: it reports each item truthfully as
+/// applied or failed and the summary states that bulk applied every item it
+/// could (a failed item was simply not applied; the successful ones stay
+/// written). It never pretends the batch stopped, because it did not — there is
+/// no "not attempted" here, unlike the serial [`batch_report`]. The real
+/// per-item signal is each item's `status`/`error` (the top-level `errors`
+/// flag only says *some* item failed); parsing is keyed off the structured
+/// status/`error.type`, never the reason prose.
+pub fn bulk_report(
+    writes: &[CompiledWrite],
+    response: &Json,
+) -> Result<(Vec<Value>, Vec<Notice>), DbError> {
+    let items = response
+        .get("items")
+        .and_then(Json::as_array)
+        .ok_or_else(|| DbError::Protocol("a _bulk response with no `items` array".into()))?;
+    if items.len() != writes.len() {
+        // Bulk returns exactly one item per submitted action, in order; a
+        // mismatch means outcomes cannot be lined up with mutations safely.
+        return Err(DbError::Protocol(format!(
+            "a _bulk response carried {} item(s) for {} submitted action(s)",
+            items.len(),
+            writes.len()
+        )));
+    }
+
+    let total = writes.len();
+    let mut docs = Vec::with_capacity(total);
+    let mut notices = Vec::new();
+    let mut applied = 0usize;
+    let mut failed = 0usize;
+    let mut conflicts = 0usize;
+
+    for (write, item) in writes.iter().zip(items) {
+        let mut doc = Document::new();
+        push_identity(&mut doc, write);
+        let inner = bulk_item_inner(item)?;
+        let status = inner.get("status").and_then(Json::as_i64).unwrap_or(0);
+        if (200i64..300).contains(&status) {
+            applied += 1;
+            push_applied_fields(&mut doc, write, inner, &mut notices);
+        } else {
+            failed += 1;
+            if push_failed_fields(&mut doc, &bulk_item_error(status, inner)) {
+                conflicts += 1;
+            }
+        }
+        docs.push(Value::Document(Arc::new(doc)));
+    }
+
+    if failed == 0 {
+        notices.push(Notice {
+            severity: NoticeSeverity::Info,
+            code: Some(Arc::from("es.bulk.applied")),
+            message: Arc::from(
+                format!(
+                    "{applied} document(s) written in one _bulk request with refresh=wait_for — \
+                     Elasticsearch bulk is not atomic (reported per item), and every item here \
+                     applied"
+                )
+                .as_str(),
+            ),
+        });
+    } else {
+        let conflict_note = if conflicts > 0 {
+            format!(" ({conflicts} of them a version conflict)")
+        } else {
+            String::new()
+        };
+        notices.push(Notice {
+            severity: NoticeSeverity::Warning,
+            code: Some(Arc::from("es.bulk.partial")),
+            message: Arc::from(
+                format!(
+                    "_bulk applied {applied} of {total} document(s); {failed} failed{conflict_note}. \
+                     Elasticsearch bulk is not atomic and has no transaction — it executed every \
+                     item and applied the ones it could, so the failed items were left unwritten \
+                     while the successful writes stay written (it did not stop at the first failure)"
+                )
+                .as_str(),
+            ),
+        });
+    }
+
+    Ok((docs, notices))
+}
+
+/// The per-item object under a `_bulk` item's single action key
+/// (`{"update": {…}}` → the `{…}`), whichever action it was.
+fn bulk_item_inner(item: &Json) -> Result<&Json, DbError> {
+    item.as_object()
+        .and_then(|o| o.values().next())
+        .ok_or_else(|| DbError::Protocol("a _bulk item with no action object".into()))
+}
+
+/// Map one failed `_bulk` item onto a [`DbError`], keyed off the item's HTTP
+/// `status` and structured `error.type` — never the reason prose. A 409 is a
+/// [`DbError::Conflict`] (a precondition or `op_type=create` collision, a UI
+/// state); anything else is a [`DbError::Query`] that keeps the engine `type`
+/// as its code. Mirrors [`crate::error::map_status_error`]'s 409 split, here
+/// for an error that arrives already parsed inside the 200 bulk envelope rather
+/// than as a non-2xx body.
+fn bulk_item_error(status: i64, inner: &Json) -> DbError {
+    let err = inner.get("error");
+    let code = err
+        .and_then(|e| e.get("type"))
+        .and_then(Json::as_str)
+        .map(str::to_string);
+    let message = err
+        .and_then(|e| e.get("reason"))
+        .and_then(Json::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("_bulk item failed with status {status}"));
+    if status == 409 {
+        DbError::Conflict { code, message }
+    } else {
+        DbError::Query {
+            code,
+            message,
+            position: None,
+        }
+    }
 }
 
 /// A single path/id URL segment, percent-encoded. Unlike an index
@@ -1968,5 +2285,385 @@ mod tests {
                 .any(|n| n.code.as_deref() == Some("es.mutate.forced_refresh")),
             "a wait_for that degraded to an immediate refresh must be surfaced"
         );
+    }
+
+    // ---- P1-2: multi-document `_bulk` batching ---------------------------
+
+    fn update(id: &str, field: &str, value: Value, seq: i64, term: i64) -> CompiledWrite {
+        compile_mutation(
+            &Mutation::Update {
+                path: path(),
+                key: key("events", id),
+                sets: vec![(fp(field), value)],
+                expect: guard(seq, term),
+            },
+            true,
+        )
+        .unwrap()
+    }
+
+    fn delete(id: &str, seq: i64, term: i64) -> CompiledWrite {
+        compile_mutation(
+            &Mutation::Delete {
+                path: path(),
+                key: key("events", id),
+                expect: guard(seq, term),
+            },
+            true,
+        )
+        .unwrap()
+    }
+
+    fn line(body: &str, n: usize) -> Json {
+        serde_json::from_str(body.lines().nth(n).unwrap())
+            .unwrap_or_else(|e| panic!("line {n} of {body:?} is not JSON: {e}"))
+    }
+
+    #[test]
+    fn bulk_frames_an_update_as_a_guarded_action_line_plus_a_doc_source_line() {
+        let w = update("abc", "status", Value::Str(Arc::from("done")), 41, 3);
+        let body = compile_bulk_body(&[w], MAX_BULK_BODY_BYTES).unwrap();
+        // Two lines (action + source), body newline-terminated.
+        assert!(body.ends_with('\n'));
+        assert_eq!(body.lines().count(), 2, "{body:?}");
+        // The guard rides the ACTION LINE, as numbers — not query params. No
+        // retry_on_conflict anywhere.
+        assert_eq!(
+            line(&body, 0),
+            json!({"update":{"_index":"events","_id":"abc","if_seq_no":41,"if_primary_term":3}})
+        );
+        assert!(!body.contains("retry_on_conflict"));
+        // The source line is the compiled partial doc, reused verbatim.
+        assert_eq!(line(&body, 1), json!({"doc":{"status":"done"}}));
+        // Each line is a single compact line of JSON.
+        for l in body.lines() {
+            assert!(!l.contains('\n'));
+        }
+    }
+
+    #[test]
+    fn bulk_frames_a_delete_as_a_guarded_action_line_with_no_source_line() {
+        let body = compile_bulk_body(&[delete("abc", 7, 2)], MAX_BULK_BODY_BYTES).unwrap();
+        assert_eq!(
+            body.lines().count(),
+            1,
+            "a delete has no source line: {body:?}"
+        );
+        assert_eq!(
+            line(&body, 0),
+            json!({"delete":{"_index":"events","_id":"abc","if_seq_no":7,"if_primary_term":2}})
+        );
+        assert!(body.ends_with('\n'));
+    }
+
+    #[test]
+    fn bulk_frames_a_removal_update_with_a_script_source_line_never_a_doc() {
+        let w = update("abc", "status", Value::Absent, 41, 3);
+        let body = compile_bulk_body(&[w], MAX_BULK_BODY_BYTES).unwrap();
+        assert_eq!(body.lines().count(), 2);
+        // The guard still rides the action line.
+        assert_eq!(
+            line(&body, 0)
+                .get("update")
+                .and_then(|u| u.get("if_seq_no")),
+            Some(&json!(41))
+        );
+        let source = line(&body, 1);
+        assert!(
+            source.get("doc").is_none(),
+            "a removal must not send `doc` — ES would ignore the script otherwise"
+        );
+        assert_eq!(
+            source
+                .get("script")
+                .and_then(|s| s.get("source"))
+                .and_then(Json::as_str),
+            Some("ctx._source.remove('status');")
+        );
+    }
+
+    #[test]
+    fn bulk_frames_an_insert_with_an_id_as_create_never_index() {
+        let w = compile_mutation(
+            &Mutation::Insert {
+                path: path(),
+                doc: doc_val(vec![
+                    ("_id", Value::Str(Arc::from("abc"))),
+                    ("_routing", Value::Str(Arc::from("t7"))),
+                    ("status", Value::Str(Arc::from("new"))),
+                ]),
+            },
+            true,
+        )
+        .unwrap();
+        let body = compile_bulk_body(&[w], MAX_BULK_BODY_BYTES).unwrap();
+        assert_eq!(body.lines().count(), 2);
+        let action = line(&body, 0);
+        // `create`, not `index` — op_type=create is the guard for an id'd insert.
+        assert!(
+            action.get("index").is_none(),
+            "NEVER a bare `index` with an id — that is the blind overwrite: {action}"
+        );
+        let create = action.get("create").expect("an id'd insert is a create");
+        assert_eq!(create.get("_id"), Some(&json!("abc")));
+        assert_eq!(create.get("routing"), Some(&json!("t7")));
+        // An insert carries no `if_seq_no` guard: a new doc has no seq_no.
+        assert!(create.get("if_seq_no").is_none());
+        assert_eq!(line(&body, 1), json!({"status":"new"}));
+    }
+
+    #[test]
+    fn bulk_frames_an_insert_without_an_id_as_index_with_no_id() {
+        let w = compile_mutation(
+            &Mutation::Insert {
+                path: path(),
+                doc: doc_val(vec![("status", Value::Str(Arc::from("new")))]),
+            },
+            true,
+        )
+        .unwrap();
+        let body = compile_bulk_body(&[w], MAX_BULK_BODY_BYTES).unwrap();
+        assert_eq!(body.lines().count(), 2);
+        let action = line(&body, 0);
+        assert!(action.get("create").is_none());
+        let index = action
+            .get("index")
+            .expect("a no-id insert is an `index` action");
+        assert!(
+            index.get("_id").is_none(),
+            "no id must be sent for a server-generated insert"
+        );
+        assert_eq!(line(&body, 1), json!({"status":"new"}));
+    }
+
+    #[test]
+    fn bulk_puts_routing_on_the_action_line() {
+        let mut k = key("events", "abc");
+        k.push((fp("_routing"), Value::Str(Arc::from("t7"))));
+        let w = compile_mutation(
+            &Mutation::Delete {
+                path: path(),
+                key: k,
+                expect: guard(7, 2),
+            },
+            true,
+        )
+        .unwrap();
+        let body = compile_bulk_body(&[w], MAX_BULK_BODY_BYTES).unwrap();
+        assert_eq!(
+            line(&body, 0).get("delete").and_then(|d| d.get("routing")),
+            Some(&json!("t7"))
+        );
+    }
+
+    #[test]
+    fn bulk_body_is_compact_newline_terminated_and_pairs_actions_with_sources() {
+        let update = update("a", "x", Value::I64(1), 1, 1);
+        let delete = delete("b", 2, 2);
+        let insert = compile_mutation(
+            &Mutation::Insert {
+                path: path(),
+                doc: doc_val(vec![
+                    ("_id", Value::Str(Arc::from("c"))),
+                    ("y", Value::I64(2)),
+                ]),
+            },
+            true,
+        )
+        .unwrap();
+        let body = compile_bulk_body(&[update, delete, insert], MAX_BULK_BODY_BYTES).unwrap();
+        // update(2) + delete(1) + insert(2) = 5 lines.
+        assert!(body.ends_with('\n'));
+        assert_eq!(body.lines().count(), 5, "{body:?}");
+        // Every line is valid standalone JSON (NDJSON), never pretty-printed.
+        for l in body.lines() {
+            let v: Json = serde_json::from_str(l).unwrap_or_else(|e| panic!("{l:?}: {e}"));
+            assert!(v.is_object());
+            assert!(!l.contains('\n'));
+        }
+        // No pretty-print spacing, no blank lines.
+        assert!(!body.contains(": "));
+        assert!(!body.contains("\n\n"));
+    }
+
+    #[test]
+    fn bulk_never_emits_retry_on_conflict() {
+        let body = compile_bulk_body(
+            &[update("a", "x", Value::I64(1), 1, 1), delete("b", 2, 2)],
+            MAX_BULK_BODY_BYTES,
+        )
+        .unwrap();
+        assert!(
+            !body.contains("retry_on_conflict"),
+            "retry_on_conflict is the silent clobber the guard prevents: {body}"
+        );
+    }
+
+    #[test]
+    fn bulk_refuses_an_oversize_body_rather_than_send_a_truncated_one() {
+        let writes: Vec<CompiledWrite> = (0..50)
+            .map(|i| update(&format!("id-{i}"), "x", Value::I64(i), 1, 1))
+            .collect();
+        // A tiny ceiling forces the refusal deterministically.
+        let err = compile_bulk_body(&writes, 64).unwrap_err();
+        assert!(matches!(err, DbError::Unsupported { .. }));
+        assert!(err.to_string().contains("http.max_content_length"), "{err}");
+        // The same batch frames fine under the real ceiling.
+        assert!(compile_bulk_body(&writes, MAX_BULK_BODY_BYTES).is_ok());
+    }
+
+    fn row(docs: &[Value], i: usize) -> &Document {
+        match &docs[i] {
+            Value::Document(d) => d,
+            other => panic!("row {i} is not a document: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bulk_report_classifies_mixed_success_conflict_and_error() {
+        let writes = vec![
+            update("a", "x", Value::I64(1), 1, 1),
+            update("b", "x", Value::I64(2), 1, 1),
+            delete("c", 1, 1),
+        ];
+        // HTTP 200 overall, with `errors:true` and per-item statuses.
+        let response = json!({
+            "errors": true,
+            "items": [
+                {"update": {"_index":"events","_id":"a","status":200,"result":"updated","_seq_no":42,"_primary_term":3}},
+                {"update": {"_index":"events","_id":"b","status":409,"error":{"type":"version_conflict_engine_exception","reason":"[b]: version conflict"}}},
+                {"delete": {"_index":"events","_id":"c","status":400,"error":{"type":"illegal_argument_exception","reason":"bad request"}}}
+            ]
+        });
+        let (docs, notices) = bulk_report(&writes, &response).unwrap();
+        assert_eq!(docs.len(), 3);
+
+        // Item 0: applied, new guard echoed.
+        assert_eq!(
+            row(&docs, 0).get("outcome"),
+            Some(&Value::Str(Arc::from("applied")))
+        );
+        assert_eq!(row(&docs, 0).get("_seq_no"), Some(&Value::I64(42)));
+
+        // Item 1: a 409 is a failure AND a conflict, engine type as error_code.
+        assert_eq!(
+            row(&docs, 1).get("outcome"),
+            Some(&Value::Str(Arc::from("failed")))
+        );
+        assert_eq!(row(&docs, 1).get("conflict"), Some(&Value::Bool(true)));
+        assert_eq!(
+            row(&docs, 1).get("error_code"),
+            Some(&Value::Str(Arc::from("version_conflict_engine_exception")))
+        );
+
+        // Item 2: a 400 is a failure but NOT a conflict.
+        assert_eq!(
+            row(&docs, 2).get("outcome"),
+            Some(&Value::Str(Arc::from("failed")))
+        );
+        assert_eq!(row(&docs, 2).get("conflict"), None);
+        assert_eq!(
+            row(&docs, 2).get("error_code"),
+            Some(&Value::Str(Arc::from("illegal_argument_exception")))
+        );
+
+        // No row is "not attempted": bulk executed every item.
+        for i in 0..3 {
+            assert_ne!(
+                row(&docs, i).get("outcome"),
+                Some(&Value::Str(Arc::from("not attempted")))
+            );
+        }
+        // The honest partial-bulk summary.
+        let partial = notices
+            .iter()
+            .find(|n| n.code.as_deref() == Some("es.bulk.partial"))
+            .expect("a partial bulk must summarise as partial");
+        assert!(
+            partial.message.contains("not atomic"),
+            "{}",
+            partial.message
+        );
+        assert!(
+            partial.message.contains("version conflict"),
+            "{}",
+            partial.message
+        );
+    }
+
+    #[test]
+    fn bulk_report_notes_bulk_is_not_atomic_even_when_every_item_applied() {
+        let response = json!({
+            "errors": false,
+            "items": [{"update":{"_index":"events","_id":"a","status":200,"result":"updated","_seq_no":9,"_primary_term":1}}]
+        });
+        let (docs, notices) =
+            bulk_report(&[update("a", "x", Value::I64(1), 1, 1)], &response).unwrap();
+        assert_eq!(
+            row(&docs, 0).get("outcome"),
+            Some(&Value::Str(Arc::from("applied")))
+        );
+        let n = notices
+            .iter()
+            .find(|n| n.code.as_deref() == Some("es.bulk.applied"))
+            .expect("an all-success bulk still notes it is not atomic");
+        assert!(n.message.contains("not atomic"), "{}", n.message);
+    }
+
+    #[test]
+    fn bulk_report_echoes_a_server_generated_insert_id() {
+        let w = compile_mutation(
+            &Mutation::Insert {
+                path: path(),
+                doc: doc_val(vec![("status", Value::Str(Arc::from("new")))]),
+            },
+            true,
+        )
+        .unwrap();
+        let response = json!({
+            "errors": false,
+            "items": [{"index":{"_index":"events","_id":"gen-xyz","status":201,"result":"created","_seq_no":0,"_primary_term":1}}]
+        });
+        let (docs, _) = bulk_report(&[w], &response).unwrap();
+        assert_eq!(
+            row(&docs, 0).get("_id"),
+            Some(&Value::Str(Arc::from("gen-xyz")))
+        );
+        assert_eq!(
+            row(&docs, 0).get("result"),
+            Some(&Value::Str(Arc::from("created")))
+        );
+    }
+
+    #[test]
+    fn bulk_report_surfaces_a_per_item_forced_refresh() {
+        let response = json!({
+            "errors": false,
+            "items": [{"update":{"_index":"events","_id":"a","status":200,"result":"updated","forced_refresh":true}}]
+        });
+        let (docs, notices) =
+            bulk_report(&[update("a", "x", Value::I64(1), 1, 1)], &response).unwrap();
+        assert_eq!(
+            row(&docs, 0).get("forced_refresh"),
+            Some(&Value::Bool(true))
+        );
+        assert!(notices
+            .iter()
+            .any(|n| n.code.as_deref() == Some("es.mutate.forced_refresh")));
+    }
+
+    #[test]
+    fn bulk_report_refuses_an_item_count_mismatch_or_missing_items() {
+        // Two items for one submitted action: outcomes cannot be lined up.
+        let two = json!({"items":[{"delete":{"status":200}},{"delete":{"status":200}}]});
+        assert!(matches!(
+            bulk_report(&[delete("a", 1, 1)], &two),
+            Err(DbError::Protocol(_))
+        ));
+        // No `items` array at all.
+        assert!(matches!(
+            bulk_report(&[delete("a", 1, 1)], &json!({"took": 1})),
+            Err(DbError::Protocol(_))
+        ));
     }
 }
