@@ -637,6 +637,12 @@ impl EsConnection {
     ) -> Result<(), DbError> {
         let mut checked: HashSet<&str> = HashSet::new();
         for write in writes {
+            // Inserts guard with `op_type=create`, not `if_seq_no`, so the TSDB
+            // sentinel-`_seq_no` hazard does not apply to them — a create works
+            // on a time-series index.
+            if write.op == "insert" {
+                continue;
+            }
             if !checked.insert(write.index.as_str()) {
                 continue;
             }

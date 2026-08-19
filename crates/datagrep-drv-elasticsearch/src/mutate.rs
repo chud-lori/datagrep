@@ -42,6 +42,7 @@
 //! unreadable) the write still carries `if_seq_no`, which such an index
 //! rejects rather than applies.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde_json::{json, Map, Value as Json};
@@ -49,6 +50,7 @@ use serde_json::{json, Map, Value as Json};
 use datagrep_api::driver::{Notice, NoticeSeverity};
 use datagrep_api::error::DbError;
 use datagrep_api::request::Mutation;
+use datagrep_api::shape::ObjectPath;
 use datagrep_api::value::{Document, FieldPath, PathSeg, Value};
 
 use crate::http::{version_pair, Method, Product};
@@ -74,7 +76,7 @@ const ENVELOPE_FIELDS: &[&str] = &[
 /// identity fields the report echoes back.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledWrite {
-    /// `"update"` or `"delete"` — for the report.
+    /// `"update"`, `"delete"` or `"insert"` — for the report.
     pub op: &'static str,
     /// Raw (unencoded) index name, for the per-index TSDB gate.
     pub index: String,
@@ -115,7 +117,12 @@ pub fn compile_mutation(
         } => {
             let identity = identity_from_key(key)?;
             let guard = guard_from_expect(expect)?;
-            let doc = sets_to_partial_doc(sets)?;
+            // A pure-set update stays a `{"doc": …}` partial merge (cheaper, and
+            // it keeps `_update`'s recursive-merge semantics). It escalates to a
+            // single `{"script": …}` only when a field removal (`Value::Absent`)
+            // is present — because ES ignores `doc` outright when a script is
+            // also given, so set + remove must live in one script.
+            let body = sets_to_update_body(sets)?;
             let mut query = guard_query(&guard, identity.routing.as_deref());
             if include_source_on_error {
                 // Never let a malformed-document error echo the document.
@@ -130,7 +137,7 @@ pub fn compile_mutation(
                 ),
                 method: Method::Post,
                 query,
-                body: Some(json!({ "doc": doc })),
+                body: Some(body),
                 index: identity.index,
                 id: identity.id,
                 routing: identity.routing,
@@ -155,12 +162,135 @@ pub fn compile_mutation(
                 routing: identity.routing,
             })
         }
-        Mutation::Insert { .. } => Err(DbError::Unsupported {
-            feature: "generated inserts (use a native `PUT /<index>/_doc/<id>?op_type=create` \
-                      request, which conflicts instead of silently overwriting)"
-                .into(),
-        }),
+        Mutation::Insert { path, doc } => compile_insert(path, doc, include_source_on_error),
     }
+}
+
+/// Compile a [`Mutation::Insert`] into the create request it becomes.
+///
+/// The insert guard is `op_type=create`, **not** `if_seq_no`: a document that
+/// does not exist yet has no sequence number to compare, and `op_type=create`
+/// already 409s on an existing id instead of silently overwriting it (the exact
+/// blind `PUT` this driver refuses to emit). So an insert carries no `expect`.
+///
+/// - **user-supplied id** (`_id` in the document envelope) →
+///   `PUT /<index>/_doc/<id>?op_type=create`.
+/// - **no id** → `POST /<index>/_doc`, and the server generates one.
+///
+/// The body is the new document's `_source` only: the envelope metadata
+/// (`_index`/`_id`/`_routing`/`_seq_no`/…) is stripped, never written back into
+/// the document — echoing it is the class of bug that has kept Dejavu's insert
+/// path broken on ES 8 since 2022 (`Field [_ignored] is a metadata field…`).
+fn compile_insert(
+    path: &ObjectPath,
+    doc: &Value,
+    include_source_on_error: bool,
+) -> Result<CompiledWrite, DbError> {
+    // The target index is the object path the grid is bound to — an insert has
+    // no `key` to carry `_index`, the same way Mongo/SQL inserts take the
+    // collection/table from the path.
+    let index = path
+        .parts()
+        .first()
+        .map(|p| p.to_string())
+        .filter(|i| !i.is_empty())
+        .ok_or_else(|| DbError::Unsupported {
+            feature: "an insert needs a concrete target index in its path".into(),
+        })?;
+    refuse_wildcard_index(&index)?;
+
+    let fields = match doc {
+        Value::Document(d) => d,
+        other => {
+            return Err(DbError::Unsupported {
+                feature: format!("an insert document must be an object/document, got {other:?}"),
+            })
+        }
+    };
+
+    // Split the envelope (identity) from the `_source` body.
+    let mut id: Option<String> = None;
+    let mut routing: Option<String> = None;
+    let mut source = Map::new();
+    for (name, value) in fields.iter() {
+        match name.as_ref() {
+            "_id" => {
+                if matches!(value, Value::Null | Value::Absent) {
+                    continue;
+                }
+                id = Some(scalar_to_string(value).ok_or_else(|| DbError::Unsupported {
+                    feature: format!("insert `_id` must be a string (got {value:?})"),
+                })?);
+            }
+            "_routing" => {
+                if matches!(value, Value::Null | Value::Absent) {
+                    continue;
+                }
+                routing = Some(scalar_to_string(value).ok_or_else(|| DbError::Unsupported {
+                    feature: format!("insert `_routing` must be a string (got {value:?})"),
+                })?);
+            }
+            // Every other envelope field is metadata, never part of the document.
+            other if ENVELOPE_FIELDS.contains(&other) => continue,
+            _ => {
+                if contains_absent(value) {
+                    // In a brand-new document an `Absent` field is meaningless —
+                    // `value_to_json` would degrade it to a JSON null, silently
+                    // inserting a null-valued field rather than omitting it.
+                    return Err(DbError::Unsupported {
+                        feature: format!(
+                            "inserting field `{name}` with an absent value: a new document either \
+                             carries a field or omits it — a JSON null would insert an explicit \
+                             null instead"
+                        ),
+                    });
+                }
+                source.insert(name.to_string(), value_to_json(value));
+            }
+        }
+    }
+
+    if source.is_empty() {
+        return Err(DbError::Unsupported {
+            feature: "an insert with no `_source` fields (only envelope metadata)".into(),
+        });
+    }
+
+    let mut query: Vec<(&'static str, String)> = Vec::new();
+    let (method, request_path, id) = match id {
+        Some(id) => {
+            refuse_unaddressable_id(&id)?;
+            // `op_type=create` is the whole guard: it 409s on an existing id
+            // instead of overwriting it. NEVER a bare `PUT` (a blind clobber).
+            query.push(("op_type", "create".to_string()));
+            let p = format!("/{}/_doc/{}", encode_segment(&index), encode_segment(&id));
+            (Method::Put, p, id)
+        }
+        // No id: let the server generate one. `POST /<index>/_doc`.
+        None => (
+            Method::Post,
+            format!("/{}/_doc", encode_segment(&index)),
+            String::new(),
+        ),
+    };
+    query.push(("refresh", "wait_for".to_string()));
+    if let Some(routing) = &routing {
+        query.push(("routing", routing.clone()));
+    }
+    if include_source_on_error {
+        query.push(("include_source_on_error", "false".to_string()));
+    }
+
+    Ok(CompiledWrite {
+        op: "insert",
+        index,
+        id,
+        routing,
+        method,
+        path: request_path,
+        query,
+        body: Some(Json::Object(source)),
+    })
 }
 
 /// `_index` + `_id` (+ `_routing`) out of a mutation's `key`. Anything else —
@@ -229,30 +359,43 @@ fn identity_from_key(key: &[(FieldPath, Value)]) -> Result<WriteIdentity, DbErro
     let id = id
         .filter(|i| !i.is_empty())
         .ok_or_else(|| missing_identity("_id"))?;
+    refuse_wildcard_index(&index)?;
+    refuse_unaddressable_id(&id)?;
+    Ok(WriteIdentity { index, id, routing })
+}
+
+/// A guarded/generated write targets exactly one concrete index, never a
+/// wildcard or a comma-list — those would fan a single-document write out
+/// across more than one thing.
+fn refuse_wildcard_index(index: &str) -> Result<(), DbError> {
     if index.contains('*') || index.contains(',') {
         return Err(DbError::Unsupported {
             feature: format!(
-                "writing to the index expression `{index}`: a guarded write targets exactly one \
-                 concrete index, never a wildcard or a list"
+                "writing to the index expression `{index}`: a write targets exactly one concrete \
+                 index, never a wildcard or a list"
             ),
         });
     }
-    // A `_id` of `.` or `..` is a legal document id (creatable via `_bulk`) but
-    // an unaddressable write target: URL path resolution (WHATWG, which
-    // reqwest's `url` applies) normalises the dot-segment away — `/<index>/_doc/..`
-    // collapses to `/<index>`, the delete-index endpoint — and percent-encoding
-    // does not save it, because that normalisation also folds `%2e`. Refuse it
-    // rather than write to the wrong resource.
+    Ok(())
+}
+
+/// A `_id` of `.` or `..` is a legal document id (creatable via `_bulk`) but an
+/// unaddressable write target: URL path resolution (WHATWG, which reqwest's
+/// `url` applies) normalises the dot-segment away — `/<index>/_doc/..` collapses
+/// to `/<index>`, the delete-index endpoint — and percent-encoding does not save
+/// it, because that normalisation also folds `%2e`. Refuse it rather than write
+/// to the wrong resource.
+fn refuse_unaddressable_id(id: &str) -> Result<(), DbError> {
     if id == "." || id == ".." {
         return Err(DbError::Unsupported {
             feature: format!(
                 "a `_id` of `{id}`: a single/double-dot segment is normalised away by URL path \
-                 resolution (a write to it would collapse onto the index endpoint), so a guarded \
-                 write cannot address it safely"
+                 resolution (a write to it would collapse onto the index endpoint), so a write \
+                 cannot address it safely"
             ),
         });
     }
-    Ok(WriteIdentity { index, id, routing })
+    Ok(())
 }
 
 fn missing_identity(field: &str) -> DbError {
@@ -358,66 +501,214 @@ fn guard_query(guard: &Guard, routing: Option<&str>) -> Vec<(&'static str, Strin
     query
 }
 
-/// `sets` -> the `{"doc": …}` partial document, built as *nested* objects so
-/// `_update`'s recursive merge touches only the named leaves.
-fn sets_to_partial_doc(sets: &[(FieldPath, Value)]) -> Result<Json, DbError> {
+/// `sets` -> an `_update` body: either a `{"doc": …}` partial merge or a
+/// single `{"script": …}`.
+///
+/// A `Value::Absent` in `sets` means "remove this field" (`value.rs`'s
+/// Absent -> null degradation would otherwise silently set it to null).
+/// Removal can only be expressed with a scripted update, and Elasticsearch is
+/// explicit that *"if both `doc` and `script` are specified, then `doc` is
+/// ignored"* — so a mutation that both sets and removes fields must compile to
+/// **one script**, never `doc` + `script`. A pure-set update therefore stays a
+/// cheaper `{"doc": …}` partial merge (which keeps recursive-merge semantics),
+/// and only the presence of at least one removal escalates the whole thing to a
+/// script.
+fn sets_to_update_body(sets: &[(FieldPath, Value)]) -> Result<Json, DbError> {
     if sets.is_empty() {
         return Err(DbError::Unsupported {
             feature: "an update that sets nothing".into(),
         });
     }
-    let mut root = Map::new();
+    let mut assignments: Vec<(&FieldPath, &Value)> = Vec::new();
+    let mut removals: Vec<&FieldPath> = Vec::new();
     for (path, value) in sets {
-        if contains_absent(value) {
-            // `value_to_json` would degrade Absent to null *recursively* — a
-            // nested Absent inside an object/array set-value degrades just as
-            // silently as a top-level one — and in a partial document a null
-            // SETS the field to null rather than removing it. Removal is a
-            // scripted `ctx._source.remove(…)`, not yet generated, so the
-            // ambiguity is refused instead of resolved by accident.
+        if matches!(value, Value::Absent) {
+            // A top-level Absent is an explicit "remove this field".
+            removals.push(path);
+        } else if contains_absent(value) {
+            // A *nested* Absent (inside an object/array set-value) is a
+            // different animal: `value_to_json` would degrade it to null one
+            // level down, and there is no unambiguous "remove `obj.f` while
+            // setting the rest of `obj`" — refuse it rather than approximate.
             return Err(DbError::Unsupported {
                 feature: format!(
-                    "removing field `{path}`: field removal needs a scripted update \
-                     (`ctx._source.remove`), which this driver does not generate yet — a JSON \
-                     null would set the field to null instead of removing it"
+                    "set `{path}`: a nested absent value is ambiguous (it would silently become a \
+                     JSON null); remove the field with a top-level absent set instead"
                 ),
             });
+        } else {
+            assignments.push((path, value));
         }
-        let mut names: Vec<&str> = Vec::with_capacity(path.segments().len());
-        for seg in path.segments() {
-            match seg {
-                PathSeg::Field(name) => names.push(name),
-                // `{"doc": …}` replaces arrays wholesale; pretending to edit
-                // one element would silently drop the others.
-                PathSeg::Index(_) => {
-                    return Err(DbError::Unsupported {
-                        feature: format!(
-                            "set `{path}`: Elasticsearch cannot address an array element \
-                             positionally, and a partial document replaces arrays wholesale"
-                        ),
-                    })
-                }
-            }
-        }
-        match names.first() {
-            Some(first) if ENVELOPE_FIELDS.contains(first) => {
-                return Err(DbError::Unsupported {
-                    feature: format!(
-                        "set `{path}`: the hit envelope is not writable — sets address fields \
-                         inside `_source` (write back the document, never its metadata)"
-                    ),
-                })
-            }
-            Some(_) => {}
-            None => {
-                return Err(DbError::Unsupported {
-                    feature: "set with an empty field path".into(),
-                })
-            }
-        }
+    }
+
+    if removals.is_empty() {
+        // Pure set: the cheaper partial merge.
+        Ok(json!({ "doc": build_partial_doc(&assignments)? }))
+    } else {
+        // At least one removal: one script for everything.
+        build_script_body(&assignments, &removals)
+    }
+}
+
+/// The `{"doc": …}` partial document, built as *nested* objects so `_update`'s
+/// recursive merge touches only the named leaves.
+fn build_partial_doc(assignments: &[(&FieldPath, &Value)]) -> Result<Json, DbError> {
+    let mut root = Map::new();
+    for (path, value) in assignments {
+        let names = set_field_names(path)?;
         insert_nested(&mut root, &names, value_to_json(value), path)?;
     }
     Ok(Json::Object(root))
+}
+
+/// Compile the assignments and removals into a **single** scripted update:
+/// `{"script": {"lang":"painless", "source": …, "params": …}}`. Injected values
+/// ride in `params` — never string-interpolated into the Painless source, which
+/// would be both an injection hole and a type-fidelity loss.
+fn build_script_body(
+    assignments: &[(&FieldPath, &Value)],
+    removals: &[&FieldPath],
+) -> Result<Json, DbError> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut params = Map::new();
+    // The same overlap discipline as the doc path: two sets that address the
+    // same leaf (or a set and a remove of it) are a caller bug, not a
+    // last-write-wins.
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for (i, (path, value)) in assignments.iter().enumerate() {
+        let names = script_field_names(path)?;
+        if !seen.insert(names.join("\u{0}")) {
+            return Err(overlap(path));
+        }
+        // Create any missing intermediate maps, shallow-to-deep, so the leaf
+        // assignment cannot NPE on an absent parent — the script analogue of
+        // the partial doc's nested-object building.
+        for depth in 1..names.len() {
+            let prefix = access_expr(&names[..depth]);
+            lines.push(format!(
+                "if (!({prefix} instanceof Map)) {{ {prefix} = [:]; }}"
+            ));
+        }
+        let param = format!("p{i}");
+        lines.push(format!("{} = params.{param};", access_expr(&names)));
+        params.insert(param, value_to_json(value));
+    }
+
+    for path in removals {
+        let names = script_field_names(path)?;
+        if !seen.insert(names.join("\u{0}")) {
+            return Err(overlap(path));
+        }
+        if names.len() == 1 {
+            lines.push(format!("ctx._source.remove('{}');", names[0]));
+        } else {
+            // Remove the leaf from its parent, but only once every prefix is
+            // confirmed a Map — `&&` short-circuits, so an absent parent is a
+            // no-op (the field is already gone) rather than an NPE.
+            let guards: Vec<String> = (1..names.len())
+                .map(|depth| format!("{} instanceof Map", access_expr(&names[..depth])))
+                .collect();
+            let parent = access_expr(&names[..names.len() - 1]);
+            let leaf = names[names.len() - 1];
+            lines.push(format!(
+                "if ({}) {{ {parent}.remove('{leaf}'); }}",
+                guards.join(" && ")
+            ));
+        }
+    }
+
+    Ok(json!({
+        "script": {
+            "lang": "painless",
+            "source": lines.join("\n"),
+            "params": Json::Object(params),
+        }
+    }))
+}
+
+/// `ctx._source.a.b.c` for the field-name path `["a","b","c"]`. Only valid on
+/// names [`script_field_names`] has already proven safe Painless identifiers.
+fn access_expr(names: &[&str]) -> String {
+    let mut expr = String::from("ctx._source");
+    for name in names {
+        expr.push('.');
+        expr.push_str(name);
+    }
+    expr
+}
+
+/// The field-name segments of a set path, refusing what neither an `_update`
+/// partial doc nor a script can address: an array-element index, the hit
+/// envelope, or an empty path.
+fn set_field_names(path: &FieldPath) -> Result<Vec<&str>, DbError> {
+    let mut names: Vec<&str> = Vec::with_capacity(path.segments().len());
+    for seg in path.segments() {
+        match seg {
+            PathSeg::Field(name) => names.push(name),
+            // A partial doc replaces arrays wholesale and Painless has no safe
+            // positional address either; pretending to edit one element would
+            // silently drop the others.
+            PathSeg::Index(_) => {
+                return Err(DbError::Unsupported {
+                    feature: format!(
+                        "set `{path}`: Elasticsearch cannot address an array element positionally, \
+                         and a partial document replaces arrays wholesale"
+                    ),
+                })
+            }
+        }
+    }
+    match names.first() {
+        Some(first) if ENVELOPE_FIELDS.contains(first) => {
+            return Err(DbError::Unsupported {
+                feature: format!(
+                    "set `{path}`: the hit envelope is not writable — sets address fields inside \
+                     `_source` (write back the document, never its metadata)"
+                ),
+            })
+        }
+        Some(_) => {}
+        None => {
+            return Err(DbError::Unsupported {
+                feature: "set with an empty field path".into(),
+            })
+        }
+    }
+    Ok(names)
+}
+
+/// [`set_field_names`], plus the extra discipline a scripted update needs: every
+/// segment must be a plain identifier, so it is safe both as Painless map
+/// member access (`ctx._source.name`) and as a single-quoted string literal
+/// (`.remove('name')`). A name that is not — a space, a dot inside the name, a
+/// quote — is refused rather than approximated into Painless the driver cannot
+/// vouch for (the same discipline as the array-element refusal).
+fn script_field_names(path: &FieldPath) -> Result<Vec<&str>, DbError> {
+    let names = set_field_names(path)?;
+    for name in &names {
+        if !is_safe_painless_field(name) {
+            return Err(DbError::Unsupported {
+                feature: format!(
+                    "removing/setting `{path}` needs a scripted update, but the field name `{name}` \
+                     is not a plain identifier — this driver refuses to build Painless it cannot \
+                     address safely rather than approximate it"
+                ),
+            });
+        }
+    }
+    Ok(names)
+}
+
+/// A plain ASCII identifier: `[A-Za-z_][A-Za-z0-9_]*`. Safe as both Painless
+/// member access and a single-quoted literal, and it cannot carry an injection.
+fn is_safe_painless_field(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Insert `value` at `names` inside `root`, creating intermediate objects,
@@ -552,7 +843,11 @@ pub fn batch_report(
         let mut doc = Document::new();
         doc.push("op", Value::Str(Arc::from(write.op)));
         doc.push("_index", Value::Str(Arc::from(write.index.as_str())));
-        doc.push("_id", Value::Str(Arc::from(write.id.as_str())));
+        // An insert with no user-supplied id has an empty compile-time id; the
+        // server generates one, echoed back from the response below.
+        if !write.id.is_empty() {
+            doc.push("_id", Value::Str(Arc::from(write.id.as_str())));
+        }
         if let Some(routing) = &write.routing {
             doc.push("_routing", Value::Str(Arc::from(routing.as_str())));
         }
@@ -560,6 +855,13 @@ pub fn batch_report(
             Some(WriteOutcome::Applied(response)) => {
                 applied += 1;
                 doc.push("outcome", Value::Str(Arc::from("applied")));
+                // A server-generated insert id is only known now: echo it so the
+                // grid can address the new document on a follow-up edit.
+                if write.id.is_empty() {
+                    if let Some(new_id) = response.get("_id").and_then(Json::as_str) {
+                        doc.push("_id", Value::Str(Arc::from(new_id)));
+                    }
+                }
                 if let Some(result) = response.get("result").and_then(Json::as_str) {
                     doc.push("result", Value::Str(Arc::from(result)));
                 }
@@ -713,6 +1015,12 @@ mod tests {
             (fp("_seq_no"), Value::I64(seq)),
             (fp("_primary_term"), Value::I64(term)),
         ]
+    }
+
+    fn doc_val(fields: Vec<(&str, Value)>) -> Value {
+        Value::Document(Arc::new(Document::from_fields(
+            fields.into_iter().map(|(k, v)| (Arc::from(k), v)).collect(),
+        )))
     }
 
     fn q<'a>(w: &'a CompiledWrite, k: &str) -> Option<&'a str> {
@@ -879,16 +1187,141 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_set_is_refused_rather_than_turned_into_a_null() {
+    fn an_absent_set_compiles_to_a_single_guarded_removal_script() {
+        // Was "field removal is refused". A top-level `Value::Absent` now means
+        // "remove this field", compiled to a scripted update — and, crucially,
+        // to a `{"script": …}` with NO `doc` key (ES ignores `doc` when a
+        // script is present, so removal cannot be a `doc` + `script` pair).
         let m = Mutation::Update {
             path: path(),
             key: key("events", "abc"),
             sets: vec![(fp("status"), Value::Absent)],
+            expect: guard(41, 3),
+        };
+        let w = compile_mutation(&m, true).unwrap();
+        assert_eq!(w.op, "update");
+        assert_eq!(w.method, Method::Post);
+        assert_eq!(w.path, "/events/_update/abc");
+        // The optimistic-concurrency guard still rides on the URL.
+        assert_eq!(q(&w, "if_seq_no"), Some("41"));
+        assert_eq!(q(&w, "if_primary_term"), Some("3"));
+        assert_eq!(q(&w, "refresh"), Some("wait_for"));
+        let body = w.body.as_ref().unwrap();
+        assert!(
+            body.get("doc").is_none(),
+            "a removal must not send `doc` — ES would ignore the script otherwise"
+        );
+        let script = body.get("script").expect("removal compiles to a script");
+        let source = script.get("source").and_then(Json::as_str).unwrap();
+        assert_eq!(source, "ctx._source.remove('status');", "{source}");
+    }
+
+    #[test]
+    fn a_mixed_set_and_remove_is_one_script_never_doc_plus_script() {
+        let m = Mutation::Update {
+            path: path(),
+            key: key("events", "abc"),
+            sets: vec![
+                (fp("status"), Value::Str(Arc::from("done"))),
+                (fp("obsolete"), Value::Absent),
+            ],
+            expect: guard(1, 1),
+        };
+        let w = compile_mutation(&m, true).unwrap();
+        let body = w.body.as_ref().unwrap();
+        assert!(
+            body.get("doc").is_none(),
+            "set + remove must be ONE script, never doc + script"
+        );
+        let script = body
+            .get("script")
+            .expect("a mixed update compiles to a script");
+        let source = script.get("source").and_then(Json::as_str).unwrap();
+        assert!(
+            source.contains("ctx._source.status = params.p0;"),
+            "the set becomes a params-driven assignment: {source}"
+        );
+        assert!(
+            source.contains("ctx._source.remove('obsolete');"),
+            "the removal becomes a remove(): {source}"
+        );
+        // The value rides in `params`, never interpolated into the Painless.
+        assert_eq!(script.get("params").unwrap(), &json!({ "p0": "done" }));
+        assert!(
+            !source.contains("done"),
+            "the user value must not be interpolated into the script source: {source}"
+        );
+    }
+
+    #[test]
+    fn a_pure_set_update_stays_a_doc_partial_merge() {
+        let m = Mutation::Update {
+            path: path(),
+            key: key("events", "abc"),
+            sets: vec![
+                (fp("status"), Value::Str(Arc::from("done"))),
+                (fp("count"), Value::I64(3)),
+            ],
+            expect: guard(1, 1),
+        };
+        let w = compile_mutation(&m, true).unwrap();
+        let body = w.body.as_ref().unwrap();
+        assert!(
+            body.get("script").is_none(),
+            "a pure-set update must NOT escalate to a script"
+        );
+        assert_eq!(body, &json!({ "doc": { "status": "done", "count": 3 } }));
+    }
+
+    #[test]
+    fn a_scripted_update_addresses_nested_paths_and_creates_missing_parents() {
+        let m = Mutation::Update {
+            path: path(),
+            key: key("events", "abc"),
+            sets: vec![(fp("a.b.c"), Value::I64(5)), (fp("d.e"), Value::Absent)],
+            expect: guard(1, 1),
+        };
+        let w = compile_mutation(&m, true).unwrap();
+        let body = w.body.as_ref().unwrap();
+        assert!(body.get("doc").is_none());
+        let script = body.get("script").unwrap();
+        let source = script.get("source").and_then(Json::as_str).unwrap();
+        // Missing intermediate maps are created shallow-to-deep before the leaf
+        // assignment, so it cannot NPE on an absent parent.
+        assert!(
+            source.contains("if (!(ctx._source.a instanceof Map)) { ctx._source.a = [:]; }"),
+            "{source}"
+        );
+        assert!(
+            source.contains("if (!(ctx._source.a.b instanceof Map)) { ctx._source.a.b = [:]; }"),
+            "{source}"
+        );
+        assert!(
+            source.contains("ctx._source.a.b.c = params.p0;"),
+            "{source}"
+        );
+        // A nested removal guards every prefix is a Map (short-circuiting on an
+        // absent parent), then removes the leaf from its parent.
+        assert!(
+            source.contains("if (ctx._source.d instanceof Map) { ctx._source.d.remove('e'); }"),
+            "{source}"
+        );
+        assert_eq!(script.get("params").unwrap(), &json!({ "p0": 5 }));
+    }
+
+    #[test]
+    fn a_scripted_update_refuses_a_field_name_it_cannot_express_in_painless() {
+        // A removal (or set-alongside-removal) whose field name is not a plain
+        // identifier is refused rather than approximated into unsafe Painless.
+        let m = Mutation::Update {
+            path: path(),
+            key: key("events", "abc"),
+            sets: vec![(FieldPath::field("weird name"), Value::Absent)],
             expect: guard(1, 1),
         };
         let err = compile_mutation(&m, true).unwrap_err();
         assert!(matches!(err, DbError::Unsupported { .. }));
-        assert!(err.to_string().contains("removing field"));
+        assert!(err.to_string().contains("plain identifier"), "{err}");
     }
 
     #[test]
@@ -1040,14 +1473,156 @@ mod tests {
     }
 
     #[test]
-    fn an_insert_is_refused_with_a_pointer_to_the_native_request() {
+    fn an_insert_with_a_user_id_compiles_to_put_op_type_create_with_routing() {
+        let m = Mutation::Insert {
+            path: path(),
+            doc: doc_val(vec![
+                ("_id", Value::Str(Arc::from("abc"))),
+                ("_routing", Value::Str(Arc::from("tenant-7"))),
+                ("status", Value::Str(Arc::from("new"))),
+                ("count", Value::I64(3)),
+            ]),
+        };
+        let w = compile_mutation(&m, true).unwrap();
+        assert_eq!(w.op, "insert");
+        assert_eq!(w.method, Method::Put);
+        assert_eq!(w.path, "/events/_doc/abc");
+        // `op_type=create` is the whole guard — 409s instead of overwriting.
+        assert_eq!(q(&w, "op_type"), Some("create"));
+        // An insert carries no `if_seq_no` guard: a new doc has no seq_no.
+        assert!(q(&w, "if_seq_no").is_none());
+        assert_eq!(q(&w, "refresh"), Some("wait_for"));
+        assert_eq!(q(&w, "routing"), Some("tenant-7"));
+        assert_eq!(w.routing.as_deref(), Some("tenant-7"));
+        assert_eq!(q(&w, "include_source_on_error"), Some("false"));
+        assert_eq!(w.id, "abc");
+        // The body is the `_source` only — the envelope is stripped, never
+        // written back into the document.
+        assert_eq!(w.body, Some(json!({ "status": "new", "count": 3 })));
+    }
+
+    #[test]
+    fn an_insert_without_an_id_compiles_to_post_doc_for_a_server_generated_id() {
+        let m = Mutation::Insert {
+            path: path(),
+            doc: doc_val(vec![("status", Value::Str(Arc::from("new")))]),
+        };
+        let w = compile_mutation(&m, true).unwrap();
+        assert_eq!(w.op, "insert");
+        assert_eq!(w.method, Method::Post);
+        assert_eq!(w.path, "/events/_doc");
+        assert!(
+            q(&w, "op_type").is_none(),
+            "no id, no create collision to guard"
+        );
+        assert_eq!(q(&w, "refresh"), Some("wait_for"));
+        assert!(w.id.is_empty(), "the server generates the id");
+        assert_eq!(w.body, Some(json!({ "status": "new" })));
+    }
+
+    #[test]
+    fn an_insert_refuses_a_nested_absent_in_the_document() {
+        // A nested Absent would degrade to a JSON null via `value_to_json`,
+        // silently inserting a null-valued field.
+        let nested = Value::Document(Arc::new(Document::from_fields(vec![
+            (Arc::from("keep"), Value::I64(1)),
+            (Arc::from("f"), Value::Absent),
+        ])));
+        let m = Mutation::Insert {
+            path: path(),
+            doc: doc_val(vec![("obj", nested)]),
+        };
+        assert!(matches!(
+            compile_mutation(&m, true),
+            Err(DbError::Unsupported { .. })
+        ));
+        // A top-level Absent field is refused the same way (an insert is not an
+        // update — there is no field to remove).
+        let m = Mutation::Insert {
+            path: path(),
+            doc: doc_val(vec![("status", Value::Absent), ("keep", Value::I64(1))]),
+        };
+        let err = compile_mutation(&m, true).unwrap_err();
+        assert!(matches!(err, DbError::Unsupported { .. }));
+        assert!(err.to_string().contains("absent value"), "{err}");
+    }
+
+    #[test]
+    fn an_insert_refuses_a_dot_or_dotdot_id() {
+        for bad in [".", ".."] {
+            let m = Mutation::Insert {
+                path: path(),
+                doc: doc_val(vec![
+                    ("_id", Value::Str(Arc::from(bad))),
+                    ("x", Value::I64(1)),
+                ]),
+            };
+            let err = compile_mutation(&m, true).unwrap_err();
+            assert!(
+                matches!(err, DbError::Unsupported { .. }),
+                "`_id` of {bad:?} must be refused"
+            );
+            assert!(err.to_string().contains("normalised away"), "{err}");
+        }
+    }
+
+    #[test]
+    fn an_insert_refuses_an_empty_source_or_a_non_document() {
+        // Only envelope metadata, no `_source`.
+        let m = Mutation::Insert {
+            path: path(),
+            doc: doc_val(vec![("_id", Value::Str(Arc::from("x")))]),
+        };
+        let err = compile_mutation(&m, true).unwrap_err();
+        assert!(matches!(err, DbError::Unsupported { .. }));
+        assert!(err.to_string().contains("no `_source`"), "{err}");
+
+        // A non-document insert value.
         let m = Mutation::Insert {
             path: path(),
             doc: Value::Null,
         };
-        let err = compile_mutation(&m, true).unwrap_err();
-        assert!(matches!(err, DbError::Unsupported { .. }));
-        assert!(err.to_string().contains("op_type=create"));
+        assert!(matches!(
+            compile_mutation(&m, true),
+            Err(DbError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn an_insert_without_include_source_on_error_omits_the_param() {
+        let m = Mutation::Insert {
+            path: path(),
+            doc: doc_val(vec![("status", Value::Str(Arc::from("new")))]),
+        };
+        let w = compile_mutation(&m, false).unwrap();
+        assert!(q(&w, "include_source_on_error").is_none());
+    }
+
+    #[test]
+    fn a_server_generated_insert_id_is_echoed_from_the_response() {
+        let w = compile_mutation(
+            &Mutation::Insert {
+                path: path(),
+                doc: doc_val(vec![("status", Value::Str(Arc::from("new")))]),
+            },
+            true,
+        )
+        .unwrap();
+        let outcomes = vec![WriteOutcome::Applied(json!({
+            "result": "created",
+            "_id": "generated-xyz",
+            "_seq_no": 0,
+            "_primary_term": 1
+        }))];
+        let (docs, _) = batch_report(&[w], outcomes);
+        let Value::Document(doc) = &docs[0] else {
+            panic!("expected a document row");
+        };
+        assert_eq!(doc.get("outcome"), Some(&Value::Str(Arc::from("applied"))));
+        assert_eq!(
+            doc.get("_id"),
+            Some(&Value::Str(Arc::from("generated-xyz")))
+        );
     }
 
     #[test]
