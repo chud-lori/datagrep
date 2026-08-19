@@ -248,6 +248,15 @@ impl CoreInner {
         self.lock_enforcement().get(name).copied()
     }
 
+    /// Record the [`Enforcement`] a read-only connection just reported, so a
+    /// later `datagrep_connection_info_json`/status call reports the same badge
+    /// a query would. Used by the mutate path, which acquires its own lease
+    /// instead of going through [`CoreInner::run_request`].
+    pub(crate) fn record_enforcement(&self, name: &str, enforcement: Enforcement) {
+        self.lock_enforcement()
+            .insert(name.to_string(), enforcement);
+    }
+
     pub(crate) async fn saved_profile(
         &self,
         name: &str,

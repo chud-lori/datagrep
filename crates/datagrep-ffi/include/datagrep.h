@@ -126,6 +126,48 @@ char* datagrep_query_status_json(DatagrepQuery*, char** err_out);
 typedef void (*DatagrepProgressFn)(void* ctx);
 void datagrep_query_on_progress(DatagrepQuery*, DatagrepProgressFn cb, void* ctx);
 
+// ---- mutate: commit one guarded document edit ------------------------
+// SYNCHRONOUS: blocks until the commit completes (unlike datagrep_query_run,
+// which returns immediately and streams). A save is a discrete commit the UI
+// waits on, not a stream it scrolls.
+//
+// mutation_json is a serde-encoded MutationBatch — the structured write op the
+// driver compiles natively. Externally-tagged shape:
+// {"mutations":[
+//   {"Update":{"path":["events"],
+//              "key":[[[{"Field":"_index"}],{"Str":"events"}],
+//                     [[{"Field":"_id"}],{"Str":"abc"}]],
+//              "sets":[[[{"Field":"status"}],{"Str":"done"}]],
+//              "expect":[[[{"Field":"_seq_no"}],{"I64":41}],
+//                        [[{"Field":"_primary_term"}],{"I64":3}]]}},
+//   {"Insert":{"path":["events"],"doc":{"Document":[...]}}},
+//   {"Delete":{"path":["events"],
+//              "key":[[[{"Field":"_id"}],{"Str":"gone"}]]}}]}
+// (`expect` is optional; an Elasticsearch update/delete without an
+//  `_seq_no`/`_primary_term` guard is refused, never sent unguarded.)
+//
+// Runs through the same lease/pool path as a query, so a read-only profile
+// refuses the write (surfaced as an error: NULL return, *err_out set) rather
+// than committing it.
+//
+// Returns an OWNED char* — the batch report as JSON — that the caller MUST
+// datagrep_string_free(). NULL on error (parse failure, read-only refusal, a
+// whole-batch driver refusal) with *err_out set. Report schema:
+// {
+//   "rows": [ {"op":"update"|"insert"|"delete",
+//              "_index":str,"_id":str,"_routing":str?,
+//              "outcome":"applied"|"failed"|"not attempted",
+//              "result":str?,"_seq_no":i64?,"_primary_term":i64?,
+//              "conflict":true?,"error_code":str?,"error":str?,
+//              "forced_refresh":true?} ],   // rows are clean flat JSON
+//   "notices": [ {"severity":"info"|"warning","code":str|null,"message":str} ],
+//   "summary": {"applied":u64,"failed":u64,"not_attempted":u64,"conflicts":u64}
+// }
+// A per-row version conflict (ES 409) is a row with outcome="failed" and
+// conflict=true — a UI state, NOT an error — so the call still returns a report.
+char* datagrep_mutate(DatagrepCore*, const char* profile, const char* mutation_json,
+                      char** err_out);
+
 // ---- rows: the hot path ----------------------------------------------
 // Materialises ONLY [offset, offset+len). Returns NULL on error.
 DatagrepRows* datagrep_query_rows(DatagrepQuery*, uint64_t offset, uint64_t len, char** err_out);
