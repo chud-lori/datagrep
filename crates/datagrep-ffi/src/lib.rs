@@ -79,6 +79,7 @@ pub mod cells;
 pub mod core;
 pub mod drivers;
 pub mod ffi_util;
+pub mod mutate;
 pub mod profiles;
 pub mod query;
 pub mod rows;
@@ -86,6 +87,7 @@ pub mod runtime;
 
 pub use crate::core::{datagrep_core_free, datagrep_core_new, datagrep_string_free, DatagrepCore};
 pub use catalog::{datagrep_catalog_children_json, datagrep_catalog_describe_json};
+pub use mutate::datagrep_mutate;
 pub use profiles::{datagrep_profiles_add, datagrep_profiles_list_json, datagrep_profiles_remove};
 pub use query::{
     datagrep_query_cancel, datagrep_query_free, datagrep_query_on_progress, datagrep_query_run,
