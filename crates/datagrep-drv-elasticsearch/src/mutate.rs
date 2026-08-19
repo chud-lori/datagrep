@@ -42,7 +42,6 @@
 //! unreadable) the write still carries `if_seq_no`, which such an index
 //! rejects rather than applies.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde_json::{json, Map, Value as Json};
@@ -87,7 +86,9 @@ pub struct CompiledWrite {
     pub path: String,
     /// Query parameters, guard included.
     pub query: Vec<(&'static str, String)>,
-    /// `{"doc": …}` partial document for an update; `None` for a delete.
+    /// The request body: a `{"doc": …}` partial merge or a `{"script": …}`
+    /// (an update, depending on whether it removes a field), the bare
+    /// `_source` object (an insert), or `None` (a delete).
     pub body: Option<Json>,
 }
 
@@ -218,17 +219,31 @@ fn compile_insert(
                 if matches!(value, Value::Null | Value::Absent) {
                     continue;
                 }
-                id = Some(scalar_to_string(value).ok_or_else(|| DbError::Unsupported {
+                let s = scalar_to_string(value).ok_or_else(|| DbError::Unsupported {
                     feature: format!("insert `_id` must be a string (got {value:?})"),
-                })?);
+                })?;
+                // An empty id is no id: fall through to a server-generated
+                // `POST /<index>/_doc` rather than `PUT /<index>/_doc/`, which
+                // 400s server-side mid-batch. Mirrors `identity_from_key`'s
+                // empty-id filter.
+                if s.is_empty() {
+                    continue;
+                }
+                id = Some(s);
             }
             "_routing" => {
                 if matches!(value, Value::Null | Value::Absent) {
                     continue;
                 }
-                routing = Some(scalar_to_string(value).ok_or_else(|| DbError::Unsupported {
+                let s = scalar_to_string(value).ok_or_else(|| DbError::Unsupported {
                     feature: format!("insert `_routing` must be a string (got {value:?})"),
-                })?);
+                })?;
+                // An empty routing string is no routing, not a `routing=` with
+                // an empty value.
+                if s.is_empty() {
+                    continue;
+                }
+                routing = Some(s);
             }
             // Every other envelope field is metadata, never part of the document.
             other if ENVELOPE_FIELDS.contains(&other) => continue,
@@ -571,16 +586,18 @@ fn build_script_body(
 ) -> Result<Json, DbError> {
     let mut lines: Vec<String> = Vec::new();
     let mut params = Map::new();
-    // The same overlap discipline as the doc path: two sets that address the
-    // same leaf (or a set and a remove of it) are a caller bug, not a
-    // last-write-wins.
-    let mut seen: HashSet<String> = HashSet::new();
+    // The same overlap discipline as the doc path's `insert_nested`: a leaf that
+    // is written twice, AND a path that is a *prefix* of another in either
+    // direction (`a` alongside `a.b`), are a caller bug — not a
+    // last-write-wins. This spans assignments and removals together, so a set
+    // and a remove of overlapping paths is refused rather than silently
+    // resolved by emission order (all sets, then all removes).
+    let mut seen: Vec<Vec<&str>> = Vec::new();
 
     for (i, (path, value)) in assignments.iter().enumerate() {
         let names = script_field_names(path)?;
-        if !seen.insert(names.join("\u{0}")) {
-            return Err(overlap(path));
-        }
+        refuse_path_overlap(&seen, &names, path)?;
+        seen.push(names.clone());
         // Create any missing intermediate maps, shallow-to-deep, so the leaf
         // assignment cannot NPE on an absent parent — the script analogue of
         // the partial doc's nested-object building.
@@ -597,9 +614,8 @@ fn build_script_body(
 
     for path in removals {
         let names = script_field_names(path)?;
-        if !seen.insert(names.join("\u{0}")) {
-            return Err(overlap(path));
-        }
+        refuse_path_overlap(&seen, &names, path)?;
+        seen.push(names.clone());
         if names.len() == 1 {
             lines.push(format!("ctx._source.remove('{}');", names[0]));
         } else {
@@ -625,6 +641,25 @@ fn build_script_body(
             "params": Json::Object(params),
         }
     }))
+}
+
+/// Refuse `names` if it collides with any path already in `seen`: an exact
+/// duplicate, or one being a prefix of the other in either direction (`a`
+/// versus `a.b`). Two paths collide exactly when their shared leading segments
+/// are equal — siblings (`a.b` versus `a.c`) do not. This is the script-path
+/// mirror of `insert_nested`'s scalar-vs-object overlap refusal.
+fn refuse_path_overlap(
+    seen: &[Vec<&str>],
+    names: &[&str],
+    path: &FieldPath,
+) -> Result<(), DbError> {
+    for prior in seen {
+        let common = prior.len().min(names.len());
+        if prior[..common] == names[..common] {
+            return Err(overlap(path));
+        }
+    }
+    Ok(())
 }
 
 /// `ctx._source.a.b.c` for the field-name path `["a","b","c"]`. Only valid on
@@ -736,14 +771,14 @@ fn insert_nested(
             .or_insert_with(|| Json::Object(Map::new()));
         cursor = entry.as_object_mut().ok_or_else(|| overlap(full_path))?;
     }
-    unreachable!("names is never empty: sets_to_partial_doc checks first()")
+    unreachable!("names is never empty: set_field_names refuses an empty path")
 }
 
 fn overlap(path: &FieldPath) -> DbError {
     DbError::Unsupported {
         feature: format!(
-            "set paths overlap at `{path}` — refusing to pick which of two values for the same \
-             field wins"
+            "field paths overlap at `{path}` — one set/remove is the same field as, or nested \
+             inside, another; refusing to pick which wins"
         ),
     }
 }
@@ -821,6 +856,17 @@ pub enum WriteOutcome {
     Failed(DbError),
 }
 
+/// `index/id` for a notice, or `index (server-assigned id)` for an insert
+/// whose id the server generates — so a notice never prints a dangling
+/// `index/` with an empty id.
+fn target_label(write: &CompiledWrite) -> String {
+    if write.id.is_empty() {
+        format!("{} (server-assigned id)", write.index)
+    } else {
+        format!("{}/{}", write.index, write.id)
+    }
+}
+
 /// Fold the compiled writes plus the outcomes gathered before the halt into
 /// the batch report: one `Value::Document` per mutation (applied / failed /
 /// not attempted) plus the summary and refresh notices.
@@ -879,10 +925,10 @@ pub fn batch_report(
                         code: Some(Arc::from("es.mutate.forced_refresh")),
                         message: Arc::from(
                             format!(
-                                "the write to `{}/{}` forced an immediate refresh: the shard's \
+                                "the write to `{}` forced an immediate refresh: the shard's \
                                  refresh-listener queue was full, so refresh=wait_for degraded \
                                  to refresh=true",
-                                write.index, write.id
+                                target_label(write)
                             )
                             .as_str(),
                         ),
@@ -933,14 +979,13 @@ pub fn batch_report(
                 code: Some(Arc::from("es.mutate.halted")),
                 message: Arc::from(
                     format!(
-                        "mutation {} of {} (`{}` on `{}/{}`) failed: {} applied, 1 failed, {} \
+                        "mutation {} of {} (`{}` on `{}`) failed: {} applied, 1 failed, {} \
                          not attempted — Elasticsearch has no transaction, so the applied \
                          writes stay written and the rest were never sent",
                         i + 1,
                         total,
                         writes[i].op,
-                        writes[i].index,
-                        writes[i].id,
+                        target_label(&writes[i]),
                         applied,
                         not_attempted
                     )
@@ -1637,6 +1682,101 @@ mod tests {
             compile_mutation(&m, true),
             Err(DbError::Unsupported { .. })
         ));
+    }
+
+    #[test]
+    fn overlapping_paths_are_refused_on_the_script_path_too() {
+        // A set of a scalar `a` alongside a nested set `a.b` is a prefix
+        // overlap the doc path refuses via `insert_nested`; the presence of a
+        // removal (`junk`) forces the script path, which must refuse it just
+        // the same rather than silently turn `a=5` into `{b:1}`.
+        let m = Mutation::Update {
+            path: path(),
+            key: key("events", "abc"),
+            sets: vec![
+                (fp("a"), Value::I64(5)),
+                (fp("a.b"), Value::I64(1)),
+                (fp("junk"), Value::Absent),
+            ],
+            expect: guard(1, 1),
+        };
+        let err = compile_mutation(&m, true).unwrap_err();
+        assert!(matches!(err, DbError::Unsupported { .. }));
+        assert!(err.to_string().contains("overlap"), "{err}");
+
+        // A set and a remove that overlap must be refused regardless of the
+        // caller's ordering — the emit-sets-then-removes shape must not silently
+        // pick a winner.
+        for sets in [
+            vec![(fp("a"), Value::Absent), (fp("a.b"), Value::I64(1))],
+            vec![(fp("a.b"), Value::I64(1)), (fp("a"), Value::Absent)],
+        ] {
+            let m = Mutation::Update {
+                path: path(),
+                key: key("events", "abc"),
+                sets,
+                expect: guard(1, 1),
+            };
+            assert!(
+                matches!(compile_mutation(&m, true), Err(DbError::Unsupported { .. })),
+                "a set/remove prefix overlap must be refused in either order"
+            );
+        }
+
+        // An exact set-then-remove of the same leaf is also refused (it is not a
+        // way to "set then clear").
+        let m = Mutation::Update {
+            path: path(),
+            key: key("events", "abc"),
+            sets: vec![
+                (fp("x"), Value::Str(Arc::from("v"))),
+                (fp("x"), Value::Absent),
+            ],
+            expect: guard(1, 1),
+        };
+        assert!(matches!(
+            compile_mutation(&m, true),
+            Err(DbError::Unsupported { .. })
+        ));
+
+        // Siblings under a shared parent do NOT overlap — a genuine multi-field
+        // scripted edit still compiles.
+        let m = Mutation::Update {
+            path: path(),
+            key: key("events", "abc"),
+            sets: vec![(fp("a.b"), Value::I64(1)), (fp("a.c"), Value::Absent)],
+            expect: guard(1, 1),
+        };
+        assert!(compile_mutation(&m, true).is_ok());
+    }
+
+    #[test]
+    fn an_empty_insert_id_becomes_a_server_generated_post_not_a_broken_put() {
+        // `PUT /events/_doc/` (empty id segment) would 400 server-side mid-batch;
+        // an empty `_id` is treated as no id, like `identity_from_key`'s filter.
+        let m = Mutation::Insert {
+            path: path(),
+            doc: doc_val(vec![
+                ("_id", Value::Str(Arc::from(""))),
+                ("status", Value::Str(Arc::from("new"))),
+            ]),
+        };
+        let w = compile_mutation(&m, true).unwrap();
+        assert_eq!(w.method, Method::Post);
+        assert_eq!(w.path, "/events/_doc");
+        assert!(q(&w, "op_type").is_none());
+        assert!(w.id.is_empty());
+        // An empty `_routing` is likewise dropped, not sent as `routing=`.
+        let m = Mutation::Insert {
+            path: path(),
+            doc: doc_val(vec![
+                ("_routing", Value::Str(Arc::from(""))),
+                ("status", Value::Str(Arc::from("new"))),
+            ]),
+        };
+        let w = compile_mutation(&m, true).unwrap();
+        assert!(w.routing.is_none());
+        assert!(q(&w, "routing").is_none());
     }
 
     #[test]
