@@ -19,3 +19,5 @@ packaging/flatpak/cargo-sources.json
 packaging/flatpak/flatpak-cargo-generator.py
 # flatpak-builder work dirs (local builds)
 .flatpak-builder/
+# ui/gtk4 is a standalone cargo workspace, for the same reason
+ui/gtk4/target/

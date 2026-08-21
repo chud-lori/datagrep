@@ -1,0 +1,25 @@
+# Not a root-workspace member: that would put GTK4 in the path of ci/gates.sh,
+# which runs --workspace on macOS. See README.md; CI is linux-gtk4.yml.
+[workspace]
+
+[package]
+name = "datagrep-gtk"
+version = "0.4.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+description = "GTK4/libadwaita Linux front-end for datagrep: a thin client over the engine's C ABI."
+
+[dependencies]
+datagrep-ffi = { path = "../../crates/datagrep-ffi" }
+
+glib = "0.20"
+gio = "0.20"
+
+async-channel = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints.clippy]
+uninlined_format_args = "allow"
