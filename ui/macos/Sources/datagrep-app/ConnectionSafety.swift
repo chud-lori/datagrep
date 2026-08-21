@@ -67,7 +67,7 @@ struct ReadOnlyBadge: View {
 // MARK: - production marker
 
 /// The banner for a connection the user has given a colour. Large and always
-/// visible: when Sequel Ace shrank its full-width production colour to a dot it
+/// visible: when another client shrank its full-width production colour to a dot it
 /// drew sustained backlash, so this is a filled band with the connection's name
 /// in it, not a tint.
 ///

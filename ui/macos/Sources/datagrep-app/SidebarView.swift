@@ -22,8 +22,8 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        // The add lives in a bottom bar, which is where Reminders, Notes and
-        // Xcode put "add to the thing this sidebar lists".
+        // The add lives in a bottom bar, which is where the platform's own
+        // apps put "add to the thing this sidebar lists".
         //
         // Two earlier attempts put a bare + on the section header and both were
         // rejected as decoration. They shared three properties this does not:
@@ -52,8 +52,8 @@ struct SidebarView: View {
             }
             .background(.bar)
         }
-        // A band, not a tint. Sequel Ace shrinking the same signal to a dot
-        // produced sustained backlash, so a marked connection gets full width.
+        // A band, not a tint. Shrinking the same signal to a dot produced
+        // sustained backlash elsewhere, so a marked connection gets full width.
         .safeAreaInset(edge: .top, spacing: 0) {
             if let color = model.activeSafety.color, !model.activeProfile.isEmpty {
                 MarkedBanner(name: model.activeProfile, color: color)
@@ -261,7 +261,8 @@ private struct NodeLabel: View {
         .contentShape(Rectangle())
         .onHover { h in withAnimation(.smooth(duration: 0.12)) { hovering = h } }
         .onTapGesture { model.select(node) }
-        // Double-click a connection: a new editor for it, DBeaver-style. The
+        // Double-click a connection: a new editor for it, the way every other
+        // client in the study does. The
         // previewable branch is unchanged — a profile row is never previewable
         // (its kind is `profile`), so these two have never overlapped.
         .onTapGesture(count: 2) {

@@ -111,7 +111,7 @@ impl CoreApi {
     /// Not async because it cannot block: registration is a hashmap insert and
     /// **constructs nothing** — the driver is built on first use. That is why
     /// adding an engine costs nothing at startup, which is the whole answer to
-    /// DBeaver's per-driver classloader.
+    /// the per-driver classloader other clients use.
     pub fn register_driver(
         &self,
         id: impl Into<Arc<str>>,

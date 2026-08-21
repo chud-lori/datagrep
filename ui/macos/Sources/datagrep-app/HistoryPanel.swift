@@ -7,10 +7,10 @@ import SwiftUI
 /// The shape is taken from what the UX study says the competitors get *wrong*,
 /// not from what they look like:
 ///
-/// * **Searchable by text, connection and date.** DBeaver's history cannot be
+/// * **Searchable by text, connection and date.** Other clients' history cannot be
 ///   searched by date and has no retention control ([#22238]); both are here, in
 ///   the filter bar, one click deep.
-/// * **Retention is stated and editable, never a silent cap.** Sequel Ace stops
+/// * **Retention is stated and editable, never a silent cap.** Other clients stop
 ///   at 100 entries without saying so ([#1551]). The footer says exactly what is
 ///   being kept and lets you change it.
 /// * **Not scoped to whatever you are connected to.** HeidiSQL's users asked for
@@ -404,8 +404,8 @@ private struct HistoryDetail: View {
 
 // MARK: - retention
 
-/// The fix for the two documented failures in one small popover: DBeaver has no
-/// retention control at all, Sequel Ace has one nobody can see or change.
+/// The fix for the two documented failures in one small popover: no retention
+/// control at all, or one nobody can see or change.
 private struct RetentionButton: View {
     @ObservedObject var model: HistoryModel
     @State private var showing = false

@@ -5,10 +5,10 @@ import Foundation
 /// This is deliberately **not** `SavedQueries.swift`. Saved queries are things a
 /// person chose to keep and gave a name to; history is a record of what happened,
 /// which nobody curates and which must never need curating to stay useful. The
-/// UX study is explicit that conflating the two (as several competitors do) is
-/// the mistake, and that TablePlus's clean split is the right shape — so these
-/// are two stores, two directories, two panels, and they never write to each
-/// other's files.
+/// UX study is explicit that conflating the two — as several other clients do —
+/// is the mistake, and that a clean split is the right shape, so these are two
+/// stores, two directories, two panels, and they never write to each other's
+/// files.
 ///
 /// ## Why this lives in Swift and not in the engine
 ///
@@ -173,9 +173,9 @@ public struct QueryHistoryEntry: Codable, Sendable, Identifiable, Equatable {
 }
 
 /// How much history to keep. **User-configurable, and stated in the UI** — the
-/// study names DBeaver (no retention control at all, [#22238]) and Sequel Ace
-/// (a silent hard cap of 100 entries, [#1551]) as the two documented ways to get
-/// this wrong. The defaults are generous on purpose: 10 000 entries or 180 days,
+/// study documents two ways to get this wrong: offering no retention control at
+/// all, and enforcing a silent hard cap of 100 entries that the user cannot see
+/// or change. The defaults are generous on purpose: 10 000 entries or 180 days,
 /// whichever bites first.
 public struct HistoryRetention: Codable, Sendable, Equatable {
     public var maxEntries: Int
@@ -207,7 +207,8 @@ public struct HistoryRetention: Codable, Sendable, Equatable {
 }
 
 /// Date window for the filter bar. The four coarse buckets people actually
-/// think in — DBeaver's filed complaint is that it has no date filtering at all.
+/// think in. The study's filed complaint against other clients is that they
+/// offer no date filtering at all.
 public enum HistoryDateRange: String, Codable, Sendable, CaseIterable, Identifiable {
     case day, week, month, all
     public var id: String { rawValue }
