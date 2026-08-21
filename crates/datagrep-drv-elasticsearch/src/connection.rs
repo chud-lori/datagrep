@@ -42,7 +42,7 @@ use datagrep_api::driver::{
     TxOpts,
 };
 use datagrep_api::error::DbError;
-use datagrep_api::request::{ExecOpts, MutationBatch, Op, Request};
+use datagrep_api::request::{DdlOp, ExecOpts, MutationBatch, Op, Request};
 use datagrep_api::shape::ObjectPath;
 use datagrep_api::value::Value;
 
@@ -50,6 +50,7 @@ use crate::canceller::{EsCanceller, InFlight, InFlightSlot};
 use crate::catalog::{encode_index_expression, EsCatalog};
 use crate::console::{self, ConsoleRequest};
 use crate::cursor::{AckCursor, DocsCursor, ScanSpec, SearchCursor, DEFAULT_KEEP_ALIVE};
+use crate::ddl::EsDdlKind;
 use crate::filter::{compile_predicate, compile_sort};
 use crate::http::{EsHttp, Method, PageMode, Product};
 use crate::mutate::{
@@ -535,6 +536,66 @@ impl EsConnection {
     /// Elasticsearch has no transaction, so the applied prefix stays written
     /// and the rest is deliberately never sent. See [`crate::mutate`] for the
     /// model and the per-operation rules.
+    /// Drop an index or an alias — one request either way.
+    async fn execute_ddl(&self, op: &DdlOp, opts: &ExecOpts) -> Result<Box<dyn Cursor>, DbError> {
+        if self.read_only_active(opts) {
+            return Err(DbError::Unsupported {
+                feature: "DDL: this connection is in read-only mode (enforced client-side — \
+                          Elasticsearch has no read-only session)"
+                    .into(),
+            });
+        }
+        let plan = crate::ddl::plan(op)?;
+        let sent = match &plan.kind {
+            EsDdlKind::DeleteIndex {
+                index,
+                ignore_unavailable,
+            } => {
+                let query: Vec<(&str, String)> = if *ignore_unavailable {
+                    vec![("ignore_unavailable", "true".to_string())]
+                } else {
+                    Vec::new()
+                };
+                self.http
+                    .request(
+                        Method::Delete,
+                        &format!("/{}", encode_index_expression(index)?),
+                        &query,
+                        None,
+                        None,
+                        opts.timeout,
+                    )
+                    .await
+            }
+            EsDdlKind::Aliases { body } => {
+                self.http
+                    .request(
+                        Method::Post,
+                        "/_aliases",
+                        &[],
+                        Some(body),
+                        None,
+                        opts.timeout,
+                    )
+                    .await
+            }
+        };
+        match sent {
+            Ok(_) => Ok(Box::new(AckCursor::new(None, Some(Arc::from(plan.ack))))),
+            // Presence-checked, not just compared: an error carrying no code
+            // would otherwise match a plan tolerating nothing.
+            Err(DbError::Query { ref code, .. })
+                if plan.absent_code.is_some() && code.as_deref() == plan.absent_code =>
+            {
+                Ok(Box::new(AckCursor::new(
+                    None,
+                    Some(Arc::from("nothing to drop")),
+                )))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     async fn execute_mutate(
         &self,
         batch: &MutationBatch,
@@ -872,15 +933,7 @@ impl Connection for EsConnection {
                     // `EDITABLE_RESULTS` is on; `ATOMIC_BATCH` stays off because
                     // Elasticsearch has no multi-document transaction.
                     Op::Mutate(batch) => self.execute_mutate(batch, &opts).await,
-                    // `DDL` is off: Elasticsearch's index/mapping management is
-                    // not SQL DDL, and generating it from a `DdlOp::Native`
-                    // blob would be an untyped passthrough pretending to be a
-                    // capability.
-                    Op::Ddl(_) => Err(DbError::Unsupported {
-                        feature: "Op::Ddl (DDL is off for this driver; index and mapping \
-                                  management is a native `PUT /<index>` request)"
-                            .into(),
-                    }),
+                    Op::Ddl(ddl) => self.execute_ddl(ddl, &opts).await,
                 }
             }
         }

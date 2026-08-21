@@ -41,7 +41,7 @@ use datagrep_api::driver::{
     Canceller, Connection, Cursor, Enforcement, ServerInfo, Transaction, TxOpts,
 };
 use datagrep_api::error::DbError;
-use datagrep_api::request::{DdlOp, Mutation, MutationBatch, Op, Request};
+use datagrep_api::request::{Mutation, MutationBatch, Op, Request};
 use datagrep_api::value::Value;
 
 use crate::actor::{self, ActorCmd, ExecOutcome};
@@ -98,7 +98,7 @@ impl PgConnection {
                 let (inner_sql, params) = Self::compile(inner)?;
                 Ok((sql::wrap_explain(&inner_sql, *analyze), params))
             }
-            Op::Ddl(DdlOp::Native { text }) => Ok((text.to_string(), Vec::new())),
+            Op::Ddl(ddl) => Ok((sql::compile_ddl(ddl)?, Vec::new())),
             Op::Mutate(batch) => Err(DbError::Unsupported {
                 feature: format!(
                     "Op::Mutate must go through PgConnection::execute_mutation, not the generic SQL compiler ({} mutation(s))",

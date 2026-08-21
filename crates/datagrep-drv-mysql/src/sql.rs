@@ -12,11 +12,14 @@
 
 use std::fmt::Write as _;
 
-use datagrep_api::{DbError, FieldPath, ObjectPath, PathSeg, Predicate, SortKey, Value};
+use datagrep_api::{
+    DbError, DdlOp, FieldPath, ObjectKind, ObjectPath, PathSeg, Predicate, SortKey, Value,
+};
 
 /// Which server we are actually talking to — decided from `@@version` at
 /// connect. Only used where the two dialects genuinely diverge (EXPLAIN
-/// ANALYZE syntax); never for anything a capability flag should cover.
+/// ANALYZE syntax, `IF [NOT] EXISTS` on index DDL); never for anything a
+/// capability flag should cover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flavor {
     MySql,
@@ -49,7 +52,10 @@ pub fn quote_ident(ident: &str) -> Result<String, DbError> {
 /// no schema tier — so paths deeper than 2 parts are rejected honestly
 /// rather than silently truncated.
 pub fn quote_object_path(path: &ObjectPath) -> Result<String, DbError> {
-    let parts = path.parts();
+    quote_parts(path.parts())
+}
+
+fn quote_parts(parts: &[std::sync::Arc<str>]) -> Result<String, DbError> {
     if parts.is_empty() {
         return Err(DbError::Unsupported {
             feature: "empty object path".into(),
@@ -58,8 +64,9 @@ pub fn quote_object_path(path: &ObjectPath) -> Result<String, DbError> {
     if parts.len() > 2 {
         return Err(DbError::Unsupported {
             feature: format!(
-                "MySQL object paths are `database`.`table` (2 levels); got {} levels: {path}",
-                parts.len()
+                "MySQL object paths are `database`.`table` (2 levels); got {} levels: {}",
+                parts.len(),
+                parts.join(".")
             ),
         });
     }
@@ -290,6 +297,128 @@ pub fn compile_count(
     Ok((sql, pb.params))
 }
 
+/// MySQL indexes are table-scoped: `DROP INDEX` and `ALTER TABLE … RENAME
+/// INDEX` both need the table, not just the name.
+fn split_index_path(path: &ObjectPath) -> Result<(String, String), DbError> {
+    let parts = path.parts();
+    let (name, owner) = parts
+        .split_last()
+        .filter(|(_, owner)| !owner.is_empty())
+        .ok_or_else(|| DbError::Unsupported {
+            feature: format!(
+                "index path {path} must name the table it is on followed by the index name"
+            ),
+        })?;
+    Ok((quote_parts(owner)?, quote_ident(name)?))
+}
+
+/// Whole columns only: a JSON path key would silently become a functional
+/// index, which needs a parenthesised expression and a generated column.
+fn index_column(path: &FieldPath) -> Result<String, DbError> {
+    match path.segments() {
+        [PathSeg::Field(name)] => quote_ident(name),
+        _ => Err(DbError::Unsupported {
+            feature: format!(
+                "index key {path} is not a plain column — a functional index is native DDL"
+            ),
+        }),
+    }
+}
+
+/// Compile a structured [`DdlOp`] to one statement. Names are identifiers,
+/// never values, so nothing here binds a parameter.
+///
+/// MySQL 8.0 has no `IF NOT EXISTS` on `CREATE INDEX` and no `IF EXISTS` on
+/// `DROP INDEX` — both are ER_PARSE_ERROR — where MariaDB 11 accepts them, so
+/// the guard is refused by flavor rather than dropped.
+pub fn compile_ddl(op: &DdlOp, flavor: Flavor) -> Result<String, DbError> {
+    match op {
+        DdlOp::Drop {
+            path,
+            kind,
+            if_exists,
+        } => {
+            let guard = if *if_exists { "IF EXISTS " } else { "" };
+            match kind {
+                ObjectKind::Index => {
+                    let (table, index) = split_index_path(path)?;
+                    if *if_exists && flavor == Flavor::MySql {
+                        return Err(DbError::Unsupported {
+                            feature: "DROP INDEX IF EXISTS — MySQL has no such form (MariaDB \
+                                      does); drop it unconditionally or check first"
+                                .into(),
+                        });
+                    }
+                    Ok(format!("DROP INDEX {guard}{index} ON {table}"))
+                }
+                ObjectKind::Table => Ok(format!("DROP TABLE {guard}{}", quote_object_path(path)?)),
+                ObjectKind::View => Ok(format!("DROP VIEW {guard}{}", quote_object_path(path)?)),
+                ObjectKind::Database => {
+                    Ok(format!("DROP DATABASE {guard}{}", quote_object_path(path)?))
+                }
+                other => Err(DbError::Unsupported {
+                    feature: format!(
+                        "{other:?} is not a MySQL object this driver can administer \
+                         (SCHEMA is a synonym for DATABASE here — use Database)"
+                    ),
+                }),
+            }
+        }
+        DdlOp::Rename { from, to, kind } => {
+            DdlOp::rename_target(from, to)?;
+            match kind {
+                // `RENAME TABLE` is also how a view is renamed.
+                ObjectKind::Table | ObjectKind::View => Ok(format!(
+                    "RENAME TABLE {} TO {}",
+                    quote_object_path(from)?,
+                    quote_object_path(to)?
+                )),
+                ObjectKind::Index => {
+                    let (table, old) = split_index_path(from)?;
+                    let (_, new) = split_index_path(to)?;
+                    Ok(format!("ALTER TABLE {table} RENAME INDEX {old} TO {new}"))
+                }
+                other => Err(DbError::Unsupported {
+                    feature: format!("MySQL cannot rename a {other:?} in place"),
+                }),
+            }
+        }
+        DdlOp::CreateIndex {
+            path,
+            name,
+            fields,
+            unique,
+            if_not_exists,
+        } => {
+            if fields.is_empty() {
+                return Err(DbError::Unsupported {
+                    feature: "CREATE INDEX with no fields".into(),
+                });
+            }
+            if *if_not_exists && flavor == Flavor::MySql {
+                return Err(DbError::Unsupported {
+                    feature: "CREATE INDEX IF NOT EXISTS — MySQL has no such form (MariaDB \
+                              does); create it unconditionally or check first"
+                        .into(),
+                });
+            }
+            let mut cols = Vec::with_capacity(fields.len());
+            for f in fields {
+                cols.push(index_column(f)?);
+            }
+            Ok(format!(
+                "CREATE {}INDEX {}{} ON {} ({})",
+                if *unique { "UNIQUE " } else { "" },
+                if *if_not_exists { "IF NOT EXISTS " } else { "" },
+                quote_ident(name)?,
+                quote_object_path(path)?,
+                cols.join(", ")
+            ))
+        }
+        DdlOp::Native { text } => Ok(text.to_string()),
+    }
+}
+
 /// Wrap an inner request's compiled SQL in the flavor's EXPLAIN form.
 /// `analyze` genuinely executes the statement: MySQL 8.0.18+ spells it
 /// `EXPLAIN ANALYZE`, MariaDB spells it `ANALYZE` — MariaDB has no
@@ -442,6 +571,129 @@ mod tests {
     use super::*;
     use datagrep_api::Predicate as P;
     use std::sync::Arc;
+
+    fn path(parts: &[&str]) -> ObjectPath {
+        ObjectPath::new(parts.iter().map(|p| Arc::from(*p)).collect())
+    }
+
+    #[test]
+    fn ddl_drop_and_rename_name_the_statement_for_the_kind() {
+        let users = path(&["app", "users"]);
+        assert_eq!(
+            compile_ddl(
+                &DdlOp::Drop {
+                    path: users.clone(),
+                    kind: ObjectKind::Table,
+                    if_exists: true
+                },
+                Flavor::MySql
+            )
+            .unwrap(),
+            "DROP TABLE IF EXISTS `app`.`users`"
+        );
+        assert_eq!(
+            compile_ddl(
+                &DdlOp::Rename {
+                    from: users.clone(),
+                    to: path(&["app", "people"]),
+                    kind: ObjectKind::View
+                },
+                Flavor::MySql
+            )
+            .unwrap(),
+            "RENAME TABLE `app`.`users` TO `app`.`people`"
+        );
+        // MySQL has no separate schema namespace, so the catalog never
+        // produces one and neither does this.
+        assert!(compile_ddl(
+            &DdlOp::Drop {
+                path: users,
+                kind: ObjectKind::Schema,
+                if_exists: false
+            },
+            Flavor::MySql
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn an_index_is_addressed_through_the_table_it_is_on() {
+        let idx = path(&["app", "users", "users_email"]);
+        assert_eq!(
+            compile_ddl(
+                &DdlOp::Drop {
+                    path: idx.clone(),
+                    kind: ObjectKind::Index,
+                    if_exists: false
+                },
+                Flavor::MySql
+            )
+            .unwrap(),
+            "DROP INDEX `users_email` ON `app`.`users`"
+        );
+        assert_eq!(
+            compile_ddl(
+                &DdlOp::Rename {
+                    from: idx,
+                    to: path(&["app", "users", "users_mail"]),
+                    kind: ObjectKind::Index
+                },
+                Flavor::MySql
+            )
+            .unwrap(),
+            "ALTER TABLE `app`.`users` RENAME INDEX `users_email` TO `users_mail`"
+        );
+        // A bare name does not say which table.
+        assert!(compile_ddl(
+            &DdlOp::Drop {
+                path: path(&["users_email"]),
+                kind: ObjectKind::Index,
+                if_exists: false
+            },
+            Flavor::MySql
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_existence_guards_mysql_lacks_are_refused_not_dropped() {
+        let create = DdlOp::CreateIndex {
+            path: path(&["app", "users"]),
+            name: Arc::from("users_email"),
+            fields: vec![FieldPath::field("email")],
+            unique: true,
+            if_not_exists: true,
+        };
+        assert!(compile_ddl(&create, Flavor::MySql).is_err());
+        assert_eq!(
+            compile_ddl(&create, Flavor::MariaDb).unwrap(),
+            "CREATE UNIQUE INDEX IF NOT EXISTS `users_email` ON `app`.`users` (`email`)"
+        );
+
+        let drop = DdlOp::Drop {
+            path: path(&["app", "users", "users_email"]),
+            kind: ObjectKind::Index,
+            if_exists: true,
+        };
+        assert!(compile_ddl(&drop, Flavor::MySql).is_err());
+        assert_eq!(
+            compile_ddl(&drop, Flavor::MariaDb).unwrap(),
+            "DROP INDEX IF EXISTS `users_email` ON `app`.`users`"
+        );
+
+        // Without the guard both flavors compile the same statement.
+        let plain = DdlOp::CreateIndex {
+            path: path(&["app", "users"]),
+            name: Arc::from("users_email"),
+            fields: vec![FieldPath::field("email")],
+            unique: false,
+            if_not_exists: false,
+        };
+        assert_eq!(
+            compile_ddl(&plain, Flavor::MySql).unwrap(),
+            compile_ddl(&plain, Flavor::MariaDb).unwrap()
+        );
+    }
 
     #[test]
     fn quote_ident_backtick_style() {

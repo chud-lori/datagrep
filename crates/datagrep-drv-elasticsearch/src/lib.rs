@@ -108,11 +108,13 @@
 //!   transaction, so `Caps::ATOMIC_BATCH` stays off and the first failure stops
 //!   the batch with the applied prefix left written). See [`mutate`] and
 //!   [`connection::EsConnection`]'s mutate path.
-//! - **Inserts, `_bulk`, field-removal and DDL are not generated yet.**
-//!   `Op::Ddl` is refused (`Caps::DDL` is off — index/mapping management is a
-//!   native `PUT /<index>` request, not SQL DDL), inserts and multi-document
-//!   `_bulk` batching are P1, and an `Absent` in `sets` (field removal) is
-//!   refused rather than turned into a `null`.
+//! - **DDL covers dropping, not authoring.** `Op::Ddl` drops an index
+//!   (`ObjectKind::Collection`) or an alias (`ObjectKind::View`) — the kind is
+//!   required because the two share one namespace and the server refuses
+//!   `DELETE /<alias>`. Creating an index carries mappings and settings,
+//!   `_close`/`_open` is a lifecycle state, and an alias action list is atomic
+//!   and carries a `filter` document: all three stay native requests. See
+//!   [`ddl`].
 //! - **Date and geo-point mapping.** An Elasticsearch `date` arrives as either
 //!   epoch millis or one of many configurable formats; parsing those without a
 //!   date library would mean guessing at a `Value::Timestamp`, and a wrong
@@ -150,6 +152,7 @@ pub mod catalog;
 pub mod connection;
 pub mod console;
 pub mod cursor;
+pub mod ddl;
 pub mod driver;
 pub mod error;
 pub mod filter;

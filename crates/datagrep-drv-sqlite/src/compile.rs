@@ -8,7 +8,8 @@
 //! property tested by `tests/scan_compile.rs`.
 
 use datagrep_api::{
-    DbError, FieldPath, ObjectPath, PathSeg, Predicate, ResumeToken, SortKey, Value,
+    DbError, DdlOp, FieldPath, ObjectKind, ObjectPath, PathSeg, Predicate, ResumeToken, SortKey,
+    Value,
 };
 
 use crate::quote_ident;
@@ -25,19 +26,25 @@ pub(crate) struct Compiled {
 /// independently so a malicious/odd table name can never break out of its
 /// slot — identifiers go through `quote_ident`, never spliced raw.
 pub(crate) fn compile_object_path(path: &ObjectPath) -> Result<String, DbError> {
-    if path.parts().is_empty() {
+    quote_parts(path.parts())
+}
+
+fn quote_parts(parts: &[std::sync::Arc<str>]) -> Result<String, DbError> {
+    if parts.is_empty() {
         return Err(DbError::Query {
             code: None,
             message: "cannot compile an empty object path".to_string(),
             position: None,
         });
     }
-    let parts = path
-        .parts()
-        .iter()
-        .map(|p| quote_ident(p))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(parts.join("."))
+    let mut out = String::new();
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            out.push('.');
+        }
+        out.push_str(&quote_ident(part)?);
+    }
+    Ok(out)
 }
 
 /// `datagrep-api`'s [`FieldPath`] allows nested/indexed paths (`a.b[3]`) for
@@ -66,6 +73,119 @@ pub(crate) fn field_name(path: &FieldPath) -> Option<&str> {
         [PathSeg::Field(name)] => Some(name),
         _ => None,
     }
+}
+
+/// Compile a structured [`DdlOp`]. Names are identifiers, never values, so
+/// nothing here binds a parameter.
+///
+/// Trap: `CREATE INDEX` qualifies the *index* and leaves the table bare —
+/// `CREATE INDEX main.i ON t(a)`, where `main.t` is a syntax error.
+pub(crate) fn compile_ddl(op: &DdlOp) -> Result<String, DbError> {
+    match op {
+        DdlOp::Native { text } => Ok(text.to_string()),
+        DdlOp::Drop {
+            path,
+            kind,
+            if_exists,
+        } => {
+            let guard = if *if_exists { "IF EXISTS " } else { "" };
+            let keyword = match kind {
+                ObjectKind::Table => "TABLE",
+                ObjectKind::View => "VIEW",
+                ObjectKind::Index => "INDEX",
+                other => {
+                    return Err(DbError::Unsupported {
+                        feature: format!(
+                            "{other:?} is not a SQLite object this driver can administer"
+                        ),
+                    })
+                }
+            };
+            let target = if *kind == ObjectKind::Index {
+                index_ref(path)?
+            } else {
+                compile_object_path(path)?
+            };
+            Ok(format!("DROP {keyword} {guard}{target}"))
+        }
+        DdlOp::Rename { from, to, kind } => {
+            let new_name = quote_ident(DdlOp::rename_target(from, to)?)?;
+            if *kind != ObjectKind::Table {
+                return Err(DbError::Unsupported {
+                    feature: format!(
+                        "SQLite can only rename a table — a {kind:?} has to be dropped and \
+                         recreated (`ALTER VIEW`/`ALTER INDEX` are syntax errors)"
+                    ),
+                });
+            }
+            Ok(format!(
+                "ALTER TABLE {} RENAME TO {new_name}",
+                compile_object_path(from)?
+            ))
+        }
+        DdlOp::CreateIndex {
+            path,
+            name,
+            fields,
+            unique,
+            if_not_exists,
+        } => {
+            if fields.is_empty() {
+                return Err(DbError::Unsupported {
+                    feature: "CREATE INDEX with no fields".into(),
+                });
+            }
+            let (table, schema) =
+                path.parts()
+                    .split_last()
+                    .ok_or_else(|| DbError::Unsupported {
+                        feature: "CREATE INDEX on an empty object path".into(),
+                    })?;
+            if schema.len() > 1 {
+                return Err(DbError::Unsupported {
+                    feature: format!("object path `{path}` is deeper than SQLite's schema.table"),
+                });
+            }
+            let mut index = String::new();
+            if !schema.is_empty() {
+                index.push_str(&quote_parts(schema)?);
+                index.push('.');
+            }
+            index.push_str(&quote_ident(name)?);
+            let mut cols = Vec::with_capacity(fields.len());
+            for f in fields {
+                cols.push(field_ident(f)?);
+            }
+            Ok(format!(
+                "CREATE {}INDEX {}{index} ON {} ({})",
+                if *unique { "UNIQUE " } else { "" },
+                if *if_not_exists { "IF NOT EXISTS " } else { "" },
+                quote_ident(table)?,
+                cols.join(", ")
+            ))
+        }
+    }
+}
+
+/// An index lives in the schema beside its table, not under it, so the table
+/// component of an index path comes back out.
+fn index_ref(path: &ObjectPath) -> Result<String, DbError> {
+    let parts = path.parts();
+    let Some(split) = parts.len().checked_sub(2) else {
+        return Err(DbError::Unsupported {
+            feature: format!(
+                "index path `{path}` must name the table it is on followed by the index name"
+            ),
+        });
+    };
+    let name = quote_ident(&parts[parts.len() - 1])?;
+    if split == 0 {
+        return Ok(name);
+    }
+    let mut out = quote_parts(&parts[..split])?;
+    out.push('.');
+    out.push_str(&name);
+    Ok(out)
 }
 
 fn bind(params: &mut Vec<Value>, v: Value) -> String {

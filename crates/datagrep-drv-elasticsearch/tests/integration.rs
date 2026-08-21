@@ -12,12 +12,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use datagrep_api::caps::Caps;
-use datagrep_api::catalog::ListOpts;
+use datagrep_api::catalog::{ListOpts, ObjectKind};
 use datagrep_api::driver::{
     CancelOutcome, ConnectCtx, Connection, Driver, Enforcement, FetchHint, Payload, TxOpts,
 };
 use datagrep_api::error::DbError;
-use datagrep_api::request::{ExecOpts, Op, Predicate, Request};
+use datagrep_api::request::{DdlOp, ExecOpts, Op, Predicate, Request};
 use datagrep_api::shape::{ObjectPath, SchemaDelta, Shape};
 use datagrep_api::value::{FieldPath, Value};
 use datagrep_api::ConfigValue;
@@ -146,6 +146,21 @@ async fn put_json(path: &str, body: serde_json::Value) {
 
 async fn delete_path(path: &str) {
     let _ = seeder().delete(format!("{}/{path}", es_url())).send().await;
+}
+
+/// As [`put_json`], for the endpoints that only answer POST (`_aliases`).
+async fn post_json(path: &str, body: serde_json::Value) {
+    let resp = seeder()
+        .post(format!("{}/{path}", es_url()))
+        .json(&body)
+        .send()
+        .await
+        .expect("post");
+    assert!(
+        resp.status().is_success(),
+        "POST /{path} failed: {}",
+        resp.text().await.unwrap_or_default()
+    );
 }
 
 async fn connect(default_index: Option<&str>) -> Box<dyn Connection> {
@@ -977,7 +992,7 @@ async fn capabilities_refusals_and_read_only_are_honest() {
     assert!(!caps.flags.contains(Caps::EXACT_COUNT_CHEAP));
     assert!(!caps.flags.contains(Caps::RANDOM_ACCESS_PAGE));
     assert!(!caps.flags.contains(Caps::SCHEMA_DECLARED));
-    assert!(!caps.flags.contains(Caps::DDL));
+    assert!(caps.flags.contains(Caps::DDL));
     assert!(caps.flags.contains(Caps::EXPLAIN));
     assert!(caps.flags.contains(Caps::EXPRESSION_FILTER));
     assert!(caps.flags.contains(Caps::KEY_ENUMERATION));
@@ -1438,6 +1453,384 @@ async fn the_root_describe_lists_all_three_template_systems() {
     assert_eq!(comp["template_keys"], serde_json::json!(["mappings"]));
 
     conn.close().await.unwrap();
+    delete_path(&format!("_index_template/{composable}")).await;
+    delete_path(&format!("_component_template/{component}")).await;
+}
+
+// ------------------------------------------------------- structured DDL --
+
+async fn ddl(conn: &dyn Connection, op: DdlOp) -> Result<(), DbError> {
+    let mut cur = conn.execute(Request::Op(Op::Ddl(op))).await?;
+    while cur.next_batch(FetchHint::default()).await?.is_some() {}
+    Ok(())
+}
+
+fn one(name: &str) -> ObjectPath {
+    ObjectPath::new(vec![Arc::from(name)])
+}
+
+async fn exists(path: &str) -> bool {
+    seeder()
+        .head(format!("{}/{path}", es_url()))
+        .send()
+        .await
+        .expect("head")
+        .status()
+        .is_success()
+}
+
+/// The whole reason `Drop` carries an `ObjectKind`. An index and an alias
+/// share one namespace here, and the server refuses `DELETE /<alias>` — so
+/// the two kinds must take different requests, and neither may be guessed.
+#[tokio::test]
+#[ignore = "needs a live Elasticsearch"]
+async fn an_index_and_an_alias_drop_under_their_own_kinds() {
+    let index = unique_index("ddl_kind");
+    let alias = format!("{index}_alias");
+    create_index(&index, serde_json::json!({})).await;
+    post_json(
+        "_aliases",
+        serde_json::json!({"actions": [{"add": {"index": index, "alias": alias}}]}),
+    )
+    .await;
+
+    let conn = connect(None).await;
+
+    // The catalog is what tells the caller which kind a name is.
+    let listed = conn
+        .catalog()
+        .children(
+            &ObjectPath::root(),
+            ListOpts {
+                limit: 10_000,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list");
+    let kind_of = |name: &str| {
+        listed
+            .items
+            .iter()
+            .find(|n| &*n.path.parts()[0] == name)
+            .unwrap_or_else(|| panic!("{name} should be listed"))
+            .kind
+    };
+    assert_eq!(kind_of(&index), ObjectKind::Collection);
+    assert_eq!(kind_of(&alias), ObjectKind::View);
+
+    // Asking to drop the alias as if it were an index is the request the
+    // server refuses, and the refusal is surfaced rather than worked around.
+    let err = ddl(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: one(&alias),
+            kind: ObjectKind::Collection,
+            if_exists: false,
+        },
+    )
+    .await
+    .expect_err("an alias is not a concrete index");
+    assert!(
+        format!("{err}").contains("alias"),
+        "the server's own message should survive: {err}"
+    );
+    assert!(exists(&index).await, "nothing should have been deleted");
+
+    // Under the right kind it detaches the alias and leaves the index.
+    ddl(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: one(&alias),
+            kind: ObjectKind::View,
+            if_exists: false,
+        },
+    )
+    .await
+    .expect("drop alias");
+    assert!(!exists(&format!("_alias/{alias}")).await, "alias is gone");
+    assert!(exists(&index).await, "the index it pointed at is not");
+
+    ddl(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: one(&index),
+            kind: ObjectKind::Collection,
+            if_exists: false,
+        },
+    )
+    .await
+    .expect("drop index");
+    assert!(!exists(&index).await, "index is gone");
+}
+
+/// Removing an alias that is on several indices is one action list, so it is
+/// never visible half-removed. Split into one call per index, a reader
+/// between them would see an alias pointing at only some of them.
+#[tokio::test]
+#[ignore = "needs a live Elasticsearch"]
+async fn an_alias_is_removed_from_every_index_in_one_call() {
+    let a = unique_index("ddl_alias_a");
+    let b = unique_index("ddl_alias_b");
+    let alias = format!("{a}_shared");
+    create_index(&a, serde_json::json!({})).await;
+    create_index(&b, serde_json::json!({})).await;
+    post_json(
+        "_aliases",
+        serde_json::json!({"actions": [
+            {"add": {"index": a, "alias": alias}},
+            {"add": {"index": b, "alias": alias}},
+        ]}),
+    )
+    .await;
+
+    let conn = connect(None).await;
+    ddl(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: one(&alias),
+            kind: ObjectKind::View,
+            if_exists: false,
+        },
+    )
+    .await
+    .expect("drop alias");
+
+    assert!(!exists(&format!("_alias/{alias}")).await);
+    assert!(exists(&a).await && exists(&b).await, "indices survive");
+    drop_index(&a).await;
+    drop_index(&b).await;
+}
+
+/// `if_exists` reaches the server by whichever mechanism each endpoint has —
+/// `ignore_unavailable` for an index, and for an alias by tolerating the one
+/// error type, since `must_exist: false` does not suppress it.
+#[tokio::test]
+#[ignore = "needs a live Elasticsearch"]
+async fn if_exists_is_honoured_on_both_endpoints() {
+    let missing = unique_index("ddl_missing");
+    let conn = connect(None).await;
+
+    for kind in [ObjectKind::Collection, ObjectKind::View] {
+        ddl(
+            conn.as_ref(),
+            DdlOp::Drop {
+                path: one(&missing),
+                kind,
+                if_exists: true,
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("dropping a missing {kind:?} with if_exists: {e}"));
+
+        assert!(
+            ddl(
+                conn.as_ref(),
+                DdlOp::Drop {
+                    path: one(&missing),
+                    kind,
+                    if_exists: false,
+                },
+            )
+            .await
+            .is_err(),
+            "a missing {kind:?} without the guard must be an error"
+        );
+    }
+}
+
+/// A name that could expand into more than one object never reaches the
+/// server. The cluster's own `action.destructive_requires_name` catches the
+/// wildcard too, but it is a setting, and a drop does not rely on it.
+#[tokio::test]
+#[ignore = "needs a live Elasticsearch"]
+async fn a_wildcard_name_is_refused_before_it_is_sent() {
+    let a = unique_index("ddl_guard_a");
+    let b = unique_index("ddl_guard_b");
+    create_index(&a, serde_json::json!({})).await;
+    create_index(&b, serde_json::json!({})).await;
+
+    let conn = connect(None).await;
+    for name in ["datagrep_es_test_ddl_guard_*", "_all", &format!("{a},{b}")] {
+        let err = ddl(
+            conn.as_ref(),
+            DdlOp::Drop {
+                path: one(name),
+                kind: ObjectKind::Collection,
+                if_exists: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, DbError::Unsupported { .. }),
+            "{name}: {err:?}"
+        );
+    }
+    assert!(exists(&a).await && exists(&b).await, "both still there");
+    drop_index(&a).await;
+    drop_index(&b).await;
+}
+
+/// The verbs this engine does not have are refused by name, before a request
+/// is built — and a read-only connection refuses DDL outright.
+#[tokio::test]
+#[ignore = "needs a live Elasticsearch"]
+async fn refusals_name_what_is_missing_and_read_only_blocks_ddl() {
+    let index = unique_index("ddl_refuse");
+    create_index(&index, serde_json::json!({})).await;
+    let conn = connect(None).await;
+
+    let err = ddl(
+        conn.as_ref(),
+        DdlOp::Rename {
+            from: one(&index),
+            to: one(&format!("{index}_2")),
+            kind: ObjectKind::Collection,
+        },
+    )
+    .await
+    .expect_err("no rename here");
+    assert!(format!("{err}").contains("reindex"), "{err}");
+
+    let err = ddl(
+        conn.as_ref(),
+        DdlOp::CreateIndex {
+            path: one(&index),
+            name: Arc::from("by_title"),
+            fields: vec![FieldPath::field("title")],
+            unique: false,
+            if_not_exists: true,
+        },
+    )
+    .await
+    .expect_err("no named secondary index here");
+    assert!(matches!(err, DbError::Unsupported { .. }), "{err:?}");
+
+    conn.set_read_only(true).await.expect("read-only");
+    let err = ddl(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: one(&index),
+            kind: ObjectKind::Collection,
+            if_exists: false,
+        },
+    )
+    .await
+    .expect_err("read-only must refuse a drop");
+    assert!(matches!(err, DbError::Unsupported { .. }), "{err:?}");
+    assert!(exists(&index).await, "read-only kept it");
+
+    drop_index(&index).await;
+}
+
+/// Authoring an index template is DDL that stays native, for the same reason
+/// creating an index does: the body *is* mappings and settings. This proves
+/// the whole loop through the driver — write it, have the cluster apply it to
+/// a new index, read it back through the catalog, delete it — and that
+/// read-only refuses the write.
+#[tokio::test]
+#[ignore = "needs a live Elasticsearch"]
+async fn an_index_template_is_authored_read_back_and_deleted_through_the_driver() {
+    let label = unique_index("tplwrite");
+    let component = format!("{label}_component");
+    let composable = format!("{label}_composable");
+    let conn = connect(None).await;
+
+    let ack = |text: String| {
+        let conn = &conn;
+        async move {
+            let mut cur = conn.execute(Request::native(text)).await?;
+            while cur.next_batch(FetchHint::default()).await?.is_some() {}
+            Ok::<(), DbError>(())
+        }
+    };
+
+    ack(format!(
+        "PUT /_component_template/{component}\n{}",
+        serde_json::json!({ "template": { "mappings": { "properties": {
+            "level": { "type": "keyword" } } } } })
+    ))
+    .await
+    .expect("author the component template");
+    ack(format!(
+        "PUT /_index_template/{composable}\n{}",
+        serde_json::json!({
+            "index_patterns": [format!("{label}-*")],
+            "priority": 500,
+            "composed_of": [component],
+            "template": { "settings": { "number_of_shards": 1 } }
+        })
+    ))
+    .await
+    .expect("author the composable template");
+
+    // The cluster applies it: an index created after the fact gets the
+    // mapping from the component the template is composed of.
+    let index = format!("{label}-001");
+    ack(format!("PUT /{index}"))
+        .await
+        .expect("create a matching index");
+    let mut mapping = conn
+        .execute(Request::native(format!("GET /{index}/_mapping")))
+        .await
+        .expect("read the mapping");
+    let Payload::Docs(docs) = mapping
+        .next_batch(FetchHint::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .payload
+    else {
+        panic!("expected docs")
+    };
+    assert!(
+        format!("{:?}", docs[0]).contains("level"),
+        "the template's mapping should have been applied: {:?}",
+        docs[0]
+    );
+
+    // And the read side sees what was written.
+    let detail = conn
+        .catalog()
+        .describe(&ObjectPath::root())
+        .await
+        .expect("describe");
+    let listing: serde_json::Value = serde_json::from_str(
+        &detail
+            .extra
+            .iter()
+            .find(|(k, _)| &**k == "index_templates")
+            .map(|(_, v)| v.to_string())
+            .expect("index_templates"),
+    )
+    .unwrap();
+    assert!(
+        listing
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["name"] == serde_json::json!(composable)),
+        "the authored template should be listed"
+    );
+
+    // Read-only refuses it, like any other write.
+    conn.set_read_only(true).await.expect("read-only");
+    assert!(
+        ack(format!("DELETE /_index_template/{composable}"))
+            .await
+            .is_err(),
+        "read-only must refuse a template delete"
+    );
+    conn.set_read_only(false).await.expect("writable again");
+
+    ack(format!("DELETE /{index}")).await.expect("drop index");
+    ack(format!("DELETE /_index_template/{composable}"))
+        .await
+        .expect("delete the composable template");
+    ack(format!("DELETE /_component_template/{component}"))
+        .await
+        .expect("delete the component template");
     delete_path(&format!("_index_template/{composable}")).await;
     delete_path(&format!("_component_template/{component}")).await;
 }

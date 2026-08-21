@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 
 use datagrep_api::config::ResolvedConfig;
 use datagrep_api::driver::{ConnectCtx, Connection, FetchHint, Payload};
-use datagrep_api::request::{ExecOpts, Op, Request};
+use datagrep_api::request::{DdlOp, ExecOpts, Op, Request};
 use datagrep_api::value::{TzSpec, Value};
-use datagrep_api::{Caps, DbError, Driver, ObjectPath};
+use datagrep_api::{Caps, DbError, Driver, ObjectKind, ObjectPath};
 
 use datagrep_drv_mysql::MySqlDriver;
 
@@ -705,5 +705,335 @@ async fn transactions_commit_rollback_and_savepoints() {
     );
 
     run_ddl(&*conn, &format!("DROP DATABASE {db}")).await;
+    conn.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------
+// Structured DDL (`Op::Ddl`)
+// ---------------------------------------------------------------------
+
+async fn ddl_op(conn: &dyn Connection, op: DdlOp) -> Result<(), DbError> {
+    let mut cur = conn.execute(Request::Op(Op::Ddl(op))).await?;
+    while cur.next_batch(FetchHint::default()).await?.is_some() {}
+    Ok(())
+}
+
+fn p(parts: &[&str]) -> ObjectPath {
+    ObjectPath::new(parts.iter().map(|s| Arc::from(*s)).collect())
+}
+
+async fn count_of(conn: &dyn Connection, sql: &str) -> i64 {
+    match &collect_rows(conn, native(sql)).await[0][0] {
+        Value::I64(n) => *n,
+        Value::U64(n) => *n as i64,
+        other => panic!("expected a count, got {other:?}"),
+    }
+}
+
+/// Drop, rename and index creation issued as structured operations, with the
+/// object addressed by the path and kind the catalog reports.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
+async fn structured_ddl_round_trips_through_the_catalog() {
+    let conn = connect().await;
+    let db = "datagrep_ddl_test";
+    run_ddl(conn.as_ref(), &format!("DROP DATABASE IF EXISTS {db}")).await;
+    run_ddl(conn.as_ref(), &format!("CREATE DATABASE {db}")).await;
+    run_ddl(
+        conn.as_ref(),
+        &format!("CREATE TABLE {db}.widgets (id int PRIMARY KEY, name varchar(64) NOT NULL)"),
+    )
+    .await;
+    run_ddl(
+        conn.as_ref(),
+        &format!("CREATE VIEW {db}.widgets_v AS SELECT * FROM {db}.widgets"),
+    )
+    .await;
+
+    let listed = conn
+        .catalog()
+        .children(
+            &p(&[db]),
+            datagrep_api::catalog::ListOpts {
+                limit: 1000,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list tables");
+    let widgets = listed
+        .items
+        .iter()
+        .find(|n| &*n.path.parts()[1] == "widgets")
+        .expect("widgets should be listed")
+        .clone();
+
+    ddl_op(
+        conn.as_ref(),
+        DdlOp::CreateIndex {
+            path: widgets.path.clone(),
+            name: Arc::from("widgets_name"),
+            fields: vec![datagrep_api::FieldPath::field("name")],
+            unique: true,
+            if_not_exists: false,
+        },
+    )
+    .await
+    .expect("create index");
+    let index_count = format!(
+        "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = '{db}' \
+         AND index_name = 'widgets_name'"
+    );
+    assert_eq!(count_of(conn.as_ref(), &index_count).await, 1);
+
+    // The index is addressed as the table's path plus the index name.
+    ddl_op(
+        conn.as_ref(),
+        DdlOp::Rename {
+            from: widgets.path.child("widgets_name"),
+            to: widgets.path.child("widgets_label"),
+            kind: ObjectKind::Index,
+        },
+    )
+    .await
+    .expect("rename index");
+    assert_eq!(count_of(conn.as_ref(), &index_count).await, 0);
+
+    ddl_op(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: widgets.path.child("widgets_label"),
+            kind: ObjectKind::Index,
+            if_exists: false,
+        },
+    )
+    .await
+    .expect("drop index");
+
+    // A view renames through `RENAME TABLE`, and drops as the kind it is.
+    ddl_op(
+        conn.as_ref(),
+        DdlOp::Rename {
+            from: p(&[db, "widgets_v"]),
+            to: p(&[db, "widgets_view"]),
+            kind: ObjectKind::View,
+        },
+    )
+    .await
+    .expect("rename view");
+    ddl_op(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: p(&[db, "widgets_view"]),
+            kind: ObjectKind::View,
+            if_exists: true,
+        },
+    )
+    .await
+    .expect("drop view");
+
+    ddl_op(
+        conn.as_ref(),
+        DdlOp::Rename {
+            from: widgets.path.clone(),
+            to: p(&[db, "gadgets"]),
+            kind: ObjectKind::Table,
+        },
+    )
+    .await
+    .expect("rename table");
+    assert_eq!(
+        count_of(
+            conn.as_ref(),
+            &format!(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{db}' \
+                 AND table_name = 'gadgets'"
+            )
+        )
+        .await,
+        1
+    );
+
+    ddl_op(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: p(&[db, "gadgets"]),
+            kind: ObjectKind::Table,
+            if_exists: true,
+        },
+    )
+    .await
+    .expect("drop table");
+    ddl_op(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: p(&[db, "gadgets"]),
+            kind: ObjectKind::Table,
+            if_exists: true,
+        },
+    )
+    .await
+    .expect("dropping it again is a no-op");
+    assert!(
+        ddl_op(
+            conn.as_ref(),
+            DdlOp::Drop {
+                path: p(&[db, "gadgets"]),
+                kind: ObjectKind::Table,
+                if_exists: false,
+            },
+        )
+        .await
+        .is_err(),
+        "without the guard a missing table must be an error"
+    );
+
+    ddl_op(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: p(&[db]),
+            kind: ObjectKind::Database,
+            if_exists: true,
+        },
+    )
+    .await
+    .expect("drop database");
+    conn.close().await.unwrap();
+}
+
+/// The one place the two flavors genuinely disagree. MySQL has no
+/// `IF NOT EXISTS` on `CREATE INDEX` and no `IF EXISTS` on `DROP INDEX`;
+/// MariaDB has both. The guard is refused rather than dropped, so this
+/// asserts the actual server's actual answer either way.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
+async fn index_existence_guards_follow_the_flavor() {
+    let conn = connect().await;
+    let is_mariadb = &*conn.server_info().product == "MariaDB";
+    let db = "datagrep_ddl_guard";
+    run_ddl(conn.as_ref(), &format!("DROP DATABASE IF EXISTS {db}")).await;
+    run_ddl(conn.as_ref(), &format!("CREATE DATABASE {db}")).await;
+    run_ddl(
+        conn.as_ref(),
+        &format!("CREATE TABLE {db}.t (id int PRIMARY KEY, name varchar(64))"),
+    )
+    .await;
+
+    let table = p(&[db, "t"]);
+    let guarded_create = DdlOp::CreateIndex {
+        path: table.clone(),
+        name: Arc::from("t_name"),
+        fields: vec![datagrep_api::FieldPath::field("name")],
+        unique: false,
+        if_not_exists: true,
+    };
+    let guarded_drop = DdlOp::Drop {
+        path: table.child("t_name"),
+        kind: ObjectKind::Index,
+        if_exists: true,
+    };
+
+    if is_mariadb {
+        ddl_op(conn.as_ref(), guarded_create.clone())
+            .await
+            .expect("MariaDB accepts CREATE INDEX IF NOT EXISTS");
+        ddl_op(conn.as_ref(), guarded_create)
+            .await
+            .expect("and so it is idempotent");
+        ddl_op(conn.as_ref(), guarded_drop.clone())
+            .await
+            .expect("MariaDB accepts DROP INDEX IF EXISTS");
+        ddl_op(conn.as_ref(), guarded_drop)
+            .await
+            .expect("and so that is idempotent too");
+    } else {
+        // Refused by the driver, before anything is sent — the server would
+        // answer ER_PARSE_ERROR, which says nothing useful about why.
+        let err = ddl_op(conn.as_ref(), guarded_create)
+            .await
+            .expect_err("MySQL has no CREATE INDEX IF NOT EXISTS");
+        assert!(matches!(err, DbError::Unsupported { .. }), "{err:?}");
+        let err = ddl_op(conn.as_ref(), guarded_drop)
+            .await
+            .expect_err("MySQL has no DROP INDEX IF EXISTS");
+        assert!(matches!(err, DbError::Unsupported { .. }), "{err:?}");
+
+        // Unguarded, the same operations work on both.
+        ddl_op(
+            conn.as_ref(),
+            DdlOp::CreateIndex {
+                path: table.clone(),
+                name: Arc::from("t_name"),
+                fields: vec![datagrep_api::FieldPath::field("name")],
+                unique: false,
+                if_not_exists: false,
+            },
+        )
+        .await
+        .expect("create index");
+        ddl_op(
+            conn.as_ref(),
+            DdlOp::Drop {
+                path: table.child("t_name"),
+                kind: ObjectKind::Index,
+                if_exists: false,
+            },
+        )
+        .await
+        .expect("drop index");
+    }
+
+    run_ddl(conn.as_ref(), &format!("DROP DATABASE {db}")).await;
+    conn.close().await.unwrap();
+}
+
+/// Object names are identifiers: a name that tries to close its own quoting
+/// must reach the server as one name and take nothing else with it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
+async fn a_hostile_name_survives_a_structured_drop() {
+    let conn = connect().await;
+    let db = "datagrep_ddl_hostile";
+    let hostile = "ddl`; DROP TABLE bystander; --";
+    run_ddl(conn.as_ref(), &format!("DROP DATABASE IF EXISTS {db}")).await;
+    run_ddl(conn.as_ref(), &format!("CREATE DATABASE {db}")).await;
+    run_ddl(
+        conn.as_ref(),
+        &format!("CREATE TABLE {db}.bystander (id int)"),
+    )
+    .await;
+    run_ddl(
+        conn.as_ref(),
+        &format!(
+            "CREATE TABLE {db}.{} (id int)",
+            datagrep_drv_mysql::sql::quote_ident(hostile).unwrap()
+        ),
+    )
+    .await;
+
+    ddl_op(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: p(&[db, hostile]),
+            kind: ObjectKind::Table,
+            if_exists: false,
+        },
+    )
+    .await
+    .expect("drop the hostile table");
+    assert_eq!(
+        count_of(
+            conn.as_ref(),
+            &format!(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{db}' \
+                 AND table_name = 'bystander'"
+            )
+        )
+        .await,
+        1,
+        "the bystander table must still be there"
+    );
+
+    run_ddl(conn.as_ref(), &format!("DROP DATABASE {db}")).await;
     conn.close().await.unwrap();
 }

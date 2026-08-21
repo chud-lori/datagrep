@@ -12,10 +12,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use datagrep_api::catalog::ListOpts;
+use datagrep_api::catalog::{ListOpts, ObjectKind};
 use datagrep_api::config::{ConfigValue, ConnectionConfig, ResolvedConfig};
 use datagrep_api::driver::{ConnectCtx, Connection, Driver, FetchHint};
-use datagrep_api::request::Request;
+use datagrep_api::request::{DdlOp, Op, Request};
 use datagrep_api::shape::{ObjectPath, Shape};
 use datagrep_api::value::Value;
 
@@ -768,4 +768,302 @@ async fn quote_ident_survives_a_hostile_identifier() {
         result.is_ok(),
         "should be able to drop the table it just created"
     );
+}
+
+// ---------------------------------------------------------------------
+// Structured DDL (`Op::Ddl`)
+// ---------------------------------------------------------------------
+
+/// The first column of the first row, as a `Value`.
+async fn scalar(conn: &dyn Connection, sql: &str) -> Value {
+    let mut cursor = conn.execute(Request::native(sql)).await.expect("query");
+    let batch = cursor
+        .next_batch(FetchHint::default())
+        .await
+        .expect("batch")
+        .expect("a row");
+    let datagrep_api::driver::Payload::Rows(rows) = batch.payload else {
+        panic!("expected rows")
+    };
+    rows[0][0].clone()
+}
+
+async fn ddl(conn: &dyn Connection, op: DdlOp) -> Result<(), datagrep_api::DbError> {
+    conn.execute(Request::Op(Op::Ddl(op))).await.map(|_| ())
+}
+
+fn p(parts: &[&str]) -> ObjectPath {
+    ObjectPath::new(parts.iter().map(|s| Arc::from(*s)).collect())
+}
+
+/// A drop is issued with exactly the `(path, kind)` the catalog reported for
+/// the object — the contract the whole structured surface rests on.
+#[tokio::test]
+#[ignore]
+async fn structured_ddl_round_trips_through_the_catalog() {
+    let conn = connect().await;
+    let schema = "datagrep_ddl_test";
+    conn.execute(Request::native(format!(
+        "DROP SCHEMA IF EXISTS {schema} CASCADE"
+    )))
+    .await
+    .ok();
+    conn.execute(Request::native(format!("CREATE SCHEMA {schema}")))
+        .await
+        .expect("create schema");
+    conn.execute(Request::native(format!(
+        "CREATE TABLE {schema}.widgets (id serial PRIMARY KEY, name text NOT NULL)"
+    )))
+    .await
+    .expect("create table");
+    conn.execute(Request::native(format!(
+        "CREATE VIEW {schema}.widgets_v AS SELECT * FROM {schema}.widgets"
+    )))
+    .await
+    .expect("create view");
+
+    let Value::Str(db) = scalar(conn.as_ref(), "SELECT current_database()").await else {
+        panic!("current_database is text")
+    };
+
+    let listed = conn
+        .catalog()
+        .children(
+            &p(&[&db, schema]),
+            ListOpts {
+                limit: 1000,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list relations");
+    let node = |name: &str| {
+        listed
+            .items
+            .iter()
+            .find(|n| &*n.path.parts()[2] == name)
+            .unwrap_or_else(|| panic!("{name} should be listed"))
+            .clone()
+    };
+    let widgets = node("widgets");
+    let widgets_v = node("widgets_v");
+    assert_eq!(widgets.kind, ObjectKind::Table);
+    assert_eq!(widgets_v.kind, ObjectKind::View);
+
+    // Create an index over an existing column, then address it as the
+    // table's path extended by the index name.
+    ddl(
+        conn.as_ref(),
+        DdlOp::CreateIndex {
+            path: widgets.path.clone(),
+            name: Arc::from("widgets_name"),
+            fields: vec![datagrep_api::FieldPath::field("name")],
+            unique: true,
+            if_not_exists: true,
+        },
+    )
+    .await
+    .expect("create index");
+    const INDEX_COUNT: &str =
+        "SELECT count(*)::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'datagrep_ddl_test' AND c.relname = 'widgets_name'";
+    assert_eq!(
+        scalar(conn.as_ref(), INDEX_COUNT).await,
+        Value::Str(Arc::from("1"))
+    );
+
+    // Repeating it is a no-op only because `if_not_exists` reached the server.
+    ddl(
+        conn.as_ref(),
+        DdlOp::CreateIndex {
+            path: widgets.path.clone(),
+            name: Arc::from("widgets_name"),
+            fields: vec![datagrep_api::FieldPath::field("name")],
+            unique: true,
+            if_not_exists: true,
+        },
+    )
+    .await
+    .expect("create index is idempotent with the guard");
+
+    ddl(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: widgets.path.child("widgets_name"),
+            kind: ObjectKind::Index,
+            if_exists: false,
+        },
+    )
+    .await
+    .expect("drop index");
+    assert_eq!(
+        scalar(conn.as_ref(), INDEX_COUNT).await,
+        Value::Str(Arc::from("0"))
+    );
+
+    // The view drops under the kind the catalog gave it.
+    ddl(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: widgets_v.path.clone(),
+            kind: widgets_v.kind,
+            if_exists: false,
+        },
+    )
+    .await
+    .expect("drop view");
+
+    ddl(
+        conn.as_ref(),
+        DdlOp::Rename {
+            from: widgets.path.clone(),
+            to: p(&[&db, schema, "gadgets"]),
+            kind: ObjectKind::Table,
+        },
+    )
+    .await
+    .expect("rename table");
+    assert_eq!(
+        scalar(
+            conn.as_ref(),
+            "SELECT count(*)::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = 'datagrep_ddl_test' AND c.relname = 'gadgets'"
+        )
+        .await,
+        Value::Str(Arc::from("1"))
+    );
+
+    // `if_exists` is the server's, not ours: the same drop twice.
+    let gone = p(&[&db, schema, "gadgets"]);
+    ddl(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: gone.clone(),
+            kind: ObjectKind::Table,
+            if_exists: true,
+        },
+    )
+    .await
+    .expect("drop table");
+    ddl(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: gone.clone(),
+            kind: ObjectKind::Table,
+            if_exists: true,
+        },
+    )
+    .await
+    .expect("dropping it again is a no-op");
+    assert!(
+        ddl(
+            conn.as_ref(),
+            DdlOp::Drop {
+                path: gone,
+                kind: ObjectKind::Table,
+                if_exists: false,
+            },
+        )
+        .await
+        .is_err(),
+        "without the guard a missing table must be an error"
+    );
+
+    conn.execute(Request::native(format!("DROP SCHEMA {schema} CASCADE")))
+        .await
+        .expect("clean up");
+}
+
+/// A materialized view is `ObjectKind::View` in this catalog, and the server
+/// refuses `DROP VIEW` on one even with `IF EXISTS` — naming the statement to
+/// use instead. That refusal is surfaced, never worked around by guessing.
+#[tokio::test]
+#[ignore]
+async fn a_materialized_view_refuses_the_plain_view_drop() {
+    let conn = connect().await;
+    let schema = "datagrep_ddl_matview";
+    conn.execute(Request::native(format!(
+        "DROP SCHEMA IF EXISTS {schema} CASCADE"
+    )))
+    .await
+    .ok();
+    conn.execute(Request::native(format!("CREATE SCHEMA {schema}")))
+        .await
+        .expect("create schema");
+    conn.execute(Request::native(format!(
+        "CREATE MATERIALIZED VIEW {schema}.mv AS SELECT 1 AS n"
+    )))
+    .await
+    .expect("create matview");
+
+    let Value::Str(db) = scalar(conn.as_ref(), "SELECT current_database()").await else {
+        panic!("current_database is text")
+    };
+    let err = ddl(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: p(&[&db, schema, "mv"]),
+            kind: ObjectKind::View,
+            if_exists: true,
+        },
+    )
+    .await
+    .expect_err("a materialized view is not a view");
+    assert!(
+        format!("{err}").contains("not a view"),
+        "the server's own message should survive: {err}"
+    );
+
+    conn.execute(Request::native(format!("DROP SCHEMA {schema} CASCADE")))
+        .await
+        .expect("clean up");
+}
+
+/// Object names are identifiers, so a name that tries to close its own
+/// quoting must reach the server as one name.
+#[tokio::test]
+#[ignore]
+async fn a_hostile_name_survives_a_structured_drop() {
+    let conn = connect().await;
+    let hostile = "ddl\"; DROP TABLE other; --";
+    let quoted = datagrep_drv_postgres::sql::quote_ident(hostile).unwrap();
+    conn.execute(Request::native(format!("DROP TABLE IF EXISTS {quoted}")))
+        .await
+        .ok();
+    conn.execute(Request::native("DROP TABLE IF EXISTS other"))
+        .await
+        .ok();
+    conn.execute(Request::native("CREATE TABLE other (id int)"))
+        .await
+        .expect("create bystander");
+    conn.execute(Request::native(format!("CREATE TABLE {quoted} (id int)")))
+        .await
+        .expect("create hostile");
+
+    let Value::Str(db) = scalar(conn.as_ref(), "SELECT current_database()").await else {
+        panic!("current_database is text")
+    };
+    ddl(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: p(&[&db, "public", hostile]),
+            kind: ObjectKind::Table,
+            if_exists: false,
+        },
+    )
+    .await
+    .expect("drop the hostile table");
+
+    assert_eq!(
+        scalar(
+            conn.as_ref(),
+            "SELECT count(*)::text FROM pg_class WHERE relname = 'other'"
+        )
+        .await,
+        Value::Str(Arc::from("1")),
+        "the bystander table must still be there"
+    );
+    conn.execute(Request::native("DROP TABLE other"))
+        .await
+        .expect("clean up");
 }

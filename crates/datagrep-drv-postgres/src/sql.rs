@@ -9,7 +9,9 @@ use std::fmt::Write as _;
 #[cfg(test)]
 use std::sync::Arc;
 
-use datagrep_api::{DbError, FieldPath, ObjectPath, PathSeg, Predicate, SortKey, Value};
+use datagrep_api::{
+    DbError, DdlOp, FieldPath, ObjectKind, ObjectPath, PathSeg, Predicate, SortKey, Value,
+};
 
 /// Quote a Postgres identifier. Embedded `"` are doubled;
 /// embedded NUL is rejected outright — Postgres identifiers cannot contain
@@ -38,7 +40,10 @@ pub fn quote_ident(ident: &str) -> Result<String, DbError> {
 /// qualified names, only `schema.table` — but callers that already trimmed
 /// the path (catalog code does) can pass a 1–2 element path directly.
 pub fn quote_object_path(path: &ObjectPath) -> Result<String, DbError> {
-    let parts = path.parts();
+    quote_parts(path.parts())
+}
+
+fn quote_parts(parts: &[std::sync::Arc<str>]) -> Result<String, DbError> {
     if parts.is_empty() {
         return Err(DbError::Unsupported {
             feature: "empty object path".into(),
@@ -274,6 +279,108 @@ pub fn compile_count(
     Ok((sql, pb.params))
 }
 
+/// Trap: `View` covers both the `v` and `m` relkinds, and `DROP VIEW` on a
+/// materialized view fails even with `IF EXISTS`. The server's message names
+/// the statement to use, so it is surfaced rather than guessed at.
+fn relation_keyword(kind: ObjectKind) -> Result<&'static str, DbError> {
+    match kind {
+        ObjectKind::Table => Ok("TABLE"),
+        ObjectKind::View => Ok("VIEW"),
+        ObjectKind::Index => Ok("INDEX"),
+        ObjectKind::Schema => Ok("SCHEMA"),
+        other => Err(DbError::Unsupported {
+            feature: format!("{other:?} is not a Postgres object this driver can administer"),
+        }),
+    }
+}
+
+/// Compile a structured [`DdlOp`]. Names are identifiers, never values, so
+/// nothing here binds a parameter — every one goes through [`quote_ident`].
+pub fn compile_ddl(op: &DdlOp) -> Result<String, DbError> {
+    match op {
+        DdlOp::Native { text } => Ok(text.to_string()),
+        DdlOp::Drop {
+            path,
+            kind,
+            if_exists,
+        } => {
+            let keyword = relation_keyword(*kind)?;
+            let target = object_ref(path, *kind)?;
+            let guard = if *if_exists { "IF EXISTS " } else { "" };
+            Ok(format!("DROP {keyword} {guard}{target}"))
+        }
+        DdlOp::Rename { from, to, kind } => {
+            let keyword = relation_keyword(*kind)?;
+            let target = object_ref(from, *kind)?;
+            let new_name = quote_ident(DdlOp::rename_target(from, to)?)?;
+            Ok(format!("ALTER {keyword} {target} RENAME TO {new_name}"))
+        }
+        DdlOp::CreateIndex {
+            path,
+            name,
+            fields,
+            unique,
+            if_not_exists,
+        } => {
+            if fields.is_empty() {
+                return Err(DbError::Unsupported {
+                    feature: "CREATE INDEX with no fields".into(),
+                });
+            }
+            let table = quote_object_path(path)?;
+            let index = quote_ident(name)?;
+            let unique = if *unique { "UNIQUE " } else { "" };
+            let guard = if *if_not_exists { "IF NOT EXISTS " } else { "" };
+            let mut cols = Vec::with_capacity(fields.len());
+            for f in fields {
+                cols.push(index_column(f)?);
+            }
+            Ok(format!(
+                "CREATE {unique}INDEX {guard}{index} ON {table} ({})",
+                cols.join(", ")
+            ))
+        }
+    }
+}
+
+/// An index is a sibling of its table in the schema, not a child: passing the
+/// table through would make `schema.table.index`, which Postgres rejects as
+/// "improper relation name (too many dotted names)".
+fn object_ref(path: &ObjectPath, kind: ObjectKind) -> Result<String, DbError> {
+    let parts = path.parts();
+    if kind != ObjectKind::Index {
+        return quote_parts(parts);
+    }
+    let Some(split) = parts.len().checked_sub(2) else {
+        return Err(DbError::Unsupported {
+            feature: format!(
+                "index path {path} must name the object it is on followed by the index name"
+            ),
+        });
+    };
+    let name = quote_ident(&parts[parts.len() - 1])?;
+    if split == 0 {
+        return Ok(name);
+    }
+    let mut out = quote_parts(&parts[..split])?;
+    out.push('.');
+    out.push_str(&name);
+    Ok(out)
+}
+
+/// Whole columns only: a nested path would silently become a `jsonb`
+/// extraction, which is an expression index with quite different rules.
+fn index_column(path: &FieldPath) -> Result<String, DbError> {
+    match path.segments() {
+        [PathSeg::Field(name)] => quote_ident(name),
+        _ => Err(DbError::Unsupported {
+            feature: format!(
+                "index key {path} is not a plain column — an expression index is native DDL"
+            ),
+        }),
+    }
+}
+
 /// Wrap an inner request's compiled SQL in `EXPLAIN [ANALYZE]`.
 pub fn wrap_explain(inner_sql: &str, analyze: bool) -> String {
     if analyze {
@@ -400,6 +507,128 @@ fn key_where(key: &[(FieldPath, Value)], pb: &mut ParamBuilder) -> Result<String
 mod tests {
     use super::*;
     use datagrep_api::{Op, Predicate as P};
+
+    fn path(parts: &[&str]) -> ObjectPath {
+        ObjectPath::new(parts.iter().map(|p| Arc::from(*p)).collect())
+    }
+
+    #[test]
+    fn ddl_names_the_statement_for_the_catalog_kind() {
+        let users = path(&["app", "users"]);
+        for (kind, expected) in [
+            (ObjectKind::Table, "DROP TABLE IF EXISTS \"app\".\"users\""),
+            (ObjectKind::View, "DROP VIEW IF EXISTS \"app\".\"users\""),
+            (
+                ObjectKind::Schema,
+                "DROP SCHEMA IF EXISTS \"app\".\"users\"",
+            ),
+        ] {
+            let sql = compile_ddl(&DdlOp::Drop {
+                path: users.clone(),
+                kind,
+                if_exists: true,
+            })
+            .unwrap();
+            assert_eq!(sql, expected);
+        }
+        assert!(compile_ddl(&DdlOp::Drop {
+            path: users.clone(),
+            kind: ObjectKind::Collection,
+            if_exists: false,
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn ddl_quotes_every_name_it_splices() {
+        // Object names reach the statement as identifiers, so a name that
+        // tries to close its own quoting must not be able to.
+        let sql = compile_ddl(&DdlOp::Drop {
+            path: path(&["app", "users\"; DROP TABLE secrets; --"]),
+            kind: ObjectKind::Table,
+            if_exists: false,
+        })
+        .unwrap();
+        assert_eq!(
+            sql,
+            "DROP TABLE \"app\".\"users\"\"; DROP TABLE secrets; --\""
+        );
+        assert!(compile_ddl(&DdlOp::Drop {
+            path: path(&["app", "nul\0name"]),
+            kind: ObjectKind::Table,
+            if_exists: false,
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn ddl_rename_and_create_index() {
+        let sql = compile_ddl(&DdlOp::Rename {
+            from: path(&["app", "users"]),
+            to: path(&["app", "people"]),
+            kind: ObjectKind::Table,
+        })
+        .unwrap();
+        assert_eq!(sql, "ALTER TABLE \"app\".\"users\" RENAME TO \"people\"");
+
+        // A Postgres index is a sibling of its table in the schema, so the
+        // table component comes back out of the index path.
+        let sql = compile_ddl(&DdlOp::Drop {
+            path: path(&["db", "app", "users", "users_email"]),
+            kind: ObjectKind::Index,
+            if_exists: true,
+        })
+        .unwrap();
+        assert_eq!(sql, "DROP INDEX IF EXISTS \"db\".\"app\".\"users_email\"");
+        // A path already trimmed to `table.index` leaves the index bare.
+        assert_eq!(
+            compile_ddl(&DdlOp::Drop {
+                path: path(&["users", "users_email"]),
+                kind: ObjectKind::Index,
+                if_exists: false,
+            })
+            .unwrap(),
+            "DROP INDEX \"users_email\""
+        );
+        assert!(compile_ddl(&DdlOp::Drop {
+            path: path(&["users_email"]),
+            kind: ObjectKind::Index,
+            if_exists: false,
+        })
+        .is_err());
+
+        let sql = compile_ddl(&DdlOp::CreateIndex {
+            path: path(&["app", "users"]),
+            name: Arc::from("users_email"),
+            fields: vec![FieldPath::field("email"), FieldPath::field("tenant")],
+            unique: true,
+            if_not_exists: true,
+        })
+        .unwrap();
+        assert_eq!(
+            sql,
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"users_email\" ON \"app\".\"users\" \
+             (\"email\", \"tenant\")"
+        );
+
+        // A nested key would silently become a jsonb extraction expression.
+        assert!(compile_ddl(&DdlOp::CreateIndex {
+            path: path(&["app", "users"]),
+            name: Arc::from("bad"),
+            fields: vec!["address.city".parse().unwrap()],
+            unique: false,
+            if_not_exists: false,
+        })
+        .is_err());
+        assert!(compile_ddl(&DdlOp::CreateIndex {
+            path: path(&["app", "users"]),
+            name: Arc::from("bad"),
+            fields: Vec::new(),
+            unique: false,
+            if_not_exists: false,
+        })
+        .is_err());
+    }
 
     #[test]
     fn quote_ident_doubles_embedded_quotes() {
