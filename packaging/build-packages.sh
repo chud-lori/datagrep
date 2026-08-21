@@ -87,6 +87,7 @@ fpm "${COMMON[@]}" -t deb \
     --depends libqt6core6 \
     --depends libqt6gui6 \
     --depends libqt6widgets6 \
+    --depends libqt6network6 \
     --depends libdbus-1-3 \
     --depends zlib1g \
     --deb-recommends "gnome-keyring | kwalletd6" \

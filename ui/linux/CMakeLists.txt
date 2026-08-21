@@ -23,6 +23,18 @@ endif()
 # ---------------------------------------------------------------------------
 get_filename_component(DATAGREP_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.."
                        ABSOLUTE)
+
+# The app version, from the workspace manifest — the same source the packaging
+# scripts stamp on the artifacts and the release script bumps alongside the
+# update manifest. The update check compares against this.
+file(STRINGS "${DATAGREP_REPO_ROOT}/Cargo.toml" _dg_version_lines
+     REGEX "^version = \"")
+if(NOT _dg_version_lines)
+    message(FATAL_ERROR "could not read the workspace version from Cargo.toml")
+endif()
+list(GET _dg_version_lines 0 _dg_version_line)
+string(REGEX REPLACE "^version = \"(.*)\"$" "\\1" DATAGREP_APP_VERSION
+       "${_dg_version_line}")
 set(DATAGREP_FFI_INCLUDE "${DATAGREP_REPO_ROOT}/crates/datagrep-ffi/include")
 set(DATAGREP_FFI_LIB
     "${DATAGREP_REPO_ROOT}/target/release/libdatagrep_ffi.a"
@@ -85,7 +97,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(DBUS REQUIRED dbus-1)
 
 # Svg: QSvgRenderer for the engine brand marks (vector, palette-aware).
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Svg)
+# Network: the once-per-launch update manifest GET.
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Svg Network)
 
 # ---------------------------------------------------------------------------
 # Optional: KSyntaxHighlighting (KF6, MIT) for real SQL syntax highlighting.
@@ -143,6 +156,8 @@ add_executable(datagrep
     src/model/SavedQueries.cpp
     src/model/SupportDir.cpp
     src/model/ResultModel.cpp
+    src/model/UpdateCheck.cpp
+    src/ui/Appearance.cpp
     src/ui/ConflictResolution.cpp
     src/ui/ConnectionDialog.cpp
     src/ui/DetailPanel.cpp
@@ -157,7 +172,11 @@ add_executable(datagrep
     src/ui/SqlEditor.cpp
     src/ui/SqlHighlighter.cpp
     src/ui/StatusBar.cpp
+    src/ui/UpdateNotice.cpp
 )
+
+target_compile_definitions(datagrep PRIVATE
+    DATAGREP_APP_VERSION="${DATAGREP_APP_VERSION}")
 
 target_include_directories(datagrep PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -182,6 +201,7 @@ target_link_libraries(datagrep PRIVATE
     Qt6::Gui
     Qt6::Widgets
     Qt6::Svg
+    Qt6::Network         # the once-per-launch update manifest GET
     datagrep_ffi          # the imported libdatagrep_ffi.a
     Threads::Threads      # pthread
     ${CMAKE_DL_LIBS}      # dl
