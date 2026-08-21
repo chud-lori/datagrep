@@ -12,6 +12,7 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QGroupBox>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
@@ -20,6 +21,7 @@
 #include <QPushButton>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QtConcurrent/QtConcurrent>
 
 // ---------------------------------------------------------------------------
 // Engine table — the ported subset of the macOS ConnectionEngines list. Kept in
@@ -430,6 +432,25 @@ void ConnectionDialog::buildUi() {
     connForm->addRow(QString(), tlsCheck_);
     connForm->addRow(QStringLiteral("Connection URL"), urlEdit_);
 
+    testButton_ = new QPushButton(QStringLiteral("Test Connection"), this);
+    testButton_->setToolTip(QStringLiteral(
+        "Open one connection with these settings and report what answers. "
+        "Nothing is saved by testing."));
+    connect(testButton_, &QPushButton::clicked, this,
+            &ConnectionDialog::onTestConnection);
+    testResultLabel_ = new QLabel(this);
+    testResultLabel_->setWordWrap(true);
+    testResultLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    testResultLabel_->hide();
+    testWatcher_ = new QFutureWatcher<QPair<QString, QString>>(this);
+    connect(testWatcher_, &QFutureWatcher<QPair<QString, QString>>::finished, this,
+            &ConnectionDialog::onTestFinished);
+    auto* testRow = new QHBoxLayout();
+    testRow->addWidget(testButton_);
+    testRow->addStretch(1);
+    connForm->addRow(QString(), testRow);
+    connForm->addRow(QString(), testResultLabel_);
+
     auto* connGroup = new QGroupBox(QStringLiteral("Connection"), this);
     connGroup->setLayout(connForm);
     outer->addWidget(connGroup);
@@ -544,6 +565,7 @@ void ConnectionDialog::buildUi() {
         showError(QStringLiteral(
             "The datagrep engine is not available, so connections cannot be saved."));
         buttons_->button(QDialogButtonBox::Save)->setEnabled(false);
+        testButton_->setEnabled(false);
     }
 
     // Visual order, not construction order (the File row sits above Database).
@@ -557,7 +579,8 @@ void ConnectionDialog::buildUi() {
     QWidget::setTabOrder(usernameEdit_, passwordEdit_);
     QWidget::setTabOrder(passwordEdit_, tlsCheck_);
     QWidget::setTabOrder(tlsCheck_, urlEdit_);
-    QWidget::setTabOrder(urlEdit_, colorBox_);
+    QWidget::setTabOrder(urlEdit_, testButton_);
+    QWidget::setTabOrder(testButton_, colorBox_);
     QWidget::setTabOrder(colorBox_, autoLimitEdit_);
     QWidget::setTabOrder(autoLimitEdit_, idleTimeoutEdit_);
     QWidget::setTabOrder(idleTimeoutEdit_, readOnlyCheck_);
@@ -756,6 +779,79 @@ void ConnectionDialog::onCheckEnforcement() {
             "refuse writes it sends, but nothing else is protected.");
     }
     enforcementLabel_->setText(text);
+}
+
+void ConnectionDialog::onTestConnection() {
+    if (core_ == nullptr || testWatcher_->isRunning()) {
+        return;
+    }
+    const QString urlWithPassword = buildUrl(fieldsFromUi(), true).trimmed();
+    const bool unchanged = editing_ && haveOriginal_ &&
+                           passwordEdit_->text().isEmpty() &&
+                           urlEdit_->text().trimmed() == originalUrlNoPassword_;
+    const QString name = unchanged ? originalName_ : QString();
+    if (name.isEmpty() && urlWithPassword.isEmpty()) {
+        testResultLabel_->setStyleSheet(QStringLiteral("color: gray;"));
+        testResultLabel_->setText(
+            QStringLiteral("Complete the connection details first."));
+        testResultLabel_->show();
+        return;
+    }
+
+    testButton_->setEnabled(false);
+    testResultLabel_->setStyleSheet(QStringLiteral("color: gray;"));
+    testResultLabel_->setText(QStringLiteral("Connecting…"));
+    testResultLabel_->show();
+
+    dg::Core* core = core_;
+    testWatcher_->setFuture(QtConcurrent::run(
+        [core, name = name.toStdString(),
+         url = urlWithPassword.toStdString()]() -> QPair<QString, QString> {
+            try {
+                return {QString::fromStdString(core->connectionTestJson(name, url)),
+                        QString()};
+            } catch (const dg::Error& e) {
+                return {QString(), QString::fromUtf8(e.what())};
+            }
+        }));
+}
+
+void ConnectionDialog::onTestFinished() {
+    testButton_->setEnabled(true);
+    const QPair<QString, QString> outcome = testWatcher_->result();
+    if (!outcome.second.isEmpty()) {
+        testResultLabel_->setStyleSheet(QStringLiteral("color: #c0392b;"));
+        testResultLabel_->setText(
+            QStringLiteral("Could not connect: %1").arg(outcome.second));
+        return;
+    }
+    const QJsonObject o = QJsonDocument::fromJson(outcome.first.toUtf8()).object();
+    const QString driver = o.value(QStringLiteral("driver")).toString();
+    const QString product = o.value(QStringLiteral("product")).toString();
+    const QString version = o.value(QStringLiteral("version")).toString();
+    const quint64 elapsed =
+        o.value(QStringLiteral("elapsed_ms")).toVariant().toULongLong();
+
+    QString what = product.isEmpty() ? dg::engineDisplayName(driver) : product;
+    if (!version.isEmpty() && version.toLower() != QStringLiteral("unknown")) {
+        what += QLatin1Char(' ') + version;
+    }
+    QStringList lines;
+    lines << QStringLiteral("Connected to %1 in %2 ms").arg(what).arg(elapsed);
+    QStringList detailParts;
+    for (const QJsonValue& v : o.value(QStringLiteral("details")).toArray()) {
+        const QJsonArray pair = v.toArray();
+        if (pair.size() == 2) {
+            detailParts << QStringLiteral("%1: %2").arg(pair.at(0).toString(),
+                                                        pair.at(1).toString());
+        }
+    }
+    lines << (detailParts.isEmpty()
+                  ? QStringLiteral("The engine accepted the connection and it was "
+                                   "closed again — nothing was saved by testing.")
+                  : detailParts.join(QStringLiteral(" · ")));
+    testResultLabel_->setStyleSheet(QStringLiteral("color: #1e8449;"));
+    testResultLabel_->setText(lines.join(QLatin1Char('\n')));
 }
 
 // ---------------------------------------------------------------------------

@@ -79,6 +79,15 @@ bool  datagrep_profiles_remove(DatagrepCore*, const char* name, char** err_out);
 // its identity, with "server":null.
 char* datagrep_connection_info_json(DatagrepCore*, const char* name, char** err_out);
 
+// Dial once and report what answered, saving nothing. A non-empty `name` tests
+// that saved profile with its keychain secret; otherwise `url` tests an
+// unsaved URL. BLOCKING for up to the engine's connect timeout. Returns JSON:
+// {"ok":true,"driver":str,"product":str,"version":str,
+//  "details":[[str,str],..],"elapsed_ms":u64}
+// or NULL with *err_out set to the driver's own failure message.
+char* datagrep_connection_test_json(DatagrepCore*, const char* name, const char* url,
+                                    char** err_out);
+
 // ---- catalog (lazy, ONE level per call) -------------------------------
 // path_json is a JSON array of path segments, e.g. ["main"] or [] for roots.
 // Returns JSON: [{"name":..,"kind":..,"has_children":bool,"enumeration":"cheap"|"scan_only"|"paged"|"on_demand"}, ...]

@@ -395,6 +395,15 @@ public:
         });
     }
 
+    // Blocks for up to the engine's connect timeout — call off the GUI thread.
+    std::string connectionTestJson(const std::string& name,
+                                   const std::string& url) const {
+        return detail::tryCallJson([&](char** err) {
+            return datagrep_connection_test_json(raw_, name.c_str(), url.c_str(),
+                                                 err);
+        });
+    }
+
     void addProfile(const std::string& name, const std::string& url) {
         detail::tryCallBool([&](char** err) {
             return datagrep_profiles_add(raw_, name.c_str(), url.c_str(), err);

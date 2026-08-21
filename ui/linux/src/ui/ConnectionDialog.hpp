@@ -12,6 +12,8 @@
 //            form populates from; the secret VALUE never crosses this ABI)
 //   Info  -> datagrep_connection_info_json (which read-only protection is really
 //            in force — server / client / none — shown honestly, never worded up)
+//   Test  -> datagrep_connection_test_json (dial once, report what answered,
+//            save nothing; runs off the GUI thread — it blocks for the timeout)
 //
 // The structured fields (host / port / database / user / password) and the URL
 // are the SAME value: the URL is rendered from the fields and typing one parses
@@ -27,6 +29,8 @@
 #define DATAGREP_CONNECTION_DIALOG_HPP
 
 #include <QDialog>
+#include <QFutureWatcher>
+#include <QPair>
 #include <QString>
 #include <QStringList>
 
@@ -68,6 +72,8 @@ private slots:
     void onReadOnlyToggled(bool on);
     void onBrowseFile();
     void onCheckEnforcement();  // datagrep_connection_info_json for this profile
+    void onTestConnection();    // datagrep_connection_test_json, off the GUI thread
+    void onTestFinished();
     void onAccept();
 
 private:
@@ -154,6 +160,11 @@ private:
     QCheckBox* confirmWritesCheck_;
     QLineEdit* autoLimitEdit_;
     QLineEdit* idleTimeoutEdit_;
+
+    QPushButton* testButton_;
+    QLabel* testResultLabel_;
+    // first = result JSON, second = the driver's failure message
+    QFutureWatcher<QPair<QString, QString>>* testWatcher_;
 
     QPushButton* enforcementButton_;
     QLabel* enforcementLabel_;
