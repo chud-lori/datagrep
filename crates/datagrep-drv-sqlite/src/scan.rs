@@ -36,7 +36,7 @@ fn estimate_value_bytes(v: &ValueRef<'_>) -> u64 {
 }
 
 pub(crate) struct OpenScan<'conn> {
-    // Declared first so it drops before `stmt` — see module doc, invariant 3.
+    // Declared before `stmt` so it drops first — `Rows::drop` touches the prepared statement.
     rows: rusqlite::Rows<'static>,
     #[allow(dead_code)]
     stmt: Box<rusqlite::Statement<'conn>>,

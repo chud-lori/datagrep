@@ -1,3 +1,4 @@
+// Needs a real SSH server: set DATAGREP_TUNNEL_TEST_{HOST,PORT,USER} (auth vars in test_auth) and run with --ignored.
 use std::sync::Arc;
 
 use datagrep_api::SecretString;

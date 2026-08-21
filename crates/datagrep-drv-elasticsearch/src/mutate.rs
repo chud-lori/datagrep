@@ -378,7 +378,7 @@ fn guard_query(guard: &Guard, routing: Option<&str>) -> Vec<(&'static str, Strin
     let mut query = vec![
         ("if_seq_no", guard.seq_no.to_string()),
         ("if_primary_term", guard.primary_term.to_string()),
-        // `wait_for`, never `true`: see the module doc.
+        // `wait_for`, never `true`: read-your-writes without forcing an immediate shard refresh.
         ("refresh", "wait_for".to_string()),
     ];
     if let Some(routing) = routing {

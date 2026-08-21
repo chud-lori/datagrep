@@ -1007,7 +1007,7 @@ impl Catalog for EsCatalog {
 
     async fn describe(&self, path: &ObjectPath) -> Result<ObjectDetail, DbError> {
         match path.parts() {
-            // The cluster itself: health, nodes, shards (see the module doc).
+            // The cluster itself: health, nodes, shards.
             [] => self.describe_root().await,
             [index] => {
                 let types = self.mapping(index).await?;
