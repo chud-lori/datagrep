@@ -22,36 +22,9 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        // The add lives in a bottom bar, which is where the platform's own
-        // apps put "add to the thing this sidebar lists".
-        //
-        // Two earlier attempts put a bare + on the section header and both were
-        // rejected as decoration. They shared three properties this does not:
-        // inside the scrolling list, wordless, and immediately beside a
-        // secondary-grey label to be mistaken for. A footer sits outside the
-        // scroll area behind a divider, so it reads as chrome, and it can say
-        // what it does. It also survives when the toolbar overflows, which was
-        // measured to happen to every toolbar item at ordinary window widths.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 0) {
-                Divider()
-                HStack(spacing: 0) {
-                    Button {
-                        model.showNewConnection = true
-                    } label: {
-                        Label("New Connection", systemImage: "plus")
-                            .font(.callout)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("New connection  ⌘N")
-                    Spacer(minLength: 0)
-                }
-            }
-            .background(.bar)
-        }
+        // NO add button anywhere in this sidebar. New Connection is a toolbar
+        // icon and a File menu item, and that is the whole of it — a second
+        // affordance down here just competes with the one in the toolbar.
         // A band, not a tint. Shrinking the same signal to a dot produced
         // sustained backlash elsewhere, so a marked connection gets full width.
         .safeAreaInset(edge: .top, spacing: 0) {
