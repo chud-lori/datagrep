@@ -14,17 +14,37 @@ core, which runs on its own tokio runtime thread.
 ui/gtk4/
   Cargo.toml                # its own workspace — see "Build integration"
   src/
+    main.rs                 # the binary; ui::run() is the whole of it
+    sql.rs                  # Derived: base statement + the ORDER BY / WHERE headers added
     ffi/mod.rs              # safe wrappers: Core / Query / RowWindow
     model/
       pager.rs              # bounded LRU over row windows (<= 4 pages resident)
       status.rs             # decoded datagrep_query_status_json
+      profile.rs            # decoded datagrep_profiles_list_json
+      catalog.rs            # decoded datagrep_catalog_children_json, enumeration included
       row.rs                # the GListModel item: an index, nothing else
       result.rs             # ResultModel: GListModel over the windowed row API  <- core
+    ui/
+      mod.rs                # AdwApplication, style sheet, profile-store path
+      window.rs             # the shell: toolbar view, split views, breakpoints, run path
+      sidebar.rs            # connections list + its own flat header bar
+      schema.rs             # the lazy catalog tree (GtkTreeListModel)
+      grid.rs               # GtkColumnView + the row-number gutter
+      status_bar.rs         # honest row counts, elapsed, cancel
+  examples/preview.rs       # snapshots the realised window to PNG (see "Building")
   tests/streaming.rs        # the model against the real engine, headless
+  tests/catalog.rs          # the sidebar's data path against the real engine, headless
 ```
 
-Widgets land on top of this. The model is first because `GtkColumnView` is
-virtualised over a `GListModel`, so nothing above it can be right until this is.
+The model came first because `GtkColumnView` is virtualised over a `GListModel`,
+so nothing above it could be right until it was.
+
+The editor and the inspector mount into `Window::editor_slot()` and
+`Window::utility_slot()`. Both are `AdwBin`s that take no space until something
+is put in them, so a slot nobody has filled yet is invisible rather than an
+empty rectangle. Every statement — typed, replayed, or re-issued by a header
+click — goes through `Window::run`, which is what keeps the derived clauses from
+being bypassed by where the SQL came from.
 
 ## The three decisions
 
@@ -165,7 +185,13 @@ same positions, so one flyweight serves both.
 ## Sorting
 
 Header clicks emit SQL — a derived `ORDER BY` against the engine — and do not
-sort loaded rows. **No `GtkSorter` is ever attached to this model.** Sorting the
+sort loaded rows. **No `GtkSorter` is ever attached to this model.** Each column does carry one —
+`GtkColumnView` will not make a header clickable without it — but it is a
+`GtkCustomSorter` that answers `Equal` for every pair, and nothing consumes it:
+there is no `GtkSortListModel` anywhere. The click is intercepted through
+`GtkColumnViewSorter::changed`, turned into an `ORDER BY` in `sql.rs` and
+re-issued; the sorter's only remaining job is the arrow in the header.
+Sorting the
 2,048 rows that happen to be resident out of a 500,000-row result and calling
 the result sorted is precisely the lie the macOS grid refuses to tell.
 
@@ -176,8 +202,19 @@ sudo apt-get install libgtk-4-dev libadwaita-1-dev libdbus-1-dev pkg-config
 cargo test --manifest-path ui/gtk4/Cargo.toml
 ```
 
-The results model is the exception to "CI is the compiler": it is gio, not GTK,
-so `brew install glib` is enough to build and run the whole of it — engine
-included — on the Mac the rest of the project is developed on. Everything above
-this layer does need GTK4, and `.github/workflows/linux-gtk4.yml` is the only
-place that exists.
+**CI is not the only compiler.** `brew install gtk4 libadwaita` puts GTK 4.22 and
+libadwaita 1.9 on the Mac the rest of the project is developed on, and `gtk4-rs`
+builds against them through `pkg-config` with nothing else configured — the whole
+front-end compiles, runs and renders there. That is a development convenience and
+not a supported target: the shipping route is the Flatpak, and the floor
+`linux-gtk4.yml` asserts is what a change has to hold to.
+
+The window is hard to look at through a screen-sharing session, so
+`examples/preview.rs` seeds a SQLite profile, runs a statement and renders the
+realised window straight to a PNG with `GtkWidgetPaintable` — no visible window
+needed, and the row-number alignment is a thing you can look at rather than
+reason about:
+
+```
+PREVIEW_DIR=/tmp/dg PREVIEW_PNG=/tmp/dg/window.png cargo run --example preview
+```
