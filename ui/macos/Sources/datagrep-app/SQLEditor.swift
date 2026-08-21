@@ -204,6 +204,16 @@ private final class TabBarHostingView: NSHostingView<EditorTabBar> {
 /// never seen. `reloadProfiles()` should also call `editor.refreshConnections()`.
 final class SQLEditorController: NSViewController, NSTextViewDelegate {
     private(set) var textView: IdleCaretTextView!
+    /// The document, held strongly.
+    ///
+    /// TextKit 1 ownership runs *downwards* — an `NSTextStorage` retains its
+    /// layout managers, never the reverse — and `SQLHighlighter` keeps its
+    /// reference `weak` on purpose, so a discarded editor cannot pin a document
+    /// alive. That leaves nobody above the storage holding it, and if it goes
+    /// the block map silently degrades to "no document": `blockRange` answers
+    /// with an empty range and ⌘↩ reports "nothing to run" over SQL the user
+    /// can plainly see. This property is that missing owner.
+    private var textStorage: NSTextStorage!
     private let scroll = NSScrollView()
     private let highlighter = SQLHighlighter()
     private let store = SavedQueryStore()
@@ -261,6 +271,7 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         // NSLayoutManager geometry is what the background decorations and the
         // visible-range highlighting both need.
         let storage = NSTextStorage()
+        textStorage = storage
         let layout = NSLayoutManager()
         storage.addLayoutManager(layout)
         let container = NSTextContainer(
@@ -536,7 +547,27 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
             range = clamped(highlighter.blockRange(containing: range.location - 1))
             body = ns.substring(with: range)
         }
-        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        if body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // The block map answered with nothing while the buffer plainly
+            // holds SQL — the highlighter's cache is empty or describes another
+            // document. It used to end here, and ⌘↩ said "nothing to run" at a
+            // visible statement. Re-split with the standalone splitter instead:
+            // it reads only `ns`, so a broken cache cannot reach it, and it
+            // resolves caret-past-the-last-`;` the same way this function does.
+            //
+            // Note the empty-range case never reached the whitespace fallback
+            // above: that one requires `range.location > 0`, and an empty map
+            // reports location 0.
+            guard let rescued = SQLBlocks.block(at: caret, in: ns as String),
+                !rescued.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return nil }
+            range = clamped(
+                NSRange(
+                    location: rescued.range.lowerBound,
+                    length: rescued.range.count))
+            body = ns.substring(with: range)
+            guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        }
 
         var directives = SQLBlocks.directives(in: body)
         if directives.connection == nil, let bound = tabs.active?.connection, !bound.isEmpty {
