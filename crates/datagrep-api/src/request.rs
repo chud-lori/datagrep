@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::ObjectKind;
 use crate::driver::ResumeToken;
+use crate::error::DbError;
 use crate::shape::ObjectPath;
 use crate::value::{FieldPath, Value};
 
@@ -182,24 +184,81 @@ pub enum Mutation {
     },
 }
 
-/// DDL. `Native` is not a placeholder: it is the right model for schema and
-/// index administration, which is the part of every engine that generalises
-/// worst. A structured verb only earns a variant when more than one driver can
-/// honour it *and* something in the workspace constructs it — an untyped
-/// passthrough is honest, whereas a general-looking variant five drivers
-/// refuse is a capability that does not exist.
+/// DDL. Authoring anything with a column type, an index lifecycle state, or an
+/// alias action list stays `Native` — see the drivers for why each one cannot
+/// generalise.
 ///
-/// Surveyed for M3 across all six drivers: only `Drop` and `Rename` have a
-/// meaning in more than one engine. `Create` is blocked on a type vocabulary
-/// the api does not have — [`crate::shape::FieldDef`] describes what a *result*
-/// held and is deliberately lossy, while authoring cannot be. And a `Drop`
-/// needs [`crate::catalog::ObjectKind`] alongside the path, because engines
-/// exist where an index and an alias share one namespace and only the kind
-/// says which is meant.
+/// `path` and `kind` are the pair [`crate::catalog::Catalog`] reported. A
+/// driver answers only for the kinds its own catalog produces: where an index
+/// and an alias share one namespace, nothing but the kind says which a name
+/// means.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DdlOp {
     /// Engine-native DDL text, passed through verbatim.
     Native { text: Arc<str> },
+    /// Remove exactly one object. A driver whose names are patterns must
+    /// refuse anything that could expand to more than one.
+    Drop {
+        path: ObjectPath,
+        kind: ObjectKind,
+        if_exists: bool,
+    },
+    /// Rename within the same parent: `from` and `to` may differ only in the
+    /// last part.
+    Rename {
+        from: ObjectPath,
+        to: ObjectPath,
+        kind: ObjectKind,
+    },
+    /// A named index over whole fields of `path`, ascending. Expressions,
+    /// partial predicates and index methods are engine syntax — `Native`.
+    ///
+    /// For [`DdlOp::Drop`] and [`DdlOp::Rename`], such an index is addressed
+    /// as `path` extended by `name`, whichever namespace the engine files it
+    /// under.
+    CreateIndex {
+        path: ObjectPath,
+        name: Arc<str>,
+        fields: Vec<FieldPath>,
+        unique: bool,
+        if_not_exists: bool,
+    },
+}
+
+impl DdlOp {
+    /// The bare new name for a [`DdlOp::Rename`], rejecting a `to` that moves
+    /// the object rather than renaming it.
+    pub fn rename_target<'a>(
+        from: &ObjectPath,
+        to: &'a ObjectPath,
+    ) -> Result<&'a Arc<str>, DbError> {
+        let (from_last, from_parent) =
+            from.parts()
+                .split_last()
+                .ok_or_else(|| DbError::Unsupported {
+                    feature: "rename from an empty object path".into(),
+                })?;
+        let (to_last, to_parent) = to
+            .parts()
+            .split_last()
+            .ok_or_else(|| DbError::Unsupported {
+                feature: "rename to an empty object path".into(),
+            })?;
+        if from_parent != to_parent {
+            return Err(DbError::Unsupported {
+                feature: format!(
+                    "rename moves {from} to a different parent ({to}) — a rename changes the \
+                     name, not the namespace"
+                ),
+            });
+        }
+        if from_last == to_last {
+            return Err(DbError::Unsupported {
+                feature: format!("rename of {from} to the name it already has"),
+            });
+        }
+        Ok(to_last)
+    }
 }
 
 #[cfg(test)]
@@ -300,6 +359,57 @@ mod tests {
             let back: Mutation = serde_json::from_value(json).expect("legacy payload");
             assert_eq!(back, m);
         }
+    }
+
+    #[test]
+    fn structured_ddl_round_trips_and_native_payloads_still_parse() {
+        let ops = vec![
+            DdlOp::Drop {
+                path: ObjectPath::new(vec![Arc::from("app"), Arc::from("users")]),
+                kind: ObjectKind::Table,
+                if_exists: true,
+            },
+            DdlOp::Rename {
+                from: ObjectPath::new(vec![Arc::from("app"), Arc::from("users")]),
+                to: ObjectPath::new(vec![Arc::from("app"), Arc::from("people")]),
+                kind: ObjectKind::Table,
+            },
+            DdlOp::CreateIndex {
+                path: ObjectPath::new(vec![Arc::from("app"), Arc::from("users")]),
+                name: Arc::from("users_email"),
+                fields: vec![FieldPath::field("email")],
+                unique: true,
+                if_not_exists: false,
+            },
+        ];
+        for op in ops {
+            let json = serde_json::to_string(&Op::Ddl(op.clone())).unwrap();
+            let back: Op = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, Op::Ddl(op));
+        }
+        // The variants are additive: a payload written before they existed
+        // still deserializes.
+        let legacy = r#"{"Ddl":{"Native":{"text":"DROP TABLE t"}}}"#;
+        let back: Op = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            back,
+            Op::Ddl(DdlOp::Native {
+                text: Arc::from("DROP TABLE t")
+            })
+        );
+    }
+
+    #[test]
+    fn a_rename_may_only_change_the_last_part() {
+        let users = ObjectPath::new(vec![Arc::from("app"), Arc::from("users")]);
+        let people = ObjectPath::new(vec![Arc::from("app"), Arc::from("people")]);
+        assert_eq!(&**DdlOp::rename_target(&users, &people).unwrap(), "people");
+
+        // Moving to another schema is not a rename, and neither is a no-op.
+        let moved = ObjectPath::new(vec![Arc::from("archive"), Arc::from("users")]);
+        assert!(DdlOp::rename_target(&users, &moved).is_err());
+        assert!(DdlOp::rename_target(&users, &users).is_err());
+        assert!(DdlOp::rename_target(&users, &ObjectPath::root()).is_err());
     }
 
     #[test]

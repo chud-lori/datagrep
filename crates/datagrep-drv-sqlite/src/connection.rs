@@ -12,7 +12,7 @@ use std::thread;
 use async_trait::async_trait;
 use datagrep_api::{
     Batch, Canceller, Capabilities, Catalog, ConnectCtx, Connection, Cursor, CursorStats, DbError,
-    DdlOp, Enforcement, FetchHint, FieldDef, FieldFlags, Identity, IsolationLevel, Mutation,
+    Enforcement, FetchHint, FieldDef, FieldFlags, Identity, IsolationLevel, Mutation,
     MutationBatch, Op, Request, ResumeToken, RowSchema, ServerInfo, SortKey, Transaction, TxOpts,
     Value,
 };
@@ -364,8 +364,8 @@ fn prepare_request(req: &Request) -> Result<PreparedRequest, DbError> {
                 order: Vec::new(),
             })
         }
-        Request::Op(Op::Ddl(DdlOp::Native { text })) => Ok(PreparedRequest {
-            sql: text.to_string(),
+        Request::Op(Op::Ddl(ddl)) => Ok(PreparedRequest {
+            sql: crate::compile::compile_ddl(ddl)?,
             params: Vec::new(),
             order: Vec::new(),
         }),

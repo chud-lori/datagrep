@@ -12,7 +12,7 @@ use mongodb::Collection;
 use tokio::sync::Mutex;
 
 use datagrep_api::caps::Capabilities;
-use datagrep_api::catalog::Catalog;
+use datagrep_api::catalog::{Catalog, ObjectKind};
 use datagrep_api::driver::{
     Canceller, Connection, Cursor, Enforcement, ResumeToken, ServerInfo, Transaction, TxOpts,
 };
@@ -198,6 +198,11 @@ impl Connection for MongoConnection {
             Request::Op(Op::Ddl(DdlOp::Native { text })) => {
                 self.read_only_gate(true)?;
                 self.execute_text(&text, DEFAULT_MAX_TIME).await
+            }
+            Request::Op(Op::Ddl(ddl)) => {
+                self.read_only_gate(true)?;
+                let plan = plan_ddl(&self.default_database, &ddl)?;
+                self.run_ddl_command(plan, DEFAULT_MAX_TIME).await
             }
         }
     }
@@ -561,6 +566,36 @@ impl MongoConnection {
             None,
             Some(Arc::from("collection dropped")),
         )))
+    }
+
+    /// Run a planned DDL command, turning `absent_code` into an ack.
+    async fn run_ddl_command(
+        &self,
+        plan: DdlCommand,
+        timeout: Duration,
+    ) -> Result<Box<dyn Cursor>, DbError> {
+        let mut command = plan.command;
+        command.insert("maxTimeMS", timeout.as_millis() as i64);
+        match self
+            .client
+            .database(&plan.db)
+            .run_command(command)
+            .await
+            .map_err(map_mongo_error)
+        {
+            Ok(_) => Ok(Box::new(AckCursor::new(None, Some(Arc::from(plan.ack))))),
+            // Presence-checked, not just compared: a write failure carries no
+            // code and would otherwise match a plan tolerating nothing.
+            Err(DbError::Query { ref code, .. })
+                if plan.absent_code.is_some() && code.as_deref() == plan.absent_code =>
+            {
+                Ok(Box::new(AckCursor::new(
+                    None,
+                    Some(Arc::from("nothing to drop")),
+                )))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn execute_raw_command(
@@ -932,6 +967,165 @@ pub(crate) fn resolve_object_path(
     }
 }
 
+pub(crate) struct DdlCommand {
+    pub db: String,
+    pub command: BsonDocument,
+    /// Server error code meaning "it was not there", tolerated under
+    /// `if_exists`.
+    pub absent_code: Option<&'static str>,
+    pub ack: &'static str,
+}
+
+const INDEX_NOT_FOUND: &str = "27";
+
+/// Plan a structured [`DdlOp`] as a command document, client-free so the
+/// mapping is testable without a server.
+///
+/// Trap: this engine's DDL is idempotent. Measured on mongod 7, `drop` and
+/// `dropDatabase` answer `ok: 1` for something that was never there and
+/// `createIndexes` is a no-op for a matching index, so the *unguarded* forms
+/// cannot mean "fail if it is already so" and are refused. `dropIndexes` is
+/// the exception and really does report IndexNotFound.
+pub(crate) fn plan_ddl(default_database: &str, op: &DdlOp) -> Result<DdlCommand, DbError> {
+    match op {
+        DdlOp::Native { text } => Err(DbError::Unsupported {
+            feature: format!("native DDL text is not a command document: {text}"),
+        }),
+        DdlOp::Drop {
+            path,
+            kind,
+            if_exists,
+        } => match kind {
+            ObjectKind::Collection => {
+                if !*if_exists {
+                    return Err(DbError::Unsupported {
+                        feature: "dropping a collection without `if_exists` — MongoDB's `drop` \
+                                  succeeds on a collection that never existed, so it cannot \
+                                  report that one was missing"
+                            .into(),
+                    });
+                }
+                let (db, coll) = resolve_object_path(default_database, path)?;
+                Ok(DdlCommand {
+                    db,
+                    command: doc! { "drop": coll },
+                    absent_code: None,
+                    ack: "collection dropped",
+                })
+            }
+            ObjectKind::Index => {
+                let (db, coll, index) = split_index_path(default_database, path)?;
+                Ok(DdlCommand {
+                    db,
+                    command: doc! { "dropIndexes": coll, "index": index },
+                    absent_code: if_exists.then_some(INDEX_NOT_FOUND),
+                    ack: "index dropped",
+                })
+            }
+            ObjectKind::Database => {
+                if !*if_exists {
+                    return Err(DbError::Unsupported {
+                        feature: "dropping a database without `if_exists` — MongoDB's \
+                                  dropDatabase succeeds on a database that never existed, so it \
+                                  cannot report that one was missing"
+                            .into(),
+                    });
+                }
+                match path.parts() {
+                    [db] => Ok(DdlCommand {
+                        db: db.to_string(),
+                        command: doc! { "dropDatabase": 1 },
+                        absent_code: None,
+                        ack: "database dropped",
+                    }),
+                    _ => Err(DbError::Unsupported {
+                        feature: format!("object path {path} does not name a database"),
+                    }),
+                }
+            }
+            other => Err(DbError::Unsupported {
+                feature: format!("{other:?} is not a MongoDB object this driver can administer"),
+            }),
+        },
+        DdlOp::Rename { from, to, kind } => {
+            if *kind != ObjectKind::Collection {
+                return Err(DbError::Unsupported {
+                    feature: format!(
+                        "MongoDB can only rename a collection — a {kind:?} has no rename command"
+                    ),
+                });
+            }
+            DdlOp::rename_target(from, to)?;
+            let (db, coll) = resolve_object_path(default_database, from)?;
+            let (to_db, to_coll) = resolve_object_path(default_database, to)?;
+            Ok(DdlCommand {
+                // An admin command over full `db.collection` namespaces, not
+                // names relative to `db`.
+                db: "admin".to_string(),
+                command: doc! {
+                    "renameCollection": format!("{db}.{coll}"),
+                    "to": format!("{to_db}.{to_coll}"),
+                },
+                absent_code: None,
+                ack: "collection renamed",
+            })
+        }
+        DdlOp::CreateIndex {
+            path,
+            name,
+            fields,
+            unique,
+            if_not_exists,
+        } => {
+            if fields.is_empty() {
+                return Err(DbError::Unsupported {
+                    feature: "createIndexes with no fields".into(),
+                });
+            }
+            if !*if_not_exists {
+                return Err(DbError::Unsupported {
+                    feature: "creating an index without `if_not_exists` — MongoDB's \
+                              createIndexes is a no-op when the same index is already there, so \
+                              it cannot report that one existed"
+                        .into(),
+                });
+            }
+            let (db, coll) = resolve_object_path(default_database, path)?;
+            let mut key = BsonDocument::new();
+            for f in fields {
+                key.insert(crate::filter::field_path_to_mongo(f), 1i32);
+            }
+            Ok(DdlCommand {
+                db,
+                command: doc! {
+                    "createIndexes": coll,
+                    "indexes": vec![doc! { "key": key, "name": name.as_ref(), "unique": *unique }],
+                },
+                absent_code: None,
+                ack: "index created",
+            })
+        }
+    }
+}
+
+/// `[db,] collection, index` → the collection it is on plus the index name.
+fn split_index_path(
+    default_database: &str,
+    path: &ObjectPath,
+) -> Result<(String, String, String), DbError> {
+    let parts = path.parts();
+    let (name, owner) = parts
+        .split_last()
+        .filter(|(_, owner)| !owner.is_empty())
+        .ok_or_else(|| DbError::Unsupported {
+            feature: format!(
+                "index path {path} must name the collection it is on followed by the index name"
+            ),
+        })?;
+    let (db, coll) = resolve_object_path(default_database, &ObjectPath::new(owner.to_vec()))?;
+    Ok((db, coll, name.to_string()))
+}
+
 pub(crate) fn is_write_method(method_lower: &str) -> bool {
     method_lower.starts_with("insert")
         || method_lower.starts_with("update")
@@ -1052,5 +1246,139 @@ pub(crate) fn map_parse_err(e: MongoError) -> DbError {
         code: None,
         message: e.to_string(),
         position,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datagrep_api::FieldPath;
+
+    fn path(parts: &[&str]) -> ObjectPath {
+        ObjectPath::new(parts.iter().map(|p| Arc::from(*p)).collect())
+    }
+
+    #[test]
+    fn a_drop_becomes_the_command_for_its_kind() {
+        let plan = plan_ddl(
+            "app",
+            &DdlOp::Drop {
+                path: path(&["widgets"]),
+                kind: ObjectKind::Collection,
+                if_exists: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.db, "app");
+        assert_eq!(plan.command, doc! { "drop": "widgets" });
+
+        // An index is addressed through the collection it is on.
+        let plan = plan_ddl(
+            "app",
+            &DdlOp::Drop {
+                path: path(&["other", "widgets", "widgets_name"]),
+                kind: ObjectKind::Index,
+                if_exists: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.db, "other");
+        assert_eq!(
+            plan.command,
+            doc! { "dropIndexes": "widgets", "index": "widgets_name" }
+        );
+        assert_eq!(plan.absent_code, Some(INDEX_NOT_FOUND));
+
+        assert!(plan_ddl(
+            "app",
+            &DdlOp::Drop {
+                path: path(&["widgets"]),
+                kind: ObjectKind::Table,
+                if_exists: true,
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_rename_is_an_admin_command_over_full_namespaces() {
+        let plan = plan_ddl(
+            "app",
+            &DdlOp::Rename {
+                from: path(&["widgets"]),
+                to: path(&["gadgets"]),
+                kind: ObjectKind::Collection,
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.db, "admin");
+        assert_eq!(
+            plan.command,
+            doc! { "renameCollection": "app.widgets", "to": "app.gadgets" }
+        );
+
+        assert!(plan_ddl(
+            "app",
+            &DdlOp::Rename {
+                from: path(&["widgets", "i"]),
+                to: path(&["widgets", "j"]),
+                kind: ObjectKind::Index,
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn an_index_key_document_keeps_the_field_order_it_was_given() {
+        let plan = plan_ddl(
+            "app",
+            &DdlOp::CreateIndex {
+                path: path(&["widgets"]),
+                name: Arc::from("by_tenant_name"),
+                fields: vec![FieldPath::field("tenant"), "profile.name".parse().unwrap()],
+                unique: true,
+                if_not_exists: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            plan.command,
+            doc! {
+                "createIndexes": "widgets",
+                "indexes": vec![doc! {
+                    "key": doc! { "tenant": 1i32, "profile.name": 1i32 },
+                    "name": "by_tenant_name",
+                    "unique": true,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn the_idempotent_forms_this_engine_cannot_promise_are_refused() {
+        // Measured against mongod 7: `drop`/`dropDatabase` answer ok for
+        // something that was never there, so "fail if missing" is a lie.
+        for kind in [ObjectKind::Collection, ObjectKind::Database] {
+            assert!(plan_ddl(
+                "app",
+                &DdlOp::Drop {
+                    path: path(&["widgets"]),
+                    kind,
+                    if_exists: false,
+                }
+            )
+            .is_err());
+        }
+        assert!(plan_ddl(
+            "app",
+            &DdlOp::CreateIndex {
+                path: path(&["widgets"]),
+                name: Arc::from("i"),
+                fields: vec![FieldPath::field("n")],
+                unique: false,
+                if_not_exists: false,
+            }
+        )
+        .is_err());
     }
 }

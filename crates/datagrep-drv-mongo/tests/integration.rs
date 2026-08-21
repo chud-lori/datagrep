@@ -15,10 +15,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bson::doc;
 
-use datagrep_api::catalog::ListOpts;
+use datagrep_api::catalog::{ListOpts, ObjectKind};
 use datagrep_api::config::{ConfigValue, ConnectionConfig, ResolvedConfig};
 use datagrep_api::driver::{ConnectCtx, Connection, Driver, FetchHint, Payload};
-use datagrep_api::request::{Op, Request};
+use datagrep_api::request::{DdlOp, Op, Request};
 use datagrep_api::shape::{ObjectPath, SchemaDelta};
 use datagrep_api::value::Value;
 
@@ -417,4 +417,200 @@ async fn catalog_lists_and_infers() {
         .any(|(k, _)| k.as_ref() == "inferred_schema"));
 
     drop_db(&db).await;
+}
+
+// ---------------------------------------------------------------------
+// Structured DDL (`Op::Ddl`)
+// ---------------------------------------------------------------------
+
+async fn ddl(conn: &dyn Connection, op: DdlOp) -> Result<(), datagrep_api::DbError> {
+    let mut cur = conn.execute(Request::Op(Op::Ddl(op))).await?;
+    while cur.next_batch(FetchHint::default()).await?.is_some() {}
+    Ok(())
+}
+
+/// Drop, rename and index creation as command documents, against the paths
+/// and kinds the catalog reports for them.
+#[tokio::test]
+#[ignore]
+async fn structured_ddl_round_trips_through_the_catalog() {
+    let db = unique_db("ddl");
+    let client = raw_client().await;
+    client
+        .database(&db)
+        .collection::<bson::Document>("widgets")
+        .insert_one(doc! { "name": "a" })
+        .await
+        .expect("seed");
+
+    let conn = connect(&db).await;
+    let listed = conn
+        .catalog()
+        .children(
+            &ObjectPath::new(vec![Arc::from(db.as_str())]),
+            ListOpts {
+                limit: 1000,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list collections");
+    let widgets = listed
+        .items
+        .iter()
+        .find(|n| &*n.path.parts()[1] == "widgets")
+        .expect("widgets should be listed")
+        .clone();
+    assert_eq!(widgets.kind, ObjectKind::Collection);
+
+    ddl(
+        conn.as_ref(),
+        DdlOp::CreateIndex {
+            path: widgets.path.clone(),
+            name: Arc::from("widgets_name"),
+            fields: vec![datagrep_api::FieldPath::field("name")],
+            unique: true,
+            if_not_exists: true,
+        },
+    )
+    .await
+    .expect("create index");
+    let index_names = |client: mongodb::Client, db: String| async move {
+        client
+            .database(&db)
+            .collection::<bson::Document>("widgets")
+            .list_index_names()
+            .await
+            .expect("list indexes")
+    };
+    assert!(index_names(client.clone(), db.clone())
+        .await
+        .contains(&"widgets_name".to_string()));
+
+    ddl(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: widgets.path.child("widgets_name"),
+            kind: ObjectKind::Index,
+            if_exists: false,
+        },
+    )
+    .await
+    .expect("drop index");
+    assert!(!index_names(client.clone(), db.clone())
+        .await
+        .contains(&"widgets_name".to_string()));
+
+    ddl(
+        conn.as_ref(),
+        DdlOp::Rename {
+            from: widgets.path.clone(),
+            to: ObjectPath::new(vec![Arc::from(db.as_str()), Arc::from("gadgets")]),
+            kind: ObjectKind::Collection,
+        },
+    )
+    .await
+    .expect("rename collection");
+    let names = client
+        .database(&db)
+        .list_collection_names()
+        .await
+        .expect("list collections");
+    assert!(names.contains(&"gadgets".to_string()) && !names.contains(&"widgets".to_string()));
+
+    let gadgets = ObjectPath::new(vec![Arc::from(db.as_str()), Arc::from("gadgets")]);
+    ddl(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: gadgets.clone(),
+            kind: ObjectKind::Collection,
+            if_exists: true,
+        },
+    )
+    .await
+    .expect("drop collection");
+    ddl(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: gadgets.clone(),
+            kind: ObjectKind::Collection,
+            if_exists: true,
+        },
+    )
+    .await
+    .expect("dropping it again is a no-op");
+    drop_db(&db).await;
+}
+
+/// Two preconditions this engine cannot express are refused rather than
+/// quietly meaning something else: `dropDatabase` succeeds on a database that
+/// never existed, and `createIndexes` is a no-op when the same index is
+/// already there.
+#[tokio::test]
+#[ignore]
+async fn preconditions_the_engine_cannot_express_are_refused() {
+    let db = unique_db("ddl_precondition");
+    let conn = connect(&db).await;
+    let coll = ObjectPath::new(vec![Arc::from(db.as_str()), Arc::from("items")]);
+
+    let err = ddl(
+        conn.as_ref(),
+        DdlOp::CreateIndex {
+            path: coll.clone(),
+            name: Arc::from("items_n"),
+            fields: vec![datagrep_api::FieldPath::field("n")],
+            unique: false,
+            if_not_exists: false,
+        },
+    )
+    .await
+    .expect_err("cannot promise to fail on an existing index");
+    assert!(format!("{err}").contains("no-op"), "{err}");
+
+    for (kind, path) in [
+        (
+            ObjectKind::Database,
+            ObjectPath::new(vec![Arc::from(db.as_str())]),
+        ),
+        (ObjectKind::Collection, coll.clone()),
+    ] {
+        let err = ddl(
+            conn.as_ref(),
+            DdlOp::Drop {
+                path,
+                kind,
+                if_exists: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("never existed"),
+            "{kind:?}: {err}"
+        );
+    }
+
+    // The server's own answer, which is what makes the refusals above right:
+    // dropping something that was never there is a success.
+    let raw = raw_client().await;
+    let ok = raw
+        .database(&db)
+        .run_command(doc! { "drop": "definitely_not_there" })
+        .await;
+    assert!(
+        ok.is_ok(),
+        "mongod is expected to answer ok for a missing collection: {ok:?}"
+    );
+
+    // With the guard, the same drop goes through.
+    ddl(
+        conn.as_ref(),
+        DdlOp::Drop {
+            path: ObjectPath::new(vec![Arc::from(db.as_str())]),
+            kind: ObjectKind::Database,
+            if_exists: true,
+        },
+    )
+    .await
+    .expect("drop database");
 }

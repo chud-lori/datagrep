@@ -38,7 +38,7 @@ impl PgTransaction {
                 let (inner_sql, params) = Self::compile(inner)?;
                 Ok((crate::sql::wrap_explain(&inner_sql, *analyze), params))
             }
-            Request::Op(Op::Ddl(datagrep_api::request::DdlOp::Native { text })) => Ok((text.to_string(), Vec::new())),
+            Request::Op(Op::Ddl(ddl)) => Ok((crate::sql::compile_ddl(ddl)?, Vec::new())),
             Request::Op(Op::Mutate(_)) => Err(DbError::Unsupported {
                 feature: "Op::Mutate inside an explicit interactive transaction is not implemented in v1 \
                           (only PgConnection::execute's auto-committing mutation path is); issue the \

@@ -60,7 +60,11 @@ const BASE_CAPS: Caps = Caps::EXPLAIN
     .union(Caps::EDITABLE_RESULTS)
     // The cursor streams page by page and never materializes a result set, so
     // "export all" genuinely is not "load all".
-    .union(Caps::EXPORT_STREAMING);
+    .union(Caps::EXPORT_STREAMING)
+    // `Op::Ddl` drops an index or an alias — the two objects this catalog
+    // lists. Creating one, its lifecycle state and alias action lists stay
+    // native; see [`crate::ddl`].
+    .union(Caps::DDL);
 
 /// Capabilities for a connection, narrowed by what the handshake found.
 pub fn es_capabilities(product: Product, page_mode: PageMode) -> Capabilities {
@@ -598,7 +602,7 @@ mod tests {
     fn capabilities_never_claim_the_five_things_elasticsearch_cannot_do() {
         let caps = es_capabilities(Product::Elasticsearch, PageMode::Pit);
         assert!(!caps.flags.contains(Caps::TRANSACTIONS));
-        assert!(!caps.flags.contains(Caps::DDL));
+        assert!(caps.flags.contains(Caps::DDL));
         assert!(!caps.flags.contains(Caps::EXACT_COUNT_CHEAP));
         assert!(!caps.flags.contains(Caps::RANDOM_ACCESS_PAGE));
         assert!(!caps.flags.contains(Caps::SCHEMA_DECLARED));

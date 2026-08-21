@@ -172,6 +172,12 @@ impl MySqlConnection {
                 timeout: opts.timeout,
                 row_limit: None,
             }),
+            Op::Ddl(ddl) => Ok(Compiled {
+                statements: vec![sql::compile_ddl(ddl, flavor)?],
+                params: Vec::new(),
+                timeout: opts.timeout,
+                row_limit: None,
+            }),
             Op::Mutate(batch) => Err(DbError::Unsupported {
                 feature: format!(
                     "Op::Mutate must go through MySqlConnection::execute_mutate, not the \
