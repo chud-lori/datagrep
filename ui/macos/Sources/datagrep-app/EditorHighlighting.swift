@@ -2,11 +2,6 @@ import AppKit
 
 // MARK: - tokens
 
-/// Mirrors `crates/datagrep-lang`'s `TokenKind`, plus one case that crate has
-/// no reason to know about: `.directive`. The `-- @limit / @timeout /
-/// @connection / @readonly` lines are lexically comments but semantically the
-/// only meta-language datagrep has, so they must not look like prose the engine
-/// ignores.
 enum SQLTokenKind {
     case keyword, ident, string, comment, number, op, punct, directive
 }
@@ -16,9 +11,6 @@ struct SQLToken {
     var kind: SQLTokenKind
 }
 
-/// Everything a line needs to know from the line above it. Equality is the
-/// convergence test that stops an incremental re-lex — when a re-lexed line
-/// ends in the state it ended in before, nothing below it can have changed.
 struct SQLLexState: Equatable {
     var commentDepth: Int = 0
     var inSingleQuote: Bool = false
@@ -29,10 +21,6 @@ struct SQLLexState: Equatable {
 
 // MARK: - keyword table
 
-/// Ported verbatim from `crates/datagrep-lang/src/sql/highlight.rs`, including
-/// its stated bias: deliberately generous across dialects, because a MySQL-only
-/// keyword lighting up in a Postgres buffer is cosmetic, while failing to
-/// highlight a common keyword is the annoying failure mode.
 enum SQLKeywords {
     static let set: Set<String> = [
         "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", "COPY",
@@ -60,10 +48,6 @@ enum SQLKeywords {
 // MARK: - the line lexer
 
 /// One line in, one line's tokens plus the state the next line inherits out.
-///
-/// Line-at-a-time is the whole point: it is what makes re-highlighting cost
-/// O(edited lines) instead of O(document). Multi-line constructs (`/* */`,
-/// `'…'`, `$tag$…$tag$`) survive across the boundary in `SQLLexState`.
 enum SQLLineLexer {
     private static let cTab: unichar = 9
     private static let cCR: unichar = 13
@@ -110,11 +94,6 @@ enum SQLLineLexer {
         c == 40 || c == 41 || c == 91 || c == 93 || c == 123 || c == 125
     }
 
-    /// `collectTokens: false` is the cheap mode used when an edit forces the
-    /// lexer to chase a state change down the document: it still resolves every
-    /// multi-line construct and every top-level `;`, but allocates no tokens and
-    /// builds no strings. That is what keeps "type `/*` at the top of a 1 MB
-    /// script" a byte scan rather than a document-wide re-attribution.
     @discardableResult
     static func lex(
         _ c: UnsafeBufferPointer<unichar>,
@@ -152,8 +131,6 @@ enum SQLLineLexer {
             }
         }
 
-        /// `''` is an escaped quote, not a terminator — the one string rule SQL
-        /// has that people actually hit.
         @inline(__always) func consumeSingleQuote() {
             while i < n {
                 if c[i] == cQuote {
@@ -206,8 +183,6 @@ enum SQLLineLexer {
                 continue
             }
 
-            // `--` line comment. Checked before the operator run so `a--b`
-            // lexes as ident + comment, matching the Rust chunk lexer.
             if ch == cDash, i + 1 < n, c[i + 1] == cDash {
                 let start = i
                 let kind: SQLTokenKind =
@@ -237,9 +212,6 @@ enum SQLLineLexer {
                 continue
             }
 
-            // Quoted identifiers. Deliberately not tracked across lines: a
-            // newline inside "…" or `…` is not a thing people write, and
-            // pretending otherwise would let one stray quote recolour the file.
             if ch == cDQuote || ch == cBacktick {
                 let closer = ch
                 let start = i
@@ -334,8 +306,6 @@ enum SQLLineLexer {
             if isOperator(ch) {
                 let start = i
                 i += 1
-                // An operator run must not swallow a comment opener: `a<--b` is
-                // `a<` then a comment, exactly as the Rust lexer sees it.
                 while i < n, isOperator(c[i]) {
                     if c[i] == cDash, i + 1 < n, c[i + 1] == cDash { break }
                     if c[i] == cSlash, i + 1 < n, c[i + 1] == cStar { break }
@@ -355,10 +325,6 @@ enum SQLLineLexer {
         return state
     }
 
-    /// True when what follows `--` is one of the four block directives. The
-    /// caller has already checked that the `--` is the first thing on the line,
-    /// which is the same rule `SQLBlocks.directives(in:)` applies — the two must
-    /// agree, or the editor would colour a line the parser then ignores.
     private static func directiveFollows(_ c: UnsafeBufferPointer<unichar>, from: Int) -> Bool {
         var i = from
         let n = c.count
@@ -377,11 +343,6 @@ enum SQLLineLexer {
 
 // MARK: - theme
 
-/// Dynamic colours, so light and dark are the same code path and neither is an
-/// afterthought. Deliberately restrained: keywords tinted, strings and comments
-/// distinct, directives distinct because they are semantic, and *everything
-/// else* left at `.textColor`. Identifiers, numbers, operators and punctuation
-/// get no colour at all — a rainbow makes SQL harder to read, not easier.
 enum SQLTheme {
     static func dynamic(light: NSColor, dark: NSColor) -> NSColor {
         NSColor(name: nil) { appearance in
@@ -401,8 +362,6 @@ enum SQLTheme {
         light: NSColor(srgbRed: 0.431, green: 0.463, blue: 0.506, alpha: 1),
         dark: NSColor(srgbRed: 0.486, green: 0.533, blue: 0.580, alpha: 1))
 
-    /// Teal, not the comment grey, and semibold: a directive changes what the
-    /// engine is asked to do, so it must not read as an ignorable remark.
     static let directive = dynamic(
         light: NSColor(srgbRed: 0.043, green: 0.447, blue: 0.522, alpha: 1),
         dark: NSColor(srgbRed: 0.302, green: 0.816, blue: 0.780, alpha: 1))
@@ -434,28 +393,9 @@ enum SQLTheme {
 
 // MARK: - the incremental highlighter
 
-/// `NSTextStorageDelegate`, not an `NSTextStorage` subclass: the delegate hook
-/// is the documented place to apply attribute-only fixups after an edit, and it
-/// avoids reimplementing the storage primitives for no gain.
-///
-/// The performance contract, which is the whole reason this class exists:
-///
-///  * A per-line cache holds the lexer state at the end of each line, the
-///    top-level `;` offsets on it, and whether its attributes are current.
-///  * An edit re-lexes forward from the edited line and stops at the first line
-///    whose end state is unchanged. Typing inside a statement touches one line.
-///  * Chasing a state change further (you typed `/*`) is a byte scan with
-///    `collectTokens: false` — it fixes the cache without writing attributes.
-///  * Attributes are only ever written for the edited range and the *visible*
-///    range. A 1 MB script costs the same per keystroke as a 20-line one.
-///
-/// The document is fully lexed exactly once, when it is loaded, to seed the
-/// cache — that pass allocates no tokens and no strings.
 final class SQLHighlighter: NSObject, NSTextStorageDelegate {
     private weak var storage: NSTextStorage?
 
-    /// Supplied by the text view. Never queried during `didProcessEditing` —
-    /// asking the layout manager for geometry mid-edit is asking for trouble.
     var visibleRangeProvider: (() -> NSRange)?
 
     var font: NSFont = .monospacedSystemFont(ofSize: 12, weight: .regular) {
@@ -466,19 +406,10 @@ final class SQLHighlighter: NSObject, NSTextStorageDelegate {
     }
     private var boldFont: NSFont = .monospacedSystemFont(ofSize: 12, weight: .semibold)
 
-    /// Postgres nests `/* */`; MySQL does not. Nesting is the superset and the
-    /// editor does not know the dialect of the tab's connection at lex time, so
-    /// it nests — the divergence needs `/* /* */` in a MySQL buffer to show up.
     var nestComments = true
 
     // Parallel arrays, one entry per line. Spliced together, always.
     private var lineStarts: [Int] = [0]
-    /// `nil` means "no valid cached state" — a line spliced in by an edit whose
-    /// state has not been recomputed yet. It must be an absent value rather than
-    /// a default `SQLLexState()`, because the default is a perfectly ordinary
-    /// state: a freshly-lexed line often ends in it, and comparing it against a
-    /// placeholder would look like convergence and stop the re-lex on a line
-    /// that never had a real cached state, stranding every line below it.
     private var lineEndState: [SQLLexState?] = [nil]
     private var lineClean: [Bool] = [false]
     private var lineSemis: [[Int]] = [[]]
@@ -486,15 +417,8 @@ final class SQLHighlighter: NSObject, NSTextStorageDelegate {
     private var isApplying = false
     private var charBuffer = [unichar](repeating: 0, count: 512)
 
-    /// Set while the whole document is being swapped (a tab switch). The edit
-    /// notification for "replace everything" carries no information the seeding
-    /// pass does not already recompute, so honouring it would just lex the new
-    /// document twice.
     var isSuspended = false
 
-    /// Attributes are written for the edited range too, so typed text colours
-    /// instantly — but a 5 MB paste must not turn into 5 MB of attribute runs
-    /// in one pass. The rest is picked up by the visible-range sweep.
     private static let maxEditApply = 40_000
 
     // MARK: attach
@@ -526,10 +450,6 @@ final class SQLHighlighter: NSObject, NSTextStorageDelegate {
         return lo
     }
 
-    /// Always clamped to the storage's current length. The cache and the
-    /// storage are briefly out of step whenever the document is swapped
-    /// wholesale, and an unclamped range here would hand `getCharacters` an
-    /// out-of-bounds request — which is a crash, not a wrong colour.
     private func lineRange(_ i: Int) -> NSRange {
         let len = length
         let start = min(lineStarts[i], len)
@@ -542,8 +462,6 @@ final class SQLHighlighter: NSObject, NSTextStorageDelegate {
         if charBuffer.count < n { charBuffer = [unichar](repeating: 0, count: max(n, charBuffer.count * 2)) }
     }
 
-    /// Lexes one line from its cached entry state. The only place characters are
-    /// pulled out of the storage.
     private func lexLine(
         _ i: Int, collectTokens: Bool, tokens: inout [SQLToken], semis: inout [Int]
     ) -> SQLLexState {
@@ -566,8 +484,6 @@ final class SQLHighlighter: NSObject, NSTextStorageDelegate {
         let ns = nsString
         let n = ns.length
         var starts: [Int] = [0]
-        // Chunked newline scan — one pass over the document, no per-character
-        // ObjC message sends.
         var offset = 0
         let chunk = 1 << 16
         var buf = [unichar](repeating: 0, count: min(chunk, max(n, 1)))
@@ -610,18 +526,12 @@ final class SQLHighlighter: NSObject, NSTextStorageDelegate {
         relex(from: first, mustCover: editedRange.upperBound)
 
         // Colour what was just typed, immediately, without touching layout.
-        // `batched: false` — we are already inside the storage's edit cycle, so
-        // opening a nested begin/endEditing here would re-enter processing.
         let capped = NSRange(
             location: editedRange.location,
             length: min(editedRange.length, Self.maxEditApply))
         applyAttributes(in: capped, batched: false)
     }
 
-    /// Splices the three parallel arrays to match the new text, without
-    /// re-scanning the document: entries before the edit are untouched, entries
-    /// after it are shifted by `delta`, and only the edited span is rescanned
-    /// for newlines.
     private func updateLineIndex(editedRange: NSRange, delta: Int) {
         let oldEnd = editedRange.location + editedRange.length - delta
         let L = lineIndex(for: editedRange.location)
@@ -632,11 +542,6 @@ final class SQLHighlighter: NSObject, NSTextStorageDelegate {
         if delta != 0 {
             for j in k..<lineStarts.count {
                 lineStarts[j] += delta
-                // `lineSemis` holds *absolute* offsets, so the statement
-                // boundaries below the edit have to move with the text. Missing
-                // this leaves every `;` past the first converged line pointing
-                // at where it used to be, and the block under the caret — the
-                // thing ⌘↵ runs — silently drifts.
                 for m in lineSemis[j].indices { lineSemis[j][m] += delta }
             }
         }
@@ -658,8 +563,6 @@ final class SQLHighlighter: NSObject, NSTextStorageDelegate {
         lineClean[L] = false
     }
 
-    /// Re-lex forward until the cache converges. `mustCover` guarantees we do
-    /// not declare victory before passing the end of the edit.
     private func relex(from first: Int, mustCover: Int) {
         var tokens: [SQLToken] = []
         var i = max(0, first)
@@ -677,14 +580,7 @@ final class SQLHighlighter: NSObject, NSTextStorageDelegate {
 
     // MARK: - attribute application
 
-    /// Re-attributes any dirty line intersecting the visible rect. Called after
-    /// an edit settles and when the clip view scrolls — never on a timer, and it
-    /// does nothing at all when every visible line is already clean, which is
-    /// the steady state.
     func refreshVisible() {
-        // Laying out a freshly-swapped document can post a bounds change before
-        // the cache has been re-seeded; colouring from a stale index would be
-        // reading the wrong lines at best.
         guard !isSuspended, let range = visibleRangeProvider?() else { return }
         applyAttributes(in: range, batched: true)
     }
@@ -738,9 +634,6 @@ final class SQLHighlighter: NSObject, NSTextStorageDelegate {
 
     // MARK: - block, line and bracket geometry
 
-    /// The statement containing `offset`, derived from the cached top-level `;`
-    /// offsets. No re-split of the document, so this is cheap enough to run on
-    /// every caret move — which is what the block background needs.
     func blockRange(containing offset: Int) -> NSRange {
         guard length > 0 else { return NSRange(location: 0, length: 0) }
         let caret = min(max(0, offset), length)
@@ -769,10 +662,6 @@ final class SQLHighlighter: NSObject, NSTextStorageDelegate {
         return lineRange(lineIndex(for: min(max(0, offset), length)))
     }
 
-    /// The bracket beside the caret and its partner, or nil. Brackets inside
-    /// strings and comments are skipped — that is why this walks tokens instead
-    /// of raw characters. The scan is capped so a lone `(` in a huge file cannot
-    /// turn a caret move into a document walk.
     private static let bracketScanLines = 400
 
     func bracketPair(at caret: Int) -> (NSRange, NSRange)? {
@@ -797,8 +686,6 @@ final class SQLHighlighter: NSObject, NSTextStorageDelegate {
         return nil
     }
 
-    /// The character at `offset`, but only if the lexer calls it punctuation —
-    /// a `(` inside `'a (b'` is not a bracket.
     private func bracketChar(at offset: Int) -> unichar? {
         let i = lineIndex(for: offset)
         for t in brackets(inLine: i) where t.offset == offset { return t.ch }

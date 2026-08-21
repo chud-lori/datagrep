@@ -1,16 +1,4 @@
 // QueryStatus.hpp — the decoded form of datagrep_query_status_json().
-//
-// The ABI returns status as JSON (contract quoted below); this struct is what the
-// model and status bar consume. Mirrors DatagrepKit.QueryStatus. Parsing lives
-// here (Qt's QJson) rather than in the dependency-free FFI layer.
-//
-// ABI contract (crates/datagrep-ffi/include/datagrep.h):
-//   {"state":"streaming"|"parked"|"capped"|"done"|"cancelled"|"failed",
-//    "rows_loaded":u64,"affected_rows":u64|null,"elapsed_ms":u64,
-//    "error":string|null,
-//    "read_only": null | {"enforcement":"server"|"client"|"none",
-//                         "server_confirmed":bool},
-//    "columns":[{"name":..,"type":..}],"total_known":bool}
 
 #ifndef DATAGREP_QUERY_STATUS_HPP
 #define DATAGREP_QUERY_STATUS_HPP
@@ -44,8 +32,6 @@ inline QueryState queryStateFromString(const QString& s) {
     return QueryState::Failed;
 }
 
-// Terminal states: the feeder has stopped. `capped` is terminal too — the server
-// hit a cap and there are honestly no more rows to wait for.
 inline bool isTerminal(QueryState s) {
     switch (s) {
         case QueryState::Done:
@@ -74,21 +60,15 @@ struct QueryStatus {
     QVector<ColumnSpec> columns;
     bool totalKnown = true;
 
-    // read_only enforcement, if the profile is guarded. Kept as the honest
-    // "which protection is in force" string the ABI reports; empty when the
-    // profile is writeable.
     QString readOnlyEnforcement;  // "server" | "client" | "none" | ""
     bool readOnlyServerConfirmed = false;
 
     // The "editable" block, when the engine says this result may be edited.
-    // nullopt is taken literally: no edit is offered at all.
     std::optional<EditableResult> editable;
 
     bool capped() const { return state == QueryState::Capped; }
     bool streaming() const { return !isTerminal(state); }
 
-    // Parses one status JSON payload. Defensive: missing keys degrade rather than
-    // throw, because the payload grows new keys over time.
     static QueryStatus parse(const QString& json);
 };
 

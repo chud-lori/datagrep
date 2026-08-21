@@ -18,8 +18,6 @@ QueryStatus QueryStatus::parse(const QString& json) {
     const QJsonObject o = doc.object();
 
     out.state = queryStateFromString(o.value(QStringLiteral("state")).toString());
-    // JSON numbers arrive as double; toVariant().toULongLong() preserves the
-    // integer magnitude the ABI put on the wire.
     out.rowsLoaded =
         o.value(QStringLiteral("rows_loaded")).toVariant().toULongLong();
     out.elapsedMs =

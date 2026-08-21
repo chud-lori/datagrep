@@ -1,28 +1,10 @@
 name: CI
 
-# The Tier-1 gate: every PR, hardware-independent,
-# deterministic, <8 min. Runs ci/gates.sh verbatim — the same script
-# contributors run locally, so "green in CI" and "green locally" mean
-# the same thing. gates.sh covers cargo fmt --check, the supply-chain scan
-# (cargo-audit + cargo-deny), clippy -D warnings, cargo test --workspace,
-# the anti-pattern greps, and the budget.toml size/crate-count checks.
-#
-# Runner policy (learned the hard way on chud-lori/tangi): never macos-13.
-# The free-tier Intel macOS pool is starved (10+ min queue while everything
-# else finished in seconds) and is on GitHub's deprecation path. All macOS
-# work runs on macos-14 (Apple silicon); release.yml cross-compiles x86_64
-# from there via rustup targets.
-
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  # Weekly, for the supply-chain gate specifically. Every other check here is a
-  # function of the tree and cannot change while the tree does not — but a new
-  # RUSTSEC advisory lands against a Cargo.lock nobody touched, and on a repo
-  # with a slow week that is precisely the window where a known-vulnerable
-  # dependency sits in main unnoticed. Monday morning, before anyone starts.
   schedule:
     - cron: "17 6 * * 1"
 
@@ -38,9 +20,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # keyring's Secret Service backend links libdbus. Without this the
-      # workspace does not build on a bare Ubuntu runner at all — the same
-      # dependency a Linux package will have to declare.
       - name: System dependencies
         run: |
           sudo apt-get update
@@ -51,9 +30,6 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Two Cargo workspaces in this repo: the root workspace (crates/*)
-      # and xtask/ (opts out via its own [workspace] table — see
-      # xtask/Cargo.toml — so its lockfile/target need caching separately).
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
@@ -61,28 +37,11 @@ jobs:
             .
             xtask
 
-      # Prebuilt binaries, not `cargo install`. Building cargo-audit and
-      # cargo-deny from source is ~4 minutes of the 8-minute Tier-1 budget for
-      # two tools that then spend 5 seconds each reading Cargo.lock;
-      # install-action pulls the release binaries in a couple of seconds. This
-      # step is also what makes gates.sh's supply-chain section a real gate:
-      # the script hard-fails when either tool is missing and CI is set, so
-      # deleting this step breaks the build rather than quietly disarming it.
       - name: Install supply-chain tools
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit,cargo-deny
 
-      # The RustSec advisory database is a git clone and a cold clone costs more
-      # than the scans themselves. The two tools do NOT share one directory:
-      # cargo-audit clones to ~/.cargo/advisory-db, cargo-deny to
-      # ~/.cargo/advisory-dbs (plural). Caching only the first leaves deny
-      # cold-cloning on every run, so both paths are listed.
-      #
-      # Key on run_id so the cache is rewritten every run and restore-keys picks
-      # up the most recent one; both tools `git pull` on startup anyway, so a
-      # restored copy is refreshed rather than stale — the cache saves the
-      # clone, not the update.
       - name: Cache RustSec advisory database
         uses: actions/cache@v4
         with:
@@ -99,9 +58,6 @@ jobs:
       - name: Run Tier-1 gates
         run: ./ci/gates.sh
 
-  # Builds the macOS app with the default stub FFI (synthetic data, no cargo
-  # involved) purely to catch Swift-side breakage on every push while staying
-  # fast. The real-FFI link (libdatagrep_ffi.a) is exercised by release.yml.
   macos-app:
     name: swift build (macos-14)
     # macos-14 ships Swift 5.10; Package.swift needs tools 6.1, which is on macos-15.

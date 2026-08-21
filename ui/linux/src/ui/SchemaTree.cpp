@@ -126,10 +126,6 @@ void SchemaTree::fetchInto(QTreeWidgetItem* parent, const QStringList& fetchPath
 
         if (hasChildren) {
             if (enumeration == kScanOnly) {
-                // No cheap listing: enumerating would be a full keyspace scan, so
-                // instead of a fetch-on-expand placeholder we plant a prompt row
-                // the user activates to supply a prefix. Expanding the node alone
-                // never enumerates it.
                 auto* prompt = new QTreeWidgetItem(node);
                 prompt->setText(0, QStringLiteral("Double-click to enter a key prefix…"));
                 prompt->setData(0, kScanPromptRole, true);
@@ -139,13 +135,9 @@ void SchemaTree::fetchInto(QTreeWidgetItem* parent, const QStringList& fetchPath
                                       "prefix — enumerating everything would be a "
                                       "full keyspace scan."));
             } else {
-                // A lazy placeholder gives the expand arrow without fetching the
-                // next level yet. It is replaced on first expansion.
                 auto* placeholder = new QTreeWidgetItem(node);
                 placeholder->setText(0, QStringLiteral("…"));
                 placeholder->setFlags(Qt::NoItemFlags);
-                // Only "cheap" nodes may auto-expand; paged / on_demand wait for
-                // the user so a large listing is never crawled on tree open.
                 if (enumeration == kCheap) {
                     node->setExpanded(true);  // triggers onItemExpanded -> fetch
                 }
@@ -162,7 +154,6 @@ void SchemaTree::onItemExpanded(QTreeWidgetItem* item) {
         return;  // already fetched
     }
     // A scan_only node is NEVER enumerated by expansion — it waits for a prefix.
-    // Expanding it just reveals its "enter a prefix" prompt row.
     if (item->data(0, kEnumerationRole).toString() == kScanOnly) {
         return;
     }
@@ -218,12 +209,6 @@ void SchemaTree::onItemActivated(QTreeWidgetItem* item, int /*column*/) {
 
 void SchemaTree::onCurrentItemChanged(QTreeWidgetItem* current,
                                       QTreeWidgetItem* /*previous*/) {
-    // Lazily describe the selected object into its tooltip — one object, only on
-    // selection, and only once (cached via kDescribedRole). Never on expansion,
-    // so selecting a node reads its columns/indexes but opening the tree does not.
-    // The raw payload is kept on the node and re-announced on every selection,
-    // so the inspector's schema pane follows the selection without ever issuing
-    // a describe of its own.
     if (core_ == nullptr) {
         return;
     }
@@ -254,9 +239,6 @@ void SchemaTree::onCurrentItemChanged(QTreeWidgetItem* current,
         current->setData(0, kDescribeJsonRole, json);
         emit objectDescribed(profile_, encodePath(path), json, QString());
     } catch (const dg::Error& e) {
-        // A describe failure is not worth interrupting selection over; the node
-        // simply keeps its kind tooltip. Leave kDescribedRole true so a broken
-        // object is not re-hit on every reselection. The pane still learns WHY.
         const QString error = QString::fromUtf8(e.what());
         current->setData(0, kDescribeErrorRole, error);
         emit objectDescribed(profile_, encodePath(path), QString(), error);

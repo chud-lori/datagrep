@@ -1,27 +1,11 @@
 import CDatagrepFFI
 import Foundation
 
-/// What a result says about editing it — the `editable` block of
-/// `datagrep_query_status_json`.
-///
-/// Absent (`nil`) means no edit may be offered at all, and the UI must take
-/// that literally: it is also what a connection that has not answered yet
-/// reports, because "we have not asked" and "yes" are different facts.
 public struct EditableResult: Sendable, Equatable {
-    /// Fields that name exactly one row (`_index`, `_id`, `_routing`). These
-    /// become the mutation's `key`; the engine never guesses which row a write
-    /// is for, so an edit is impossible without every one of them.
     public let identity: [String]
-    /// Fields a write compares against before applying (`_seq_no`,
-    /// `_primary_term`). These become the mutation's `expect`, carrying the
-    /// values that were *loaded* — that is the whole compare-and-swap.
     public let guardFields: [String]
-    /// The field the grid's columns are projected from (`_source`). Everything
-    /// outside it is the row envelope, which is where identity and guard live.
     public let root: String?
     /// False means a failing batch can leave the mutations before it applied.
-    /// The confirmation has to say so *before* the click, which is the only
-    /// moment it is still the user's decision.
     public let atomicBatch: Bool
 
     public init(identity: [String], guardFields: [String], root: String?, atomicBatch: Bool) {
@@ -32,8 +16,6 @@ public struct EditableResult: Sendable, Equatable {
     }
 
     /// Decodes the block, or `nil` for anything that is not a usable identity.
-    /// A malformed or half-present block reads as "not editable" rather than
-    /// as a partial yes.
     public static func decode(_ any: Any?) -> EditableResult? {
         guard let d = any as? [String: Any] else { return nil }
         let identity = (d["identity"] as? [Any] ?? []).compactMap { $0 as? String }
@@ -48,18 +30,6 @@ public struct EditableResult: Sendable, Equatable {
 
 extension EditableResult {
     /// The address one row's write needs, read out of that row's envelope.
-    ///
-    /// Two different failures, both refused here rather than sent:
-    ///
-    /// - no identity at all — nothing names the document, and guessing which
-    ///   one to write is the mistake this whole path exists to avoid;
-    /// - a missing guard field — the write could then only go unguarded, which
-    ///   the engine refuses anyway, so the sentence is worth more here where it
-    ///   can still say which field was missing and why it matters.
-    ///
-    /// An identity field that is simply not on this row (an unrouted document
-    /// carries no `_routing`) is left out of the key rather than sent as null:
-    /// absent and null are different facts, and the engine reads them so.
     public func address(envelope: [String: Any]) -> Result<
         (key: [(field: String, value: MutationValue)],
         expect: [(field: String, value: MutationValue)]), DatagrepError
@@ -94,10 +64,6 @@ extension EditableResult {
 // MARK: - values
 
 /// One value crossing the mutation ABI, in the engine's own `Value` spelling.
-///
-/// Deliberately a small set: these are the types a grid cell can be typed
-/// into. Anything richer — an object, an array — is edited as a document
-/// rather than as a cell, and is not offered here at all.
 public enum MutationValue: Sendable, Equatable {
     case string(String)
     case int(Int64)
@@ -105,8 +71,6 @@ public enum MutationValue: Sendable, Equatable {
     case bool(Bool)
     case null
 
-    /// serde's externally-tagged form, as `JSONSerialization` fragments:
-    /// `{"Str":"x"}`, `{"I64":42}`, and a bare `"Null"` for the unit variant.
     var abiJSON: Any {
         switch self {
         case .string(let s): return ["Str": s]
@@ -128,17 +92,11 @@ public enum MutationValue: Sendable, Equatable {
         }
     }
 
-    /// Reads one value out of parsed JSON — an envelope field, or a cell's
-    /// detail payload. Objects and arrays return `nil`: they are values this
-    /// type deliberately cannot carry, not values it should flatten.
     public static func decode(_ any: Any?) -> MutationValue? {
         switch any {
         case let s as String: return .string(s)
         case is NSNull: return .null
         case let n as NSNumber:
-            // JSONSerialization hands back NSNumber for true/false as well, and
-            // sending a bool on as an integer would rewrite the field's type on
-            // a server that types its fields.
             if CFGetTypeID(n) == CFBooleanGetTypeID() { return .bool(n.boolValue) }
             let objCType = String(cString: n.objCType)
             if objCType == "d" || objCType == "f" { return .double(n.doubleValue) }
@@ -148,16 +106,6 @@ public enum MutationValue: Sendable, Equatable {
     }
 
     /// The typed text, coerced to the type the loaded value had.
-    ///
-    /// A field that came back as a number goes back as a number. Retyping it
-    /// as a string would be accepted by this side and then either rejected by
-    /// the server or — worse — silently stored under a different type, so the
-    /// coercion is refused here, where the sentence can still name the field
-    /// and the value the user typed.
-    ///
-    /// A field loaded as NULL has no type to preserve, so its text is read the
-    /// way JSON would read it: `42` is a number, `true` is a bool, everything
-    /// else is a string.
     public static func typed(_ text: String, like loaded: MutationValue?) -> Result<
         MutationValue, DatagrepError
     > {
@@ -196,18 +144,11 @@ public enum MutationValue: Sendable, Equatable {
 // MARK: - the batch
 
 /// One document's write, addressed the way the engine addresses it.
-///
-/// `key` and `expect` are separate on purpose and mean different things: the
-/// key says *which* document, the expectation says *which version of it*. A
-/// driver that cannot honour an expectation must refuse the write rather than
-/// drop it, so nothing here ever leaves `expect` off to "make it work".
 public struct DocumentMutation: Sendable {
     /// The object path the write targets — the index the row was read from.
     public var path: [String]
     public var key: [(field: String, value: MutationValue)]
     public var expect: [(field: String, value: MutationValue)]
-    /// Field name → new value, relative to the document root. Empty for a
-    /// delete.
     public var sets: [(field: String, value: MutationValue)]
     public var isDelete: Bool
 
@@ -235,12 +176,6 @@ public struct DocumentMutation: Sendable {
         return ["Update": body]
     }
 
-    /// `(FieldPath, Value)` — a one-segment path paired with its value, which
-    /// on the wire is `[[{"Field":"status"}], {"Str":"done"}]`.
-    ///
-    /// Shared with `DocumentAddress` below: a re-read addresses a document with
-    /// the very same key its write did, and two encoders for one wire shape is
-    /// two things to get wrong.
     static func pair(_ field: String, _ value: MutationValue) -> [Any] {
         [[["Field": field]], value.abiJSON]
     }
@@ -261,10 +196,6 @@ public enum MutationBatch {
 // MARK: - asking what the server holds now
 
 /// One document to re-read, addressed exactly as its write was.
-///
-/// This is the read half of a version conflict. Nothing about it retries a
-/// write: it fetches the current document so the three readings — loaded,
-/// server-now, typed — can be put side by side and a person can choose.
 public struct DocumentAddress: Sendable {
     public var key: [(field: String, value: MutationValue)]
 
@@ -290,11 +221,6 @@ public enum DocumentAddressBatch {
 }
 
 /// One field of a document as the server holds it now.
-///
-/// `nested` rather than a flattened value: a field that has become an object or
-/// an array is not something the three-column view can compare against a typed
-/// cell, and saying which it is beats showing a blank the user would read as
-/// "empty".
 public enum ServerValue: Sendable, Equatable {
     case value(MutationValue)
     case nested(String)
@@ -324,14 +250,9 @@ public enum ServerValue: Sendable, Equatable {
     }
 }
 
-/// What one re-read found. `found == false` with no `error` means the document
-/// is simply gone — someone deleted it, which is a resolution in itself and
-/// leaves nothing to rebase onto.
 public struct ServerDocument: Sendable {
     public let found: Bool
     public let error: String?
-    /// The fields outside the projected root: which document this is, and the
-    /// *fresh* guard values a rebase re-guards against.
     public let envelope: [String: ServerValue]
     /// The document itself, at its root.
     public let fields: [String: ServerValue]
@@ -360,14 +281,10 @@ public struct ServerDocument: Sendable {
 
 // MARK: - the report
 
-/// What happened to one document. A conflict is a row here, not an error:
-/// the batch still returns a report, and the conflict is a state the UI shows.
 public struct MutationRow: Sendable, Identifiable {
     public enum Outcome: String, Sendable {
         case applied
         case failed
-        /// The batch halted before reaching this one. Nothing was written and
-        /// nothing was rolled back — it is simply still pending.
         case notAttempted = "not attempted"
     }
 
@@ -381,8 +298,6 @@ public struct MutationRow: Sendable, Identifiable {
     public let conflict: Bool
     public let errorCode: String?
     public let error: String?
-    /// The server escalated a `wait_for` refresh to an immediate one — a load
-    /// the cluster paid for this save. The driver reports it as a notice too.
     public let forcedRefresh: Bool
 
     public var id: String { "\(index)\u{1}\(documentID)\u{1}\(op)" }
@@ -403,8 +318,6 @@ public struct MutationRow: Sendable, Identifiable {
     }
 }
 
-/// A non-fatal message the engine sent along with the batch. Shown, never
-/// swallowed: `forced_refresh` and a partial-batch summary both arrive here.
 public struct MutationNotice: Sendable, Identifiable {
     public let severity: String
     public let code: String?
@@ -447,16 +360,6 @@ public struct MutationReport: Sendable {
 
 extension DatagrepCoreHandle {
     /// Commit one batch of document edits and wait for the report.
-    ///
-    /// **This blocks.** Unlike running a query, a save is a discrete commit
-    /// with an answer, so the ABI is synchronous and this must be called off
-    /// the main queue — the window stays live and says "committing…" instead
-    /// of beachballing on a cluster that is thinking.
-    ///
-    /// A per-row version conflict comes back *in the report*, not as a throw:
-    /// nothing about it is exceptional, and the UI has a state for it. A throw
-    /// means the batch as a whole never ran — a read-only refusal, an
-    /// unparseable batch, a driver that refused every write up front.
     public func mutate(profile: String, mutations: [DocumentMutation]) throws -> MutationReport {
         let batch = try MutationBatch.json(mutations)
         let json = try profile.withCString { p in
@@ -468,15 +371,6 @@ extension DatagrepCoreHandle {
     }
 
     /// Read what the server holds now for each address, in the order given.
-    ///
-    /// **This blocks**, like `mutate`, and must be called off the main queue.
-    /// The answers are matched to the addresses **by position** — the engine
-    /// returns exactly one entry per address — which is the same contract the
-    /// commit report follows, and for the same reason: matching by id would
-    /// need this layer to know which identity field *is* the id.
-    ///
-    /// A document that has been deleted comes back as `found == false`, not as
-    /// a throw. A throw means the whole read never ran.
     public func reread(profile: String, addresses: [DocumentAddress]) throws -> [ServerDocument] {
         let body = try DocumentAddressBatch.json(addresses)
         let json = try profile.withCString { p in

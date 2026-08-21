@@ -1,12 +1,5 @@
 import AppKit
 
-/// A rectangular block of cells, expressed in DISPLAY coordinates: a view row
-/// index and a column *position* in the table (not the engine's column index,
-/// which survives reordering and is resolved separately).
-///
-/// The block is stored as anchor + focus rather than as two ranges, because
-/// which corner is which is exactly what shift-click and shift-arrow need to
-/// know: extending always moves the focus and leaves the anchor pinned.
 struct GridCellRange: Equatable {
     var anchorRow: Int
     var anchorColumn: Int
@@ -39,9 +32,6 @@ struct GridCellRange: Equatable {
         focusColumn = column
     }
 
-    /// Keeps the block inside a table that may have shrunk (a new result, or a
-    /// streaming one that was reset) without ever silently pointing at rows the
-    /// engine no longer reports.
     func clamped(rowCount: Int, columnCount: Int) -> GridCellRange? {
         guard rowCount > 0, columnCount > 0 else { return nil }
         var r = self
@@ -52,17 +42,12 @@ struct GridCellRange: Equatable {
         return r
     }
 
-    /// True when the block covers every column the table has, i.e. the user is
-    /// really selecting whole rows and should see a whole-row highlight.
     func spansAllColumns(of columnCount: Int) -> Bool {
         columns.lowerBound <= 0 && columns.upperBound >= columnCount - 1
     }
 }
 
 enum GridCopy {
-    /// A drag with autoscroll can cover an unbounded number of rows. Copying is
-    /// the one place where a big selection would pull page after page through
-    /// the FFI, so it is capped and the status message says so.
     static let maxRows = 20_000
 
     static func summary(rows: Int, columns: Int, truncated: Bool) -> String {

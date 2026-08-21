@@ -9,8 +9,6 @@
 
 UpdateNotice::UpdateNotice(UpdateCheck* check, QWidget* parent)
     : QWidget(parent), check_(check), label_(new QLabel(this)) {
-    // Palette roles, not hard-coded colours, so the bar follows every
-    // appearance mode.
     setAutoFillBackground(true);
     setBackgroundRole(QPalette::AlternateBase);
 

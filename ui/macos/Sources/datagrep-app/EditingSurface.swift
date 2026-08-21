@@ -2,11 +2,6 @@ import DatagrepKit
 import SwiftUI
 
 /// The bar under the grid while edits are staged.
-///
-/// It exists so that "I typed something" and "I wrote something" are visibly
-/// different states. Nothing typed into the grid reaches the server until the
-/// button on the right of this bar is pressed, and the bar is the standing
-/// reminder that there is unwritten work.
 struct StagedEditsBar: View {
     @ObservedObject var model: AppModel
     @ObservedObject var edits: PendingEdits
@@ -36,10 +31,6 @@ struct StagedEditsBar: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             } else if edits.pendingCount == 0 {
-                // Everything staged was written. What is on screen is still the
-                // rows as they were loaded, with the typed values drawn over
-                // them — so the only way to see what the server holds is to ask
-                // it again, and that is what this offers.
                 Button("Reload") { model.reloadResult() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
@@ -47,9 +38,6 @@ struct StagedEditsBar: View {
                 Button("Discard") { model.discardStagedEdits() }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                // A conflicted edit cannot simply be committed again — it would
-                // be refused by the same guard — so the way forward is offered
-                // where the refusal is visible, not only inside the report.
                 if edits.conflictCount > 0 {
                     Button(conflictTitle) { model.reviewConflicts() }
                         .buttonStyle(.borderedProminent)
@@ -83,8 +71,6 @@ struct StagedEditsBar: View {
             : "\(n) documents edited, not yet written"
     }
 
-    /// Names the shape of what is staged: updates and deletes are different
-    /// enough that a single count would be hiding one behind the other.
     private var detail: String? {
         var parts: [String] = []
         if edits.updateCount > 0 { parts.append("\(edits.updateCount) to update") }
@@ -111,11 +97,6 @@ struct StagedEditsBar: View {
 // MARK: - the report
 
 /// What the commit actually did, per document.
-///
-/// A sheet rather than a toast, for the reason the whole halt-and-report design
-/// exists: a batch that stopped half way through leaves the user with three
-/// different kinds of row — written, refused, never tried — and a message that
-/// fades after four seconds cannot carry that, let alone let them act on it.
 struct MutationReportSheet: View {
     @ObservedObject var model: AppModel
     let report: MutationReport
@@ -208,9 +189,6 @@ struct MutationReportSheet: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             Spacer()
-            // The only offer a conflict gets here is to go and look at it. What
-            // is deliberately absent is a "retry": re-sending the same write
-            // against a document that moved is the clobber the guard refused.
             if report.conflicts > 0 {
                 Button("Resolve Conflicts…") { model.reviewConflicts() }
                     .disabled(model.isRereading)

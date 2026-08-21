@@ -1,9 +1,6 @@
 import Darwin
 import Foundation
 
-/// How datagrep measures memory: on macOS the number is `phys_footprint`,
-/// NOT `ps` RSS (RSS overcounts shared dyld pages by
-/// 10–30 MB). Both are reported so the difference is visible.
 public enum Footprint {
     public struct Sample {
         public let physFootprint: UInt64
@@ -27,7 +24,6 @@ public enum Footprint {
     }
 
     /// Total CPU time consumed by every thread in this process, in seconds.
-    /// Used to prove the idle budget (P12) without running a timer.
     public static func cpuSeconds() -> Double {
         var info = task_thread_times_info_data_t()
         var count = mach_msg_type_number_t(

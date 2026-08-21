@@ -1,29 +1,5 @@
 #!/usr/bin/env bash
 # Build datagrep-<version>-x86_64.AppImage from the already-built Qt binary.
-#
-# This script does NOT build anything — it packages the output of the existing
-# CMake build (see ui/linux/README.md). Build first:
-#
-#   cargo build -p datagrep-ffi --release
-#   cmake -S ui/linux -B ui/linux/build -DCMAKE_BUILD_TYPE=Release -DDATAGREP_BUILD_RUST=OFF
-#   cmake --build ui/linux/build
-#
-# Then:
-#
-#   packaging/build-appimage.sh [path/to/datagrep-binary]
-#
-# Tooling: linuxdeploy + linuxdeploy-plugin-qt (downloaded on first run into
-# dist/.appimage-work/tools). The qt plugin walks the binary's Qt dependencies and
-# bundles the Qt runtime + platform plugins into the AppDir; linuxdeploy then
-# emits a single portable AppImage. References:
-#   https://docs.appimage.org/packaging-guide/from-source/native-binaries.html
-#   https://github.com/linuxdeploy/linuxdeploy-plugin-qt
-#
-# Env overrides:
-#   VERSION   package version   (default: workspace version from Cargo.toml)
-#   OUT_DIR   output directory  (default: <repo>/dist)
-#   QMAKE     qmake binary the qt plugin should query (default: qmake6 if found)
-#   DEPLOY_PLATFORM_THEMES  bundle host platform theme plugins (default: 1)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -54,9 +30,6 @@ if [[ -z "$VERSION" ]]; then
 fi
 export VERSION   # linuxdeploy uses $VERSION for the output filename
 
-# The qt plugin locates Qt by interrogating qmake. On Debian/Ubuntu the Qt6
-# qmake is `qmake6` (bare `qmake` may be Qt5 or absent), so point the plugin
-# at it explicitly unless the caller already did.
 if [[ -z "${QMAKE:-}" ]] && command -v qmake6 >/dev/null 2>&1; then
     export QMAKE="$(command -v qmake6)"
 fi
@@ -78,14 +51,8 @@ fetch "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/co
 
 rm -rf "$APPDIR"
 
-# The qt plugin skips platformthemes/ by default, leaving the AppImage without
-# desktop integration (system fonts, palette, native file dialogs). Needs
-# qt6-gtk-platformtheme (+ qt6-xdgdesktopportal-platformtheme) on the build host.
 export DEPLOY_PLATFORM_THEMES="${DEPLOY_PLATFORM_THEMES:-1}"
 
-# linuxdeploy writes the AppImage into the current directory; the plugin is
-# discovered because it sits next to (or on PATH relative to) the invocation —
-# pass the AppDir + inputs explicitly and run from OUT_DIR.
 export PATH="$TOOLS_DIR:$PATH"
 cd "$OUT_DIR"
 "$LINUXDEPLOY" \

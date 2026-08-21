@@ -50,8 +50,6 @@ EditorTabs::EditorTabs(QWidget* parent) : QWidget(parent) {
         "The connection this tab runs against. `-- @connection` inside the "
         "statement still wins."));
     bindCombo_->addItem(QStringLiteral("Follow window connection"), QString());
-    // activated, not currentIndexChanged: only a user pick binds; programmatic
-    // syncs (tab switches) must not.
     connect(bindCombo_, &QComboBox::activated, this, [this](int index) {
         Tab* tab = activeTab();
         if (tab == nullptr) {
@@ -79,9 +77,6 @@ EditorTabs::EditorTabs(QWidget* parent) : QWidget(parent) {
     cornerLayout->addWidget(bindCombo_);
     tabWidget_->setCornerWidget(corner, Qt::TopRightCorner);
 
-    // The welcome pane: what fills the editor area when nothing is open. No
-    // manufactured "Untitled 1" and no sample SQL in a dialect that is wrong
-    // for every connection but one.
     welcome_ = new QWidget(this);
     auto* welcomeLayout = new QVBoxLayout(welcome_);
     welcomeLayout->addStretch(2);
@@ -203,10 +198,6 @@ void EditorTabs::setConnections(const QVector<QPair<QString, QString>>& connecti
     connectionsAuthoritative_ = !connections.isEmpty();
     syncBindCombo();
 
-    // Prune tabs bound to connections that no longer exist — but only against
-    // an authoritative, non-empty list; guessing would throw away valid tabs.
-    // The .sql/.json pairs stay on disk: a missing connection is not a reason
-    // to destroy SQL someone wrote.
     if (!connectionsAuthoritative_) {
         return;
     }
@@ -274,9 +265,6 @@ void EditorTabs::onCloseRequested(int index) {
     flushTab(tab);
     const QString text = tab.editor->toPlainText();
 
-    // Closing an unsaved scratch tab is the ONLY action that destroys typed
-    // SQL — quitting keeps everything — so it is the one place a confirmation
-    // belongs, and there is deliberately none on quit.
     if (tab.record.isScratch() && tab.record.isDirty &&
         !text.trimmed().isEmpty()) {
         QMessageBox box(QMessageBox::Warning, QStringLiteral("Discard this query?"),
@@ -307,8 +295,6 @@ void EditorTabs::onCloseRequested(int index) {
         performClose(index, /*keepFiles=*/false);
         return;
     }
-    // A named query is a file the user asked us to keep: closing its tab drops
-    // it from the session, never from the disk.
     performClose(index, /*keepFiles=*/!tab.record.isScratch());
 }
 
@@ -415,8 +401,6 @@ void EditorTabs::updateTabChrome(int index) {
         title += QStringLiteral(" •");
     }
     tabWidget_->setTabText(index, title);
-    // Same rule as macOS: the mark shows the EFFECTIVE engine — the binding
-    // when bound, the window connection otherwise — and hides when unknown.
     const QString effective = tab.record.connection.isEmpty()
                                   ? windowConnection_
                                   : tab.record.connection;
@@ -507,8 +491,6 @@ void EditorTabs::appendTab(const dg::SavedQueryRecord& record, const QString& te
     }
 }
 
-// Lowest unused number within one connection, so every connection starts at
-// "Untitled 1" rather than continuing a global count.
 int EditorTabs::nextUntitledNumber(const QString& connection) const {
     QSet<int> used;
     for (const Tab& tab : tabs_) {
@@ -545,8 +527,6 @@ void EditorTabs::restoreSession() {
     for (const SavedQueryStore::LoadedTab& t : loaded.tabs) {
         appendTab(t.record, t.text, /*activate=*/false);
     }
-    // Renumber untitled tabs per connection in restore order, so two
-    // connections can each have an "Untitled 1".
     QHash<QString, int> counters;
     for (int i = 0; i < tabs_.size(); ++i) {
         if (tabs_.at(i).record.isScratch()) {
@@ -619,8 +599,6 @@ void EditorTabs::syncBindCombo() {
             break;
         }
     }
-    // A restored binding to a profile the list does not know yet still has to
-    // be visible, or the binding would silently read as "window".
     if (select == 0 && !bound.isEmpty()) {
         bindCombo_->addItem(bound, bound);
         select = bindCombo_->count() - 1;
@@ -635,8 +613,6 @@ void EditorTabs::rebuildPlusMenu() {
     menu->addAction(QStringLiteral("New Query Tab"), this, &EditorTabs::newTab);
 
     // Closed named queries, the way back to a .sql the bar no longer shows.
-    // Records bound to a gone connection are hidden under the same rule as the
-    // orphan pruning, so pruned tabs do not reappear as stale entries.
     QSet<QString> open;
     for (const Tab& tab : tabs_) {
         open.insert(tab.record.id);

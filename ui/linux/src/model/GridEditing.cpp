@@ -13,8 +13,6 @@ std::optional<MutationValue> StagedDocument::valueOf(const QString& field) const
 
 DocumentMutation StagedDocument::mutation() const {
     DocumentMutation m;
-    // `path` is where a NEW document would go; nothing here inserts one, so it
-    // is sent empty rather than guessed.
     m.key = key;
     m.expect = expect;
     if (!isDelete) {
@@ -113,8 +111,6 @@ void PendingEdits::stage(const QString& id, int row, const QVector<FieldValue>& 
     if (!found) {
         doc.sets.append(StagedField{field, value, loaded});
     }
-    // A row edited again after a failed commit is pending again; leaving it
-    // marked failed would report a stale verdict.
     doc.state = StagedState{};
     put(doc, row);
     emit stagingChanged();

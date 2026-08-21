@@ -5,17 +5,9 @@ import SwiftUI
 // MARK: - colour vocabulary
 
 /// The connection colours offered in the editor.
-///
-/// Named, not free-form: the value is stored on the profile and read back by
-/// the CLI, so it has to mean the same thing in both. Every swatch resolves to
-/// a *system* colour, which is why the sidebar marker stays legible in dark
-/// mode — safety UI that disappears in one theme is a failure other clients
-/// have shipped over and over.
 enum ConnectionColor {
     static let names = ["red", "orange", "yellow", "green", "blue", "purple", "graphite"]
 
-    /// The same palette as `color(_:)`, for AppKit surfaces (the window
-    /// chrome) that cannot take a SwiftUI `Color`.
     static func nsColor(_ name: String?) -> NSColor? {
         switch name?.lowercased() {
         case "red": return .systemRed
@@ -45,18 +37,6 @@ enum ConnectionColor {
 
 // MARK: - the connection form
 
-/// Host, port, database, user — and the URL, which is the same value written
-/// the other way round.
-///
-/// One object behind both dialogs so New and Edit cannot drift apart. There is
-/// exactly one source of truth: the structured fields. The URL box renders
-/// them, and typing in it parses straight back, so the two can never disagree
-/// — the alternative (storing both and syncing) is how a connection dialog
-/// ends up saving the host you can see and the port you cannot.
-///
-/// While the URL box is being typed in, the literal text is held in
-/// `rawURLDraft` and the fields track it. Rendering the fields back into the
-/// box on every keystroke would rewrite half-typed input under the caret.
 @MainActor
 final class ConnectionForm: ObservableObject {
     @Published var name: String = ""
@@ -65,16 +45,10 @@ final class ConnectionForm: ObservableObject {
     @Published var port: String = ""
     @Published var database: String = ""
     @Published var username: String = ""
-    /// Kept here rather than in a text field bound to the URL: a password
-    /// belongs behind a `SecureField`, and it is spliced into the URL only on
-    /// the one path that hands it to the engine, which lifts it into the
-    /// keychain before anything is written.
     @Published var password: String = ""
     @Published var filePath: String = ""
     @Published var useTLS: Bool = false
     @Published var extras: String = ""
-    /// The URL box is folded away by default — the fields are the primary way
-    /// in, and the URL is there for people who already have one to paste.
     @Published var showsRawURL: Bool = false
 
     @Published private var rawURLDraft: String?
@@ -94,9 +68,6 @@ final class ConnectionForm: ObservableObject {
     /// What is shown, and what Save/Add sends — without the password.
     var url: String { rawURLDraft ?? fields.url() }
 
-    /// The URL with the typed password spliced in. The only thing that ever
-    /// sees it is `datagrep_profiles_add` / `_update`, both of which move it
-    /// into the keychain and drop it from the stored config.
     var urlWithPassword: String {
         guard !password.isEmpty else { return url }
         guard rawURLDraft == nil else {
@@ -105,16 +76,12 @@ final class ConnectionForm: ObservableObject {
         return fields.url(includingPassword: true)
     }
 
-    /// Two-way binding for the raw URL box. Reading renders the fields;
-    /// writing parses the text back into them.
     var urlBinding: Binding<String> {
         Binding(
             get: { self.url },
             set: { text in
                 self.rawURLDraft = text
                 guard var parsed = ConnectionFields.parse(text) else { return }
-                // A password pasted inside a URL is lifted straight out into
-                // the secure field and never rendered back into the box.
                 if !parsed.password.isEmpty {
                     self.password = parsed.password
                     parsed.password = ""
@@ -124,8 +91,6 @@ final class ConnectionForm: ObservableObject {
             })
     }
 
-    /// Bindings for the structured fields. Every write clears `rawURLDraft`, so
-    /// the URL box goes back to rendering whatever the fields now say.
     func text(_ keyPath: ReferenceWritableKeyPath<ConnectionForm, String>) -> Binding<String> {
         Binding(
             get: { self[keyPath: keyPath] },
@@ -144,8 +109,6 @@ final class ConnectionForm: ObservableObject {
             })
     }
 
-    /// Pick an engine. The port is cleared rather than carried over, so the new
-    /// engine's default applies instead of MySQL's 3306 following you to Redis.
     func selectEngine(_ id: String) {
         guard EngineStyle.canonicalID(id) != EngineStyle.canonicalID(engineID) else { return }
         rawURLDraft = nil
@@ -163,9 +126,6 @@ final class ConnectionForm: ObservableObject {
         password = f.password
     }
 
-    /// The half of `apply` that a keystroke in the URL box performs: everything
-    /// except the password, which is handled by the caller so a URL that has
-    /// none does not wipe one the user typed.
     private func applyParsed(_ f: ConnectionFields) {
         engineID = f.engineID
         host = f.host
@@ -186,9 +146,6 @@ final class ConnectionForm: ObservableObject {
     }
 }
 
-/// What a Test Connection is doing, and what it found. Its own object so both
-/// sheets can hold one without either growing a second copy of the same three
-/// fields.
 @MainActor
 final class ConnectionTestState: ObservableObject {
     @Published var running = false
@@ -211,26 +168,14 @@ final class ConnectionTestState: ObservableObject {
 // MARK: - draft
 
 /// The editor's working copy of one connection.
-///
-/// Held apart from the saved profile on purpose: nothing typed here reaches the
-/// engine until Save, and the patch sent on Save is the *difference* against
-/// `original`, so a field this build did not report is never written back as an
-/// empty value.
 @MainActor
 final class ConnectionDraft: ObservableObject, Identifiable {
     nonisolated let id = UUID()
 
-    /// The name the connection is saved under. It is also the ABI's key, so a
-    /// rename has to send the old one alongside the new.
     let originalName: String
 
-    /// Host / port / database / user, and the URL they render to. Shared with
-    /// the New Connection sheet so the two dialogs cannot drift.
     let form = ConnectionForm()
     let test = ConnectionTestState()
-    /// Nested `ObservableObject`s do not propagate, so the sheet's footer —
-    /// which reads `changedKeys`, which reads the URL — would not redraw when a
-    /// field changed. Forwarding the child's `objectWillChange` is the fix.
     private var nested: [AnyCancellable] = []
 
     @Published var name: String
@@ -240,9 +185,6 @@ final class ConnectionDraft: ObservableObject, Identifiable {
     @Published var idleTimeoutText: String
     @Published var color: String?
 
-    /// Never pre-filled. The saved secret is in the keychain and does not come
-    /// back through this ABI — round-tripping it through a text field would put
-    /// a live password in the view hierarchy for no gain.
     var password: String {
         get { form.password }
         set { form.password = newValue }
@@ -252,9 +194,6 @@ final class ConnectionDraft: ObservableObject, Identifiable {
     @Published var loading = false
     @Published var saving = false
     @Published var error: String?
-    /// Set when the sheet opened against a build that cannot read a profile
-    /// back, so the URL box is blank because we do not know it — not because
-    /// the connection has no URL.
     @Published var urlUnknown = false
 
     @Published var enforcement: ReadOnlyEnforcement = .unknown
@@ -296,11 +235,6 @@ final class ConnectionDraft: ObservableObject, Identifiable {
     }
 
     /// Fill the fields from whatever the engine reported.
-    ///
-    /// `datagrep_profiles_get_json` returns the *parsed* config and no `url`
-    /// key, so `detail.fields` is the direct route and the URL is only used
-    /// when a build reports one instead. A build that reports neither leaves
-    /// the fields blank and `urlUnknown` explains why.
     private func seedForm(_ detail: ProfileDetail) {
         if let fields = detail.fields {
             form.apply(fields)
@@ -316,8 +250,6 @@ final class ConnectionDraft: ObservableObject, Identifiable {
 
     var url: String { form.url }
 
-    /// The URL the profile was opened with, for deciding whether Test should
-    /// dial the saved connection or the edited one.
     var originalURL: String { original.url }
 
     var driver: String {
@@ -336,11 +268,6 @@ final class ConnectionDraft: ObservableObject, Identifiable {
     }
 
     /// The URL actually sent, with a freshly typed password spliced in.
-    ///
-    /// `datagrep_profiles_add` already takes the secret this way and lifts it
-    /// into the keychain before the profile is written, so this reuses the one
-    /// path that is known to keep a password off disk. When the user types
-    /// nothing, no URL password is sent and the stored secret is left alone.
     private var urlToSend: String? {
         let typed = password
         let urlChanged = trimmedURL != original.url && !trimmedURL.isEmpty
@@ -349,13 +276,8 @@ final class ConnectionDraft: ObservableObject, Identifiable {
         return Self.embedPassword(typed, in: trimmedURL.isEmpty ? original.url : trimmedURL)
     }
 
-    /// What Test Connection dials: the URL as edited, password included, so a
-    /// green result means the credentials in front of the user actually work.
     var urlToTest: String { form.urlWithPassword }
 
-    /// Inserts a password into `scheme://user@host/…` between the user and the
-    /// `@`. Percent-encodes it, because a `@` or a `/` in a password otherwise
-    /// re-points the URL at a different host.
     static func embedPassword(_ password: String, in url: String) -> String {
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "-._~")
@@ -399,8 +321,6 @@ final class ConnectionDraft: ObservableObject, Identifiable {
 
 // MARK: - shared field views
 
-/// The engine picker. One tap picks the engine; the fields below it change
-/// shape with it, because SQLite is a file and the rest are servers.
 struct EnginePicker: View {
     @ObservedObject var form: ConnectionForm
 
@@ -440,26 +360,13 @@ struct EnginePicker: View {
     }
 }
 
-/// Host / Port / Database / User / Password — the way every other client asks,
-/// instead of making the user hand-write a URL.
-///
-/// The URL is still there, one disclosure away, and stays in step: it is
-/// rendered from these fields and parsed straight back, so pasting one fills
-/// them in and editing them rewrites it.
 struct ConnectionFieldsView: View {
     @ObservedObject var form: ConnectionForm
-    /// The connection's name. Drawn here rather than by the two sheets so every
-    /// label in the dialog sits in one grid column — a Name row in an outer
-    /// grid and Host/Port in an inner one line up nowhere.
     var name: Binding<String>?
-    /// The Edit sheet has a password already in the keychain and must say so;
-    /// the New sheet has nothing to say about one.
     var hasStoredSecret: Bool = false
 
     private var engine: ConnectionEngine? { form.engine }
 
-    /// One label column width for the whole dialog, shared with the settings
-    /// grid below it so the two read as one form.
     static let labelWidth: CGFloat = 88
 
     private func label(_ text: String) -> some View {
@@ -575,8 +482,6 @@ struct ConnectionFieldsView: View {
         .animation(.smooth(duration: 0.18), value: form.showsRawURL)
     }
 
-    /// A file picker, because typing an absolute path from memory is not a
-    /// reasonable thing to ask for the one engine whose "host" is a path.
     private func chooseFile() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
@@ -589,10 +494,6 @@ struct ConnectionFieldsView: View {
 }
 
 /// The Test Connection button and whatever the last test said.
-///
-/// The whole point is that it reports the engine's *own* answer: the server
-/// version on success, the driver's real message on failure. "Added a
-/// connection and had no idea whether it worked" is the state this ends.
 struct ConnectionTestRow: View {
     @ObservedObject var state: ConnectionTestState
     let enabled: Bool
@@ -643,9 +544,6 @@ struct ConnectionTestRow: View {
 
 // MARK: - the sheet
 
-/// Edit Connection. Deliberately the same silhouette as `NewConnectionSheet` —
-/// same header, same field grid, same footer — because a user who has added a
-/// connection should recognise this instantly rather than learn a second dialog.
 struct ConnectionEditorSheet: View {
     @ObservedObject var model: AppModel
     @ObservedObject var draft: ConnectionDraft
@@ -676,7 +574,6 @@ struct ConnectionEditorSheet: View {
             }
 
             safetySection
-
 
             if let err = draft.error {
                 Callout(symbol: "exclamationmark.triangle.fill", tone: .error, text: err)
@@ -728,8 +625,6 @@ struct ConnectionEditorSheet: View {
             .frame(width: ConnectionFieldsView.labelWidth, alignment: .leading)
     }
 
-    /// Environment, colour and the two limits — the settings half of the sheet,
-    /// on the same label column as the connection half above it.
     private var settings: some View {
         Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
             GridRow {
@@ -768,8 +663,6 @@ struct ConnectionEditorSheet: View {
 
     // MARK: safety
 
-    /// The reason this dialog exists. Read-only first, and it says which kind
-    /// of read-only it is buying you before you rely on it.
     private var safetySection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Toggle(isOn: $draft.readOnly) {
@@ -816,14 +709,11 @@ struct ConnectionEditorSheet: View {
         )
     }
 
-
     // MARK: footer
 
     private var footer: some View {
         HStack {
             if !draft.changedKeys.isEmpty {
-                // What the patch will contain, spelled out. Nothing this dialog
-                // does not name here is written.
                 Text("Will save: \(draft.changedKeys.joined(separator: ", "))")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -842,8 +732,6 @@ struct ConnectionEditorSheet: View {
 
 // MARK: - pieces
 
-/// Says which protection is really in force. Never phrased so that a
-/// client-side guard could be mistaken for the server refusing writes.
 struct EnforcementNote: View {
     let level: ReadOnlyEnforcement
 

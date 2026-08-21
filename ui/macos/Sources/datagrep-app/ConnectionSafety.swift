@@ -4,8 +4,6 @@ import SwiftUI
 
 // MARK: - what one connection promises
 
-/// The safety facts about a connection, resolved once so the sidebar, the
-/// titlebar chip and the query path all answer the question the same way.
 struct ConnectionSafety: Equatable {
     var name: String
     var readOnly: Bool
@@ -17,8 +15,6 @@ struct ConnectionSafety: Equatable {
         name: "", readOnly: false, enforcement: .unknown, confirmWrites: false,
         color: nil)
 
-    /// A colour is the user's own "this one matters" marker — datagrep does
-    /// not decide what red means, it just shows it where a mistake would hurt.
     var isMarked: Bool { color != nil }
 
     var hasAnything: Bool { isMarked || readOnly }
@@ -26,9 +22,6 @@ struct ConnectionSafety: Equatable {
 
 // MARK: - read-only badge
 
-/// A lock and a word, at two sizes. Never a tint on its own: a colour-only
-/// signal disappears in whichever theme it was not tuned for, and it would also
-/// collide with the connection colour the user picked.
 struct ReadOnlyBadge: View {
     let level: ReadOnlyEnforcement
     var compact = false
@@ -66,13 +59,6 @@ struct ReadOnlyBadge: View {
 
 // MARK: - production marker
 
-/// The banner for a connection the user has given a colour. Large and always
-/// visible: when another client shrank its full-width production colour to a dot it
-/// drew sustained backlash, so this is a filled band with the connection's name
-/// in it, not a tint.
-///
-/// It says the name and nothing else. datagrep does not know what the colour
-/// means — that is the point of letting the user choose it.
 struct MarkedBanner: View {
     let name: String
     let color: String
@@ -98,10 +84,6 @@ struct MarkedBanner: View {
 
 // MARK: - the titlebar chip
 
-/// What sits at the trailing end of the toolbar. It is the same two facts as
-/// the sidebar — production, and how real the read-only promise is — carried
-/// into the one piece of chrome that is on screen no matter which pane has
-/// focus or whether the sidebar is collapsed.
 struct ConnectionSafetyChip: View {
     @ObservedObject var model: AppModel
 
@@ -109,8 +91,6 @@ struct ConnectionSafetyChip: View {
         let safety = model.activeSafety
         HStack(spacing: 6) {
             if let color = safety.color {
-                // A dot, not a word: the colour is the user's own marker and
-                // datagrep has no name for what it means.
                 Circle()
                     .fill(ConnectionColor.color(color) ?? Color(nsColor: .systemGray))
                     .frame(width: 9, height: 9)
@@ -128,10 +108,6 @@ struct ConnectionSafetyChip: View {
 }
 
 /// Installs `ConnectionSafetyChip` as a titlebar accessory.
-///
-/// It goes here rather than into the SwiftUI `.toolbar` because the toolbar is
-/// owned by another part of the window; an accessory view is additive, attaches
-/// once, and never re-lays-out the controls already in the bar.
 @MainActor
 enum ConnectionSafetyTitlebar {
     private static var controller: NSTitlebarAccessoryViewController?

@@ -43,8 +43,6 @@ enum Columns {
     ColCount,
 };
 
-// Outcome is carried by the word first and the colour second — never colour
-// alone, the same rule the rest of this UI follows.
 QColor outcomeColor(dg::QueryOutcome o) {
     switch (o) {
         case dg::QueryOutcome::Ok: return QColor(0x1E, 0x8E, 0x3E);
@@ -76,8 +74,6 @@ HistoryPanel::HistoryPanel(QueryHistoryStore* store, QWidget* parent)
     search_->setClearButtonEnabled(true);
     connect(search_, &QLineEdit::textChanged, this, &HistoryPanel::refresh);
 
-    // "All connections" first and default — history is never scoped for you;
-    // the connection is a filter you may apply.
     connectionFilter_ = new QComboBox(this);
     connectionFilter_->addItem(QStringLiteral("All connections"), QString());
     connectionFilter_->setToolTip(
@@ -367,8 +363,6 @@ void HistoryPanel::refresh() {
                                              ? QStringLiteral("no connection")
                                              : e.connection);
             if (!e.engine.isEmpty()) {
-                // Engine kept per entry, so a deleted connection still shows
-                // what it was.
                 item->setIcon(ColConnection, dg::engineIcon(e.engine));
                 item->setToolTip(ColConnection, dg::engineDisplayName(e.engine));
             }

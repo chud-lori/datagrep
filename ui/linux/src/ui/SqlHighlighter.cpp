@@ -11,8 +11,6 @@ SqlHighlighter::SqlHighlighter(QTextDocument* document)
     commentFormat_.setForeground(QColor(0x6a, 0x99, 0x55));
     commentFormat_.setFontItalic(true);
 
-    // A pragmatic keyword set spanning the SQL the engine speaks. Case-insensitive
-    // whole-word match. Not exhaustive — this is the placeholder highlighter.
     static const char* const kKeywords[] = {
         "SELECT",  "FROM",     "WHERE",   "INSERT", "UPDATE",  "DELETE",
         "CREATE",  "DROP",     "ALTER",   "TABLE",  "INDEX",   "VIEW",
@@ -37,8 +35,6 @@ SqlHighlighter::SqlHighlighter(QTextDocument* document)
     // Numbers.
     rules_.push_back({QRegularExpression(QStringLiteral("\\b[0-9]+(\\.[0-9]+)?\\b")),
                       numberFormat_});
-    // Single-quoted strings (SQL doubles the quote to escape; the greedy class
-    // handles the common cases for a placeholder highlighter).
     rules_.push_back(
         {QRegularExpression(QStringLiteral("'([^']|'')*'")), stringFormat_});
     // Double-quoted identifiers styled as strings is close enough here.

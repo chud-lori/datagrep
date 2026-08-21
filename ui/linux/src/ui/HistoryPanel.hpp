@@ -1,12 +1,4 @@
 // HistoryPanel.hpp — the query history dock: everything datagrep ran, searchable.
-//
-// Linux counterpart of the macOS HistoryPanel, in Qt vocabulary: a widget for a
-// bottom QDockWidget rather than a sheet. Same functionality — filter by text,
-// connection, date and outcome; entries grouped by day; a detail strip with the
-// full statement and its error; copy / open in editor / run again / remove;
-// retention stated in the footer and editable. The panel never runs anything
-// itself: it emits requests and MainWindow owns the run path, so a rerun goes
-// through exactly the same safety prompts as a typed statement.
 
 #ifndef DATAGREP_HISTORY_PANEL_HPP
 #define DATAGREP_HISTORY_PANEL_HPP
@@ -30,8 +22,6 @@ public:
     explicit HistoryPanel(QueryHistoryStore* store, QWidget* parent = nullptr);
 
 signals:
-    // "Put this SQL where I can edit it." The host decides how (append today,
-    // a new tab once tabs exist) — the panel only asks.
     void openInEditor(const QString& sql, const QString& connection);
     void rerunRequested(const QString& sql, const QString& connection);
     // Short confirmations for the status bar, where this app says small things.

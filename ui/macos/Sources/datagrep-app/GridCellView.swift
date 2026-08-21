@@ -2,11 +2,7 @@ import AppKit
 import DatagrepKit
 import QuartzCore
 
-/// Cached text attributes. Built once at startup, never per cell and never per
-/// frame: nothing may be allocated per cell per frame.
 enum GridStyle {
-    /// 24, not 20: 20 pt rows with 6 pt padding read as a spreadsheet from
-    /// 1998. This is one line of monospaced 11.5 with real air around it.
     static let rowHeight: CGFloat = 24
     static let headerHeight: CGFloat = 26
     static let cellPadX: CGFloat = 10
@@ -51,14 +47,9 @@ enum GridStyle {
     static let absent = Set2(font, .tertiaryLabelColor)
     static let chip = Set2(font, .controlAccentColor)
     static let pending = Set2(italic, .quaternaryLabelColor)
-    /// A cell holding a value the user typed and has not committed. Accent
-    /// coloured and semibold: it is the one thing in the grid that is not what
-    /// the server said.
     static let editedFont = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .semibold)
     static let edited = Set2(editedFont, .controlAccentColor)
 
-    /// A row staged for deletion: struck through, so it reads as "going away"
-    /// rather than as selected.
     static func struckThrough(_ attrs: [NSAttributedString.Key: Any]) -> [NSAttributedString.Key:
         Any]
     {
@@ -79,8 +70,6 @@ enum GridStyle {
             ])
     }
 
-    /// Chip labels come from a tiny fixed vocabulary ("{4 fields}", "[2 items]"),
-    /// so their measured widths are memoised instead of re-measured per draw.
     private static var chipWidths: [String: CGFloat] = [:]
     static func chipWidth(_ s: String) -> CGFloat {
         if let w = chipWidths[s] { return w }
@@ -90,9 +79,6 @@ enum GridStyle {
     }
 }
 
-/// One grid cell. Deliberately NOT an NSTextField: this draws a single string
-/// with cached attributes, which keeps a 24-column viewport at ~1k trivial
-/// views instead of ~1k full text-layout engines.
 final class GridCellView: NSView {
     static let reuseID = NSUserInterfaceItemIdentifier("datagrep.grid.cell")
 
@@ -100,37 +86,16 @@ final class GridCellView: NSView {
     private(set) var kind: CellKind = .value
     private var isPending = false
     private var rightAligned = false
-    /// Whether this result may be edited at all — the engine's answer, not a
-    /// guess about the driver. A cell that is not editable never becomes a
-    /// field editor, however it is double-clicked.
     private(set) var isEditable = false
-    /// What the user typed here and has not committed, drawn instead of the
-    /// loaded value.
     private var staged: MutationValue?
-    /// Where this row's document stands after the last commit attempt. Drawn
-    /// as the wash's colour, so a document the server refused is findable in
-    /// the grid rather than only in a report that has been dismissed.
     private var stagedState: StagedState?
     /// This row is staged for deletion.
     private var isDeleted = false
     private var isEditing = false
     private var chipRect: NSRect = .zero
-    /// Deterministic per-row width for the skeleton bar, so placeholders look
-    /// like data instead of a row of identical gray sticks.
     private var skeletonSeed: CGFloat = 0.7
 
     /// The value text goes through a real `NSTextField`, not `draw()`.
-    ///
-    /// Custom `draw()` output does not reliably reach the screen for this table:
-    /// it is a view-based `NSTableView` hosted inside SwiftUI's layer-backed
-    /// `NSHostingView`, and there the normal on-screen display cycle never calls
-    /// the cell's `draw()` — only a forced render (a PDF export, `cacheDisplay`,
-    /// `CALayer.render`) does, which is why every capture showed the grid while
-    /// the actual window stayed blank. An `NSTextField` composites its text
-    /// itself through AppKit's normal control lifecycle, with no dependency on
-    /// `draw()` running. The decorations that are NOT plain text — the loading
-    /// skeleton, the empty-string mark, the nested-value chip — stay in
-    /// `draw()`, because they are cosmetic and never the reason a query is run.
     private let label: NSTextField = {
         let f = NSTextField(labelWithString: "")
         f.translatesAutoresizingMaskIntoConstraints = false
@@ -138,23 +103,16 @@ final class GridCellView: NSView {
         f.cell?.usesSingleLineMode = true
         f.drawsBackground = false
         f.isBordered = false
-        // Both flipped on only while this cell is actually being edited; a
-        // grid of live text fields is a grid of text-layout engines.
         f.isEditable = false
         f.isSelectable = false
         return f
     }()
 
     var onNestedClick: ((GridCellView) -> Void)?
-    /// Fired with the typed text when a field editor closes on a commit. The
-    /// controller decides whether it is a legal edit — this view never parses
-    /// a value or builds a mutation.
     var onEditCommitted: ((GridCellView, String) -> Void)?
     var row: Int = -1
     /// The ENGINE column index this cell reads from — stable across reordering.
     var column: UInt32 = 0
-    /// The DISPLAY position this cell is drawn at — what the selection block is
-    /// expressed in. The two differ the moment a column is dragged.
     var columnPosition: Int = 0
 
     override var isFlipped: Bool { true }
@@ -177,17 +135,12 @@ final class GridCellView: NSView {
         rightAligned: Bool, editable: Bool = false, staged: MutationValue? = nil,
         deleted: Bool = false, stagedState: StagedState? = nil
     ) {
-        // A cell can be recycled out from under an open field editor by a
-        // scroll. Close it without committing rather than letting the editor
-        // write the typed text into whatever row landed here.
         if isEditing { endEditing(commit: false) }
         self.columnPosition = position
         self.isEditable = editable
         self.staged = staged
         self.isDeleted = deleted
         self.stagedState = stagedState
-        // A cell that was a skeleton and is now real fades in once. This is the
-        // difference between rows "arriving" and rows "popping".
         let wasPending = isPending
         self.kind = kind
         self.text = text
@@ -201,17 +154,11 @@ final class GridCellView: NSView {
         if wasPending && !pending { fadeIn() }
     }
 
-    /// The text field mirrors the cell's value. Empty for the kinds that draw
-    /// their own thing (a skeleton, an empty-string mark, a nested chip drawn
-    /// in `draw()`).
     private func updateLabel() {
         if isEditing { return }  // the field editor owns the text right now
         let selected = isSelectedRow
         var attrs: [NSAttributedString.Key: Any]
         let string: String
-        // A typed value replaces the loaded one wherever it is drawn: the grid
-        // shows what would be written, and the staged mark is what says it has
-        // not been.
         if let staged, !isPending {
             label.isHidden = false
             label.alignment = rightAligned ? .right : .left
@@ -239,8 +186,6 @@ final class GridCellView: NSView {
             string = "—"
             attrs = (selected ? GridStyle.selected : GridStyle.absent).of(rightAligned)
         case (_, .nested):
-            // The chip background is drawn in draw(); its text rides in the
-            // label, left-aligned inside the chip's padding.
             string = text
             attrs = (selected ? GridStyle.selected : GridStyle.chip).left
         }
@@ -250,14 +195,10 @@ final class GridCellView: NSView {
         label.attributedStringValue = NSAttributedString(string: string, attributes: attrs)
     }
 
-    /// Called by the row view when selection changes, so the value text can flip
-    /// to the selected colour without a full reconfigure.
     func refreshSelectionColour() {
         updateLabel()
     }
 
-    /// 120 ms, once, on the cell that changed. Not a view-wide animation and
-    /// not a repeating one — when nothing arrives, nothing animates.
     private func fadeIn() {
         wantsLayer = true
         let a = CABasicAnimation(keyPath: "opacity")
@@ -268,9 +209,6 @@ final class GridCellView: NSView {
         layer?.add(a, forKey: "datagrep.fade")
     }
 
-    /// True only when this cell is inside the highlighted block. A partial block
-    /// paints a solid accent over some columns and a faint wash over the rest;
-    /// the light "selected" text colour belongs only to the solid part.
     private var isSelectedRow: Bool {
         guard let rv = superview as? GridRowView, rv.isSelected, rv.isEmphasized else {
             return false
@@ -280,25 +218,18 @@ final class GridCellView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // Only the decorations. The value text is an NSTextField subview (see
-        // the `label` declaration) because custom draw() does not reliably reach
-        // the screen for this SwiftUI-hosted table.
         let inset = bounds.insetBy(dx: GridStyle.cellPadX, dy: 4)
         if isPending {
             drawSkeleton(in: inset)
             return
         }
         let selected = isSelectedRow
-        // A staged cell carries its own wash, so an uncommitted value is
-        // findable by eye in a grid that is otherwise all server truth.
         if let wash = washColour, !isEditing {
             wash.withAlphaComponent(selected ? 0.30 : 0.12).setFill()
             bounds.fill()
         }
         switch kind {
         case .value where text.isEmpty:
-            // EMPTY STRING: present, and empty. A thin baseline mark, so it is
-            // tellable apart from NULL and from ABSENT at a glance.
             let y = inset.maxY - 2.5
             let x = rightAligned ? inset.maxX - 11 : inset.minX
             (selected ? NSColor.alternateSelectedControlTextColor : NSColor.quaternaryLabelColor)
@@ -320,10 +251,6 @@ final class GridCellView: NSView {
     }
 
     /// The colour behind a cell that is not plain server truth.
-    ///
-    /// A delete washes the WHOLE row rather than only the cells holding text:
-    /// the document is going, and a strikethrough on three of twelve columns
-    /// reads as three edited fields.
     private var washColour: NSColor? {
         let touched = isDeleted || staged != nil
         guard touched else { return nil }
@@ -336,8 +263,6 @@ final class GridCellView: NSView {
         }
     }
 
-    /// A skeleton BAR, not an ellipsis: the eye reads "a value is coming here"
-    /// from a shape at the right size, and reads nothing at all from "…".
     private func drawSkeleton(in inset: NSRect) {
         let w = inset.width * skeletonSeed
         let x = rightAligned ? inset.maxX - w : inset.minX
@@ -346,8 +271,6 @@ final class GridCellView: NSView {
         NSBezierPath(roundedRect: bar, xRadius: 4, yRadius: 4).fill()
     }
 
-    /// Added only while a query is actually streaming, and removed the moment
-    /// it is terminal, so a settled window has no live animations at all.
     func setShimmer(_ on: Bool) {
         guard isPending else {
             layer?.removeAnimation(forKey: "datagrep.shimmer")
@@ -370,23 +293,14 @@ final class GridCellView: NSView {
 
     // MARK: - inline editing
 
-    /// The table this cell is drawn in, if it is still in one. Reached by
-    /// optional chaining rather than by index arithmetic: this runs inside
-    /// mouse and key handling, where a thrown exception is swallowed by AppKit
-    /// and takes the window's gesture state with it.
     private var table: NSTableView? { superview?.superview as? NSTableView }
 
-    /// True when this cell can actually become a field editor: the result is
-    /// editable, the value has arrived, and it is a scalar. A document or an
-    /// array is edited as a document, in the inspector, not in a 130 pt column.
     var canBeginEditing: Bool { isEditable && !isPending && kind != .nested }
 
     /// Turn this cell into a field editor over the value it is showing.
     func beginEditing() {
         guard canBeginEditing, !isEditing else { return }
         isEditing = true
-        // A NULL or ABSENT cell opens empty rather than on the word "NULL",
-        // which would otherwise be committed back as a literal string.
         let seed = staged?.display ?? (kind == .value ? text : "")
         label.isHidden = false
         label.isEditable = true
@@ -403,8 +317,6 @@ final class GridCellView: NSView {
         label.currentEditor()?.selectAll(nil)
     }
 
-    /// Close the field editor. `commit` false is Escape and the recycle path:
-    /// the typed text is dropped and the cell goes back to what it was showing.
     private func endEditing(commit: Bool) {
         guard isEditing else { return }
         isEditing = false
@@ -419,9 +331,6 @@ final class GridCellView: NSView {
         if commit { onEditCommitted?(self, typed) }
     }
 
-    /// What a staged cell says on hover. This is where a version conflict is
-    /// readable after the report sheet has been dismissed — the row keeps its
-    /// colour, and the reason is one hover away.
     private var stagingToolTip: String? {
         guard isDeleted || staged != nil else { return nil }
         let what = isDeleted ? "this document is staged for deletion" : "you typed this value"
@@ -459,9 +368,6 @@ final class GridCellView: NSView {
 
     override var toolTip: String? {
         get {
-            // A skeleton is configured as (.value, "") — without this guard it
-            // would answer "empty string", which is precisely the pending-vs-
-            // empty confusion the skeleton bar exists to prevent.
             if isPending { return "loading — this row has not been fetched yet" }
             if let staging = stagingToolTip { return staging }
             switch kind {
@@ -478,9 +384,6 @@ final class GridCellView: NSView {
 // MARK: - the field editor's delegate
 
 extension GridCellView: NSTextFieldDelegate {
-    /// Fires on ⏎ and on losing focus alike, and both mean "keep it" — the
-    /// macOS convention for a table cell. Escape is intercepted below, before
-    /// this can see it.
     func controlTextDidEndEditing(_ obj: Notification) {
         endEditing(commit: true)
     }
@@ -498,10 +401,6 @@ extension GridCellView: NSTextFieldDelegate {
 // MARK: - row view
 
 /// Draws the hover highlight and the focused-cell ring.
-///
-/// Both live on the ROW, not the cell: a hover repaint then dirties one row
-/// rectangle instead of twenty-four cell rectangles, and the focus ring can
-/// straddle the intercell gap.
 final class GridRowView: NSTableRowView {
     var isHovered = false {
         didSet { if isHovered != oldValue { needsDisplay = true } }
@@ -509,9 +408,6 @@ final class GridRowView: NSTableRowView {
     var focusedColumn: Int = -1 {
         didSet { if focusedColumn != oldValue { needsDisplay = true } }
     }
-    /// The column positions this row contributes to the selected block, or nil
-    /// for "the whole row" — which is both the classic row selection and what a
-    /// block that happens to span every column should look like.
     var rangeColumns: ClosedRange<Int>? {
         didSet {
             guard rangeColumns != oldValue else { return }
@@ -548,8 +444,6 @@ final class GridRowView: NSTableRowView {
             dirtyRect.fill()
             return
         }
-        // Partial block: the row still reads as "in the selection" via a wash,
-        // and the columns actually selected get the real highlight.
         color.withAlphaComponent(0.14).setFill()
         dirtyRect.fill()
         let solid = block.intersection(dirtyRect)
@@ -558,23 +452,16 @@ final class GridRowView: NSTableRowView {
         solid.fill()
     }
 
-    /// The block's outline, drawn under the (non-opaque) cell views so the
-    /// borders sit behind the text rather than clipping it.
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         if let cols = rangeColumns, let block = blockRect(cols) {
             NSColor.controlAccentColor.setStroke()
             let path = NSBezierPath()
             path.lineWidth = 1.5
-            // Vertical edges always; horizontal edges only on the first and last
-            // row of the block, so a tall block reads as one rectangle.
             path.move(to: NSPoint(x: block.minX + 0.75, y: block.minY))
             path.line(to: NSPoint(x: block.minX + 0.75, y: block.maxY))
             path.move(to: NSPoint(x: block.maxX - 0.75, y: block.minY))
             path.line(to: NSPoint(x: block.maxX - 0.75, y: block.maxY))
-            // Which edge is visually "top" depends on the row view's geometry,
-            // not on the rect: get this backwards and a block gets its cap line
-            // at the wrong end.
             let topY = isFlipped ? block.minY + 0.75 : block.maxY - 0.75
             let bottomY = isFlipped ? block.maxY - 0.75 : block.minY + 0.75
             if isRangeTop {
@@ -599,8 +486,6 @@ final class GridRowView: NSTableRowView {
         path.stroke()
     }
 
-    /// Unions the frames of the block's columns. Hidden columns report an empty
-    /// frame, so they are skipped rather than dragging the union to the origin.
     private func blockRect(_ cols: ClosedRange<Int>) -> NSRect? {
         guard let table = superview as? NSTableView else { return nil }
         let row = table.row(for: self)
@@ -621,8 +506,6 @@ final class GridRowView: NSTableRowView {
 
 // MARK: - header view
 
-/// `NSTableHeaderView` with a pointer. Stock AppKit headers do not react to
-/// hover at all, which is most of why a stock table feels like a printout.
 final class GridHeaderView: NSTableHeaderView {
     private var hoverColumn = -1
     private var tracking: NSTrackingArea?
@@ -664,13 +547,8 @@ final class GridHeaderView: NSTableHeaderView {
         let r = headerRect(ofColumn: hoverColumn)
         NSColor.secondaryLabelColor.withAlphaComponent(0.10).setFill()
         r.insetBy(dx: 0, dy: 1).fill()
-        // A one-pixel accent underline says "this is clickable" without
-        // repainting the whole header in a different colour.
         NSColor.controlAccentColor.withAlphaComponent(0.65).setFill()
         NSRect(x: r.minX, y: r.maxY - 2, width: r.width, height: 2).fill()
-        // A ghost chevron on the hovered column that is NOT the sorted one:
-        // it says "clicking here sorts" before the click, which is the whole
-        // difference between a header and a label.
         let sorted = table.tableColumns.indices.contains(hoverColumn)
             && table.indicatorImage(in: table.tableColumns[hoverColumn]) != nil
         guard !sorted, r.width > 46 else { return }
@@ -693,9 +571,6 @@ final class GridHeaderView: NSTableHeaderView {
         p.stroke()
     }
 
-    /// `super` first: AppKit's own resize cursors live on the dividers, and
-    /// blanketing the header in a pointing hand is what made resizing
-    /// undiscoverable. The hand is added only over each column's interior.
     override func resetCursorRects() {
         super.resetCursorRects()
         guard let table = tableView else { return }

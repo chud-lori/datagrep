@@ -6,8 +6,6 @@
 
 RowNumberHeader::RowNumberHeader(QWidget* parent)
     : QHeaderView(Qt::Vertical, parent) {
-    // Fixed sections: row height is uniform, so the view's geometry is pure
-    // arithmetic (row i sits at i * rowHeight). Never resizeRowsToContents.
     setSectionResizeMode(QHeaderView::Fixed);
     setSectionsClickable(true);   // click a number to select the whole row
     setSectionsMovable(false);

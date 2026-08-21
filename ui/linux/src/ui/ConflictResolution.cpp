@@ -50,8 +50,6 @@ ConflictReview ConflictReview::build(const QVector<StagedDocument>& conflicted,
         for (const FieldValue& fv : staged.key) {
             titleParts << fv.field + QLatin1Char('=') + fv.value.display();
         }
-        // The engine's own field names and values, joined — never a guess at
-        // which one is "the id".
         doc.title = titleParts.join(QStringLiteral("  "));
         for (const StagedField& set : staged.sets) {
             ConflictField field;
@@ -64,8 +62,6 @@ ConflictReview ConflictReview::build(const QVector<StagedDocument>& conflicted,
             doc.fields.append(field);
         }
         doc.isDelete = staged.isDelete;
-        // The fresh guard, read out of the envelope by the field names the
-        // engine named — this layer never learns what `_seq_no` is.
         bool guardComplete = true;
         for (const QString& field : editable.guardFields) {
             const auto value = now.envelope.contains(field)
@@ -112,8 +108,6 @@ QLabel* cell(const QString& text, bool tinted, QWidget* parent) {
     label->setTextFormat(Qt::PlainText);
     label->setToolTip(text);
     if (tinted) {
-        // The middle column tinted when it moved: that is the whole reason
-        // this view exists, and it should be findable at a glance.
         label->setStyleSheet(QStringLiteral("color: rgb(200, 110, 10);"));
     }
     return label;

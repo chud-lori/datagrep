@@ -1,25 +1,5 @@
 #!/usr/bin/env bash
 # Build datagrep .deb and .rpm packages from the already-built Qt binary.
-#
-# Uses fpm (https://fpm.readthedocs.io/) with a staged directory tree, because
-# ui/linux/CMakeLists.txt intentionally has no install()/CPack wiring — we
-# package the artifact the existing CMake build produces, not re-plumb the
-# build. Build first:
-#
-#   cargo build -p datagrep-ffi --release
-#   cmake -S ui/linux -B ui/linux/build -DCMAKE_BUILD_TYPE=Release -DDATAGREP_BUILD_RUST=OFF
-#   cmake --build ui/linux/build
-#
-# Then:
-#
-#   packaging/build-packages.sh [path/to/datagrep-binary]
-#
-# Needs: fpm on PATH (gem install fpm), rpmbuild for the .rpm target
-# (Debian/Ubuntu package `rpm`), and binutils' strip.
-#
-# Env overrides:
-#   VERSION   package version   (default: workspace version from Cargo.toml)
-#   OUT_DIR   output directory  (default: <repo>/dist)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,9 +21,6 @@ if [[ -z "$VERSION" ]]; then
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# Stage the FHS tree both packages share.
-# ---------------------------------------------------------------------------
 rm -rf "$STAGE"
 install -Dm755 "$BINARY" "$STAGE/usr/bin/datagrep"
 install -Dm644 "$REPO_ROOT/packaging/datagrep.desktop" \
@@ -60,15 +37,6 @@ fi
 
 mkdir -p "$OUT_DIR"
 
-# Shared metadata. Runtime dependencies are declared per target below:
-# the Qt6 runtime, libdbus-1 (the keyring crate's Secret Service backend is
-# D-Bus IPC), and zlib (flate2 inside the Rust static lib). glibc/libstdc++
-# are omitted deliberately — they are essential on any system that can run
-# apt/rpm. A Secret Service *provider* (GNOME Keyring / KWallet) is a
-# Recommends, not a hard dep: the app runs without one, saved passwords don't.
-# Same for the Qt platform theme plugins: without them the app still runs but
-# ignores the desktop's fonts, palette and file-dialog integration. (Fedora
-# ships them inside qt6-qtbase-gui, so the .rpm needs no extra entry.)
 COMMON=(
     -s dir
     --name datagrep
@@ -83,9 +51,7 @@ COMMON=(
     --force
 )
 
-# .deb — Debian/Ubuntu names. On Ubuntu 24.04 the time_t64-renamed packages
-# (libqt6core6t64 etc.) Provide these unversioned names, so the deps resolve
-# on both pre- and post-t64 distros.
+# Recommends, not hard deps: the app runs without them, saved passwords do not.
 fpm "${COMMON[@]}" -t deb \
     --depends libqt6core6 \
     --depends libqt6gui6 \
@@ -98,9 +64,6 @@ fpm "${COMMON[@]}" -t deb \
     --deb-recommends qt6-xdgdesktopportal-platformtheme \
     usr
 
-# .rpm — Fedora/RHEL names. qt6-qtbase-gui carries Qt6Gui/Widgets and pulls
-# qt6-qtbase (Core); dbus-libs is libdbus-1.so.3. `zlib` is Provided by
-# zlib-ng-compat on current Fedora.
 fpm "${COMMON[@]}" -t rpm \
     --depends qt6-qtbase-gui \
     --depends dbus-libs \

@@ -1,22 +1,6 @@
 import AppKit
 import SwiftUI
 
-// The visible half of UpdateCheck.swift: a quiet, dismissible card when a
-// newer release exists, and a settings row for the opt-out.
-//
-// Redraw discipline (P19 / "zero redraws when idle"): nothing here animates,
-// nothing spins, nothing polls. The view renders exactly twice in the common
-// case — once as nothing, once more if a newer version arrived — and then
-// never again until the user clicks it away.
-
-/// Self-driving update notice. Drop it into the window once, e.g. as an
-/// overlay on the workbench:
-///
-///     .overlay(alignment: .bottomTrailing) { UpdateNoticeView() }
-///
-/// It triggers the once-per-launch check on first appearance (re-appearing is
-/// a no-op — the check is guarded in UpdateCheck), renders nothing while
-/// there is no update, and shows a small dismissible card when there is one.
 struct UpdateNoticeView: View {
     @ObservedObject private var check = UpdateCheck.shared
 
@@ -83,8 +67,6 @@ struct UpdateNoticeView: View {
     }
 }
 
-/// The opt-out, for whatever settings surface the app grows. The wording is
-/// the whole point: say exactly what the check does and sends, no more.
 struct UpdateSettingsView: View {
     @State private var enabled = UpdatePrefs.checkOnLaunch
 

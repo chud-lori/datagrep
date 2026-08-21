@@ -1,7 +1,3 @@
-// UpdateNotice.hpp — the visible half of UpdateCheck: an inline bar that
-// exists only while a newer release is known. It renders nothing otherwise,
-// animates nothing, and never installs — "View release" opens the browser.
-
 #ifndef DATAGREP_UPDATE_NOTICE_HPP
 #define DATAGREP_UPDATE_NOTICE_HPP
 

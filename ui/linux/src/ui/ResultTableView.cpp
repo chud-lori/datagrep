@@ -27,25 +27,16 @@ ResultTableView::ResultTableView(QWidget* parent) : QTableView(parent) {
     setShowGrid(true);
     setWordWrap(false);
     setCornerButtonEnabled(true);  // corner "select all", like the macOS gutter head
-    // Double-click is the universal "edit this cell" gesture. Whether a cell
-    // actually edits is the MODEL's answer (flags() grants ItemIsEditable only
-    // on a result the engine said is editable), so on everything else these
-    // triggers are inert and the grid stays read-only.
     setEditTriggers(QAbstractItemView::DoubleClicked |
                     QAbstractItemView::EditKeyPressed);
     setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
 
-    // Uniform, fixed row height keeps geometry arithmetic — the model can report
-    // millions of rows and the view still lays out in O(viewport).
     verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     verticalHeader()->setDefaultSectionSize(fontMetrics().height() + 8);
     horizontalHeader()->setStretchLastSection(false);
     horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
 
-    // Ctrl+C / Cmd+C -> copySelection. Deliberately NOT the default view copy
-    // (there is none); this is the single copy path, and it only ever touches
-    // selectedIndexes().
     auto* copyShortcut = new QShortcut(QKeySequence::Copy, this);
     copyShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(copyShortcut, &QShortcut::activated, this,
@@ -56,10 +47,6 @@ void ResultTableView::setModel(QAbstractItemModel* model) {
     if (model == this->model()) {
         return;  // re-setting the same model must not duplicate connections
     }
-    // Drop the previous model's connections first: they capture `this` and
-    // would otherwise keep firing after the model is swapped — dereferencing
-    // model() (nullptr after setModel(nullptr)) or resizing the gutter from a
-    // model this view no longer shows.
     if (QAbstractItemModel* old = this->model(); old != nullptr) {
         disconnect(old, nullptr, this, nullptr);
     }
@@ -84,15 +71,11 @@ void ResultTableView::copySelection() const {
     if (model() == nullptr || selectionModel() == nullptr) {
         return;
     }
-    // ONLY model cells. A QHeaderView row number is not a QModelIndex, so it can
-    // never be in this list — that is the whole copy-safety guarantee.
     const QModelIndexList indexes = selectionModel()->selectedIndexes();
     if (indexes.isEmpty()) {
         return;
     }
 
-    // Group cell text by (row -> column -> text) so the TSV comes out in visual
-    // order regardless of selection order.
     QMap<int, QMap<int, QString>> grid;
     for (const QModelIndex& idx : indexes) {
         grid[idx.row()][idx.column()] = idx.data(Qt::DisplayRole).toString();

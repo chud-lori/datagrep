@@ -15,10 +15,6 @@
 namespace dg {
 namespace {
 
-// One row per engine. `lightFill` is the fill baked into the shipped SVG;
-// `darkFill` is the luminance-raised variant — the same values the macOS dark
-// PNG set uses, so both platforms show identical marks. An engine with no
-// artwork (file == nullptr) gets a drawn glyph in `tint`.
 struct EngineArt {
     const char* file;
     const char* lightFill;
@@ -36,8 +32,6 @@ const EngineArt* artFor(const QString& key) {
         {"sqlite", {"sqlite", "#003B57", "#4D9BC4", QColor()}},
         {"redis", {"redis", "#FF4438", "#FF6B5E", QColor()}},
         {"mongo", {"mongodb", "#47A248", "#6FD070", QColor()}},
-        // No brand artwork shipped for Elasticsearch on either platform; the
-        // magnifier below is what the engine looks like everywhere.
         {"elasticsearch", {nullptr, nullptr, nullptr, QColor(0x00, 0xBF, 0xB3)}},
     };
     for (const auto& row : table) {
@@ -48,8 +42,6 @@ const EngineArt* artFor(const QString& key) {
     return nullptr;
 }
 
-// Read on every paint, never cached across palette changes: this is what makes
-// the icons follow a runtime light/dark swap.
 bool darkSurface() {
     return QGuiApplication::palette().color(QPalette::Window).lightness() < 128;
 }
@@ -62,16 +54,12 @@ QByteArray svgBytes(const EngineArt& art, bool dark) {
     }
     QByteArray svg = f.readAll();
     if (dark) {
-        // The fill sits once, on the <svg> root. A failed replace (artwork
-        // edited upstream) just leaves the light art — visible, if dim.
         svg.replace(QByteArray("fill=\"") + art.lightFill + '"',
                     QByteArray("fill=\"") + art.darkFill + '"');
     }
     return svg;
 }
 
-// Magnifier for Elasticsearch — mirrors the macOS symbol choice: a search
-// index drawn as the thing it is.
 void drawMagnifier(QPainter& p, const QRectF& r, const QColor& tint) {
     const qreal s = r.width();
     QPen pen(tint, s * 0.12, Qt::SolidLine, Qt::RoundCap);
@@ -84,9 +72,6 @@ void drawMagnifier(QPainter& p, const QRectF& r, const QColor& tint) {
                QPointF(r.left() + s * 0.88, r.top() + s * 0.88));
 }
 
-// Generic cylinder for a driver nothing here recognises (e.g. a history entry
-// whose engine came from a newer build). Palette-derived, so it reads as
-// secondary in both modes.
 void drawCylinder(QPainter& p, const QRectF& r) {
     QColor tint = QGuiApplication::palette().color(QPalette::Text);
     tint.setAlpha(150);
@@ -154,9 +139,6 @@ QPixmap renderPixmap(const QString& key, const QColor& marker, const QSize& size
         }
     }
 
-    // The connection-colour bar, same idea as the macOS sidebar's leading-edge
-    // bar. Only when there is room beside the mark: over the mark it would
-    // obscure the engine, and the safety colour must never fight the identity.
     const qreal barW = qMax<qreal>(2.0, s * 0.1875);
     if (marker.isValid() && w - s >= barW + 1.0) {
         p.setPen(Qt::NoPen);
@@ -170,9 +152,6 @@ QPixmap renderPixmap(const QString& key, const QColor& marker, const QSize& size
     return pm;
 }
 
-// Resolves light/dark inside every pixmap request instead of at QIcon
-// construction, so icons stored in items/combos/tabs stay correct after a
-// palette change — the repaint the change triggers re-asks this engine.
 class EngineIconEngine : public QIconEngine {
 public:
     EngineIconEngine(QString key, QColor marker)

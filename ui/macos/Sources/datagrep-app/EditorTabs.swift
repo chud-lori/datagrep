@@ -2,21 +2,12 @@ import AppKit
 import DatagrepKit
 import SwiftUI
 
-/// A connection the tab picker can bind to. The editor does not talk to the
-/// engine itself — `SQLEditorController.profilesProvider` supplies these, so the
-/// picker always shows exactly the profiles the window knows about.
 struct EditorConnectionOption: Identifiable, Hashable {
     let name: String
     let driver: String
     var id: String { name }
 }
 
-/// One open editor. A reference type with `@Published` so the tab bar can
-/// re-render a single chip (a title, a dirty dot) without rebuilding the row.
-///
-/// `text` is authoritative only while the tab is *inactive*; the active tab's
-/// text lives in the `NSTextView` and is flushed back here on every switch,
-/// close, and autosave.
 final class EditorTab: ObservableObject, Identifiable {
     let id: String
     /// `nil` until the tab is named with ⌘S. An untitled tab is still persisted.
@@ -44,8 +35,6 @@ final class EditorTab: ObservableObject, Identifiable {
         self.isDirty = isDirty
     }
 
-    /// Untitled tabs are numbered by the model, not here, so the number stays
-    /// stable for the life of the tab rather than shifting when a sibling closes.
     var untitledNumber: Int = 0
 
     var displayTitle: String {
@@ -61,20 +50,12 @@ final class EditorTab: ObservableObject, Identifiable {
     }
 }
 
-/// Tab list + which one is frontmost. The controller owns this and installs the
-/// command closures; the SwiftUI bar only ever calls them.
 final class EditorTabsModel: ObservableObject {
-    /// The tabs of the **currently scoped connection** — not every tab open in
-    /// the app. `SQLEditorController` owns the full set and republishes this
-    /// slice whenever the scope changes.
     @Published var tabs: [EditorTab] = []
     @Published var activeID: String?
     @Published var connections: [EditorConnectionOption] = []
     /// Named queries on disk that are not currently open in a tab.
     @Published var savedQueries: [SavedQueryRecord] = []
-    /// The connection these tabs belong to, or nil when no connection is
-    /// selected. Drives the welcome state's wording and the engine mark on the
-    /// chips.
     @Published var scope: String?
 
     var onActivate: ((EditorTab) -> Void)?
@@ -83,8 +64,6 @@ final class EditorTabsModel: ObservableObject {
     var onSave: ((EditorTab) -> Void)?
     var onBind: ((EditorTab, String?) -> Void)?
     var onOpenSaved: ((SavedQueryRecord) -> Void)?
-    /// The welcome state's second action. Owned by `AppModel`, which is the
-    /// only thing that can put the New Connection sheet up.
     var onNewConnection: (() -> Void)?
     /// Picking a connection from the welcome state.
     var onPickConnection: ((String) -> Void)?
@@ -103,21 +82,11 @@ final class EditorTabsModel: ObservableObject {
 
 // MARK: - the bar
 
-/// Sits directly above the `NSTextView`, hosted in an `NSHostingView`. SwiftUI
-/// here and not AppKit because the engine mark (`EngineIcon`) is already a
-/// SwiftUI view — reimplementing it in AppKit would be a second definition of
-/// what an engine looks like, which `EngineStyle` exists to prevent.
 struct EditorTabBar: View {
     @ObservedObject var model: EditorTabsModel
 
     var body: some View {
         HStack(spacing: 6) {
-            // No ScrollView: a horizontal SwiftUI ScrollView arbitrates every
-            // press as a possible scroll-drag, which wedged the tab Buttons after
-            // the first switch (they stopped registering). A plain HStack keeps
-            // the tabs reliably clickable; they abut like real window tabs,
-            // divided by a hairline. Many tabs compress rather than scroll — a
-            // dedicated overflow affordance can come later if it is ever needed.
             HStack(spacing: 0) {
                 ForEach(model.tabs) { tab in
                     EditorTabChip(
@@ -130,8 +99,6 @@ struct EditorTabBar: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            // Closing a named tab keeps its .sql on disk, so there has to be a
-            // way back to it. This is that way.
             Menu {
                 Button("New Query Tab") { model.onNew?() }
                 if !model.savedQueries.isEmpty {
@@ -163,9 +130,6 @@ struct EditorTabBar: View {
 
 private struct EditorTabChip: View {
     @ObservedObject var tab: EditorTab
-    /// The engine of the connection this editor belongs to. Empty for an
-    /// editor that belongs to none, which draws no mark at all rather than a
-    /// generic cylinder that would read as "some database".
     let driver: String
     let isActive: Bool
     let activate: () -> Void
@@ -174,11 +138,6 @@ private struct EditorTabChip: View {
     @State private var hovering = false
 
     var body: some View {
-        // A real Button, not `.onTapGesture`: inside a horizontal ScrollView the
-        // scroll gesture swallows tap gestures on the non-active tabs, so only
-        // the frontmost one activated. A plain Button routes the click reliably,
-        // and the close control is its own nested Button so clicking the × does
-        // not also activate the tab.
         Button(action: activate) {
             HStack(spacing: 5) {
                 // 12 pt brand mark — square, so anything larger crowds the title.
@@ -190,9 +149,6 @@ private struct EditorTabChip: View {
                     .foregroundStyle(isActive ? Color.primary : Color.secondary)
                     .lineLimit(1)
 
-                // Which connection this editor runs against — the point of the
-                // unified bar is that tabs for different databases sit side by
-                // side, so two "Untitled 1" on different connections must differ.
                 if let conn = tab.connection, !conn.isEmpty {
                     Text(conn)
                         .font(.system(size: 9, weight: .medium))
@@ -204,9 +160,6 @@ private struct EditorTabChip: View {
                             Capsule().fill(Color(nsColor: .quaternaryLabelColor).opacity(0.5)))
                 }
 
-                // The unsaved dot keeps its own slot instead of sharing the close
-                // button's — sharing meant it vanished the instant the pointer
-                // touched the tab, i.e. exactly when you look to check for edits.
                 HStack(spacing: 3) {
                     if tab.isDirty {
                         Circle()
@@ -229,15 +182,10 @@ private struct EditorTabChip: View {
                 }
             }
             .padding(.horizontal, 11)
-            // Fill the whole bar height so tabs read as part of the bar, not
-            // chips floating in it.
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        // The active tab takes the editor's own background and an accent underline
-        // — it "connects" to the content below it — while inactive tabs stay flush
-        // with the bar and are split by a hairline.
         .background(isActive ? Color(nsColor: .textBackgroundColor) : Color.clear)
         .overlay(alignment: .bottom) {
             Rectangle()
@@ -260,16 +208,6 @@ private struct EditorTabChip: View {
 }
 
 /// What fills the editor pane when the scoped connection has no editor open.
-///
-/// This is what the app shows on a fresh launch, instead of manufacturing an
-/// "Untitled 1" pre-filled with a sample statement in a dialect that is very
-/// probably not the one you connected to. An editor is a thing the user makes;
-/// until they make one there is nothing to edit, and saying so — with the two
-/// buttons that end the state right there — is more honest than a buffer of
-/// boilerplate they have to select and delete first.
-///
-/// Same restraint as `ResultsEmptyState`: one symbol, one line, one sentence,
-/// and the shortcut spelled out.
 struct EditorWelcomeState: View {
     @ObservedObject var model: EditorTabsModel
 
@@ -317,9 +255,6 @@ struct EditorWelcomeState: View {
                     Text("Editors you made earlier")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
-                    // Horizontal, and capped: this is a shortcut back into
-                    // recent work, not a file browser. The connection's own
-                    // context menu lists all of them.
                     HStack(spacing: 6) {
                         ForEach(reopenable.prefix(4), id: \.id) { record in
                             Button(record.name ?? "Untitled") { model.onOpenSaved?(record) }
@@ -352,8 +287,6 @@ struct EditorWelcomeState: View {
                 .padding(.top, 2)
             }
 
-            // The two things the old boilerplate buffer was really there to
-            // teach, kept — as a note, not as text in someone's document.
             Text("⌘⏎ runs the statement under the caret · -- @limit and -- @timeout set per-statement limits")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -369,9 +302,6 @@ struct EditorWelcomeState: View {
     }
 }
 
-/// The heart of the request: *"the editor can be saved so the user can choose
-/// which db"*. The binding lives on the tab, so switching tabs switches the
-/// connection the next ⌘↵ runs against.
 private struct ConnectionPicker: View {
     @ObservedObject var model: EditorTabsModel
 

@@ -1,33 +1,5 @@
 name: release
 
-# Tag a version to cut a release:
-#   git tag v0.1.0 && git push origin v0.1.0
-#
-# Builds stripped CLI binaries per platform plus the macOS app bundle, emits
-# SHA256SUMS, and attaches everything to a GitHub Release so install.sh can
-# pull prebuilt binaries without a clone.
-#
-# Assets:
-#   datagrep-macos-arm64        CLI, Apple silicon
-#   datagrep-macos-x86_64       CLI, Intel mac (cross-compiled — see below)
-#   datagrep-linux-x86_64       CLI, glibc x86_64 (bundled SQLite, rustls — no
-#   datagrep-linux-arm64        CLI, glibc aarch64  system deps beyond libc)
-#   datagrep-macos.app.zip      the macOS app (arm64-only, ad-hoc signed)
-#   datagrep-macos.dmg          the same app as a drag-to-Applications DMG
-#   *.sha256                    per-asset checksum (tangi convention)
-#   SHA256SUMS                  combined checksum file (install.sh verifies this)
-#
-# The release job also rewrites docs/latest.json on main to point at the tag
-# it just published — that file is the static update manifest GitHub Pages
-# serves (the app's launch check and install.sh both read it), and rewriting
-# it here means it can never drift from the release that actually shipped.
-#
-# Runner policy (learned the hard way on chud-lori/tangi): never macos-13.
-# The free-tier Intel macOS pool is starved (a tangi job queued 10+ minutes
-# while arm64/Linux finished in seconds) and is on GitHub's deprecation path.
-# One macos-14 (Apple silicon) job cross-compiles both mac arches via
-# `rustup target add x86_64-apple-darwin` + `cargo build --target`.
-
 on:
   push:
     tags: ["v*"]
@@ -43,9 +15,7 @@ permissions:
 jobs:
   build-macos:
     name: build (macos)
-    # Apple silicon; cross-compiles x86_64 — never macos-13, see header.
-    # macos-15 (not -14) because this job also runs build-app.sh, and
-    # Package.swift declares swift-tools-version 6.1 — macos-14 ships 5.10.
+    # Never macos-13 (starved, deprecated Intel pool); macos-15 because Package.swift needs swift-tools 6.1.
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -58,10 +28,6 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # [profile.release] already sets strip = "symbols" (plus fat LTO), so
-      # the binaries come out of cargo stripped. No extra `strip` pass on
-      # macOS: it would invalidate the linker's ad-hoc code signature that
-      # arm64 binaries require to run at all.
       - name: Build CLI (both arches)
         run: |
           cargo build --release -p datagrep-cli --target aarch64-apple-darwin
@@ -75,31 +41,8 @@ jobs:
           ./dist/datagrep-macos-arm64 --version
           ./dist/datagrep-macos-arm64 --help
 
-      # The app links the real FFI static lib (not the synthetic-data stub the
-      # CI workflow builds). build-app.sh assembles the .app bundle by hand
-      # (SwiftPM, no xcodebuild) and ad-hoc signs it (`codesign -s -`).
-      #
-      # -- Code signing / notarization -------------------------------------
-      # There is no Apple Developer account, so the app CANNOT be notarized;
-      # ad-hoc signing is the honest best we can do, and Gatekeeper will warn
-      # on first launch (the release notes below tell users what to do).
-      # To notarize later WITHOUT restructuring this job, insert a step here,
-      # after build-app.sh and before "Zip app", that needs these secrets:
-      #   MACOS_CERT_P12        — "Developer ID Application" cert, base64 .p12
-      #   MACOS_CERT_PASSWORD   — password for that .p12
-      #   APPLE_ID              — Apple ID email used with notarytool
-      #   APPLE_TEAM_ID         — 10-character team id
-      #   APPLE_APP_PASSWORD    — app-specific password for that Apple ID
-      # The step would: import the cert into a throwaway keychain, re-sign
-      # with `codesign --force --options runtime --sign "Developer ID
-      # Application: …" datagrep.app`, `xcrun notarytool submit <zip> --wait`,
-      # `xcrun stapler staple datagrep.app`, then let "Zip app" run as-is.
-      # --------------------------------------------------------------------
       - name: Build app bundle (real FFI, arm64)
         run: |
-          # Match Package.swift's .macOS(.v14). Without this the runner's SDK
-          # stamps the archive 15.x and every object warns "built for newer
-          # macOS version than being linked".
           export MACOSX_DEPLOYMENT_TARGET=14.0
           cargo build --release -p datagrep-ffi --target aarch64-apple-darwin
           cd ui/macos
@@ -107,19 +50,11 @@ jobs:
           DATAGREP_FFI_LIB_DIR="${GITHUB_WORKSPACE}/target/aarch64-apple-darwin/release" \
           ./build-app.sh
 
-      # ditto, not zip: it preserves the bundle's symlinks and extended
-      # attributes, which unzip-with-zip famously mangles for .app bundles.
       - name: Zip app
         run: |
           cd ui/macos
           ditto -c -k --keepParent datagrep.app "${GITHUB_WORKSPACE}/dist/datagrep-macos.app.zip"
 
-      # Drag-to-Applications DMG alongside the zip (some people prefer the
-      # zip; the DMG is the friendlier first run). macOS built-ins only. The
-      # script auto-skips its Finder AppleScript layout pass under CI (no
-      # Finder on a runner) — the DMG still mounts with the app plus an
-      # /Applications symlink, just in Finder's default arrangement. Lands in
-      # dist/ before the checksum step so SHA256SUMS covers it.
       - name: Build DMG
         run: ./scripts/make_dmg.sh ui/macos/datagrep.app
 
@@ -154,10 +89,6 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # SQLite is bundled and TLS is rustls, but keyring's Secret Service
-      # backend links libdbus, so this is a build-time requirement on a bare
-      # runner — without it cargo fails in libdbus-sys's build script with
-      # "pkg_config failed". ci.yml installs the same pair.
       - name: System dependencies
         run: |
           sudo apt-get update
@@ -191,9 +122,6 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # Aggregate the per-job .sha256 files into one SHA256SUMS (what
-      # install.sh downloads and verifies), then re-verify every asset here —
-      # a corrupted artifact transfer fails the release instead of shipping.
       - name: Assemble and verify SHA256SUMS
         run: |
           cd dist
@@ -259,13 +187,6 @@ jobs:
           files: |
             dist/*
 
-      # Re-assert the static update manifest AFTER the release is published,
-      # so latest.json never points at a tag whose assets failed to upload.
-      # scripts/deploy.sh already writes this file before tagging, so on a
-      # normal release this is a no-op ("nothing to commit"); it exists to
-      # catch manual tags / workflow_dispatch runs where deploy.sh was
-      # skipped. Checked out into a subdir so the dist/ artifacts above stay
-      # untouched.
       - uses: actions/checkout@v4
         with:
           ref: main

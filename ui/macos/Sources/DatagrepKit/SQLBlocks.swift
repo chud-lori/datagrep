@@ -24,10 +24,6 @@ public struct SQLBlock: Sendable {
     public let range: Range<Int>  // UTF-16 offsets into the source, for NSTextView
     public let directives: BlockDirectives
 
-    /// Public so the editor can hand back a block it located itself. The editor
-    /// keeps a per-line lexer cache and can find the statement under the caret
-    /// without re-splitting the document, but the result still has to be the
-    /// same `SQLBlock` the rest of the app consumes.
     public init(text: String, range: Range<Int>, directives: BlockDirectives) {
         self.text = text
         self.range = range
@@ -37,7 +33,6 @@ public struct SQLBlock: Sendable {
 
 public enum SQLBlocks {
     /// Splits on top-level `;`, honouring '…', "…", $tag$…$tag$, `--` and `/*…*/`.
-    /// No dialect knowledge — v1 only needs to find the statement under the caret.
     public static func split(_ source: String) -> [SQLBlock] {
         let chars = Array(source.utf16)
         var blocks: [SQLBlock] = []
@@ -108,8 +103,6 @@ public enum SQLBlocks {
         return SQLBlock(text: text, range: lo..<hi, directives: directives(in: text))
     }
 
-    /// The statement whose range contains the caret; falls back to the last
-    /// block that starts before the caret, then to the first block.
     public static func block(at caret: Int, in source: String) -> SQLBlock? {
         let blocks = split(source)
         if blocks.isEmpty { return nil }
@@ -142,7 +135,6 @@ public enum SQLBlocks {
     }
 
     /// A fat-finger guardrail, not an adversary defence.
-    /// Only used to honour `-- @readonly`, and the UI says exactly that.
     public static func isWriteStatement(_ sql: String) -> Bool {
         var s = sql
         while true {
