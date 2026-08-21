@@ -133,10 +133,12 @@ endif()
 add_executable(datagrep
     src/main.cpp
     src/model/ConnectionSafety.cpp
+    src/model/QueryHistory.cpp
     src/model/QueryStatus.cpp
     src/model/ResultModel.cpp
     src/ui/ConnectionDialog.cpp
     src/ui/DetailPanel.cpp
+    src/ui/HistoryPanel.cpp
     src/ui/MainWindow.cpp
     src/ui/ResultTableView.cpp
     src/ui/RowNumberHeader.cpp

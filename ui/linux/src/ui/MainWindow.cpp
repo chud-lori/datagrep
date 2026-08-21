@@ -2,9 +2,11 @@
 
 #include "ffi/DatagrepFfi.hpp"
 #include "model/ConnectionSafety.hpp"
+#include "model/QueryHistory.hpp"
 #include "model/ResultModel.hpp"
 #include "ui/ConnectionDialog.hpp"
 #include "ui/DetailPanel.hpp"
+#include "ui/HistoryPanel.hpp"
 #include "ui/ResultTableView.hpp"
 #include "ui/SchemaTree.hpp"
 #include "ui/SqlEditor.hpp"
@@ -21,6 +23,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QKeySequence>
 #include <QLabel>
 #include <QListWidget>
 #include <QMessageBox>
@@ -156,6 +159,26 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         status_->showMessage(QStringLiteral("cell JSON copied"));
     });
 
+    // --- query history: a bottom dock over the JSONL store ------------------
+    // Hidden until asked for; its toggle lives on the editor toolbar with the
+    // shortcut, so closed history stays one keystroke away.
+    history_ = new QueryHistoryStore(QueryHistoryStore::defaultDirectory(), this);
+    historyPanel_ = new HistoryPanel(history_, this);
+    historyDock_ = new QDockWidget(QStringLiteral("Query History"), this);
+    historyDock_->setObjectName(QStringLiteral("historyDock"));
+    historyDock_->setWidget(historyPanel_);
+    historyDock_->setAllowedAreas(Qt::BottomDockWidgetArea |
+                                  Qt::TopDockWidgetArea);
+    addDockWidget(Qt::BottomDockWidgetArea, historyDock_);
+    historyDock_->hide();
+    connect(historyPanel_, &HistoryPanel::statusMessage, this,
+            [this](const QString& text) { status_->showMessage(text); });
+    connect(historyPanel_, &HistoryPanel::openInEditor, this,
+            &MainWindow::onOpenHistoryInEditor);
+    connect(historyPanel_, &HistoryPanel::rerunRequested, this,
+            &MainWindow::onRerunFromHistory);
+    history_->load();
+
     auto* sidebar = new QSplitter(Qt::Vertical, this);
     sidebar->addWidget(connPane);
     sidebar->addWidget(schema_);
@@ -171,6 +194,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(runAction, &QAction::triggered, this, &MainWindow::runStatement);
     editorToolbar->addSeparator();
     editorToolbar->addAction(inspectorDock_->toggleViewAction());
+    QAction* historyToggle = historyDock_->toggleViewAction();
+    historyToggle->setText(QStringLiteral("History"));
+    historyToggle->setShortcut(QKeySequence(QStringLiteral("Ctrl+H")));
+    editorToolbar->addAction(historyToggle);
 
     auto* editorPane = new QWidget(this);
     auto* editorLayout = new QVBoxLayout(editorPane);
@@ -267,6 +294,7 @@ void MainWindow::reloadProfiles() {
     }
     const QJsonArray arr = QJsonDocument::fromJson(json.toUtf8()).array();
     safetyByProfile_.clear();
+    driverByProfile_.clear();
     for (const QJsonValue& v : arr) {
         const QJsonObject o = v.toObject();
         const QString name = o.value(QStringLiteral("name")).toString();
@@ -284,6 +312,7 @@ void MainWindow::reloadProfiles() {
         safety.confirmWrites =
             o.value(QStringLiteral("confirm_writes")).toBool(false);
         safetyByProfile_.insert(name, safety);
+        driverByProfile_.insert(name, driver);
 
         auto* item = new QListWidgetItem(name, connections_);
 
@@ -437,9 +466,6 @@ void MainWindow::onRemoveConnection() {
 }
 
 void MainWindow::runStatement() {
-    if (!core_) {
-        return;
-    }
     const QString profile = selectedProfile();
     if (profile.isEmpty()) {
         status_->showMessage(QStringLiteral("Select a connection first."), true);
@@ -447,6 +473,13 @@ void MainWindow::runStatement() {
     }
     const QString sql = editor_->statementUnderCursor();
     if (sql.isEmpty()) {
+        return;
+    }
+    executeStatement(profile, sql);
+}
+
+void MainWindow::executeStatement(const QString& profile, const QString& sql) {
+    if (!core_) {
         return;
     }
     // The confirm-writes promise. The engine has no notion of this profile
@@ -473,6 +506,9 @@ void MainWindow::runStatement() {
             return;
         }
     }
+    // Recorded before the engine is asked, so a run that never gets a query
+    // handle still has a pending entry to fail into.
+    history_->executionStarted(sql, profile, driverByProfile_.value(profile));
     try {
         auto query = std::make_unique<dg::Query>(
             core_->run(profile.toStdString(), sql.toStdString()));
@@ -488,8 +524,57 @@ void MainWindow::runStatement() {
         // result; a new query makes that reference meaningless.
         inspector_->clearCell();
     } catch (const dg::Error& e) {
+        history_->executionFailedToStart(QString::fromUtf8(e.what()));
         status_->showMessage(QString::fromUtf8(e.what()), true);
     }
+}
+
+bool MainWindow::selectConnection(const QString& name) {
+    const auto matches = connections_->findItems(name, Qt::MatchExactly);
+    if (matches.isEmpty()) {
+        return false;
+    }
+    connections_->setCurrentItem(matches.first());
+    return true;
+}
+
+void MainWindow::onOpenHistoryInEditor(const QString& sql,
+                                       const QString& connection) {
+    // No editor tabs yet, so append rather than replace: a history panel that
+    // overwrites the SQL someone was half way through writing has cost them
+    // more than it saved.
+    QTextCursor cursor = editor_->textCursor();
+    cursor.movePosition(QTextCursor::End);
+    if (!editor_->toPlainText().trimmed().isEmpty()) {
+        cursor.insertText(QStringLiteral("\n\n"));
+    }
+    cursor.insertText(sql);
+    editor_->setTextCursor(cursor);
+    editor_->setFocus();
+    if (!connection.isEmpty()) {
+        selectConnection(connection);  // gone connections just stay unselected
+    }
+}
+
+void MainWindow::onRerunFromHistory(const QString& sql, const QString& connection) {
+    QString profile = connection;
+    if (!profile.isEmpty()) {
+        // The entry names the connection it ran against; honour it or say why not.
+        if (!selectConnection(profile)) {
+            status_->showMessage(
+                QStringLiteral("connection ‘%1’ no longer exists — not run")
+                    .arg(profile),
+                true);
+            return;
+        }
+    } else {
+        profile = selectedProfile();
+        if (profile.isEmpty()) {
+            status_->showMessage(QStringLiteral("Select a connection first."), true);
+            return;
+        }
+    }
+    executeStatement(profile, sql);
 }
 
 void MainWindow::cancelQuery() {
@@ -513,6 +598,8 @@ void MainWindow::cancelQuery() {
 
 void MainWindow::onStatusChanged(const dg::QueryStatus& status) {
     status_->updateStatus(status);
+    // Safe on every tick: this records once, when the query goes terminal.
+    history_->executionProgressed(status);
 }
 
 void MainWindow::onSchemaObjectActivated(const QString& /*profile*/,

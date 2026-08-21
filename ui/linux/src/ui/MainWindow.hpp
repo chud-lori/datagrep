@@ -20,6 +20,8 @@ namespace dg {
 class Core;
 }
 class DetailPanel;
+class HistoryPanel;
+class QueryHistoryStore;
 class ResultModel;
 class ResultTableView;
 class SqlEditor;
@@ -47,9 +49,17 @@ private slots:
     void cancelQuery();
     void onStatusChanged(const dg::QueryStatus& status);
     void onSchemaObjectActivated(const QString& profile, const QString& pathJson);
+    void onOpenHistoryInEditor(const QString& sql, const QString& connection);
+    void onRerunFromHistory(const QString& sql, const QString& connection);
 
 private:
     QString selectedProfile() const;
+
+    // The one run path. Every statement — typed or replayed from history —
+    // goes through here, so the confirm-writes prompt and the history record
+    // can never be bypassed by where the SQL came from.
+    void executeStatement(const QString& profile, const QString& sql);
+    bool selectConnection(const QString& name);
 
     // Show the filled marker band for the selected connection, or hide it. Runs
     // on every selection change and after every profile reload, so the banner
@@ -66,6 +76,9 @@ private:
     QLabel* markedBanner_;
     DetailPanel* inspector_;
     QDockWidget* inspectorDock_;
+    QueryHistoryStore* history_;
+    HistoryPanel* historyPanel_;
+    QDockWidget* historyDock_;
     SqlEditor* editor_;
     ResultTableView* grid_;
     ResultModel* model_;
@@ -75,6 +88,8 @@ private:
     // rows, the banner and the run path all read THIS map, so they can never
     // disagree about how careful a connection wants us to be.
     QHash<QString, dg::ConnectionSafety> safetyByProfile_;
+    // Driver id per profile, for the engine field history stores on each entry.
+    QHash<QString, QString> driverByProfile_;
 };
 
 #endif  // DATAGREP_MAIN_WINDOW_HPP
