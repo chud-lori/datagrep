@@ -55,13 +55,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             cmake ninja-build g++ pkg-config \
-            qt6-base-dev qt6-base-dev-tools qt6-svg-dev \
+            qt6-base-dev qt6-base-dev-tools \
             qt6-gtk-platformtheme qt6-xdgdesktopportal-platformtheme \
             libgl1-mesa-dev \
             zlib1g-dev \
             libdbus-1-dev \
             ruby ruby-dev rpm \
             desktop-file-utils
+          # Renamed between releases: qt6-svg-dev on newer, libqt6svg6-dev on
+          # 22.04, which this job is pinned to for the glibc floor.
+          sudo apt-get install -y qt6-svg-dev || \
+            sudo apt-get install -y libqt6svg6-dev
 
       - name: Install fpm
         run: sudo gem install --no-document fpm
