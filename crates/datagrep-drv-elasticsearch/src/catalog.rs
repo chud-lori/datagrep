@@ -21,12 +21,12 @@
 //! index's `dynamic` setting. `infer_shape` is the honest, explicitly-labelled
 //! substitute, exactly as for Mongo.
 //!
-//! # Root-level describe: cluster / node / shard health
+//! # Root-level describe: cluster / node / shard health, and what is running
 //!
 //! `describe(ObjectPath::root())` reports cluster health through the existing
-//! `ObjectDetail::extra` — not a new screen: `_cluster/health`, `_cat/nodes`
-//! and `_cat/shards`, three bounded `GET`s. Two rules, both learned from
-//! failures filed against other Elasticsearch clients:
+//! `ObjectDetail::extra` — not a new screen: `_cluster/health`, `_cat/nodes`,
+//! `_cat/shards` and `_tasks`, four bounded `GET`s. Two rules, both learned
+//! from failures filed against other Elasticsearch clients:
 //!
 //! - **each source degrades independently** — a cluster where `_cat/shards`
 //!   is forbidden still shows health and nodes, with the failed source marked
@@ -36,6 +36,14 @@
 //!   Elastic says they are "not intended for use by applications" — so every
 //!   `_cat` call here passes `format=json`, `bytes=b` and `time=ms`, and the
 //!   surfaced keys carry their unit (`disk_avail_bytes`, `uptime_ms`).
+//!
+//! `_tasks` is the same shape of answer as `_cat/shards`: a count, per-action
+//! totals, and a capped list of the longest-running ones, so a reindex or a
+//! delete-by-query somebody started is visible without a screen of its own.
+//! It is a **read**. Cancelling an arbitrary task is deliberately not offered
+//! here — this driver's canceller only ever cancels tasks datagrep itself
+//! tagged, and a button that cancelled a stranger's reindex from a browser
+//! would be a different feature with a different confirmation.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -73,6 +81,11 @@ const CAT_NODES_COLUMNS: &str =
     "name,ip,node.role,master,heap.percent,ram.percent,cpu,load_1m,disk.used_percent,disk.avail,uptime,version";
 /// Columns requested from `_cat/shards` — likewise only what is surfaced.
 const CAT_SHARDS_COLUMNS: &str = "index,shard,prirep,state,docs,store,node,unassigned.reason";
+/// Cap on the `running_tasks` array the root describe reports, for the same
+/// reason as [`PROBLEM_SHARD_CAP`]: a busy cluster can be running thousands of
+/// shard-level sub-tasks, and the full per-action counts are always in
+/// `task_actions`.
+const RUNNING_TASK_CAP: usize = 25;
 
 pub struct EsCatalog {
     http: Arc<EsHttp>,
@@ -314,20 +327,45 @@ impl EsCatalog {
             .await
     }
 
-    /// The root-level describe: cluster / node / shard health in
-    /// `ObjectDetail::extra`. Never fails as a whole — each of the three
-    /// sources is fetched and folded in independently, so a permissions or
-    /// version problem on one endpoint marks that source and leaves the
-    /// others intact (see the module doc).
+    /// Every task the cluster is running, as a flat list.
+    ///
+    /// `group_by=none` rather than the default node -> task nesting, and
+    /// `detailed=true` for the descriptions that are the only thing telling a
+    /// reindex apart from a search. Unfiltered on purpose: an `actions=` filter
+    /// would be a guess at which work is worth seeing, and would hide whatever
+    /// it did not think of.
+    async fn tasks(&self) -> Result<Json, DbError> {
+        self.http
+            .request(
+                Method::Get,
+                "/_tasks",
+                &[
+                    ("detailed", "true".to_string()),
+                    ("group_by", "none".to_string()),
+                ],
+                None,
+                None,
+                None,
+            )
+            .await
+    }
+
+    /// The root-level describe: cluster / node / shard health and what the
+    /// cluster is running, in `ObjectDetail::extra`. Never fails as a whole —
+    /// each of the four sources is fetched and folded in independently, so a
+    /// permissions or version problem on one endpoint marks that source and
+    /// leaves the others intact (see the module doc).
     async fn describe_root(&self) -> Result<ObjectDetail, DbError> {
         let health = self.cluster_health().await;
         let nodes = self.cat_nodes().await;
         let shards = self.cat_shards(None).await;
+        let tasks = self.tasks().await;
 
         let mut extra: Vec<(Arc<str>, Arc<str>)> = Vec::new();
         push_cluster_health_extra(&mut extra, &health);
         push_nodes_extra(&mut extra, &nodes);
         push_shards_extra(&mut extra, &shards);
+        push_tasks_extra(&mut extra, &tasks);
 
         Ok(ObjectDetail {
             node: ObjectNode {
@@ -561,6 +599,112 @@ fn push_shards_extra(extra: &mut Vec<(Arc<str>, Arc<str>)>, result: &Result<Json
             &format!("listing capped at {PROBLEM_SHARD_CAP}; shard_states has the full counts"),
         );
     }
+}
+
+/// Fold a `_tasks` result into `extra`: how many are running, per-action
+/// counts, and a capped list of the longest-running ones. On failure: marked
+/// under `tasks_error`, others still render.
+fn push_tasks_extra(extra: &mut Vec<(Arc<str>, Arc<str>)>, result: &Result<Json, DbError>) {
+    let json = match result {
+        Ok(json) => json,
+        Err(e) => {
+            push_pair(extra, "tasks_error", &e.to_string());
+            return;
+        }
+    };
+    let summary = parse_tasks(json, RUNNING_TASK_CAP);
+    push_pair(extra, "task_count", &summary.total.to_string());
+    let mut actions = serde_json::Map::new();
+    for (action, n) in &summary.by_action {
+        actions.insert(action.clone(), json!(n));
+    }
+    push_pair(extra, "task_actions", &Json::Object(actions).to_string());
+    push_pair(extra, "running_tasks", &summary.running.to_string());
+    if summary.running_truncated {
+        push_pair(
+            extra,
+            "running_tasks_truncated",
+            &format!("listing capped at {RUNNING_TASK_CAP} longest-running; task_actions has the full counts"),
+        );
+    }
+}
+
+/// What the root describe reports about `_tasks` without ever carrying every
+/// shard-level sub-task of a busy cluster.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskSummary {
+    pub total: usize,
+    /// Per-action counts, sorted by action name.
+    pub by_action: Vec<(String, usize)>,
+    /// JSON array of the `cap` longest-running tasks, longest first.
+    pub running: Json,
+    pub running_truncated: bool,
+}
+
+/// Summarise a `GET /_tasks?detailed&group_by=none` response.
+///
+/// Two things this deliberately does not do:
+///
+/// - **it does not drop the listing task itself.** Every `_tasks` answer
+///   contains the `cluster:monitor/tasks/lists` task that is the request
+///   asking, so the count is never zero. Filtering it out by action would also
+///   hide somebody *else* listing tasks, and a count that quietly disagrees
+///   with the server's own is worse than one that needs a sentence.
+/// - **it does not translate actions.** `indices:data/write/reindex` is what
+///   the cluster calls it, and it is what every other tool and every log line
+///   will call it too.
+///
+/// Running time is reported in milliseconds, from the server's own
+/// `running_time_in_nanos`, with the unit in the key — the same rule the `_cat`
+/// columns follow. Rows with no `action` are skipped, not fatal.
+pub fn parse_tasks(json: &Json, cap: usize) -> TaskSummary {
+    let mut total = 0usize;
+    let mut by_action: Vec<(String, usize)> = Vec::new();
+    let mut rows: Vec<(i64, Json)> = Vec::new();
+    if let Some(tasks) = json.get("tasks").and_then(Json::as_array) {
+        for task in tasks {
+            let Some(action) = task.get("action").and_then(Json::as_str) else {
+                continue;
+            };
+            total += 1;
+            match by_action.iter_mut().find(|(a, _)| a == action) {
+                Some((_, n)) => *n += 1,
+                None => by_action.push((action.to_string(), 1)),
+            }
+            let nanos = task
+                .get("running_time_in_nanos")
+                .and_then(Json::as_i64)
+                .unwrap_or(0);
+            rows.push((nanos, task_row_json(task, nanos)));
+        }
+    }
+    by_action.sort_by(|a, b| a.0.cmp(&b.0));
+    // Longest-running first: on a cluster with more tasks than the cap, the
+    // ones worth seeing are the ones that have been going a while.
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    let running_truncated = rows.len() > cap;
+    rows.truncate(cap);
+    TaskSummary {
+        total,
+        by_action,
+        running: Json::Array(rows.into_iter().map(|(_, row)| row).collect()),
+        running_truncated,
+    }
+}
+
+/// One `_tasks` entry as a display object. `cancellable` is reported because
+/// it is a fact about the task; nothing here offers to act on it.
+fn task_row_json(task: &Json, nanos: i64) -> Json {
+    json!({
+        "id": task.get("id").and_then(Json::as_i64),
+        "node": task.get("node").and_then(Json::as_str),
+        "action": task.get("action").and_then(Json::as_str),
+        "running_time_ms": nanos / 1_000_000,
+        "cancellable": task.get("cancellable").and_then(Json::as_bool),
+        "cancelled": task.get("cancelled").and_then(Json::as_bool),
+        "description": task.get("description").and_then(Json::as_str),
+        "parent_task_id": task.get("parent_task_id").and_then(Json::as_str),
+    })
 }
 
 /// One `_cat/nodes?format=json&bytes=b&time=ms` response as a JSON array of
@@ -1536,10 +1680,16 @@ mod tests {
         push_cluster_health_extra(&mut extra, &Err(err()));
         push_nodes_extra(&mut extra, &Err(err()));
         push_shards_extra(&mut extra, &Err(err()));
+        push_tasks_extra(&mut extra, &Err(err()));
         let keys: Vec<&str> = extra.iter().map(|(k, _)| &**k).collect();
         assert_eq!(
             keys,
-            vec!["cluster_health_error", "nodes_error", "shards_error"]
+            vec![
+                "cluster_health_error",
+                "nodes_error",
+                "shards_error",
+                "tasks_error"
+            ]
         );
     }
 
@@ -1567,6 +1717,96 @@ mod tests {
         assert_eq!(problems.as_array().unwrap().len(), 1);
         assert_eq!(
             get("problem_shards_truncated"),
+            None,
+            "no truncation note under the cap"
+        );
+    }
+
+    #[test]
+    fn tasks_summarise_by_action_and_cap_the_longest_running_first() {
+        let json = json!({ "tasks": [
+            { "node": "nodeA", "id": 1, "action": "indices:data/read/search",
+              "running_time_in_nanos": 3_000_000_000_i64,
+              "cancellable": true, "cancelled": false, "description": "indices[logs]" },
+            { "node": "nodeA", "id": 2, "action": "indices:data/write/reindex",
+              "running_time_in_nanos": 900_000_000_000_i64,
+              "cancellable": true, "cancelled": false,
+              "description": "reindex from [old] to [new]" },
+            { "node": "nodeB", "id": 3, "action": "indices:data/read/search",
+              "running_time_in_nanos": 1_000_000_i64, "cancellable": true },
+            { "node": "nodeB", "id": 4, "action": "cluster:monitor/tasks/lists",
+              "running_time_in_nanos": 500_000_i64, "cancellable": false },
+            { "malformed": true }
+        ]});
+
+        let summary = parse_tasks(&json, 2);
+        assert_eq!(
+            summary.total, 4,
+            "a task without an action is skipped, not fatal — and the listing \
+             task itself is counted, because the server counts it"
+        );
+        assert_eq!(
+            summary.by_action,
+            vec![
+                ("cluster:monitor/tasks/lists".to_string(), 1),
+                ("indices:data/read/search".to_string(), 2),
+                ("indices:data/write/reindex".to_string(), 1),
+            ],
+            "actions keep the cluster's own spelling"
+        );
+        let running = summary.running.as_array().unwrap();
+        assert_eq!(running.len(), 2, "the listing is capped");
+        assert!(summary.running_truncated);
+        // Longest-running first: the reindex is the one worth seeing.
+        assert_eq!(running[0]["action"], json!("indices:data/write/reindex"));
+        assert_eq!(running[0]["running_time_ms"], json!(900_000));
+        assert_eq!(running[0]["node"], json!("nodeA"));
+        assert_eq!(running[1]["running_time_ms"], json!(3_000));
+        // A fact, reported; nothing here offers to act on it.
+        assert_eq!(running[0]["cancellable"], json!(true));
+        assert_eq!(running[1]["description"], json!("indices[logs]"));
+
+        let uncapped = parse_tasks(&json, 25);
+        assert!(!uncapped.running_truncated);
+        assert_eq!(uncapped.running.as_array().unwrap().len(), 4);
+
+        // An idle cluster, and a response that is not the shape we expect,
+        // both read as "nothing running" rather than panicking.
+        let empty = parse_tasks(&json!({ "tasks": [] }), 25);
+        assert_eq!(empty.total, 0);
+        assert!(empty.by_action.is_empty());
+        assert_eq!(parse_tasks(&json!(null), 25).total, 0);
+    }
+
+    #[test]
+    fn task_extra_reports_counts_and_the_running_list() {
+        let mut extra: Vec<(Arc<str>, Arc<str>)> = Vec::new();
+        push_tasks_extra(
+            &mut extra,
+            &Ok(json!({ "tasks": [
+                { "node": "n", "id": 1, "action": "indices:data/write/reindex",
+                  "running_time_in_nanos": 2_000_000_000_i64 },
+                { "node": "n", "id": 2, "action": "cluster:monitor/tasks/lists",
+                  "running_time_in_nanos": 100_000_i64 }
+            ]})),
+        );
+        let get = |k: &str| {
+            extra
+                .iter()
+                .find(|(key, _)| &**key == k)
+                .map(|(_, v)| v.to_string())
+        };
+        assert_eq!(get("task_count").as_deref(), Some("2"));
+        let actions: Json = serde_json::from_str(&get("task_actions").unwrap()).unwrap();
+        assert_eq!(
+            actions,
+            json!({ "cluster:monitor/tasks/lists": 1, "indices:data/write/reindex": 1 })
+        );
+        let running: Json = serde_json::from_str(&get("running_tasks").unwrap()).unwrap();
+        assert_eq!(running.as_array().unwrap().len(), 2);
+        assert_eq!(running[0]["running_time_ms"], json!(2_000));
+        assert_eq!(
+            get("running_tasks_truncated"),
             None,
             "no truncation note under the cap"
         );

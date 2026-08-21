@@ -1077,3 +1077,243 @@ async fn native_console_requests_and_bound_parameters_work() {
     conn.close().await.unwrap();
     drop_index(&index).await;
 }
+
+/// **The version-conflict loop, whole, against a real cluster.**
+///
+/// A guarded write is only worth having if a conflict is recoverable, and the
+/// recovery is the same three steps every time: the write is refused, the
+/// document is read back, the edit is re-sent against the version that read
+/// returned. Every one of those steps rests on an assumption about the server
+/// that no fixture can check — that a stale `if_seq_no` really does 409 rather
+/// than overwrite, that a scan by identity really does return the *current*
+/// `_seq_no`, and that the same edit really is accepted once re-guarded.
+///
+/// This is the shape `datagrep_reread_documents` builds for the grid's
+/// three-column conflict view: `Op::Scan` over the document's own index,
+/// filtered by the rest of its identity, `limit: 2` so an identity that
+/// answers twice can be told from one that answers once.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live Elasticsearch; see tests/README.md"]
+async fn a_stale_guard_is_refused_then_re_read_and_re_applied() {
+    let index = unique_index("conflict");
+    create_index(
+        &index,
+        serde_json::json!({ "properties": {
+            "status": { "type": "keyword" }, "owner": { "type": "keyword" }
+        }}),
+    )
+    .await;
+    bulk(
+        &index,
+        &[serde_json::json!({ "status": "open", "owner": "amy" })],
+    )
+    .await;
+
+    let conn = connect(Some(&index)).await;
+
+    // The scan a re-read runs: the index is the object, the rest of the
+    // identity are terms inside it.
+    let reread = |id: Option<&str>| {
+        let mut terms = Vec::new();
+        if let Some(id) = id {
+            terms.push(Predicate::Eq {
+                field: FieldPath::field("_id"),
+                value: Value::Str(Arc::from(id)),
+            });
+        }
+        Request::Op(Op::Scan {
+            path: ObjectPath::new(vec![Arc::from(index.as_str())]),
+            filter: (!terms.is_empty()).then(|| Predicate::And(terms)),
+            order: Vec::new(),
+            project: None,
+            limit: Some(2),
+            resume: None,
+        })
+    };
+
+    let read_one = |req: Request| {
+        let conn = &conn;
+        async move {
+            let mut cursor = conn.execute(req).await.expect("scan");
+            let mut docs: Vec<Value> = Vec::new();
+            while let Some(batch) = cursor
+                .next_batch(FetchHint::default())
+                .await
+                .expect("batch")
+            {
+                if let Payload::Docs(hits) = batch.payload {
+                    docs.extend(hits);
+                }
+            }
+            cursor.close().await.expect("close");
+            docs
+        }
+    };
+
+    // 1. Load it. The scan carries the guard, because every page asks for it.
+    let loaded = read_one(reread(None)).await;
+    assert_eq!(loaded.len(), 1);
+    let Some(Value::Str(doc_id)) = field(&loaded[0], "_id") else {
+        panic!("a hit must carry its _id")
+    };
+    let loaded_seq = field(&loaded[0], "_seq_no").expect("a scan must carry _seq_no");
+    let loaded_term = field(&loaded[0], "_primary_term").expect("…and _primary_term");
+    assert_eq!(
+        field(&loaded[0], "_source.status"),
+        Some(Value::Str(Arc::from("open")))
+    );
+
+    // 2. Somebody else moves it — a different field, so a rebase would not be
+    //    overwriting their work.
+    let resp = seeder()
+        .post(format!(
+            "{}/{index}/_update/{doc_id}?refresh=true",
+            es_url()
+        ))
+        .json(&serde_json::json!({ "doc": { "owner": "bo" } }))
+        .send()
+        .await
+        .expect("out-of-band update");
+    assert!(resp.status().is_success(), "seed update failed: {resp:?}");
+
+    let key = vec![
+        (
+            FieldPath::field("_index"),
+            Value::Str(Arc::from(index.as_str())),
+        ),
+        (FieldPath::field("_id"), Value::Str(doc_id.clone())),
+    ];
+    let update = |expect: Vec<(FieldPath, Value)>| {
+        Request::Op(Op::Mutate(datagrep_api::request::MutationBatch {
+            mutations: vec![datagrep_api::request::Mutation::Update {
+                path: ObjectPath::new(vec![Arc::from(index.as_str())]),
+                key: key.clone(),
+                sets: vec![(FieldPath::field("status"), Value::Str(Arc::from("done")))],
+                expect,
+            }],
+        }))
+    };
+
+    // 3. The stale guard is refused — reported per row, not thrown, and the
+    //    document is NOT overwritten.
+    let refused = read_one(update(vec![
+        (FieldPath::field("_seq_no"), loaded_seq.clone()),
+        (FieldPath::field("_primary_term"), loaded_term.clone()),
+    ]))
+    .await;
+    assert_eq!(refused.len(), 1, "one report row per mutation");
+    assert_eq!(
+        field(&refused[0], "outcome"),
+        Some(Value::Str(Arc::from("failed"))),
+        "a stale guard must not be applied"
+    );
+    assert_eq!(field(&refused[0], "conflict"), Some(Value::Bool(true)));
+
+    // 4. Re-read by identity: exactly one document, a FRESH guard, and the
+    //    other person's change visible — which is what the middle column of
+    //    the conflict view shows.
+    let now = read_one(reread(Some(&doc_id))).await;
+    assert_eq!(now.len(), 1, "an identity answers exactly once");
+    let fresh_seq = field(&now[0], "_seq_no").expect("_seq_no");
+    let fresh_term = field(&now[0], "_primary_term").expect("_primary_term");
+    assert_ne!(
+        fresh_seq, loaded_seq,
+        "the re-read must carry the CURRENT version"
+    );
+    assert_eq!(
+        field(&now[0], "_source.owner"),
+        Some(Value::Str(Arc::from("bo"))),
+        "the re-read shows what the server holds now"
+    );
+    assert_eq!(
+        field(&now[0], "_source.status"),
+        Some(Value::Str(Arc::from("open"))),
+        "and the refused write really did not land"
+    );
+
+    // 5. Rebase: the same edit, re-guarded against that version, applies.
+    let applied = read_one(update(vec![
+        (FieldPath::field("_seq_no"), fresh_seq),
+        (FieldPath::field("_primary_term"), fresh_term),
+    ]))
+    .await;
+    assert_eq!(
+        field(&applied[0], "outcome"),
+        Some(Value::Str(Arc::from("applied"))),
+        "re-applying onto the current version is accepted"
+    );
+
+    let after = read_one(reread(Some(&doc_id))).await;
+    assert_eq!(
+        field(&after[0], "_source.status"),
+        Some(Value::Str(Arc::from("done"))),
+        "the user's edit landed"
+    );
+    assert_eq!(
+        field(&after[0], "_source.owner"),
+        Some(Value::Str(Arc::from("bo"))),
+        "and it merged onto the other change rather than reverting it"
+    );
+
+    conn.close().await.unwrap();
+    drop_index(&index).await;
+}
+
+/// The root describe's fourth source: what the cluster is running.
+///
+/// `_tasks` is queried unfiltered, so the listing request itself is always in
+/// the answer — which is exactly what makes this checkable without arranging
+/// for a long-running reindex.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live Elasticsearch; see tests/README.md"]
+async fn the_root_describe_reports_running_tasks_alongside_health() {
+    let conn = connect(None).await;
+    let detail = conn
+        .catalog()
+        .describe(&ObjectPath::root())
+        .await
+        .expect("describe the cluster");
+    let extra = |k: &str| -> Option<String> {
+        detail
+            .extra
+            .iter()
+            .find(|(key, _)| &**key == k)
+            .map(|(_, v)| v.to_string())
+    };
+
+    // The three sources P1-4 landed still answer…
+    assert!(
+        extra("status").is_some(),
+        "cluster health must still render"
+    );
+    assert!(extra("shard_count").is_some(), "shards must still render");
+    // …and the fourth one does too.
+    let count: usize = extra("task_count")
+        .expect("task_count")
+        .parse()
+        .expect("a number");
+    assert!(
+        count >= 1,
+        "the tasks listing always contains at least the request asking"
+    );
+    let actions: serde_json::Value =
+        serde_json::from_str(&extra("task_actions").expect("task_actions")).unwrap();
+    assert!(
+        actions
+            .as_object()
+            .expect("an object")
+            .contains_key("cluster:monitor/tasks/lists"),
+        "actions keep the cluster's own spelling, got {actions}"
+    );
+    let running: serde_json::Value =
+        serde_json::from_str(&extra("running_tasks").expect("running_tasks")).unwrap();
+    let rows = running.as_array().expect("an array");
+    assert!(!rows.is_empty());
+    assert!(
+        rows[0]["running_time_ms"].is_i64(),
+        "running time is milliseconds, from the server's nanos"
+    );
+    assert!(rows[0]["action"].is_string());
+
+    conn.close().await.unwrap();
+}
