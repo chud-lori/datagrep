@@ -127,6 +127,27 @@ async fn drop_index(index: &str) {
         .await;
 }
 
+/// Seed anything that is not an index — a template, say — at an arbitrary
+/// path, for the same reason as [`create_index`]: a read test must not depend
+/// on a write path it is not exercising.
+async fn put_json(path: &str, body: serde_json::Value) {
+    let resp = seeder()
+        .put(format!("{}/{path}", es_url()))
+        .json(&body)
+        .send()
+        .await
+        .expect("put");
+    assert!(
+        resp.status().is_success(),
+        "PUT /{path} failed: {}",
+        resp.text().await.unwrap_or_default()
+    );
+}
+
+async fn delete_path(path: &str) {
+    let _ = seeder().delete(format!("{}/{path}", es_url())).send().await;
+}
+
 async fn connect(default_index: Option<&str>) -> Box<dyn Connection> {
     let driver = ElasticsearchDriver::new();
     let mut cfg = driver.parse_url(&es_url()).expect("parse url");
@@ -1316,4 +1337,107 @@ async fn the_root_describe_reports_running_tasks_alongside_health() {
     assert!(rows[0]["action"].is_string());
 
     conn.close().await.unwrap();
+}
+
+/// Index templates in the root describe: three systems, three sources.
+///
+/// The listing must find a template this test authored *and* the ones the
+/// server ships with — a stock 8.15 cluster has 45 composable, 44 component
+/// and 5 legacy templates before anybody authors one, which is the whole
+/// reason the listings are capped and counted separately.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live Elasticsearch; see tests/README.md"]
+async fn the_root_describe_lists_all_three_template_systems() {
+    let label = unique_index("tpl");
+    let component = format!("{label}_component");
+    let composable = format!("{label}_composable");
+    put_json(
+        &format!("_component_template/{component}"),
+        serde_json::json!({ "template": { "mappings": { "properties": {
+            "level": { "type": "keyword" } } } } }),
+    )
+    .await;
+    put_json(
+        &format!("_index_template/{composable}"),
+        serde_json::json!({
+            "index_patterns": [format!("{label}-*")],
+            "priority": 500,
+            "composed_of": [component],
+            "version": 7,
+            "template": { "settings": { "number_of_shards": 1 } }
+        }),
+    )
+    .await;
+
+    let conn = connect(None).await;
+    let detail = conn
+        .catalog()
+        .describe(&ObjectPath::root())
+        .await
+        .expect("describe the cluster");
+    let extra = |k: &str| -> Option<String> {
+        detail
+            .extra
+            .iter()
+            .find(|(key, _)| &**key == k)
+            .map(|(_, v)| v.to_string())
+    };
+
+    // The sources that were already there still answer.
+    assert!(
+        extra("status").is_some(),
+        "cluster health must still render"
+    );
+    assert!(extra("task_count").is_some(), "tasks must still render");
+
+    for key in ["index_templates", "component_templates", "legacy_templates"] {
+        let count: usize = extra(&format!("{key}_count"))
+            .unwrap_or_else(|| panic!("{key}_count"))
+            .parse()
+            .expect("a number");
+        assert!(count > 0, "a stock cluster ships {key}, got {count}");
+        let listing: serde_json::Value =
+            serde_json::from_str(&extra(key).unwrap_or_else(|| panic!("{key}"))).unwrap();
+        assert!(listing
+            .as_array()
+            .expect("an array")
+            .iter()
+            .all(|row| row["name"].is_string()));
+    }
+
+    // The composable template this test wrote, with its patterns still an
+    // array rather than the `_cat` rendering `"[…-*]"`.
+    let listing: serde_json::Value =
+        serde_json::from_str(&extra("index_templates").unwrap()).unwrap();
+    let mine = listing
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == serde_json::json!(composable))
+        .expect("the template this test authored is listed");
+    assert_eq!(
+        mine["index_patterns"],
+        serde_json::json!([format!("{label}-*")])
+    );
+    assert_eq!(mine["priority"], serde_json::json!(500));
+    assert_eq!(mine["composed_of"], serde_json::json!([component]));
+    assert_eq!(mine["version"], serde_json::json!(7));
+    assert_eq!(mine["data_stream"], serde_json::json!(false));
+    assert_eq!(mine["template_keys"], serde_json::json!(["settings"]));
+
+    // A composable template stores only the *name* of what it is composed of,
+    // so the component listing is what stops that name being a dead reference.
+    let components: serde_json::Value =
+        serde_json::from_str(&extra("component_templates").unwrap()).unwrap();
+    let comp = components
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == serde_json::json!(component))
+        .expect("the component is listed");
+    assert_eq!(comp["template_keys"], serde_json::json!(["mappings"]));
+
+    conn.close().await.unwrap();
+    delete_path(&format!("_index_template/{composable}")).await;
+    delete_path(&format!("_component_template/{component}")).await;
 }
