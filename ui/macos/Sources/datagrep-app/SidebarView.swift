@@ -40,12 +40,23 @@ struct SidebarView: View {
                         .foregroundStyle(.secondary)
                         .tracking(0.6)
                     Spacer(minLength: 0)
+                    // Deliberately NOT `.secondary` like the header text
+                    // beside it. A + drawn in the same grey as a label reads
+                    // as decoration, and the whole point of this control is
+                    // that the one list you could not add to now looks like it
+                    // takes additions. Accent glyph on a faint chip: a target
+                    // with an edge, which the accent tint also turns red on a
+                    // production connection along with the rest of the window.
                     Button {
                         model.showNewConnection = true
                     } label: {
                         Image(systemName: "plus")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(Color.accentColor)
+                            .frame(width: 18, height: 18)
+                            .background(
+                                Color.primary.opacity(0.09),
+                                in: RoundedRectangle(cornerRadius: 4, style: .continuous))
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
