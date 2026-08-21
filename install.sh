@@ -1,28 +1,9 @@
 #!/usr/bin/env bash
-# datagrep installer — puts the `datagrep` CLI on your PATH (and, with --app,
-# installs the macOS app). Downloads prebuilt binaries from GitHub Releases,
-# verifies them against the release's SHA256SUMS, and never runs sudo for you.
-#
-#   curl -fsSL https://raw.githubusercontent.com/chud-lori/datagrep/main/install.sh | bash
-#
-# Options (pass after `bash -s --` when piping from curl):
-#   --version VER    install this release tag instead of latest (e.g. v0.1.0)
-#   --prefix DIR     install the CLI to DIR/bin
-#   --user           install the CLI to ~/.local/bin
-#   --app            also install the macOS app (macOS only)
-#   --uninstall      remove the datagrep CLI (and the app if --app)
-#   --help           show this help
-#
-# Building from source instead:  cargo install --path crates/datagrep-cli
 
 set -euo pipefail
 
 PROG=datagrep
 REPO=chud-lori/datagrep
-# Static release manifest on GitHub Pages (docs/latest.json on main). Same
-# scheme as chud-lori/rusty-requester: resolving "latest" from a static file
-# instead of the GitHub REST API avoids unauthenticated rate limits. Falls
-# back to GitHub's /releases/latest redirect when unreachable.
 LATEST_JSON_URL="${DATAGREP_LATEST_JSON_URL:-https://chud-lori.github.io/datagrep/latest.json}"
 
 PREFIX=""
@@ -252,10 +233,6 @@ mkdir -p "$BINDIR"
 install -m 0755 "$tmpdir/$asset" "$BINDIR/$PROG"
 echo "Installed $BINDIR/$PROG"
 
-# ---- optionally install the macOS app ----
-# Prefer the DMG (present from the release that introduced it; older releases
-# only have the zip — SHA256SUMS tells us which we have). Both paths verify
-# against SHA256SUMS before anything is opened or copied.
 if [ "$WANT_APP" -eq 1 ]; then
   app_dmg="$PROG-macos.dmg"
   app_zip="$PROG-macos.app.zip"

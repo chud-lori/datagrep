@@ -1,18 +1,5 @@
 name: Linux Qt UI
 
-# The ONLY build verification the Linux Qt UI gets: development happens on a
-# Mac with no Qt6/cmake, so compile and link errors in ui/linux are invisible
-# until this job runs. It builds the real thing — the Rust FFI static archive
-# first, then the Qt6 app CMake-configured and compiled against it — and fails
-# on any compile or link error. No tests, no packaging: catching the errors we
-# cannot see locally is the entire point.
-#
-# Run the same thing locally (needs Qt6, CMake >= 3.19, a C++17 compiler,
-# libdbus-1-dev, and a Rust toolchain):
-#   cargo build -p datagrep-ffi --release
-#   cmake -S ui/linux -B ui/linux/build -DDATAGREP_BUILD_RUST=OFF
-#   cmake --build ui/linux/build
-
 on:
   push:
     branches: [main, "feat/**"]
@@ -43,20 +30,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # qt6-base-dev carries Core/Gui/Widgets, the CMake config files, and
-      # (via qt6-base-dev-tools) the moc that CMAKE_AUTOMOC needs — the only
-      # Qt modules ui/linux/CMakeLists.txt asks for. libgl1-mesa-dev is the
-      # GL headers Qt6Gui's CMake config insists on even for a widgets app.
-      # libdbus-1-dev is a link dependency of the Rust staticlib (keyring's
-      # Secret Service backend), named explicitly on the final link line.
-      # libkf6syntaxhighlighting-dev provides KF6::SyntaxHighlighting (the
-      # KSyntaxHighlighting engine + bundled SQL definition and themes) that the
-      # SQL editor uses; without it CMake silently falls back to the built-in
-      # basic highlighter, so this is what exercises the real highlighting path.
-      #
-      # apt is deliberately NOT cached: these packages install in well under a
-      # minute from the runner-local mirror, and apt cache actions are the
-      # flakiest moving part one can add for that minute.
       - name: System dependencies
         run: |
           sudo apt-get update
@@ -66,15 +39,8 @@ jobs:
             libgl1-mesa-dev \
             zlib1g-dev \
             libdbus-1-dev
-          # Qt6 Svg (engine brand marks). Debian-style name first; the
-          # pre-noble Ubuntu name second in case the runner image regresses.
           sudo apt-get install -y qt6-svg-dev || \
             sudo apt-get install -y libqt6svg6-dev
-          # KSyntaxHighlighting is OPTIONAL: CMake finds it with find_package
-          # and otherwise compiles the built-in fallback highlighter. The KF6
-          # dev package is not in every runner image's archive (partial KF6 on
-          # 24.04), so install it best-effort — its absence must not fail the
-          # build, it just exercises the fallback path.
           sudo apt-get install -y libkf6syntaxhighlighting-dev || \
             echo "KF6SyntaxHighlighting unavailable — building the fallback highlighter"
 
@@ -84,15 +50,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # Build the engine archive exactly as CMake would drive it, but as its
-      # own step so a Rust failure and a C++ failure are distinguishable in
-      # the job log.
       - name: Build FFI static library
         run: cargo build -p datagrep-ffi --release
 
-      # DATAGREP_BUILD_RUST=OFF: the archive above is the input; CMake must
-      # not re-drive cargo. Any missing symbol, bad include, or Qt API misuse
-      # in ui/linux fails right here — which is this workflow's whole job.
       - name: Configure UI (CMake)
         run: >
           cmake -S ui/linux -B ui/linux/build -G Ninja
@@ -102,24 +62,11 @@ jobs:
       - name: Build UI
         run: cmake --build ui/linux/build
 
-  # The job above has never once compiled the KF6 editor path: the ubuntu-24.04
-  # runner archive carries only partial KF6, its best-effort install of
-  # libkf6syntaxhighlighting-dev always fails, and CMake falls back to the
-  # built-in highlighter. That leaves everything behind HAVE_KSYNTAXHIGHLIGHTING
-  # in SqlEditor read-verified only. This leg runs in a Debian trixie container,
-  # whose archive does carry the KF6 dev package, and configures with
-  # -DDATAGREP_REQUIRE_KSYNTAXHIGHLIGHTING=ON so a missing package fails the
-  # configure instead of silently downgrading to the fallback. Between the two
-  # jobs, BOTH editor code paths get a compiler on every change.
   build-kf6:
     name: cmake build (debian, KF6 highlighter)
     runs-on: ubuntu-latest
     container: debian:trixie
     steps:
-      # Container images start bare: ca-certificates/curl/git are for checkout
-      # and the rustup bootstrap, the rest mirrors the job above plus the KF6
-      # dev package — installed WITHOUT a fallback, because compiling the KF6
-      # path is this job's entire reason to exist.
       - name: System dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
