@@ -20,11 +20,11 @@ namespace dg {
 class Core;
 }
 class DetailPanel;
+class EditorTabs;
 class HistoryPanel;
 class QueryHistoryStore;
 class ResultModel;
 class ResultTableView;
-class SqlEditor;
 class SchemaTree;
 class StatusBar;
 class QDockWidget;
@@ -79,7 +79,7 @@ private:
     QueryHistoryStore* history_;
     HistoryPanel* historyPanel_;
     QDockWidget* historyDock_;
-    SqlEditor* editor_;
+    EditorTabs* editors_;
     ResultTableView* grid_;
     ResultModel* model_;
     StatusBar* status_;
