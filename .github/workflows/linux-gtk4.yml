@@ -1,0 +1,105 @@
+name: Linux GTK4 UI
+
+# ui/gtk4 is its own Cargo workspace, so ci/gates.sh does not reach it: this is
+# the whole of its gate, lockfile audit included. See ui/gtk4/README.md.
+
+on:
+  push:
+    branches: [main, "feat/**"]
+    paths:
+      - "ui/gtk4/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/linux-gtk4.yml"
+  pull_request:
+    paths:
+      - "ui/gtk4/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/linux-gtk4.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: linux-gtk4-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: cargo test (ubuntu)
+    # Pinned, not `ubuntu-latest`: an unpinned image is how the AppImage ended
+    # up unlaunchable on a glibc 2.35 desktop. This is not the shipping floor —
+    # the Flatpak runtime is.
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # libdbus-1-dev links the engine's Secret Service backend.
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libdbus-1-dev \
+            libgtk-4-dev libadwaita-1-dev
+
+      # The floor is a build failure rather than a paragraph — README.md says why.
+      - name: Assert the GTK4 / libadwaita floor
+        run: |
+          pkg-config --print-errors --atleast-version=4.12 gtk4
+          pkg-config --print-errors --atleast-version=1.4 libadwaita-1
+          echo "gtk4        $(pkg-config --modversion gtk4)"
+          echo "libadwaita  $(pkg-config --modversion libadwaita-1)"
+
+      - name: Install Rust (stable, rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ui/gtk4
+
+      - name: cargo fmt --check
+        run: cargo fmt --manifest-path ui/gtk4/Cargo.toml --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --manifest-path ui/gtk4/Cargo.toml --all-targets -- -D warnings
+
+      # No display needed: GListModel is gio, not GTK.
+      - name: cargo test
+        run: cargo test --manifest-path ui/gtk4/Cargo.toml -- --nocapture
+
+  audit:
+    name: supply chain (ui/gtk4 lockfile)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install supply-chain tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      # `--locked`: a lockfile that has drifted from Cargo.toml is a failure,
+      # not a silent re-resolution of something nobody audited.
+      - name: Assert the lockfile is current
+        run: >
+          cargo metadata --manifest-path ui/gtk4/Cargo.toml
+          --locked --format-version 1 > /dev/null
+
+      # Against the ROOT deny.toml: one licence allowlist and one accepted-advisory
+      # list for the product, rather than a second copy to drift from.
+      - name: cargo deny (advisories, licences, bans, sources)
+        run: >
+          cargo deny --manifest-path ui/gtk4/Cargo.toml
+          --config deny.toml check --hide-inclusion-graph
