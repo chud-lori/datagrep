@@ -224,6 +224,17 @@ public:
             datagrep_rows_cell_detail_json(raw_, absoluteRow - offset_, col));
     }
 
+    // The row's fields OUTSIDE the projected root — its envelope — as owned
+    // JSON. For a documents result this is the answer to "which document is
+    // this?" (e.g. _index/_id), which is exactly what a detail pane must lead
+    // with once those fields are no longer columns. The ABI returns NULL when
+    // the driver declared no root (nothing exists outside the row); that
+    // becomes nullopt here.
+    std::optional<std::string> envelopeJson(std::uint64_t absoluteRow) const {
+        return detail::takeOwnedString(
+            datagrep_rows_envelope_json(raw_, absoluteRow - offset_));
+    }
+
 private:
     DatagrepRows* raw_;
     std::uint64_t offset_;

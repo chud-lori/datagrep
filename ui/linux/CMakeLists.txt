@@ -136,6 +136,7 @@ add_executable(datagrep
     src/model/QueryStatus.cpp
     src/model/ResultModel.cpp
     src/ui/ConnectionDialog.cpp
+    src/ui/DetailPanel.cpp
     src/ui/MainWindow.cpp
     src/ui/ResultTableView.cpp
     src/ui/RowNumberHeader.cpp

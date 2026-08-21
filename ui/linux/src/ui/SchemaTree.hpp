@@ -37,6 +37,15 @@ signals:
     // into a SELECT. Carries profile + JSON path array.
     void objectActivated(const QString& profile, const QString& pathJson);
 
+    // The selected object's describe() payload, for the inspector's schema pane.
+    // Fires on EVERY selection change: with the raw describe JSON (fresh or
+    // cached — the panel never causes a second describe), with an error string
+    // when the describe failed, or with both empty when nothing describable is
+    // selected. The panel draws exactly what it is handed, so the tooltip and
+    // the pane can never tell two different stories about one object.
+    void objectDescribed(const QString& profile, const QString& pathJson,
+                         const QString& describeJson, const QString& error);
+
 private slots:
     void onItemExpanded(QTreeWidgetItem* item);
     void onItemActivated(QTreeWidgetItem* item, int column);

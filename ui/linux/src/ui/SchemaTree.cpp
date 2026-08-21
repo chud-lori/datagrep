@@ -19,6 +19,8 @@ constexpr int kEnumerationRole = Qt::UserRole + 3;  // QString
 constexpr int kLoadedRole = Qt::UserRole + 4;       // bool: children fetched
 constexpr int kScanPromptRole = Qt::UserRole + 5;   // bool: the "enter prefix" row
 constexpr int kDescribedRole = Qt::UserRole + 6;    // bool: describe() already done
+constexpr int kDescribeJsonRole = Qt::UserRole + 7;   // QString: raw describe JSON
+constexpr int kDescribeErrorRole = Qt::UserRole + 8;  // QString: describe failure
 
 const QString kScanOnly = QStringLiteral("scan_only");
 const QString kCheap = QStringLiteral("cheap");
@@ -219,15 +221,26 @@ void SchemaTree::onCurrentItemChanged(QTreeWidgetItem* current,
     // Lazily describe the selected object into its tooltip — one object, only on
     // selection, and only once (cached via kDescribedRole). Never on expansion,
     // so selecting a node reads its columns/indexes but opening the tree does not.
-    if (current == nullptr || core_ == nullptr) {
+    // The raw payload is kept on the node and re-announced on every selection,
+    // so the inspector's schema pane follows the selection without ever issuing
+    // a describe of its own.
+    if (core_ == nullptr) {
         return;
     }
-    if (current->data(0, kScanPromptRole).toBool() ||
-        current->data(0, kDescribedRole).toBool()) {
+    if (current == nullptr || current->data(0, kScanPromptRole).toBool()) {
+        emit objectDescribed(profile_, QString(), QString(), QString());
         return;
     }
     const QStringList path = current->data(0, kPathRole).toStringList();
     if (path.isEmpty()) {
+        emit objectDescribed(profile_, QString(), QString(), QString());
+        return;
+    }
+    if (current->data(0, kDescribedRole).toBool()) {
+        // Cached — re-announce without re-describing.
+        emit objectDescribed(profile_, encodePath(path),
+                             current->data(0, kDescribeJsonRole).toString(),
+                             current->data(0, kDescribeErrorRole).toString());
         return;
     }
     current->setData(0, kDescribedRole, true);  // set first: don't retry on failure loops
@@ -238,9 +251,14 @@ void SchemaTree::onCurrentItemChanged(QTreeWidgetItem* current,
         if (!summary.isEmpty()) {
             current->setToolTip(0, summary);
         }
-    } catch (const dg::Error&) {
+        current->setData(0, kDescribeJsonRole, json);
+        emit objectDescribed(profile_, encodePath(path), json, QString());
+    } catch (const dg::Error& e) {
         // A describe failure is not worth interrupting selection over; the node
         // simply keeps its kind tooltip. Leave kDescribedRole true so a broken
-        // object is not re-hit on every reselection.
+        // object is not re-hit on every reselection. The pane still learns WHY.
+        const QString error = QString::fromUtf8(e.what());
+        current->setData(0, kDescribeErrorRole, error);
+        emit objectDescribed(profile_, encodePath(path), QString(), error);
     }
 }
