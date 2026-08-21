@@ -23,6 +23,7 @@
 #   VERSION   package version   (default: workspace version from Cargo.toml)
 #   OUT_DIR   output directory  (default: <repo>/dist)
 #   QMAKE     qmake binary the qt plugin should query (default: qmake6 if found)
+#   DEPLOY_PLATFORM_THEMES  bundle host platform theme plugins (default: 1)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -77,6 +78,11 @@ fetch "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/co
 
 rm -rf "$APPDIR"
 
+# The qt plugin skips platformthemes/ by default, leaving the AppImage without
+# desktop integration (system fonts, palette, native file dialogs). Needs
+# qt6-gtk-platformtheme (+ qt6-xdgdesktopportal-platformtheme) on the build host.
+export DEPLOY_PLATFORM_THEMES="${DEPLOY_PLATFORM_THEMES:-1}"
+
 # linuxdeploy writes the AppImage into the current directory; the plugin is
 # discovered because it sits next to (or on PATH relative to) the invocation —
 # pass the AppDir + inputs explicitly and run from OUT_DIR.
@@ -89,6 +95,11 @@ cd "$OUT_DIR"
     --icon-file "$REPO_ROOT/packaging/icons/datagrep.png" \
     --plugin qt \
     --output appimage
+
+if ! ls "$APPDIR"/usr/plugins/platformthemes/*.so >/dev/null 2>&1; then
+    echo "error: no platform theme plugins in AppDir (install qt6-gtk-platformtheme)" >&2
+    exit 1
+fi
 
 echo
 echo "AppImage(s) in $OUT_DIR:"

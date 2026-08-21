@@ -7,6 +7,7 @@
 
 #include "ui/Appearance.hpp"
 #include "ui/MainWindow.hpp"
+#include "ui/Theme.hpp"
 
 #include <QApplication>
 
@@ -16,8 +17,9 @@ int main(int argc, char** argv) {
     QApplication::setOrganizationName(QStringLiteral("datagrep"));
     QApplication::setApplicationVersion(QStringLiteral(DATAGREP_APP_VERSION));
 
-    // Before the window: a forced palette must be in effect when widgets first
-    // polish, or the window flashes the platform theme.
+    // Style, base palette and stylesheet first; the stored light/dark choice
+    // then overrides the palette. Both must land before the window polishes.
+    dg::applyTheme(app);
     Appearance::instance().applyStored();
 
     MainWindow window;
