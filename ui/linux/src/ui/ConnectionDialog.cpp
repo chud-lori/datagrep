@@ -301,7 +301,8 @@ ConnectionDialog::Fields ConnectionDialog::fieldsFromConfig(const QString& drive
     }
     f.database = str(QStringLiteral("database"));
     if (f.database.isEmpty()) {
-        f.database = str(QStringLiteral("db"));
+        // Redis stores its db index as a JSON number.
+        f.database = num(QStringLiteral("db"));
     }
     if (f.database.isEmpty()) {
         f.database = str(QStringLiteral("index"));
