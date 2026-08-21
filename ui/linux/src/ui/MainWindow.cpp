@@ -4,6 +4,7 @@
 #include "model/ConnectionSafety.hpp"
 #include "model/QueryHistory.hpp"
 #include "model/ResultModel.hpp"
+#include "model/SupportDir.hpp"
 #include "ui/ConnectionDialog.hpp"
 #include "ui/DetailPanel.hpp"
 #include "ui/EditorTabs.hpp"
@@ -16,7 +17,6 @@
 #include <QAction>
 #include <QBrush>
 #include <QColor>
-#include <QDir>
 #include <QDockWidget>
 #include <QFont>
 #include <QHBoxLayout>
@@ -34,7 +34,6 @@
 #include <QPushButton>
 #include <QRectF>
 #include <QSplitter>
-#include <QStandardPaths>
 #include <QStatusBar>
 #include <QTextCursor>
 #include <QToolBar>
@@ -45,13 +44,10 @@
 
 namespace {
 
-// The profiles store lives in the platform's per-user app data directory. The
-// engine (datagrep_core_new) opens/creates the SQLite file at this path.
+// The engine (datagrep_core_new) opens/creates the SQLite file at this path.
+// Same filename as the macOS app, so one DATAGREP_CONFIG_DIR serves both.
 QString profilesDbPath() {
-    const QString dir =
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    QDir().mkpath(dir);
-    return dir + QStringLiteral("/profiles.db");
+    return dg::SupportDir::ensured() + QStringLiteral("/profiles.sqlite");
 }
 
 // The @limit N block directive parsed from the statement being run. Mirrors

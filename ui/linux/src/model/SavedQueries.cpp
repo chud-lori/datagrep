@@ -1,5 +1,7 @@
 #include "SavedQueries.hpp"
 
+#include "SupportDir.hpp"
+
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -7,7 +9,6 @@
 #include <QJsonObject>
 #include <QSaveFile>
 #include <QSet>
-#include <QStandardPaths>
 
 #include <algorithm>
 
@@ -62,8 +63,7 @@ SavedQueryStore::SavedQueryStore(const QString& directory) : directory_(director
 }
 
 QString SavedQueryStore::defaultDirectory() {
-    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) +
-           QStringLiteral("/tabs");
+    return dg::SupportDir::base() + QStringLiteral("/tabs");
 }
 
 QString SavedQueryStore::sqlPath(const dg::SavedQueryRecord& record) const {

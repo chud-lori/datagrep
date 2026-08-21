@@ -1,12 +1,13 @@
 #include "QueryHistory.hpp"
 
+#include "SupportDir.hpp"
+
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocale>
 #include <QSaveFile>
-#include <QStandardPaths>
 #include <QUuid>
 
 #include <algorithm>
@@ -236,8 +237,7 @@ QueryHistoryStore::~QueryHistoryStore() {
 }
 
 QString QueryHistoryStore::defaultDirectory() {
-    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) +
-           QStringLiteral("/history");
+    return dg::SupportDir::base() + QStringLiteral("/history");
 }
 
 void QueryHistoryStore::load() {
