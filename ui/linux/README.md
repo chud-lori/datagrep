@@ -36,7 +36,7 @@ ui/linux/
 |-------------------|----------------------------------|--------------------------------|
 | C++17 toolchain   | `build-essential`                | `gcc-c++`                      |
 | CMake ≥ 3.19      | `cmake`                          | `cmake`                        |
-| Qt6 Widgets       | `qt6-base-dev`                   | `qt6-qtbase-devel`             |
+| Qt6 Widgets+Network | `qt6-base-dev`                 | `qt6-qtbase-devel`             |
 | D-Bus (keyring)   | `libdbus-1-dev`                  | `dbus-devel`                   |
 | pkg-config        | `pkg-config`                     | `pkgconf-pkg-config`           |
 | Rust toolchain    | via [rustup](https://rustup.rs)  | via rustup                     |

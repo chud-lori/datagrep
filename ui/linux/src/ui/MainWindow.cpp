@@ -6,6 +6,8 @@
 #include "model/QueryHistory.hpp"
 #include "model/ResultModel.hpp"
 #include "model/SupportDir.hpp"
+#include "model/UpdateCheck.hpp"
+#include "ui/Appearance.hpp"
 #include "ui/ConnectionDialog.hpp"
 #include "ui/DetailPanel.hpp"
 #include "ui/EditingSurface.hpp"
@@ -16,8 +18,10 @@
 #include "ui/SchemaTree.hpp"
 #include "ui/SqlEditor.hpp"
 #include "ui/StatusBar.hpp"
+#include "ui/UpdateNotice.hpp"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QBrush>
 #include <QColor>
 #include <QDockWidget>
@@ -30,6 +34,8 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QListWidget>
+#include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPushButton>
@@ -314,11 +320,30 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     markedBanner_->setTextFormat(Qt::PlainText);
     markedBanner_->hide();
 
+    // --- update notice ------------------------------------------------------
+    // One silent manifest GET per launch; the bar below the marked band exists
+    // only while a newer release is known. Nothing polls, nothing installs.
+    updateCheck_ = new UpdateCheck(this);
+    updateNotice_ = new UpdateNotice(updateCheck_, this);
+    connect(updateCheck_, &UpdateCheck::checkFinished, this,
+            [this](bool newerFound, bool failed) {
+                // Only checkNow() reports here — the user asked and is watching.
+                if (failed) {
+                    status_->showMessage(QStringLiteral("update check failed"),
+                                         true);
+                } else if (!newerFound) {
+                    status_->showMessage(
+                        QStringLiteral("datagrep %1 is up to date")
+                            .arg(UpdateCheck::currentVersion()));
+                }
+            });
+
     auto* central = new QWidget(this);
     auto* centralLayout = new QVBoxLayout(central);
     centralLayout->setContentsMargins(0, 0, 0, 0);
     centralLayout->setSpacing(0);
     centralLayout->addWidget(markedBanner_);
+    centralLayout->addWidget(updateNotice_);
     centralLayout->addWidget(root, 1);
     setCentralWidget(central);
 
@@ -327,8 +352,46 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(status_, &StatusBar::cancelRequested, this, &MainWindow::cancelQuery);
     statusBar()->addWidget(status_, 1);
 
+    // --- menu bar -----------------------------------------------------------
+    QMenu* viewMenu = menuBar()->addMenu(QStringLiteral("&View"));
+    QMenu* appearanceMenu = viewMenu->addMenu(QStringLiteral("&Appearance"));
+    auto* appearanceGroup = new QActionGroup(this);
+    const auto addAppearanceMode = [&](const QString& title,
+                                       Appearance::Mode mode) {
+        QAction* action = appearanceMenu->addAction(title);
+        action->setCheckable(true);
+        action->setChecked(Appearance::mode() == mode);
+        appearanceGroup->addAction(action);
+        connect(action, &QAction::triggered, this,
+                [mode]() { Appearance::instance().setMode(mode); });
+    };
+    addAppearanceMode(QStringLiteral("Follow System"), Appearance::Mode::System);
+    addAppearanceMode(QStringLiteral("Light"), Appearance::Mode::Light);
+    addAppearanceMode(QStringLiteral("Dark"), Appearance::Mode::Dark);
+    viewMenu->addSeparator();
+    viewMenu->addAction(inspectorDock_->toggleViewAction());
+    viewMenu->addAction(historyToggle);
+
+    QMenu* helpMenu = menuBar()->addMenu(QStringLiteral("&Help"));
+    QAction* checkNowAction =
+        helpMenu->addAction(QStringLiteral("Check for Updates…"));
+    connect(checkNowAction, &QAction::triggered, updateCheck_,
+            &UpdateCheck::checkNow);
+    QAction* launchCheckAction =
+        helpMenu->addAction(QStringLiteral("Check for Updates at Launch"));
+    launchCheckAction->setCheckable(true);
+    launchCheckAction->setChecked(UpdateCheck::checkOnLaunchEnabled());
+    // The honest wording is the point: exactly what the check does and sends.
+    launchCheckAction->setStatusTip(QStringLiteral(
+        "One GET of a static JSON manifest per launch, only to compare "
+        "version numbers. Nothing is downloaded or installed. Off means zero "
+        "outbound traffic."));
+    connect(launchCheckAction, &QAction::toggled, this,
+            [](bool on) { UpdateCheck::setCheckOnLaunchEnabled(on); });
+
     resize(1200, 760);
     reloadProfiles();
+    updateCheck_->checkOnLaunchIfEnabled();
 }
 
 MainWindow::~MainWindow() = default;

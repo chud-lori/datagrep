@@ -5,6 +5,7 @@
 // work happens on the core's own tokio runtime thread; this process is a pure
 // CoreApi client and holds no business logic.
 
+#include "ui/Appearance.hpp"
 #include "ui/MainWindow.hpp"
 
 #include <QApplication>
@@ -13,6 +14,11 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("datagrep"));
     QApplication::setOrganizationName(QStringLiteral("datagrep"));
+    QApplication::setApplicationVersion(QStringLiteral(DATAGREP_APP_VERSION));
+
+    // Before the window: a forced palette must be in effect when widgets first
+    // polish, or the window flashes the platform theme.
+    Appearance::instance().applyStored();
 
     MainWindow window;
     window.show();

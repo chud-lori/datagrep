@@ -30,6 +30,8 @@ class ResultTableView;
 class SchemaTree;
 class StagedEditsBar;
 class StatusBar;
+class UpdateCheck;
+class UpdateNotice;
 class QDockWidget;
 class QLabel;
 class QListWidget;
@@ -113,6 +115,8 @@ private:
     StatusBar* status_;
     dg::PendingEdits* edits_;
     StagedEditsBar* stagedBar_;
+    UpdateCheck* updateCheck_;
+    UpdateNotice* updateNotice_;
 
     // What the current result was run against — the profile a commit or a
     // re-read must address, whatever the sidebar has selected since.
