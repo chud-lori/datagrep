@@ -301,7 +301,10 @@ fn split_document(hit: &Value, root: Option<&str>) -> (serde_json::Value, serde_
         }
         envelope.insert(name.to_string(), value_to_json(value));
     }
-    let fields = doc.get(root).map(value_to_json).unwrap_or(json!({}));
+    let fields = doc
+        .get(root)
+        .map(value_to_json)
+        .unwrap_or_else(|| json!({}));
     (serde_json::Value::Object(envelope), fields)
 }
 

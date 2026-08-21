@@ -681,7 +681,7 @@ pub fn parse_tasks(json: &Json, cap: usize) -> TaskSummary {
     by_action.sort_by(|a, b| a.0.cmp(&b.0));
     // Longest-running first: on a cluster with more tasks than the cap, the
     // ones worth seeing are the ones that have been going a while.
-    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.0));
     let running_truncated = rows.len() > cap;
     rows.truncate(cap);
     TaskSummary {
