@@ -1,0 +1,22 @@
+/* The gutter's rows and the grid's cells must request the same height: they are
+   two views sharing one vertical adjustment, so a pixel of drift misaligns every
+   row number below the fold. */
+columnview.data-table > listview > row > cell,
+listview.dg-gutter > row {
+  padding: 4px 8px;
+  min-height: 0;
+}
+
+.dg-gutter-column {
+  border-right: 1px solid alpha(currentColor, 0.15);
+}
+
+.dg-gutter-head {
+  border-bottom: 1px solid alpha(currentColor, 0.15);
+}
+
+listview.dg-gutter,
+listview.dg-gutter > row:hover,
+listview.dg-gutter > row:selected {
+  background: none;
+}
