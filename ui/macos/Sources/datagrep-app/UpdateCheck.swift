@@ -1,36 +1,22 @@
 import AppKit
 import Foundation
 
-// datagrep's update check. Same pattern as rusty-requester: a static
-// `latest.json` on GitHub Pages is the single source of truth, written by
-// scripts/deploy.sh and re-asserted by the release workflow, so the manifest
-// can never describe a release that doesn't exist.
+// datagrep's update check. A static `latest.json` (written by
+// scripts/deploy.sh, re-asserted by the release workflow) is the single
+// source of truth. The contract:
 //
-// The contract, in order of importance:
-//
-//   1. ONE silent GET of a static JSON file per app launch. No timer, no
-//      retry loop, no background schedule — datagrep's design bans polling
-//      outright (ci/gates.sh hard-fails on `tokio::time::interval`; the idle
-//      budget is ≤2 wakeups/sec) and an update poller on the Swift side would
-//      break the same promise by other means. `checkOnLaunchIfEnabled()` is
-//      guarded by a per-process flag; calling it twice does nothing.
-//
+//   1. ONE silent GET per app launch. No timer, no retry loop, no background
+//      schedule — datagrep bans polling outright, and an update poller on the
+//      Swift side would break that promise by other means.
 //   2. Never downloads, never installs. The app is ad-hoc signed, not
-//      notarized — a binary silently replacing itself is exactly what
-//      Gatekeeper exists to prevent. This code compares two version strings
-//      and, when the remote one is newer, exposes the manifest so the UI can
-//      show a quiet, dismissible notice with a link. The user decides.
-//
-//   3. Opt-out, honestly described. `UpdatePrefs.checkOnLaunch` defaults to
-//      true; the settings wording (UpdateNotice.swift) says plainly what the
-//      check sends: nothing but the GET itself. No identifiers, no telemetry,
-//      nothing about the user's databases.
-//
-//   4. Fail silently. Offline, DNS failure, 404, bad JSON — the user must
-//      never see an error dialog because a version check didn't work.
+//      notarized; it only exposes the manifest so the UI can show a
+//      dismissible notice with a link. The user decides.
+//   3. Opt-out, honestly described: the check sends nothing but the GET
+//      itself.
+//   4. Fail silently. The user must never see an error dialog because a
+//      version check didn't work.
 
-/// Shape of https://chud-lori.github.io/datagrep/latest.json (docs/latest.json
-/// in the repo). Extra keys (`release_notes_url`, `install_url`) are ignored.
+/// Shape of `latest.json` (docs/latest.json in the repo). Extra keys ignored.
 struct UpdateManifest: Decodable, Equatable {
     let version: String
     let tag: String
@@ -80,8 +66,8 @@ final class UpdateCheck: ObservableObject {
     static let fallbackVersion = "0.4.0"
 
     /// Non-nil when the manifest advertises a strictly newer version than the
-    /// one running (and the user hasn't skipped it). Set at most once per
-    /// launch, on the main actor — the notice view observes this.
+    /// one running (and the user hasn't skipped it). The notice view observes
+    /// this.
     @Published private(set) var available: UpdateManifest?
 
     private var didCheckThisLaunch = false
@@ -93,8 +79,8 @@ final class UpdateCheck: ObservableObject {
             ?? Self.fallbackVersion
     }
 
-    /// The once-per-launch check. Second and later calls are no-ops, so it is
-    /// safe to trigger from a view's `onAppear` even if that view re-appears.
+    /// The once-per-launch check. Later calls are no-ops, so it is safe to
+    /// trigger from a view's `onAppear` even if that view re-appears.
     func checkOnLaunchIfEnabled() {
         guard UpdatePrefs.checkOnLaunch, !didCheckThisLaunch else { return }
         didCheckThisLaunch = true
@@ -110,10 +96,8 @@ final class UpdateCheck: ObservableObject {
         }
     }
 
-    /// Explicit user-initiated check (for a "Check for Updates…" menu item).
-    /// Ignores the skip list and the once-per-launch guard — the user asked.
-    /// Reports the outcome instead of failing silently, because this time the
-    /// user is watching.
+    /// Explicit user-initiated check. Ignores the skip list and the
+    /// once-per-launch guard, and reports the outcome — the user is watching.
     func checkNow(completion: @escaping (_ newer: UpdateManifest?, _ failed: Bool) -> Void) {
         fetchManifest { [weak self] manifest in
             guard let self else { return }
@@ -143,9 +127,8 @@ final class UpdateCheck: ObservableObject {
 
     // MARK: - fetch
 
-    /// One GET, 6-second timeout, ephemeral session (no cookies, no cache,
-    /// nothing persisted). Completion runs on the main actor; `nil` means any
-    /// failure whatsoever.
+    /// One GET, short timeout, ephemeral session (nothing persisted).
+    /// Completion runs on the main actor; `nil` means any failure whatsoever.
     private func fetchManifest(_ completion: @escaping @MainActor (UpdateManifest?) -> Void) {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 6
@@ -178,10 +161,9 @@ final class UpdateCheck: ObservableObject {
         v.hasPrefix("v") ? String(v.dropFirst()) : v
     }
 
-    /// True when `a` is strictly newer than `b`. Both accept an optional `v`
-    /// prefix; unparseable components count as 0 and pre-release suffixes on
-    /// the patch (`0.2.0-rc1`) are stripped. Good enough for a notice — this
-    /// never gates anything security-relevant.
+    /// True when `a` is strictly newer than `b`. Unparseable components count
+    /// as 0 and pre-release suffixes are stripped. Good enough for a notice —
+    /// this never gates anything security-relevant.
     static func isNewer(_ a: String, than b: String) -> Bool {
         func parse(_ s: String) -> (UInt64, UInt64, UInt64) {
             let parts = normalize(s).split(separator: ".", maxSplits: 2)

@@ -12,18 +12,15 @@
 //     selectionModel()->selectedIndexes(). Every copy path in ResultTableView
 //     serialises selectedIndexes() and nothing else, so the row number is
 //     STRUCTURALLY incapable of reaching the clipboard. It is chrome, not data.
-//     (Compare the macOS guarantee: the number lived in an NSRulerView, and the
-//     copy paths enumerate tableColumns only.)
 //
 //  3. CANNOT BREAK VIRTUALISATION — the number is section+1, a pure function of
 //     the row index. Painting it never touches the RowPager, so scrolling the
 //     gutter costs zero row fetches and zero page-cache churn.
 //
 // This subclass only adapts the gutter WIDTH to the magnitude of the row count
-// (1,000,000 rows must not clip to "1000…") and keeps every section a fixed
-// height so geometry stays arithmetic (no resizeRowsToContents ever). None of
-// that affects the copy-safety guarantee, which is a property of the header
-// being a header.
+// and keeps every section a fixed height so geometry stays arithmetic (no
+// resizeRowsToContents ever). None of that affects the copy-safety guarantee,
+// which is a property of the header being a header.
 
 #ifndef DATAGREP_ROW_NUMBER_HEADER_HPP
 #define DATAGREP_ROW_NUMBER_HEADER_HPP

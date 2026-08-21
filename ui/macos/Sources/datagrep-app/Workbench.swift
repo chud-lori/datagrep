@@ -2,26 +2,18 @@ import AppKit
 import DatagrepKit
 import SwiftUI
 
-/// The whole window, in SwiftUI.
-///
-/// Exactly two things in here are AppKit controls, and both are behind an
-/// `NSViewControllerRepresentable`: the results grid (`NSTableView`) and the SQL
-/// editor (`NSTextView`). Everything else — sidebar, toolbar, status bar,
-/// inspector, sheets — is SwiftUI.
-///
-/// The grid is not SwiftUI `Table`/`List` because those do not virtualise
-/// predictably at a million rows, and virtualisation is the product.
+/// The whole window, in SwiftUI. Exactly two things are AppKit controls behind
+/// an `NSViewControllerRepresentable`: the results grid (`NSTableView`) and
+/// the SQL editor (`NSTextView`). The grid is not SwiftUI `Table`/`List`
+/// because those do not virtualise predictably at a million rows.
 struct Workbench: View {
     @ObservedObject var model: AppModel
 
-    /// Bound, not delegated to `toggleSidebar(_:)`. A `NavigationSplitView`
-    /// dragged shut keeps its state privately, and there is then nothing to
-    /// toggle back — this binding is the only version we own, so it is the one
-    /// the button, the ⌃⌘S shortcut and the View menu all drive.
+    /// Bound, not delegated to `toggleSidebar(_:)`: a `NavigationSplitView`
+    /// dragged shut keeps its state privately, leaving nothing to toggle back.
+    /// This binding is the one the button, ⌃⌘S and the View menu all drive.
     private var visibility: Binding<NavigationSplitViewVisibility> {
         Binding(
-            // Shown only when the user wants it AND the window is wide enough —
-            // below that it collapses cleanly rather than clipping off-screen.
             get: { model.sidebarShown ? .all : .detailOnly },
             set: { v in model.sidebarVisible = (v != .detailOnly) })
     }
@@ -29,42 +21,33 @@ struct Workbench: View {
     var body: some View {
         NavigationSplitView(columnVisibility: visibility) {
             SidebarView(model: model)
-                // A hard 190 pt floor: the drag cannot take the column to a
-                // width the user can no longer grab.
                 .navigationSplitViewColumnWidth(min: 190, ideal: 258, max: 460)
         } detail: {
             DetailArea(model: model)
         }
         .navigationSplitViewStyle(.balanced)
-        // Renders nothing unless a newer release exists, and triggers its own
-        // once-per-launch check. One line is the whole integration.
         .overlay(alignment: .bottomTrailing) { UpdateNoticeView() }
-        // Production guardrail, layer 1: a connection marked production tints
-        // every accent in the window red.
+        // A connection marked production tints every accent in the window red.
         .tint(model.markColor)
         .sheet(isPresented: $model.showNewConnection) { NewConnectionSheet(model: model) }
-        // What the commit did, per document. Presented from the same place as
-        // the other sheets so nothing about a write is drawn inside the grid's
-        // AppKit host.
+        // What the commit did, per document.
         .sheet(isPresented: $model.showMutationReport) {
             if let report = model.mutationReport {
                 MutationReportSheet(model: model, report: report)
             }
         }
         // What the server holds now, for the documents the guard refused to
-        // overwrite. Reached from the report or from the staged bar, and never
-        // up at the same time as the report — the re-read lands a runloop turn
-        // after the report sheet is told to close.
+        // overwrite. Never up at the same time as the report sheet — the
+        // re-read lands a runloop turn after the report is told to close.
         .sheet(isPresented: $model.showConflictReview) {
             if let review = model.conflictReview {
                 ConflictReviewSheet(model: model, review: review)
             }
         }
         .animation(.smooth(duration: 0.25), value: model.sidebarShown)
-        // Feed the live content width so the sidebar can auto-collapse before the
-        // balanced split would clip it. The window's own contentMinSize is the
-        // hard floor (set on the NSWindow); this frame minimum only needs to
-        // agree with it, not enforce the 900-wide "sidebar fits" width.
+        // Feed the live content width so the sidebar can auto-collapse before
+        // the balanced split would clip it. The NSWindow's contentMinSize is
+        // the hard floor; this minimum only needs to agree with it.
         .frame(minWidth: 480, minHeight: 400)
         .background {
             GeometryReader { proxy in
@@ -93,10 +76,10 @@ private struct DetailArea: View {
                     .padding(.bottom, 5)
 
                 ResultsPane(model: model)
-                    // A low floor, not a real minimum: the grid scrolls its own
-                    // content, so the pane must be free to shrink well below a
-                    // "show every row" height — otherwise a short window pushes
-                    // the whole detail past the window edge instead of scrolling.
+                    // A low floor: the grid scrolls its own content, so the
+                    // pane must be free to shrink well below its content
+                    // height — otherwise a short window pushes the detail past
+                    // the window edge instead of scrolling.
                     .frame(minHeight: 80, maxHeight: .infinity)
                     .padding(.horizontal, 10)
                     .padding(.top, 5)
@@ -110,8 +93,6 @@ private struct DetailArea: View {
                         }
                     }
             }
-            // The window's own plane, so the two panes above read as raised
-            // layers against it rather than as one continuous sheet of gray.
             .background(Color(nsColor: .underPageBackgroundColor))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .safeAreaInset(edge: .top, spacing: 0) {
@@ -121,61 +102,48 @@ private struct DetailArea: View {
                 }
             }
             // Attached BEFORE the progress-bar inset, so the inset places the
-            // bar above it. As an overlay on the result of that inset it landed
-            // on the composite's top edge — exactly over the 3 pt progress bar,
-            // which made query progress invisible on any marked connection.
+            // bar above it — as an overlay after the inset it landed exactly
+            // over the 3 pt progress bar on any marked connection.
             .overlay(alignment: .top) { MarkStripe(color: model.markColor) }
 
-            // A real bottom row, NOT a `.safeAreaInset`: an always-present bar
-            // laid out via safeAreaInset did not reserve its height until the
-            // window was resized, so the grid filled to the window edge and the
-            // status bar sat off-screen. As a VStack row it is always laid out,
-            // and the split above simply takes the remaining height.
+            // A real bottom row, NOT a `.safeAreaInset`: a bar laid out via
+            // safeAreaInset did not reserve its height until the window was
+            // resized, leaving the status bar off-screen.
             StatusBar(model: model)
         }
-        // A low detail minimum so narrowing the window shrinks the EDITOR/GRID
-        // first (the grid scrolls its own columns) while the sidebar keeps its
-        // fixed width — `.balanced` shrinks the detail to make room for the
-        // sidebar, so the sidebar never gets squeezed off its leading edge. The
-        // window minimum (set on the NSWindow) is sidebar-min + this + slack, so
-        // the two can always coexist without clipping.
+        // A low detail minimum so narrowing the window shrinks the editor/grid
+        // (which scroll) while the sidebar keeps its fixed width. The NSWindow
+        // minimum is sidebar-min + this + slack, so the two always coexist.
         .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
         // `HistoryModel` is a nested ObservableObject, so the presentation flag
-        // has to be observed by something that observes *it* — that is what the
-        // modifier is for. One line here, no state in this view.
+        // must be observed by something that observes *it* — that is what the
+        // modifier is for.
         .historySheet(model.history)
         // Deferred with the rest of the chrome — see `StartupStage`. Attaching
-        // `.inspector` costs ~35 ms of view-graph construction for a column that
-        // starts hidden, which is 14% of the 250 ms budget spent on something
-        // nobody can see yet.
+        // `.inspector` costs ~35 ms of view-graph construction for a column
+        // that starts hidden.
         .modifier(DeferredInspector(model: model))
         .animation(.smooth(duration: 0.22), value: model.isRunning)
         .animation(.smooth(duration: 0.2), value: model.isError)
-        // NO `.navigationTitle`, and no `.navigationSubtitle` either. The title
-        // drew the connection name — the exact string the badge already carries
-        // — and title-plus-subtitle cost ~280 pt of a toolbar measured to be
-        // out of room. The window still has a title (AppDelegate owns it, for
-        // the Window menu and Mission Control); the toolbar just does not draw
-        // it (`RemoveToolbarTitle` below), so every action fits on screen.
-        // The single most expensive thing in the window at launch (~80 ms of
-        // the ~330 ms it used to take). The toolbar's *background* is a window
-        // property and is painted from the first frame either way, so what is
-        // deferred is the controls inside an already-correct bar — no reflow,
-        // no height change.
+        // NO `.navigationTitle` or `.navigationSubtitle`: they duplicate the
+        // badge and cost ~280 pt of a toolbar that is out of room. The window
+        // still has a title (AppDelegate owns it); the toolbar just does not
+        // draw it (`RemoveToolbarTitle` below).
+        // Deferring the toolbar controls saves ~80 ms at launch; the toolbar
+        // *background* is a window property painted from the first frame, so
+        // there is no reflow or height change when they arrive.
         .toolbar { if stage.contentReady { WorkbenchToolbar(model: model) } }
         // SwiftUI draws `NSWindow.title` inside the toolbar even with no
-        // `.navigationTitle` — and it re-shows it over an AppKit
-        // `titleVisibility = .hidden` (tried; the title came back with the
-        // toolbar) — so the removal has to be said in SwiftUI's own
-        // vocabulary.
+        // `.navigationTitle`, and re-shows it over an AppKit
+        // `titleVisibility = .hidden` — the removal has to be said in
+        // SwiftUI's own vocabulary.
         .modifier(RemoveToolbarTitle())
         .toolbarBackground(.visible, for: .windowToolbar)
     }
 }
 
-/// `.toolbar(removing: .title)` behind an availability check: the API is
-/// macOS 15's and the deployment target is 14. On 14 the title simply draws
-/// again — a crowded toolbar, not a broken one.
+/// `.toolbar(removing: .title)` is macOS 15 API and the deployment target is
+/// 14. On 14 the title simply draws again — crowded, not broken.
 private struct RemoveToolbarTitle: ViewModifier {
     func body(content: Content) -> some View {
         if #available(macOS 15.0, *) {
@@ -188,12 +156,7 @@ private struct RemoveToolbarTitle: ViewModifier {
 
 // MARK: - the two AppKit bridges, held back until the window is up
 
-/// The SQL editor pane. See `StartupStage`: on the very first pass the pane is
-/// drawn empty, so `NSWindow(contentViewController:)` does not have to build an
-/// `NSTextView`, a TextKit 1 stack, the tab bar's own hosting view and a
-/// restored session before the user sees anything. The pane's frame is
-/// identical either way, so the editor appearing moves no pixels.
-///
+/// The SQL editor pane, drawn empty until `StartupStage` flips (see there).
 /// Only this view and `ResultsPane` observe `StartupStage`, so the flip
 /// re-renders two subtrees rather than the whole window.
 private struct EditorPane: View {
@@ -213,20 +176,16 @@ private struct EditorPane: View {
     }
 }
 
-/// The results pane. Same deal as `EditorPane` — the `NSTableView`, its ruler
-/// and its 30 columns are not built before first paint. The empty state was
-/// already what an unstarted session shows, so holding the grid back changes
-/// nothing the user sees.
+/// The results pane. Same deal as `EditorPane` — the `NSTableView` is not
+/// built before first paint.
 private struct ResultsPane: View {
     @ObservedObject var model: AppModel
     @ObservedObject private var stage = StartupStage.shared
 
     var body: some View {
-        // A real bottom row, NOT a `.safeAreaInset` — the same lesson the
-        // window's status bar carries: a bar attached as a safe-area inset did
-        // not reserve its height until something forced a relayout, and here
-        // that would put it over the last row of the grid, which is exactly the
-        // row someone has just been editing.
+        // A real bottom row, NOT a `.safeAreaInset` — same lesson as the
+        // window's status bar: an inset bar did not reserve its height until a
+        // relayout, and here that would cover the last row of the grid.
         VStack(spacing: 0) {
             grid
             StagedEditsSlot(model: model, edits: model.edits)
@@ -236,25 +195,17 @@ private struct ResultsPane: View {
     private var grid: some View {
         Chrome.pane(
             ZStack {
-                // `.opacity()` and NOT an `if`, so the grid is built once and
-                // keeps its scroll position, column widths and selection across
-                // an empty result. But NO implicit animation on it: animating
-                // opacity on a hosted AppKit view left the layer stuck at 0
-                // after fading in, so rows appeared for a frame and then
-                // vanished with the data still loaded underneath.
-                // The grid is ALWAYS rendered at full opacity, and the empty
-                // state is an opaque cover on top of it. Never `.opacity(0)`:
-                // SwiftUI takes a zero-opacity platform view out of the render
-                // tree, and the moment a result arrived and flipped it back to
-                // 1 the host was re-attached with fresh, EMPTY layer contents —
-                // drawn milliseconds earlier, wiped on arrival. That is why the
-                // pane stayed blank until a window resize forced AppKit to
-                // redraw everything.
+                // The grid is ALWAYS in the render tree at full opacity, and
+                // the empty/text states are opaque covers on top of it. Never
+                // `.opacity(0)` and never an `if`: SwiftUI takes a
+                // zero-opacity platform view out of the render tree, and
+                // re-attaching it on the next result gives the host fresh,
+                // EMPTY layer contents — a blank pane until a window resize
+                // forces AppKit to redraw. Keeping it mounted also preserves
+                // scroll position, column widths and selection.
                 if stage.contentReady {
                     ResultsGridView(controller: model.results, generation: model.resultGeneration)
                 }
-                // Text view: an opaque cover over the grid (same reasoning as the
-                // empty state — the grid stays in the render tree underneath).
                 if model.showsGrid && model.showResultAsText {
                     ResultTextView(model: model)
                 }
@@ -268,8 +219,6 @@ private struct ResultsPane: View {
     }
 }
 
-/// The staged-edits bar's place in the layout, and nothing else.
-///
 /// Its own view because it has to *observe* `PendingEdits`: the staging store
 /// is written from the AppKit side of the grid, and a parent that merely reads
 /// `model.edits` would not re-render when a cell was typed into.
@@ -286,14 +235,10 @@ private struct StagedEditsSlot: View {
 }
 
 /// The result as a selectable, column-aligned monospaced table. An AppKit
-/// `NSTextView` rather than a SwiftUI `Text` in a `ScrollView`: a two-axis
-/// SwiftUI scroll view centres content smaller than the viewport (the table
-/// floated in the middle of the pane), while a text view top-left-aligns and
-/// scrolls both axes natively — and it selects/copies for free.
-///
-/// Styled by line so it does not read as a wall of grey: the header row is bold
-/// in the accent colour, the rule under it dimmed, the "N more rows" footer
-/// secondary — the structure a plain string loses.
+/// `NSTextView` rather than SwiftUI `Text` in a `ScrollView`: a two-axis
+/// SwiftUI scroll view centres content smaller than the viewport, while a
+/// text view top-left-aligns, scrolls both axes natively, and selects/copies
+/// for free.
 private struct ResultTextView: NSViewControllerRepresentable {
     @ObservedObject var model: AppModel
 
@@ -373,10 +318,9 @@ final class ResultTextController: NSViewController {
     }
 }
 
-/// `.inspector` is a structural modifier, so it cannot be added and removed
-/// freely — doing that mid-session would re-identify the whole detail subtree.
-/// It is attached exactly once, in the same state change that attaches the
-/// editor and the grid, and never detached again.
+/// `.inspector` is a structural modifier — adding/removing it mid-session
+/// would re-identify the whole detail subtree. It is attached exactly once,
+/// with the rest of the deferred content, and never detached.
 private struct DeferredInspector: ViewModifier {
     @ObservedObject var model: AppModel
     @ObservedObject var stage = StartupStage.shared
@@ -410,62 +354,44 @@ private struct MarkStripe: View {
 
 // MARK: - connection badge
 
-/// Where you are, in one place: engine, connection, database.
-///
-/// The same three facts used to be spread over the connection picker, the
-/// window subtitle and the status bar, with the database named in none of them.
-/// Splitting an identity across three weak signals is how someone runs a
-/// statement against the wrong server, so this consolidates them into the one
-/// saturated element in an otherwise monochrome toolbar.
-///
-/// The connection's own colour fills it, which is what finally makes that
-/// colour *readable* rather than an ambient wash.
+/// Where you are, in one place: engine, connection, database. Splitting that
+/// identity across weak signals is how someone runs a statement against the
+/// wrong server, so it is consolidated into the one saturated element in an
+/// otherwise monochrome toolbar, filled with the connection's own colour.
 private struct ConnectionBadge: View {
     @ObservedObject var model: AppModel
 
-    /// What the server calls itself, preferred over the driver id: `product` is
-    /// the only thing that separates MariaDB from MySQL, or OpenSearch from
-    /// Elasticsearch — a distinction the driver id cannot make.
+    /// What the server calls itself, preferred over the driver id: `product`
+    /// distinguishes forks and compatible servers the driver id cannot.
     private var product: String {
         if let p = model.connectionInfo?.product, !p.isEmpty, !Self.isUnknown(p) { return p }
         return EngineStyle.displayName(for: model.activeDriver)
     }
 
-    /// `MySQL 8.0.36`, or just `MySQL` until a handshake has confirmed a
-    /// version. Never a guess: an unconfirmed version is the number someone
-    /// would quote when asking whether a feature exists on their server.
+    /// Product plus version, or just the product until a handshake has
+    /// confirmed a version — never a guess.
     private var engine: String {
         guard let v = model.connectionInfo?.version, !v.isEmpty, !Self.isUnknown(v) else {
             return product
         }
-        // `@@version` arrives as e.g. `8.0.36-0ubuntu0.22.04.1`. The build
-        // suffix is packaging trivia in the one element the eye lands on; the
-        // whole string stays in the tooltip.
+        // `@@version` arrives as e.g. `8.0.36-0ubuntu0.22.04.1`; the build
+        // suffix stays in the tooltip only.
         let short = v.split(separator: "-", maxSplits: 1).first.map(String.init) ?? v
         return "\(product) \(short)"
     }
 
     /// Some drivers hand up the literal string `unknown` instead of declining
-    /// to answer, which would otherwise render as `PostgreSQL unknown` in the
-    /// most saturated element in the window. Treated as absent here so the
-    /// badge keeps its promise; the drivers should report nothing at all.
+    /// to answer; treated as absent so the badge never renders it.
     private static func isUnknown(_ s: String) -> Bool {
         s.caseInsensitiveCompare("unknown") == .orderedSame
     }
 
     /// The connection's own colour, grey when it has none.
-    ///
-    /// This used to short-circuit on `isProd` and return red first — but
-    /// `isProd` *was* "has a colour", so the branch below was reachable only
-    /// when the colour was nil, and the badge could therefore only ever be red
-    /// or grey. A connection marked green got a red pill while the window tint
-    /// and the sidebar band both painted it green correctly.
     private var fill: Color {
         model.markColor ?? Color(nsColor: .systemGray)
     }
 
-    /// One segment of the pill. Split out so the three densities below stay
-    /// readable rather than three copies of the same modifier stack.
+    /// One segment of the pill, shared by the three densities below.
     private func pill(@ViewBuilder _ content: () -> some View) -> some View {
         HStack(spacing: 6) { content() }
             .font(.system(size: 11, weight: .regular, design: .monospaced))
@@ -478,8 +404,7 @@ private struct ConnectionBadge: View {
 
     private var separator: some View { Text("·").foregroundStyle(.secondary) }
 
-    /// Carries what the densest pill had to drop, including the full
-    /// unshortened version string.
+    /// Carries what the densest pill had to drop, including the full version.
     private var tooltip: String {
         var parts = [product]
         if let v = model.connectionInfo?.version, !v.isEmpty, !Self.isUnknown(v) {
@@ -495,8 +420,7 @@ private struct ConnectionBadge: View {
         return parts.joined(separator: " · ")
     }
 
-    /// The connection name, which must survive every density: it is the field
-    /// that answers "am I about to run this on the right server".
+    /// The connection name — the one field that must survive every density.
     private var name: some View {
         Text(model.activeProfile)
             .fontWeight(.semibold)
@@ -515,18 +439,14 @@ private struct ConnectionBadge: View {
 
     var body: some View {
         if model.activeProfile.isEmpty {
-            // Not an EmptyView. The most saturated element in the window
-            // pointing at the thing you have to do first is worth more than a
-            // hole in the middle of the toolbar.
             pill {
                 Text("No connection")
             }
             .help("No connection selected — ⌘N adds one")
         } else {
-            // Sheds detail rather than truncating. Left to itself SwiftUI was
-            // free to cut the connection NAME while keeping `PostgreSQL 16.2`,
-            // which is precisely backwards. Same idiom the status bar already
-            // uses for its four densities.
+            // Sheds detail rather than truncating: left to itself SwiftUI is
+            // free to cut the connection NAME while keeping the engine
+            // segment, which is precisely backwards.
             ViewThatFits(in: .horizontal) {
                 pill {
                     Text(engine).fixedSize()
@@ -551,19 +471,11 @@ private struct ConnectionBadge: View {
                     lock
                 }
             }
-            // The badge must never be the widest thing in the toolbar. 420 pt
-            // was not a cap on a ~1000 pt toolbar — it let the pill keep full
-            // width while Run, Cancel and New Connection went to the overflow
-            // chevron, which is the reverse of the intended priority.
-            //
             // The cap follows the window because NSToolbar budgets the badge's
-            // CAP, not its drawn width, when it decides what to evict — never
-            // compressing an item, only hiding tail items. Measured: at a cap
-            // of 260 the last two icons went to the chevron below ~1040 pt of
-            // window even though the drawn row ended ~230 pt short of the
-            // edge; at 170 everything stays visible down to 1000. So a narrow
-            // window trades the engine segment (still in the tooltip) for
-            // keeping every icon on screen.
+            // CAP, not its drawn width, when deciding what to evict — it never
+            // compresses an item, only hides tail items. A narrow window
+            // trades the engine segment (still in the tooltip) for keeping
+            // every icon on screen.
             .frame(maxWidth: model.windowContentWidth < 1080 ? 170 : 260)
             .help(tooltip)
         }
@@ -577,7 +489,6 @@ private struct WorkbenchToolbar: ToolbarContent {
 
     var body: some ToolbarContent {
         ToolbarItemGroup(placement: .navigation) {
-            // The fix for "I collapsed the sidebar and could not get it back".
             Button {
                 withAnimation(.smooth(duration: 0.25)) { model.sidebarVisible.toggle() }
             } label: {
@@ -588,16 +499,6 @@ private struct WorkbenchToolbar: ToolbarContent {
             // made one ⌘↩ run a statement twice.
             .help("Show or hide the connections sidebar  ⌃⌘S")
 
-            // New Connection lives in the window toolbar, as its own icon.
-            //
-            // It used to be reachable only from the File menu and from inside
-            // the toolbar's connection menu — but that menu is labelled with
-            // the CURRENT connection, so it reads as a switcher and the add
-            // hides inside it. A + on the sidebar's section header was tried
-            // and rejected: at that size, next to a secondary-grey label, it
-            // reads as decoration however it is coloured. A toolbar icon is
-            // where a window-level verb belongs, and it stays visible with the
-            // sidebar collapsed.
             Button {
                 model.showNewConnection = true
             } label: {
@@ -605,14 +506,9 @@ private struct WorkbenchToolbar: ToolbarContent {
             }
             .help("New connection (⌘N)")
 
-            // The badge IS the connection switcher. It used to be a separate
-            // text menu next to a `.principal` badge — the same name drawn
-            // twice in one row, ~150 pt apart. Worse, `.principal` is never
-            // displaced by narrowing: it EVICTS every other item into the `»`
-            // chevron instead (measured: at 1200 pt Cancel/History/Inspector
-            // were already hidden; at 1000 pt everything but the sidebar
-            // toggle and the badge was, Run included). One pill, in an
-            // ordinary slot, is both the identity and the control.
+            // The badge IS the connection switcher — one pill in an ordinary
+            // slot, never `.principal`: a `.principal` item is not displaced
+            // by narrowing, it EVICTS every other item into the `»` chevron.
             Menu {
                 if model.roots.isEmpty {
                     Text("No connections yet")
@@ -642,27 +538,19 @@ private struct WorkbenchToolbar: ToolbarContent {
             }
             .menuStyle(.button)
             .buttonStyle(.plain)
-            // No chevron: the pill is the one saturated element in the row and
-            // stays clean like the reference; the tooltip says it opens.
-            // No `.fixedSize()` either — it would pin the badge at its ideal
-            // width and starve the ViewThatFits ladder that lets it shed the
-            // engine segment before any icon is pushed into the overflow.
+            // No chevron (the tooltip says it opens), and no `.fixedSize()` —
+            // that would pin the badge at its ideal width and starve the
+            // ViewThatFits ladder above.
             .menuIndicator(.hidden)
 
-            // DECLARATION ORDER IS SURVIVAL PRIORITY. A toolbar group
-            // overflows from its tail, so whatever is declared last is what
-            // disappears into the `»` chevron first. Run was previously
-            // declared third, behind two items that only sometimes exist, and
-            // went to the chevron at ordinary window widths. The primary verb
-            // of the app comes right after the identity pill.
+            // DECLARATION ORDER IS SURVIVAL PRIORITY: a toolbar group
+            // overflows from its tail, so whatever is declared last goes into
+            // the `»` chevron first. ONE group, so that order holds for the
+            // whole toolbar — a section boundary would reorder who dies first.
+            // The primary verb comes right after the identity pill.
             //
-            // ONE group, not navigation + primaryAction: the reference layout
-            // is a single left-aligned row, and with everything in one group
-            // the declaration order above is the survival order for the WHOLE
-            // toolbar — no section boundary reorders who dies first.
-            // Run and Cancel were two buttons that could never both be live —
-            // one was always greyed out. One button that swaps its glyph costs
-            // half the width and never shows a dead control.
+            // One button that swaps Run/Cancel: the two can never both be
+            // live, and one glyph-swapping button never shows a dead control.
             Button {
                 if model.isRunning { model.cancel() } else { model.runStatementUnderCaret() }
             } label: {
@@ -671,24 +559,17 @@ private struct WorkbenchToolbar: ToolbarContent {
                     systemImage: model.isRunning ? "stop.fill" : "play.fill")
             }
             // NO `.keyboardShortcut` here. ⌘↩ and ⌘. are owned by the Query
-            // menu items in AppDelegate, and binding ⌘↩ in both places fired
-            // the statement TWICE on one press: the first result painted, then
-            // the second run's opening status — zero rows, zero columns — wiped
-            // the grid a frame later and left "running on …" behind.
+            // menu items in AppDelegate; binding ⌘↩ in both places fires the
+            // statement TWICE on one press, and the second run's empty opening
+            // status wipes the first result's grid a frame later.
             .disabled(model.activeProfile.isEmpty && !model.isRunning)
             .help(
                 model.isRunning
                     ? "Cancel — returns instantly, then reports what the server actually did  ⌘."
                     : "Run the statement under the caret  ⌘↩")
 
-            // Grid ⇄ Text result view. In the toolbar (the way Finder keeps its
-            // icon/list/column switcher) rather than floated over the grid, where
-            // it covered the last column's header.
-            //
-            // Shown-and-disabled rather than hidden, so Run does not slide
-            // sideways the moment a result lands. The editor's tab menu already
-            // states the rule: an entry that appears only sometimes is harder
-            // to learn than one that says why it is off.
+            // Grid ⇄ Text result view. Shown-and-disabled rather than hidden,
+            // so Run does not slide sideways the moment a result lands.
             Picker("Result view", selection: $model.showResultAsText) {
                 Image(systemName: "tablecells").tag(false)
                 Image(systemName: "text.alignleft").tag(true)
@@ -721,15 +602,11 @@ private struct WorkbenchToolbar: ToolbarContent {
 
 // MARK: - new connection
 
-/// Add a connection by describing it — host, port, database, user, password —
-/// the way every other client asks, with the URL one disclosure away for
-/// anyone who already has one to paste.
-///
-/// The two representations are the same value (see `ConnectionForm`), and the
-/// same `ConnectionFieldsView` the Edit sheet uses is what draws them, so
-/// adding and editing a connection are visibly one design. `datagrep_profiles_add`
+/// Add a connection by fields, with the URL one disclosure away. The two
+/// representations are the same value (see `ConnectionForm`), drawn by the
+/// same `ConnectionFieldsView` the Edit sheet uses. `datagrep_profiles_add`
 /// still takes a URL and still lifts any password in it into the keychain
-/// before anything is written — that path is unchanged.
+/// before anything is written.
 struct NewConnectionSheet: View {
     @ObservedObject var model: AppModel
     @ObservedObject var form: ConnectionForm
