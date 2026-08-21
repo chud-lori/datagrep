@@ -291,7 +291,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .flatMap { $0.blended(withFraction: 0.78, of: .windowBackgroundColor) }
             ?? .windowBackgroundColor
         // The title says which connection, not which tier — the colour is the
-        // user's own marker and only they know what it stands for.
+        // user's own marker and only they know what it stands for. The toolbar
+        // does not draw it (the workbench removes the title item); this is the
+        // Window menu / Mission Control name, which SwiftUI no longer
+        // overwrites now that the workbench sets no `.navigationTitle`.
         window.title =
             colorName == nil ? "datagrep" : "datagrep — \(model.activeProfile)"
     }

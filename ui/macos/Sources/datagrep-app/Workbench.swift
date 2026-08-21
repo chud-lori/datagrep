@@ -142,19 +142,38 @@ private struct DetailArea: View {
         .modifier(DeferredInspector(model: model))
         .animation(.smooth(duration: 0.22), value: model.isRunning)
         .animation(.smooth(duration: 0.2), value: model.isError)
-        .navigationTitle(model.activeProfile.isEmpty ? "datagrep" : model.activeProfile)
-        // NO `.navigationSubtitle`. Every fact it carried is now in the badge
-        // (engine, database), the read-only accessory (the lock) and the status
-        // bar (state, rows) — and it truncated mid-word even at a wide window,
-        // which is the exact failure the status bar's density ladder exists to
-        // avoid. It was also ~280 pt of a toolbar measured to be out of room.
+        // NO `.navigationTitle`, and no `.navigationSubtitle` either. The title
+        // drew the connection name — the exact string the badge already carries
+        // — and title-plus-subtitle cost ~280 pt of a toolbar measured to be
+        // out of room. The window still has a title (AppDelegate owns it, for
+        // the Window menu and Mission Control); the toolbar just does not draw
+        // it (`RemoveToolbarTitle` below), so every action fits on screen.
         // The single most expensive thing in the window at launch (~80 ms of
         // the ~330 ms it used to take). The toolbar's *background* is a window
         // property and is painted from the first frame either way, so what is
         // deferred is the controls inside an already-correct bar — no reflow,
         // no height change.
         .toolbar { if stage.contentReady { WorkbenchToolbar(model: model) } }
+        // SwiftUI draws `NSWindow.title` inside the toolbar even with no
+        // `.navigationTitle` — and it re-shows it over an AppKit
+        // `titleVisibility = .hidden` (tried; the title came back with the
+        // toolbar) — so the removal has to be said in SwiftUI's own
+        // vocabulary.
+        .modifier(RemoveToolbarTitle())
         .toolbarBackground(.visible, for: .windowToolbar)
+    }
+}
+
+/// `.toolbar(removing: .title)` behind an availability check: the API is
+/// macOS 15's and the deployment target is 14. On 14 the title simply draws
+/// again — a crowded toolbar, not a broken one.
+private struct RemoveToolbarTitle: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.toolbar(removing: .title)
+        } else {
+            content
+        }
     }
 }
 
@@ -462,6 +481,8 @@ private struct ConnectionBadge: View {
         parts.append(model.activeProfile)
         if let db = model.connectionInfo?.database { parts.append(db) }
         if model.activeSafety.readOnly { parts.append(model.activeSafety.enforcement.headline) }
+        // The pill has no chevron, so the tooltip is what says it opens.
+        parts.append("click to switch connection")
         return parts.joined(separator: " · ")
     }
 
@@ -525,7 +546,16 @@ private struct ConnectionBadge: View {
             // was not a cap on a ~1000 pt toolbar — it let the pill keep full
             // width while Run, Cancel and New Connection went to the overflow
             // chevron, which is the reverse of the intended priority.
-            .frame(maxWidth: 260)
+            //
+            // The cap follows the window because NSToolbar budgets the badge's
+            // CAP, not its drawn width, when it decides what to evict — never
+            // compressing an item, only hiding tail items. Measured: at a cap
+            // of 260 the last two icons went to the chevron below ~1040 pt of
+            // window even though the drawn row ended ~230 pt short of the
+            // edge; at 170 everything stays visible down to 1000. So a narrow
+            // window trades the engine segment (still in the tooltip) for
+            // keeping every icon on screen.
+            .frame(maxWidth: model.windowContentWidth < 1080 ? 170 : 260)
             .help(tooltip)
         }
     }
@@ -566,6 +596,14 @@ private struct WorkbenchToolbar: ToolbarContent {
             }
             .help("New connection (⌘N)")
 
+            // The badge IS the connection switcher. It used to be a separate
+            // text menu next to a `.principal` badge — the same name drawn
+            // twice in one row, ~150 pt apart. Worse, `.principal` is never
+            // displaced by narrowing: it EVICTS every other item into the `»`
+            // chevron instead (measured: at 1200 pt Cancel/History/Inspector
+            // were already hidden; at 1000 pt everything but the sidebar
+            // toggle and the badge was, Run included). One pill, in an
+            // ordinary slot, is both the identity and the control.
             Menu {
                 if model.roots.isEmpty {
                     Text("No connections yet")
@@ -591,29 +629,28 @@ private struct WorkbenchToolbar: ToolbarContent {
                 Button("Remove “\(model.activeProfile)”") { model.removeActiveProfile() }
                     .disabled(model.activeProfile.isEmpty)
             } label: {
-                // Icon AND name: a bare chevron is not a control.
-                HStack(spacing: 5) {
-                    EngineIcon(model.activeDriver, size: 15)
-                    Text(model.activeProfile.isEmpty ? "No connection" : model.activeProfile)
-                        .font(.callout)
-                        .lineLimit(1)
-                }
+                ConnectionBadge(model: model)
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("Switch, add or remove a connection")
-        }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            // No chevron: the pill is the one saturated element in the row and
+            // stays clean like the reference; the tooltip says it opens.
+            // No `.fixedSize()` either — it would pin the badge at its ideal
+            // width and starve the ViewThatFits ladder that lets it shed the
+            // engine segment before any icon is pushed into the overflow.
+            .menuIndicator(.hidden)
 
-        ToolbarItem(placement: .principal) {
-            ConnectionBadge(model: model)
-        }
-
-        // DECLARATION ORDER IS SURVIVAL PRIORITY. A toolbar group overflows
-        // from its tail, so whatever is declared last is what disappears into
-        // the `»` chevron first. Run was previously declared third, behind two
-        // items that only sometimes exist, and went to the chevron at ordinary
-        // window widths. The primary verb of the app now comes first.
-        ToolbarItemGroup(placement: .primaryAction) {
+            // DECLARATION ORDER IS SURVIVAL PRIORITY. A toolbar group
+            // overflows from its tail, so whatever is declared last is what
+            // disappears into the `»` chevron first. Run was previously
+            // declared third, behind two items that only sometimes exist, and
+            // went to the chevron at ordinary window widths. The primary verb
+            // of the app comes right after the identity pill.
+            //
+            // ONE group, not navigation + primaryAction: the reference layout
+            // is a single left-aligned row, and with everything in one group
+            // the declaration order above is the survival order for the WHOLE
+            // toolbar — no section boundary reorders who dies first.
             // Run and Cancel were two buttons that could never both be live —
             // one was always greyed out. One button that swaps its glyph costs
             // half the width and never shows a dead control.
