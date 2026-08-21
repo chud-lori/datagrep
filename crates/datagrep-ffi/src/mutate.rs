@@ -1,40 +1,3 @@
-//! `datagrep_mutate` — Stage 1 of the ES editing chain: commit one guarded
-//! [`MutationBatch`] and hand the report back as a single owned JSON `char*`.
-//!
-//! Unlike [`crate::query::datagrep_query_run`] this entry point is
-//! **synchronous**: a save is a discrete commit the UI waits on, not a stream
-//! it scrolls. It resolves the profile, acquires a lease on the profile's pool
-//! (so connection pooling and read-only enforcement apply exactly as they do
-//! for a query — see [`CoreInner::run_request`]), runs the mutation, and drains
-//! the resulting cursor to completion before returning.
-//!
-//! ## Read-only enforcement
-//!
-//! A read-only profile takes `set_read_only(true)` on the exact socket the
-//! write will run on, the same as `run_request` ([`CoreInner::leased`]). The Elasticsearch connection's
-//! `read_only_active` guard then refuses the generated write before compiling
-//! anything, and that refusal surfaces here as an error string (NULL return),
-//! never a silent no-op.
-//!
-//! ## The report shape
-//!
-//! The driver returns a `Shape::Documents` cursor: one `Value::Document` per
-//! mutation (`op`/`_index`/`_id`/`outcome`/…) plus [`Notice`]s that ride the
-//! cursor's batches. This module drains both and reshapes them into one stable,
-//! Swift-friendly blob — the rows reuse the very same `Value` → clean-JSON
-//! conversion the grid's detail pane uses ([`crate::cells::value_to_json`]), so
-//! a mutation-report cell renders identically to any other cell:
-//!
-//! ```json
-//! {
-//!   "rows":    [ { "op":"update", "_index":"events", "_id":"abc",
-//!                  "outcome":"applied", "result":"updated",
-//!                  "_seq_no":42, "_primary_term":3 } ],
-//!   "notices": [ {"severity":"warning","code":"es.bulk.partial","message":"…"} ],
-//!   "summary": {"applied":1,"failed":0,"not_attempted":0,"conflicts":0}
-//! }
-//! ```
-
 use std::ffi::c_char;
 use std::sync::Arc;
 
@@ -47,34 +10,8 @@ use crate::core::{core_ref, CoreInner, DatagrepCore};
 use crate::ffi_util::{cstr, guard, to_c_string};
 use crate::runtime::runtime;
 
-/// Commit a guarded document edit and return the batch report as JSON.
-///
-/// `mutation_json` is a serde-encoded [`MutationBatch`] — the exact wire form
-/// exercised by `datagrep-api`'s
-/// `mutation_key_carries_field_names_and_round_trips_through_serde` test:
-/// externally-tagged `Mutation` variants, `FieldPath` as `[{"Field":"_id"}]`,
-/// `Value` as `{"Str":"x"}`/`{"I64":42}`. For example:
-///
-/// ```json
-/// {"mutations":[
-///   {"Update":{
-///     "path":["events"],
-///     "key":[[[{"Field":"_index"}],{"Str":"events"}],
-///            [[{"Field":"_id"}],{"Str":"abc"}]],
-///     "sets":[[[{"Field":"status"}],{"Str":"done"}]],
-///     "expect":[[[{"Field":"_seq_no"}],{"I64":41}],
-///               [[{"Field":"_primary_term"}],{"I64":3}]]}}]}
-/// ```
-///
-/// Blocks until the commit completes. Returns an **owned** JSON `char*` (free it
-/// with `datagrep_string_free`), or NULL with `*err_out` set on a parse failure,
-/// a read-only refusal, or any other error — the same `err_out` contract every
-/// entry point in this crate follows.
-///
 /// # Safety
-/// `core` must come from `datagrep_core_new` and be unfreed; `profile` and
-/// `mutation_json` must be NULL or valid NUL-terminated strings that outlive the
-/// call; `err_out` must be NULL or point at a writable `char*`.
+/// `core` is a live handle from `datagrep_core_new`; string arguments are NULL or NUL-terminated; `err_out` is NULL or a writable slot.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_mutate(
     core: *mut DatagrepCore,
@@ -83,10 +20,7 @@ pub unsafe extern "C" fn datagrep_mutate(
     err_out: *mut *mut c_char,
 ) -> *mut c_char {
     guard(err_out, std::ptr::null_mut(), "datagrep_mutate", || {
-        // SAFETY: `core` is a live handle from `datagrep_core_new` and the two
-        // strings are NULL or NUL-terminated, per this function's contract;
-        // `core_ref`/`cstr` turn NULL (and non-UTF-8) into errors rather than
-        // dereferencing them.
+        // SAFETY: live core handle and strings NULL or NUL-terminated per the contract; core_ref/cstr error before any deref.
         let core = unsafe { core_ref(core) }?;
         let profile = unsafe { cstr(profile, "profile") }?;
         let mutation_json = unsafe { cstr(mutation_json, "mutation_json") }?;
@@ -95,10 +29,6 @@ pub unsafe extern "C" fn datagrep_mutate(
             .map_err(|e| format!("mutation_json is not a valid MutationBatch: {e}"))?;
 
         let rt = runtime()?;
-        // Synchronous by design: a commit blocks the caller until it lands. The
-        // runtime is process-global and this is never called from a worker
-        // thread, so `block_on` here can never be "block_on from inside the
-        // runtime" (see `runtime.rs`).
         let (rows, notices) = rt.block_on(run_mutation(core, profile, batch))?;
 
         let report = build_report(&rows, &notices);
@@ -108,19 +38,11 @@ pub unsafe extern "C" fn datagrep_mutate(
     })
 }
 
-/// Resolve the profile, run the mutation on a leased connection, and drain the
-/// report cursor. Mirrors [`CoreInner::run_request`]'s lease/read-only handling,
-/// but keeps the cursor rather than streaming it into the result store: a
-/// mutation report is inherently small (one document per mutation), so it is
-/// drained here in full instead of paged through the feeder.
 async fn run_mutation(
     core: &Arc<CoreInner>,
     profile: &str,
     batch: MutationBatch,
 ) -> Result<(Vec<Value>, Vec<Notice>), String> {
-    // The same guard `run_request` applies: for a read-only profile the
-    // read-only session is taken on this exact socket, so the connection
-    // refuses the write before it compiles anything.
     let (lease, _) = core.leased(profile).await?;
 
     let mut cursor = lease
@@ -128,9 +50,6 @@ async fn run_mutation(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Drain the whole report: one `Value::Document` per mutation plus every
-    // notice that rode the batches. `next_batch` is pull-only, so this loop is
-    // what actually reads the report off the driver.
     let mut rows: Vec<Value> = Vec::new();
     let mut notices: Vec<Notice> = Vec::new();
     while let Some(batch) = cursor
@@ -143,18 +62,11 @@ async fn run_mutation(
         }
         notices.extend(batch.notices);
     }
-    // Best-effort: the report is fully drained, so releasing any server-side
-    // resource early is courtesy, not correctness.
     let _ = cursor.close().await;
 
     Ok((rows, notices))
 }
 
-/// Reshape the drained report into the stable Swift-facing schema. Rows are
-/// each a report `Value::Document` run through [`value_to_json`] — the same
-/// clean-JSON form `datagrep_rows_cell_detail_json` emits, so a report field
-/// renders exactly like any other cell. The summary is recomputed from the
-/// rows' own `outcome`/`conflict` fields rather than trusted from the driver.
 pub(crate) fn build_report(rows: &[Value], notices: &[Notice]) -> serde_json::Value {
     let row_json: Vec<serde_json::Value> = rows.iter().map(value_to_json).collect();
 
@@ -186,9 +98,6 @@ pub(crate) fn build_report(rows: &[Value], notices: &[Notice]) -> serde_json::Va
     })
 }
 
-/// One [`Notice`] as the flat `{severity, code, message}` object the schema
-/// promises. `severity` is lowercased so Swift can switch on a stable string;
-/// `code` is `null` when the driver attached none.
 fn notice_to_json(notice: &Notice) -> serde_json::Value {
     let severity = match notice.severity {
         NoticeSeverity::Info => "info",
@@ -222,9 +131,6 @@ mod tests {
         }
     }
 
-    /// The canonical wire form (`datagrep-api`'s round-trip test) parses into a
-    /// `MutationBatch` and wraps as the request the driver expects — the parse
-    /// half of `datagrep_mutate`, provable without a cluster.
     #[test]
     fn a_canonical_mutation_batch_parses_and_wraps_as_an_op() {
         let json = r#"{
@@ -249,21 +155,8 @@ mod tests {
         assert!(matches!(req, Request::Op(Op::Mutate(_))));
     }
 
-    /// **The bytes the macOS grid actually sends.**
-    ///
-    /// Captured verbatim from `datagrep-app --dump-mutation`, which prints what
-    /// that app's own encoder builds for one edited document and one deleted
-    /// one. The UI hand-encodes serde's externally-tagged spelling — there is no
-    /// Swift test target to pin it from that side, and a single wrong bracket
-    /// would surface as a parse failure with the user's edit already typed. So
-    /// it is pinned here, against the parser that would reject it, and taken all
-    /// the way through the driver's compiler: the guard survives as
-    /// `if_seq_no`/`if_primary_term`, routing survives, and the typed values
-    /// keep their JSON types instead of arriving as strings.
     #[test]
     fn the_json_the_macos_grid_sends_parses_and_compiles_to_a_guarded_write() {
-        // Regenerate with: cd ui/macos && swift build -c release &&
-        //                  ./.build/release/datagrep-app --dump-mutation
         let json = r#"{"mutations":[{"Update":{"expect":[[[{"Field":"_seq_no"}],{"I64":41}],[[{"Field":"_primary_term"}],{"I64":3}]],"key":[[[{"Field":"_index"}],{"Str":"events"}],[[{"Field":"_id"}],{"Str":"abc"}],[[{"Field":"_routing"}],{"Str":"tenant-7"}]],"sets":[[[{"Field":"status"}],{"Str":"done"}],[[{"Field":"retries"}],{"I64":2}],[[{"Field":"score"}],{"F64":1.5}],[[{"Field":"archived"}],{"Bool":true}]],"path":[]}},{"Delete":{"expect":[[[{"Field":"_seq_no"}],{"I64":7}],[[{"Field":"_primary_term"}],{"I64":1}]],"path":[],"key":[[[{"Field":"_index"}],{"Str":"events"}],[[{"Field":"_id"}],{"Str":"gone"}]]}}]}"#;
 
         let batch: MutationBatch = serde_json::from_str(json).expect("the grid's batch must parse");
@@ -284,8 +177,6 @@ mod tests {
             .query
             .iter()
             .any(|(k, v)| *k == "if_primary_term" && v == "3"));
-        // A pure set stays a partial merge, and every value keeps its type — a
-        // number retyped as a string is a mapping change, not an edit.
         let body = update.body.as_ref().expect("an update has a body");
         assert_eq!(body["doc"]["status"], serde_json::json!("done"));
         assert_eq!(body["doc"]["retries"], serde_json::json!(2));
@@ -304,9 +195,6 @@ mod tests {
             .any(|(k, v)| *k == "if_seq_no" && v == "7"));
     }
 
-    /// `expect` is `#[serde(default)]`, so an update/delete without a
-    /// precondition still parses (the guard is then refused downstream, not
-    /// here).
     #[test]
     fn a_mutation_without_expect_still_parses() {
         let json = r#"{"mutations":[
@@ -316,7 +204,6 @@ mod tests {
         assert_eq!(batch.mutations.len(), 1);
     }
 
-    /// Malformed JSON is a parse error, not a panic.
     #[test]
     fn malformed_json_is_a_clean_parse_error() {
         let err = serde_json::from_str::<MutationBatch>("{not json}")
@@ -325,10 +212,6 @@ mod tests {
         assert!(err.contains("not a valid MutationBatch"), "{err}");
     }
 
-    /// The report serializer emits the exact schema: clean flat rows, a
-    /// per-notice `{severity,code,message}`, and a summary counted from the
-    /// rows' own `outcome`/`conflict` — one applied, one failed-conflict, one
-    /// not-attempted.
     #[test]
     fn build_report_emits_the_stable_schema_with_counts() {
         let rows = vec![
@@ -368,8 +251,6 @@ mod tests {
 
         let report = build_report(&rows, &notices);
 
-        // Rows are clean flat JSON — a plain string/number per field, not the
-        // externally-tagged `Value` form.
         let out_rows = report["rows"].as_array().expect("rows array");
         assert_eq!(out_rows.len(), 3);
         assert_eq!(out_rows[0]["op"], serde_json::json!("update"));
@@ -398,8 +279,6 @@ mod tests {
         assert_eq!(report["summary"]["conflicts"], serde_json::json!(1));
     }
 
-    /// A notice with no code serializes `code: null` rather than omitting it,
-    /// so the Swift shape is stable.
     #[test]
     fn a_notice_without_a_code_serializes_null() {
         let n = Notice {
@@ -413,8 +292,6 @@ mod tests {
         assert_eq!(json["message"], serde_json::json!("all applied"));
     }
 
-    /// An empty report is still the full schema with zeroed counts — never a
-    /// bare `{}` the Swift decoder would choke on.
     #[test]
     fn an_empty_report_is_the_full_schema() {
         let report = build_report(&[], &[]);
@@ -434,7 +311,6 @@ mod tests {
         core
     }
 
-    /// A NULL core is an error string, not a crash.
     #[test]
     fn a_null_core_is_an_error() {
         let profile = CString::new("p").unwrap();
@@ -453,8 +329,6 @@ mod tests {
         unsafe { crate::core::datagrep_string_free(err) };
     }
 
-    /// Malformed JSON is refused with `*err_out` set and a NULL return, before
-    /// any profile lookup or socket.
     #[test]
     fn malformed_mutation_json_sets_err_and_returns_null() {
         let core = core();
@@ -470,8 +344,6 @@ mod tests {
         unsafe { crate::core::datagrep_core_free(core) };
     }
 
-    /// Valid JSON against an unknown profile fails at profile resolution — a
-    /// clear error, NULL return, no panic (still no socket).
     #[test]
     fn a_valid_batch_on_an_unknown_profile_is_an_error() {
         let core = core();
@@ -487,7 +359,6 @@ mod tests {
         unsafe { crate::core::datagrep_core_free(core) };
     }
 
-    /// A NULL `mutation_json` is a checked error, not a deref.
     #[test]
     fn a_null_mutation_json_is_an_error() {
         let core = core();

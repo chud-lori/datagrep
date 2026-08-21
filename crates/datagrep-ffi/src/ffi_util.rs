@@ -1,24 +1,7 @@
-//! Pointer/string/panic plumbing shared by every entry point.
-//!
-//! Two rules the whole ABI depends on:
-//!
-//! - **Every `char*` this library returns is allocated by [`to_c_string`]**
-//!   and freed by `datagrep_string_free`, which is `CString::from_raw`. One
-//!   allocator, one free — the caller never has to know which function
-//!   produced a string.
-//! - **No panic ever crosses the boundary.** Unwinding through an
-//!   `extern "C"` frame is undefined behaviour; [`guard`] converts it to an
-//!   error string instead.
-
 use std::any::Any;
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-/// Allocate a NUL-terminated copy of `s` for the caller to `datagrep_string_free`.
-///
-/// Nothing this crate builds can contain an interior NUL (JSON escapes them;
-/// error text is Rust `String`), but truncating at one beats returning NULL
-/// and silently losing an error message.
 pub fn to_c_string(s: impl Into<Vec<u8>>) -> *mut c_char {
     let bytes: Vec<u8> = s.into();
     let cut = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
@@ -29,36 +12,20 @@ pub fn to_c_string(s: impl Into<Vec<u8>>) -> *mut c_char {
     }
 }
 
-/// Borrow a `const char*` argument as `&str`.
-///
-/// NULL and non-UTF-8 are *errors*, not preconditions: both are things a Swift
-/// caller can produce by accident (an unset `String?`, a `Data` blob mistaken
-/// for text) and neither may be allowed to reach a deref. What the caller must
-/// still guarantee is the one property no amount of checking here can recover:
-/// that the bytes are NUL-terminated. An unterminated buffer makes the scan for
-/// the terminator run off the end of the allocation, and nothing in Rust can
-/// detect that after the fact.
-///
 /// # Safety
-/// `p` must be NULL or a valid NUL-terminated string that outlives the call.
+/// `p` is NULL or points at a NUL-terminated buffer that outlives this call.
 pub unsafe fn cstr<'a>(p: *const c_char, what: &str) -> Result<&'a str, String> {
     if p.is_null() {
         return Err(format!("{what} must not be NULL"));
     }
-    // SAFETY: `p` is non-NULL (checked above) and the caller's contract says it
-    // points at a NUL-terminated buffer living at least for this call. The
-    // returned `&str` borrows that buffer; the `'a` is unbound, so every caller
-    // in this crate consumes it before returning to C, which is where the
-    // buffer's guaranteed lifetime ends.
+    // SAFETY: non-NULL (checked) and NUL-terminated for this call per the contract; the unbound 'a is consumed before returning to C.
     let raw = unsafe { CStr::from_ptr(p) };
     raw.to_str()
         .map_err(|_| format!("{what} is not valid UTF-8"))
 }
 
-/// Write `msg` (or NULL on success) into a caller-supplied `char** err_out`.
-///
 /// # Safety
-/// `err_out` must be NULL or point at a writable `char*`.
+/// `err_out` is NULL or a writable `char*` slot.
 pub unsafe fn set_err(err_out: *mut *mut c_char, msg: Option<String>) {
     if err_out.is_null() {
         return;
@@ -67,28 +34,17 @@ pub unsafe fn set_err(err_out: *mut *mut c_char, msg: Option<String>) {
         Some(m) => to_c_string(m),
         None => std::ptr::null_mut(),
     };
-    // SAFETY: `err_out` is non-NULL (checked above) and the caller's contract
-    // says it points at a writable `char*`. This overwrites rather than reads,
-    // so an uninitialised slot is fine — which is exactly why every entry point
-    // writes NULL here on success instead of leaving a stale value behind.
+    // SAFETY: non-NULL (checked) and writable per the contract; this overwrites and never reads, so an uninitialised slot is fine.
     unsafe { *err_out = value };
 }
 
-/// Run `f` with an `err_out` contract: NULL on success, a freshly allocated
-/// UTF-8 message on failure or panic. Returns `on_error` in both bad cases,
-/// so the ABI never hands back a dangling or uninitialised pointer.
 pub fn guard<T>(
     err_out: *mut *mut c_char,
     on_error: T,
     what: &str,
     f: impl FnOnce() -> Result<T, String>,
 ) -> T {
-    // SAFETY (all three `set_err` calls): `err_out` is whatever the C caller
-    // passed to the entry point that called us, and `set_err`'s contract is
-    // "NULL or a writable `char*`" — the same contract every entry point's own
-    // `# Safety` section states. `set_err` null-checks before writing, so the
-    // only way to break this is a caller passing a non-NULL, non-writable
-    // pointer, which no amount of Rust can catch.
+    // SAFETY (all three set_err calls): err_out is NULL or a writable char* per every entry-point contract; set_err null-checks before writing.
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok(value)) => {
             unsafe { set_err(err_out, None) };
@@ -99,9 +55,6 @@ pub fn guard<T>(
             on_error
         }
         Err(payload) => {
-            // `payload.as_ref()`, not `&payload`: `&Box<dyn Any>` unsizes to
-            // `&dyn Any` whose concrete type is the *Box*, and every downcast
-            // then misses.
             let msg = format!("{what} panicked: {}", panic_text(payload.as_ref()));
             unsafe { set_err(err_out, Some(msg)) };
             on_error
@@ -109,15 +62,10 @@ pub fn guard<T>(
     }
 }
 
-/// [`guard`] for the entry points the frozen header gives no `err_out`
-/// (`datagrep_rows_count`, `datagrep_rows_cell_kind`, the `free`s, …). A panic is
-/// swallowed into `on_error`; there is nowhere to report it, and crashing the
-/// host app is strictly worse than a `0`.
 pub fn guard_quiet<T>(on_error: T, f: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or(on_error)
 }
 
-/// Best-effort text of a panic payload.
 pub fn panic_text(payload: &(dyn Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
@@ -128,8 +76,6 @@ pub fn panic_text(payload: &(dyn Any + Send)) -> String {
     }
 }
 
-/// Parse the `path_json` argument the header specifies for the catalog calls:
-/// a JSON array of path segments, `[]` for the roots.
 pub fn parse_path_json(text: &str) -> Result<Vec<String>, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {

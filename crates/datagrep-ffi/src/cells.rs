@@ -1,32 +1,3 @@
-//! Cell rendering — where the no-allocation-per-cell-per-frame promise is
-//! either honoured or thrown away.
-//!
-//! The goal is to avoid a `String` per visible cell per frame. In order of
-//! leverage: `Utf8`/`LargeUtf8` columns need no formatting at all — the bytes
-//! are already a `&str` slice into the Arrow buffer, so borrow, shape, done;
-//! zero allocation, zero copy. This module implements exactly that ordering:
-//!
-//! 1. **Borrowed, zero-copy** — Arrow `Utf8`/`LargeUtf8`, the string values of
-//!    an `Int32→Utf8` dictionary column, and `Arc<str>`-backed document values
-//!    (`Str`/`Decimal`/`Json`). `datagrep_rows_cell` returns a pointer straight
-//!    into the store's own buffer; the [`crate::rows::DatagrepRows`] holds the
-//!    `Arc` that keeps it alive.
-//! 2. **Formatted once per window** into the window's single text arena —
-//!    numerics, temporals, UUIDs, bytes. Not per frame: the Swift side gets
-//!    pointers and re-reads them for free on every redraw.
-//! 3. **Summarised** — documents and arrays render as `{3 fields}` /
-//!    `[7 items]` and report kind `3`, because a grid cell is not where a
-//!    nested value gets read. `datagrep_rows_cell_detail_json` is.
-//!
-//! ## The distinction this whole ABI exists to carry
-//!
-//! `Value::Null` → kind **1**. `Value::Absent` → kind **2**. A field that is
-//! *not present* is a different fact from a field that is explicitly `NULL`;
-//! keeping them apart is what makes a Mongo grid truthful rather than a wall of
-//! fake empties. Arrow's validity bitmap cannot represent absence, so kind 2 is
-//! reachable only through the document lane — which is precisely why documents
-//! are deliberately not Arrow.
-
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -35,39 +6,22 @@ use arrow_array::{Array, DictionaryArray};
 use arrow_schema::{DataType, TimeUnit};
 use datagrep_api::{Bytes, TzSpec, Value};
 
-/// A rendered value.
 pub const KIND_VALUE: u8 = 0;
-/// An explicit SQL `NULL`.
 pub const KIND_NULL: u8 = 1;
-/// The field is **not present** in this document (`Value::Absent`).
 pub const KIND_ABSENT: u8 = 2;
-/// A document or array; the cell text is a summary, the detail pane has the
-/// real thing.
 pub const KIND_NESTED: u8 = 3;
 
-/// Where one cell's text ended up.
 #[derive(Debug)]
 pub enum Rendered<'a> {
-    /// No text at all — `NULL` and `ABSENT` render as zero bytes and are told
-    /// apart by their kind, so an empty string stays distinguishable from
-    /// both — value, `NULL`, and absent are three distinct facts.
     Empty(u8),
-    /// Borrowed from a buffer the window keeps alive. Zero copy.
     Borrowed(&'a str, u8),
-    /// Appended to the window's arena.
     Arena(u8),
 }
 
-/// Render one [`Value`] — the document lane, and the fallback for Arrow types
-/// with no borrowable text.
 pub fn render_value<'a>(v: &'a Value, arena: &mut String) -> Rendered<'a> {
     match v {
         Value::Null => Rendered::Empty(KIND_NULL),
         Value::Absent => Rendered::Empty(KIND_ABSENT),
-        // `Arc<str>`: already UTF-8, already alive for as long as the window
-        // holds its `Arc<DocSegment>`. Borrow it. `Decimal` and `Json` are
-        // already exact text and must never be reformatted — re-rendering a
-        // decimal risks changing the number the server actually sent.
         Value::Str(s) | Value::Decimal(s) | Value::Json(s) => Rendered::Borrowed(s, KIND_VALUE),
         Value::Document(doc) => {
             let n = doc.len();
@@ -84,8 +38,6 @@ pub fn render_value<'a>(v: &'a Value, arena: &mut String) -> Rendered<'a> {
                 arena.push_str(&text);
                 Rendered::Arena(KIND_VALUE)
             }
-            // `display_value` returns `None` only for Null/Absent, both
-            // matched above; this arm is unreachable in practice.
             None => Rendered::Empty(KIND_VALUE),
         },
     }
@@ -99,19 +51,11 @@ fn plural(n: usize) -> &'static str {
     }
 }
 
-/// Render one Arrow cell, taking the borrow fast path wherever Arrow's own
-/// layout already holds UTF-8.
-///
-/// Arrow has no representation for absence — only a validity bitmap — so this
-/// never returns [`KIND_ABSENT`]. That is not a shortcut: a tabular result
-/// genuinely has no absent cells, because every row has every column.
 pub fn render_arrow<'a>(array: &'a dyn Array, row: usize, arena: &mut String) -> Rendered<'a> {
     if array.is_null(row) {
         return Rendered::Empty(KIND_NULL);
     }
     match array.data_type() {
-        // (1) The zero-copy path — the single largest structural win here:
-        // the bytes are already a `&str` in the Arrow buffer.
         DataType::Utf8 => match array.as_any().downcast_ref::<arrow_array::StringArray>() {
             Some(a) => Rendered::Borrowed(a.value(row), KIND_VALUE),
             None => Rendered::Empty(KIND_VALUE),
@@ -125,10 +69,6 @@ pub fn render_arrow<'a>(array: &'a dyn Array, row: usize, arena: &mut String) ->
                 None => Rendered::Empty(KIND_VALUE),
             }
         }
-        // Dictionary-encoded strings: borrow the dictionary entry, not a copy.
-        // Handing back the *same pointer* for every row sharing a value is
-        // what lets the Swift side shape each distinct value once and key its
-        // shaped-run cache by that pointer instead of re-shaping per row.
         DataType::Dictionary(key, value)
             if **key == DataType::Int32 && **value == DataType::Utf8 =>
         {
@@ -137,12 +77,6 @@ pub fn render_arrow<'a>(array: &'a dyn Array, row: usize, arena: &mut String) ->
                 None => Rendered::Empty(KIND_NULL),
             }
         }
-        // (2) Everything else formats once, into the window's arena.
-        //
-        // The `Value` here is a temporary, so nothing may be borrowed out of
-        // it — which is exactly why every Arrow type whose text *could* be
-        // borrowed is matched above. The `Borrowed` arm is unreachable in
-        // practice and copies rather than dangling if that ever changes.
         _ => {
             let value = arrow_cell_to_value(array, row);
             let start = arena.len();
@@ -175,12 +109,6 @@ fn dictionary_str(array: &dyn Array, row: usize) -> Option<&str> {
     Some(values.value(keys.value(row) as usize))
 }
 
-/// One Arrow cell as a [`Value`], for the detail pane and for the formatted
-/// path above.
-///
-/// Total by construction: an Arrow type this build's converter never emits
-/// becomes [`Value::Unsupported`] rather than panicking — never lose bytes,
-/// never crash on a driver quirk.
 pub fn arrow_cell_to_value(array: &dyn Array, row: usize) -> Value {
     if array.is_null(row) {
         return Value::Null;
@@ -249,19 +177,9 @@ fn tz_spec(tz: Option<&str>) -> TzSpec {
     }
 }
 
-/// `Value` → JSON for `datagrep_rows_cell_detail_json`.
-///
-/// Lossless where JSON allows it; anything JSON has no native type for
-/// (bytes, UUID, decimal, timestamps, intervals, geometry, vectors) becomes
-/// its exact display text rather than a JSON encoding this crate would have
-/// to invent and the Swift side would have to learn. Documents and arrays
-/// keep their structure — the detail pane is the one place nesting is the
-/// point.
 pub fn value_to_json(v: &Value) -> serde_json::Value {
     use serde_json::Value as J;
     match v {
-        // Both become `null`. The detail pane already knows which one it is
-        // from `datagrep_rows_cell_kind`; JSON has no third spelling.
         Value::Null | Value::Absent => J::Null,
         Value::Bool(b) => J::Bool(*b),
         Value::I64(n) => J::Number((*n).into()),
@@ -275,9 +193,6 @@ pub fn value_to_json(v: &Value) -> serde_json::Value {
                 .map(|(k, v)| (k.to_string(), value_to_json(v)))
                 .collect(),
         ),
-        // Raw JSON text: re-parse so the detail pane gets structure, but fall
-        // back to the exact text if the server sent something we cannot parse
-        // — never lose bytes.
         Value::Json(text) => {
             serde_json::from_str(text).unwrap_or_else(|_| J::String(text.to_string()))
         }
@@ -305,8 +220,6 @@ mod tests {
         }
     }
 
-    /// **The reason the document model exists.** NULL, ABSENT and the empty
-    /// string are three different things and stay three different things.
     #[test]
     fn null_absent_and_empty_string_are_three_distinct_states() {
         assert_eq!(render(&Value::Null), (KIND_NULL, String::new()));
@@ -315,8 +228,6 @@ mod tests {
             render(&Value::Str(Arc::from(""))),
             (KIND_VALUE, String::new())
         );
-        // Same text, different kind — which is exactly how the ABI keeps the
-        // distinction without a sentinel string.
         assert_ne!(KIND_NULL, KIND_ABSENT);
     }
 

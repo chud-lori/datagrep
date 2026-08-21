@@ -1,16 +1,3 @@
-//! Catalog: **lazy, one level per call**.
-//!
-//! On connect, issue **exactly one** cheap query: the database/schema list.
-//! Nothing else. Everything below that is expand-on-demand, per node.
-//!
-//! Neither function here recurses. `datagrep_catalog_children_json` is one
-//! `Catalog::children` call for one path, bounded by `ListOpts`; the
-//! disclosure triangle in the Swift outline view is what drives the next one.
-//!
-//! `enumeration` is the single most important concept in the catalog: it is
-//! what stops a `KEYS *` against prod because someone clicked a triangle.
-//! Getting it into this ABI needs a detour; see [`enumeration_for_depth`].
-
 use std::ffi::c_char;
 use std::sync::Arc;
 
@@ -22,13 +9,8 @@ use crate::core::{core_ref, CoreInner, DatagrepCore};
 use crate::ffi_util::{cstr, guard, parse_path_json, to_c_string};
 use crate::runtime::runtime;
 
-/// One level of children under `path_json`.
-///
-/// Returns `[{"name":..,"kind":..,"has_children":bool,"enumeration":..}, ...]`.
-///
 /// # Safety
-/// `core` must come from `datagrep_core_new`; `profile`/`path_json` must be valid
-/// NUL-terminated UTF-8; `err_out` must be NULL or writable.
+/// `core` is a live handle from `datagrep_core_new`; string arguments are NULL or NUL-terminated; `err_out` is NULL or a writable slot.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_catalog_children_json(
     core: *mut DatagrepCore,
@@ -41,12 +23,7 @@ pub unsafe extern "C" fn datagrep_catalog_children_json(
         std::ptr::null_mut(),
         "datagrep_catalog_children_json",
         || {
-            // SAFETY: the three pointers carry exactly the contract this
-            // function's `# Safety` section states — a live handle from
-            // `datagrep_core_new` and NUL-terminated strings. `core_ref` and
-            // `cstr` reject NULL (and non-UTF-8) as errors rather than
-            // dereferencing them, so the only unenforceable half left is
-            // "not yet freed" / "NUL-terminated".
+            // SAFETY: live core handle and NUL-terminated strings per the contract; core_ref/cstr reject NULL and non-UTF-8 before any deref.
             let core = unsafe { core_ref(core) }?;
             let profile = unsafe { cstr(profile, "profile") }?;
             let parent = object_path(unsafe { cstr(path_json, "path_json") }?)?;
@@ -83,22 +60,6 @@ async fn children(core: &CoreInner, profile: &str, parent: ObjectPath) -> Result
     serde_json::to_string(&items).map_err(|e| format!("could not encode the catalog page: {e}"))
 }
 
-/// How costly enumerating the level *below* `depth` is.
-///
-/// **CoreApi gap the frozen header forces open.** The header wants
-/// `enumeration` **per node**; the engine models it **per level**
-/// ([`datagrep_api::catalog::LevelDef`], returned by `Catalog::levels()`), and
-/// `CoreApi` wraps only `Catalog::children` — there is no `catalog_levels`
-/// façade. So this reaches one step further into the same public seam
-/// `datagrep-cli` uses for `--describe`:
-/// `CoreApi::session(id).acquire().await?.catalog().levels()`. Still entirely
-/// `datagrep-core`/`datagrep-api` public API, never a driver crate — but it skips the
-/// `guarded(...)` panic isolation `list_catalog` gets for free.
-///
-/// A failure here is deliberately **not** fatal: the children are real and
-/// worth showing. The value degrades to the most conservative honest answer,
-/// `on_demand` ("never auto-expand; the user must explicitly ask"), which can
-/// cost the user a click but can never fire a `KEYS *`.
 async fn enumeration_for_depth(
     core: &CoreInner,
     id: datagrep_core::ProfileId,
@@ -114,73 +75,11 @@ async fn enumeration_for_depth(
     let Some(levels) = levels.filter(|l| !l.is_empty()) else {
         return Enumeration::OnDemand;
     };
-    // Children of a path of depth `d` are that hierarchy's level `d`. Below
-    // the declared hierarchy (columns of a table, say) the last level's cost
-    // is the closest truth we have.
     levels[depth.min(levels.len() - 1)].enumeration
 }
 
-/// Full detail for one object — columns, indexes, stats, comment,
-/// engine-specific extras.
-///
-/// ## Payload schema (one shape for every engine)
-///
-/// ```json
-/// {
-///   "path": ["main", "users"],
-///   "name": "users",
-///   "kind": "table",
-///   "has_children": true,
-///   "comment": "table comment" | null,
-///   "columns": [
-///     {"name": "id", "ordinal": 0,
-///      "native_type": "INTEGER" | null, "logical_type": "I64" | null,
-///      "type": "I64",                      // legacy alias of logical_type
-///      "nullable": false, "default": "18" | null,
-///      "primary_key": true, "unique": false, "indexed": true,
-///      "auto_generated": false,
-///      "presence_ratio": 0.66}              // sampled engines only
-///   ] | null,                               // null = engine declares no schema
-///   "indexes": [
-///     {"name": "idx_users_email",
-///      "columns": [{"name": "email", "order": "asc"|"desc"|null}],
-///      "unique": true, "primary": false,
-///      "type": "btree" | "gin" | "text" | "2dsphere" | …,
-///      "partial": false, "filter": "(deleted_at IS NULL)" | null,
-///      "size_bytes": 16384 | null,
-///      "definition": "CREATE UNIQUE INDEX …" | null,
-///      "sparse": false, "expire_after_seconds": 3600 | null}
-///   ] | null,                               // null = engine did not report;
-///                                           // [] = engine says there are none
-///   "row_estimate": 42 | null,              // estimate, never a COUNT(*)
-///   "size_bytes": 8192 | null,
-///   "inferred": false,                      // true = columns come from sampling
-///   "sampled_docs": 500 | null,             // sample size behind `inferred`
-///   "extra": [["k","v"], …]                 // remaining engine-specific pairs
-/// }
-/// ```
-///
-/// Laziness contract: everything above — indexes included — is
-/// fetched by the driver only when *this* call is made for *this* object,
-/// never during tree expansion and never on connect.
-///
-/// Columns and stats come from the driver's typed `ObjectDetail`; indexes,
-/// defaults, and inferred columns ride the `ObjectDetail::extra` string
-/// pairs under reserved keys (`indexes`, `column_defaults`,
-/// `inferred_columns`, `row_estimate`, `size_bytes`, `inferred_schema`,
-/// `sampled_docs`) because `datagrep-api` has no structured field for them yet —
-/// this function consumes those pairs and promotes them; unrecognized (or
-/// unparseable) pairs stay visible in `extra` rather than being dropped.
-///
-/// **CoreApi gap.** `CoreApi` wraps `Catalog::children` (as `list_catalog`)
-/// but not `describe`/`infer_shape`/`complete`, so this goes through
-/// `session().acquire().catalog().describe()` — public `datagrep-core`/`datagrep-api`
-/// API, minus `list_catalog`'s panic isolation. Identical to the detour
-/// `datagrep-cli` documents.
-///
 /// # Safety
-/// `core` must come from `datagrep_core_new`; `profile`/`path_json` must be valid
-/// NUL-terminated UTF-8; `err_out` must be NULL or writable.
+/// `core` is a live handle from `datagrep_core_new`; string arguments are NULL or NUL-terminated; `err_out` is NULL or a writable slot.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_catalog_describe_json(
     core: *mut DatagrepCore,
@@ -193,9 +92,7 @@ pub unsafe extern "C" fn datagrep_catalog_describe_json(
         std::ptr::null_mut(),
         "datagrep_catalog_describe_json",
         || {
-            // SAFETY: as `datagrep_catalog_children_json` — a live core handle
-            // and NUL-terminated strings, with NULL and non-UTF-8 rejected
-            // before any deref.
+            // SAFETY: as datagrep_catalog_children_json — live core, NUL-terminated strings, NULL rejected before deref.
             let core = unsafe { core_ref(core) }?;
             let profile = unsafe { cstr(profile, "profile") }?;
             let path = object_path(unsafe { cstr(path_json, "path_json") }?)?;
@@ -219,35 +116,21 @@ async fn describe(core: &CoreInner, profile: &str, path: ObjectPath) -> Result<S
         .map_err(|e| format!("could not encode the object detail: {e}"))
 }
 
-/// The reserved `ObjectDetail::extra` keys promoted out of the pair list by
-/// [`detail_json`], separated from the display-only pairs that pass through.
 #[derive(Default)]
 struct PromotedExtras {
-    /// `indexes`: a JSON array (`[]` is an honest "none"; absent = engine
-    /// did not report).
     indexes: Option<serde_json::Value>,
-    /// `inferred_columns`: sample-derived column list, same shape as the
-    /// declared one, used only when the engine declares no schema.
     inferred_columns: Option<serde_json::Value>,
-    /// `column_defaults`: `{column: default SQL text}` merged into `columns`.
     column_defaults: serde_json::Map<String, serde_json::Value>,
-    /// `row_estimate` / `size_bytes`: integer strings promoted to numbers.
     row_estimate: Option<i64>,
     size_bytes: Option<i64>,
-    /// `inferred_schema` = "true" / `sampled_docs`: the honesty labels for
-    /// sampled engines — inference from a sample is never ground truth, and
-    /// the UI has to be able to say which one it is showing.
     inferred: bool,
     sampled_docs: Option<u64>,
-    /// Everything else, in driver order.
     rest: Vec<(String, String)>,
 }
 
 fn promote_extras(extra: &[(std::sync::Arc<str>, std::sync::Arc<str>)]) -> PromotedExtras {
     let mut out = PromotedExtras::default();
     for (k, v) in extra {
-        // A value that fails to parse falls through into `rest`: better an
-        // ugly-but-visible pair than a silently dropped fact.
         let mut unparsed = true;
         match k.as_ref() {
             "indexes" => {
@@ -299,19 +182,9 @@ fn promote_extras(extra: &[(std::sync::Arc<str>, std::sync::Arc<str>)]) -> Promo
     out
 }
 
-/// The describe payload's shape is this crate's to choose — the frozen header
-/// pins the children JSON but leaves describe open. Hand-shaped rather than
-/// `serde(ObjectDetail)` so the Swift side sees `"nullable": true` instead of
-/// a bitflags integer it would have to decode. The full schema is documented
-/// on [`datagrep_catalog_describe_json`].
 fn detail_json(detail: &ObjectDetail) -> serde_json::Value {
     let promoted = promote_extras(&detail.extra);
 
-    // Declared columns from the typed RowSchema, enriched with the ordinal,
-    // the default expression (merged by name from `column_defaults`), and
-    // the identity: a driver may report the primary key as
-    // `RowSchema::identity` without also setting the per-field flag, and the
-    // two must agree in the payload.
     let declared: Option<Vec<serde_json::Value>> = detail.schema.as_ref().map(|s| {
         let identity: Vec<usize> = s
             .identity
@@ -328,8 +201,6 @@ fn detail_json(detail: &ObjectDetail) -> serde_json::Value {
                     "ordinal": ordinal,
                     "native_type": f.native_type,
                     "logical_type": logical,
-                    // Legacy alias kept for existing consumers of the
-                    // pre-index payload.
                     "type": logical,
                     "nullable": f.flags.contains(FieldFlags::NULLABLE),
                     "default": promoted.column_defaults.get(f.name.as_ref()),
@@ -342,10 +213,6 @@ fn detail_json(detail: &ObjectDetail) -> serde_json::Value {
             })
             .collect()
     });
-    // `null`, not `[]`: "this engine declares no schema" is a different fact
-    // from "this object has no columns" (see the `SCHEMA_DECLARED` cap).
-    // A sampled field list (Mongo) fills in only where nothing is declared,
-    // and the top-level `inferred` flag is what keeps it honest.
     let columns = match (declared, &promoted.inferred_columns) {
         (Some(cols), _) => serde_json::Value::Array(cols),
         (None, Some(inferred)) => inferred.clone(),
@@ -381,8 +248,6 @@ fn object_path(path_json: &str) -> Result<ObjectPath, String> {
     ))
 }
 
-/// The header asks for a `name`; `ObjectNode` carries a full [`ObjectPath`].
-/// The leaf is the name, and the caller already knows the parent it asked for.
 fn leaf_name(node: &ObjectNode) -> String {
     node.path
         .parts()
@@ -407,10 +272,6 @@ fn kind_str(kind: ObjectKind) -> &'static str {
     }
 }
 
-/// Exactly the four spellings the frozen header lists. `ScanOnly`'s
-/// `requires_prefix` payload has nowhere to go in that vocabulary — a real
-/// loss, recorded in the README: a Redis tree cannot tell the Swift side
-/// "refuse to scan without a prefix", only "this is a scan".
 fn enumeration_str(e: Enumeration) -> &'static str {
     match e {
         Enumeration::Cheap => "cheap",
@@ -483,17 +344,12 @@ mod tests {
                     native_type: Some(Arc::from("INTEGER")),
                 },
             ],
-            // Identity names `id` as the key without the per-field flag set —
-            // the payload must reconcile the two spellings.
             identity: Some(Identity {
                 field_indices: vec![0],
             }),
         }
     }
 
-    /// The full describe contract: reserved extras are promoted (and removed
-    /// from `extra`), defaults merge into columns by name, ordinals appear,
-    /// and identity-only primary keys still flag their column.
     #[test]
     fn detail_json_promotes_reserved_extras_into_the_documented_shape() {
         let detail = detail_with(
@@ -537,9 +393,6 @@ mod tests {
         assert_eq!(extra[0][0], "engine");
     }
 
-    /// A schemaless engine's sampled field list becomes `columns` — but only
-    /// with `inferred: true` and `sampled_docs` alongside, so no UI can
-    /// present inference as ground truth.
     #[test]
     fn detail_json_uses_inferred_columns_only_without_a_declared_schema() {
         let detail = detail_with(
@@ -565,8 +418,6 @@ mod tests {
         );
     }
 
-    /// No reserved keys at all — the legacy payload: `columns`/`indexes`
-    /// null, stats null, extras passed through untouched.
     #[test]
     fn detail_json_without_reserved_extras_reports_null_not_fabrication() {
         let detail = detail_with(None, vec![("type", "string"), ("ttl_seconds", "no expiry")]);
@@ -578,8 +429,6 @@ mod tests {
         assert_eq!(v["extra"].as_array().map(Vec::len), Some(2));
     }
 
-    /// A malformed reserved value must stay visible in `extra`, never be
-    /// silently dropped.
     #[test]
     fn detail_json_keeps_unparseable_reserved_pairs_in_extra() {
         let detail = detail_with(

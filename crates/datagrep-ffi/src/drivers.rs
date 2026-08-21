@@ -1,23 +1,7 @@
-//! Driver registration — **one line per engine**, so mongo slots in later
-//! without touching anything else in this crate.
-//!
-//! `CoreApi::register_driver` is documented as "a hashmap insert — nothing is
-//! constructed until first use" (`datagrep_core::api`), so registering every
-//! compiled-in engine unconditionally costs nothing at cold start. Eager
-//! driver/TLS/regex init at startup is a banned anti-pattern here: it buys
-//! nothing and lands entirely on the launch time the user feels. The
-//! `SqliteDriver`/`PostgresDriver`/`RedisDriver` structs are not built until a
-//! profile actually needs one.
-
 use std::sync::Arc;
 
 use datagrep_core::CoreApi;
 
-/// Register every driver this build was compiled with.
-///
-/// Adding mongo is one line here plus one in `Cargo.toml` — nothing else in
-/// this crate names a concrete engine. No `if driver_id == …` above
-/// `datagrep-api`, ever; that is what capability flags are for.
 pub fn register_drivers(core: &CoreApi) {
     core.register_driver("sqlite", || {
         Arc::new(datagrep_drv_sqlite::SqliteDriver::new())
@@ -35,14 +19,6 @@ pub fn register_drivers(core: &CoreApi) {
     });
 }
 
-/// A standalone `Driver` by registry id, for the two things `CoreApi` has no
-/// façade for: `parse_url` and `config_schema` (both needed by
-/// `datagrep_profiles_add`).
-///
-/// `CoreApi::register_driver` only ever receives a *constructor*, and
-/// `CoreApi` exposes no way to get a driver back out — so this is a second,
-/// deliberately tiny, one-line-per-engine mapping, not a reach-around into
-/// driver internals. Recorded as a `CoreApi` gap in this crate's README.
 pub fn driver_for(id: &str) -> Option<Arc<dyn datagrep_api::Driver>> {
     match id {
         "sqlite" => Some(Arc::new(datagrep_drv_sqlite::SqliteDriver::new())),
@@ -57,8 +33,6 @@ pub fn driver_for(id: &str) -> Option<Arc<dyn datagrep_api::Driver>> {
     }
 }
 
-/// Guess a profile's engine from a pasted connection URL. One line per driver,
-/// same spirit as [`register_drivers`].
 pub fn driver_for_url(url: &str) -> Option<(&'static str, Arc<dyn datagrep_api::Driver>)> {
     let id = if url == ":memory:" || url.starts_with("sqlite://") {
         "sqlite"
@@ -74,11 +48,6 @@ pub fn driver_for_url(url: &str) -> Option<(&'static str, Arc<dyn datagrep_api::
         || url.starts_with("http://")
         || url.starts_with("https://")
     {
-        // `ElasticsearchDriver::parse_url` accepts all three spellings, and
-        // http(s) is the form every Elasticsearch tool prints — a profile URL
-        // copied out of Kibana or curl has to land somewhere. No other engine
-        // in this build claims an HTTP scheme, so this stays unambiguous; the
-        // day one does, the scheme alone stops being enough to route on.
         "elasticsearch"
     } else {
         return None;
@@ -86,8 +55,6 @@ pub fn driver_for_url(url: &str) -> Option<(&'static str, Arc<dyn datagrep_api::
     Some((id, driver_for(id)?))
 }
 
-/// Registry ids this build knows about — the message
-/// [`driver_for_url`] failures quote back at the user.
 pub fn known_driver_ids() -> &'static [&'static str] {
     &[
         "sqlite",
@@ -143,8 +110,6 @@ mod tests {
                 Some("elasticsearch"),
                 "{url}"
             );
-            // Routing and parsing must agree: a URL this maps to a driver the
-            // driver then rejects is a worse failure than not mapping it.
             let (_, driver) = driver_for_url(url).expect("routed");
             assert!(driver.parse_url(url).is_ok(), "{url}");
         }
