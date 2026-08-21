@@ -1,30 +1,3 @@
-// ConnectionDialog.hpp — add / edit one connection profile.
-//
-// The Linux analogue of the macOS ConnectionEditor (New + Edit share one form
-// so the two dialogs cannot drift). It drives the profile half of the C ABI
-// through the dg::Core wrapper — and ONLY through it:
-//
-//   Add   -> datagrep_profiles_add_json (name, url-with-password, options-json)
-//   Edit  -> datagrep_profiles_update   (original-name, patch-json of ONLY the
-//            keys that changed — a full-object write would round-trip and reset
-//            fields this build does not understand)
-//   Seed  -> datagrep_profiles_get_json (the parsed, secretless config the Edit
-//            form populates from; the secret VALUE never crosses this ABI)
-//   Info  -> datagrep_connection_info_json (which read-only protection is really
-//            in force — server / client / none — shown honestly, never worded up)
-//   Test  -> datagrep_connection_test_json (dial once, report what answered,
-//            save nothing; runs off the GUI thread — it blocks for the timeout)
-//
-// The structured fields (host / port / database / user / password) and the URL
-// are the SAME value: the URL is rendered from the fields and typing one parses
-// straight back, exactly like the macOS ConnectionForm, so the two can never
-// disagree. The password lives only behind a masked field and is spliced into
-// the URL solely on the one path that hands it to the engine, which lifts it
-// into the keychain before anything is written — it is never shown in the URL.
-//
-// UI glue only: no schema/engine logic beyond building and parsing a URL string,
-// which is presentation, not business rules.
-
 #ifndef DATAGREP_CONNECTION_DIALOG_HPP
 #define DATAGREP_CONNECTION_DIALOG_HPP
 
@@ -48,21 +21,16 @@ class ConnectionDialog : public QDialog {
     Q_OBJECT
 
 public:
-    // `core` is borrowed and must outlive the dialog. Construct with the two
-    // named constructors below rather than directly.
+    // `core` is borrowed and must outlive the dialog; construct via the factories.
     explicit ConnectionDialog(dg::Core* core, QWidget* parent = nullptr);
 
-    // A blank form for a new connection (datagrep_profiles_add_json on accept).
     static ConnectionDialog* forNewConnection(dg::Core* core, QWidget* parent);
 
-    // An Edit form seeded from datagrep_profiles_get_json for `name`
-    // (datagrep_profiles_update with a minimal patch on accept). If the seed
-    // read fails the dialog still opens, explaining why, rather than refusing.
+    // Seeded from datagrep_profiles_get_json; a failed seed still opens, explaining why.
     static ConnectionDialog* forEditing(dg::Core* core, const QString& name,
                                         QWidget* parent);
 
-    // The profile name that was added/saved — valid after exec() returns
-    // QDialog::Accepted, so the caller can reselect it in the list.
+    // The name added/saved — valid once exec() returns QDialog::Accepted.
     QString savedName() const { return savedName_; }
 
 private slots:
@@ -77,8 +45,7 @@ private slots:
     void onAccept();
 
 private:
-    // One engine, as the form needs to describe it (ported subset of the macOS
-    // ConnectionEngine table — kept in step with the driver registry).
+    // One engine as the form describes it — kept in step with the driver registry.
     struct Engine {
         QString id;
         QString scheme;       // canonical scheme, e.g. "postgres://"
@@ -90,8 +57,7 @@ private:
         QString databasePlaceholder;
     };
 
-    // The structured connection, the way a person thinks about it. The URL and
-    // these fields are the same value rendered two ways.
+    // The structured connection; the URL and these fields are one value, two renderings.
     struct Fields {
         QString engineId = QStringLiteral("postgres");
         QString host, port, database, username, password, filePath, extras;
@@ -111,8 +77,7 @@ private:
     const Engine* engineById(const QString& id) const;
     const Engine* currentEngine() const;
 
-    // URL <-> fields, ported from the macOS ConnectionURL so New and Edit agree
-    // with the CLI on the profile's storage format.
+    // URL <-> fields, ported from the macOS ConnectionURL so all builds agree.
     QString buildUrl(const Fields& f, bool includePassword) const;
     Fields parseUrl(const QString& url) const;
     Fields fieldsFromConfig(const QString& driver, const class QJsonObject& config) const;
@@ -123,7 +88,6 @@ private:
     QString savedName_;
 
     // The Edit form's baseline, so the patch carries only what actually moved.
-    // Populated from datagrep_profiles_get_json.
     bool haveOriginal_ = false;
     QString originalUrlNoPassword_;
     bool origReadOnly_ = false;
