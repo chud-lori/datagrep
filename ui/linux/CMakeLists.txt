@@ -12,6 +12,7 @@ project(datagrep-linux LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)   # Q_OBJECT classes across the UI need moc
+set(CMAKE_AUTORCC ON)   # resources.qrc (engine brand SVGs) needs rcc
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
@@ -83,7 +84,8 @@ find_package(ZLIB REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(DBUS REQUIRED dbus-1)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+# Svg: QSvgRenderer for the engine brand marks (vector, palette-aware).
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Svg)
 
 # ---------------------------------------------------------------------------
 # Optional: KSyntaxHighlighting (KF6, MIT) for real SQL syntax highlighting.
@@ -131,6 +133,7 @@ endif()
 # The application.
 # ---------------------------------------------------------------------------
 add_executable(datagrep
+    resources.qrc
     src/main.cpp
     src/model/ConnectionSafety.cpp
     src/model/QueryHistory.cpp
@@ -141,6 +144,7 @@ add_executable(datagrep
     src/ui/ConnectionDialog.cpp
     src/ui/DetailPanel.cpp
     src/ui/EditorTabs.cpp
+    src/ui/EngineIcon.cpp
     src/ui/HistoryPanel.cpp
     src/ui/MainWindow.cpp
     src/ui/ResultTableView.cpp
@@ -173,6 +177,7 @@ target_link_libraries(datagrep PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
+    Qt6::Svg
     datagrep_ffi          # the imported libdatagrep_ffi.a
     Threads::Threads      # pthread
     ${CMAKE_DL_LIBS}      # dl
