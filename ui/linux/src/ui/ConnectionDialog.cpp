@@ -442,12 +442,9 @@ void ConnectionDialog::buildUi() {
     connect(urlEdit_, &QLineEdit::textEdited, this, &ConnectionDialog::onUrlEdited);
 
     // --- settings ----------------------------------------------------------
-    envBox_ = new QComboBox(this);
-    envBox_->addItem(QStringLiteral("dev"), QStringLiteral("dev"));
-    envBox_->addItem(QStringLiteral("staging"), QStringLiteral("staging"));
-    envBox_->addItem(QStringLiteral("prod"), QStringLiteral("prod"));
-    envBox_->setToolTip(QStringLiteral(
-        "prod turns on the production guardrails (red chrome, confirm-on-write)."));
+    // No environment picker: the engine dropped the dev/staging/prod enum in
+    // favour of the colour marker and the read-only tick, and still sending
+    // `env` made every save from this dialog fail.
 
     colorBox_ = new QComboBox(this);
     colorBox_->addItem(QStringLiteral("none"), QString());
@@ -470,7 +467,6 @@ void ConnectionDialog::buildUi() {
         QStringLiteral("seconds before an unused connection is dropped"));
 
     auto* settingsForm = new QFormLayout();
-    settingsForm->addRow(QStringLiteral("Environment"), envBox_);
     settingsForm->addRow(QStringLiteral("Colour"), colorBox_);
     settingsForm->addRow(QStringLiteral("Row limit"), autoLimitEdit_);
     settingsForm->addRow(QStringLiteral("Idle timeout (s)"), idleTimeoutEdit_);
@@ -732,7 +728,6 @@ void ConnectionDialog::seedForEdit(const QString& name) {
     // Baseline the diff against the form's current default state, so that if the
     // seed read fails (or a key is absent) the patch does not manufacture a
     // spurious change against an empty original.
-    origEnv_ = envBox_->currentData().toString();
     origColor_ = colorBox_->currentData().toString();
     if (core_ == nullptr) {
         return;
@@ -751,7 +746,6 @@ void ConnectionDialog::seedForEdit(const QString& name) {
     const QJsonObject o = QJsonDocument::fromJson(json.toUtf8()).object();
 
     const QString driver = o.value(QStringLiteral("driver")).toString();
-    origEnv_ = o.value(QStringLiteral("env")).toString(QStringLiteral("dev"));
     origReadOnly_ = o.value(QStringLiteral("read_only")).toBool(false);
     origConfirmWrites_ = o.value(QStringLiteral("confirm_writes")).toBool(false);
     origColor_ = o.value(QStringLiteral("color")).toString();
@@ -788,7 +782,6 @@ void ConnectionDialog::seedForEdit(const QString& name) {
     if (e != nullptr) {
         reshapeForEngine(*e);
     }
-    envBox_->setCurrentIndex(qMax(0, envBox_->findData(origEnv_)));
     colorBox_->setCurrentIndex(qMax(0, colorBox_->findData(origColor_)));
     readOnlyCheck_->setChecked(origReadOnly_);
     confirmWritesCheck_->setChecked(origConfirmWrites_);
@@ -817,7 +810,6 @@ void ConnectionDialog::seedForEdit(const QString& name) {
 
 QString ConnectionDialog::optionsJson() const {
     QJsonObject o;
-    o.insert(QStringLiteral("env"), envBox_->currentData().toString());
     o.insert(QStringLiteral("read_only"), readOnlyCheck_->isChecked());
     o.insert(QStringLiteral("confirm_writes"), confirmWritesCheck_->isChecked());
 
@@ -866,9 +858,6 @@ QString ConnectionDialog::patchJson() const {
     }
     if (confirmWritesCheck_->isChecked() != origConfirmWrites_) {
         p.insert(QStringLiteral("confirm_writes"), confirmWritesCheck_->isChecked());
-    }
-    if (envBox_->currentData().toString() != origEnv_) {
-        p.insert(QStringLiteral("env"), envBox_->currentData().toString());
     }
 
     const QString color = colorBox_->currentData().toString();

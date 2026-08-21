@@ -36,7 +36,6 @@ namespace dg {
 struct ConnectionSafety {
     QString name;
     QString color;          // one of the marker palette names; empty = unmarked
-    QString env;            // legacy dev/staging/prod tag, still in the store
     bool readOnly = false;
     bool confirmWrites = false;
 
