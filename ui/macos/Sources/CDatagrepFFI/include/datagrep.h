@@ -30,7 +30,7 @@ DatagrepCore *datagrep_core_new(const char *profiles_db_path, char **err_out);
 void     datagrep_core_free(DatagrepCore *);
 void     datagrep_string_free(char *);
 
-/* [{"name","driver","env","has_secret"}] */
+/* [{"name","driver","read_only","confirm_writes","color","has_secret"}] */
 char *datagrep_profiles_list_json(DatagrepCore *, char **err_out);
 bool  datagrep_profiles_add(DatagrepCore *, const char *name, const char *url, char **err_out);
 bool  datagrep_profiles_remove(DatagrepCore *, const char *name, char **err_out);
