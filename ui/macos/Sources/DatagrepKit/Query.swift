@@ -24,6 +24,23 @@ public struct QueryStatus: Sendable {
     public let error: String?
     public let columns: [ColumnSpec]
     public let totalKnown: Bool
+    /// What this result may be edited into, or nil. Nil is also what an engine
+    /// build without the block reports, so an older engine degrades to a
+    /// read-only grid rather than to an edit that could never be sent.
+    public let editable: EditableResult?
+
+    public init(
+        state: QueryState, rowsLoaded: UInt64, elapsedMs: UInt64, error: String?,
+        columns: [ColumnSpec], totalKnown: Bool, editable: EditableResult? = nil
+    ) {
+        self.state = state
+        self.rowsLoaded = rowsLoaded
+        self.elapsedMs = elapsedMs
+        self.error = error
+        self.columns = columns
+        self.totalKnown = totalKnown
+        self.editable = editable
+    }
 
     public static let empty = QueryStatus(
         state: .done, rowsLoaded: 0, elapsedMs: 0, error: nil, columns: [], totalKnown: true)
@@ -94,7 +111,8 @@ public final class DatagrepQueryHandle: @unchecked Sendable {
             elapsedMs: (d["elapsed_ms"] as? NSNumber)?.uint64Value ?? 0,
             error: d["error"] as? String,
             columns: cols,
-            totalKnown: d["total_known"] as? Bool ?? false)
+            totalKnown: d["total_known"] as? Bool ?? false,
+            editable: EditableResult.decode(d["editable"]))
     }
 
     /// Returns instantly. The outcome JSON is shown to the user VERBATIM —

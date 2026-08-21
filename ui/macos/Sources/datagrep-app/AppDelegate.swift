@@ -53,6 +53,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// The `MEASURE cold start` line is emitted from a forced first display, not
     /// from an `async` hop that would report a window that has not drawn yet.
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before anything is built: this one prints and leaves, so there is no
+        // window to put it in. See `MutationProbe`.
+        if MutationProbe.runIfRequested() {
+            NSApp.terminate(nil)
+            return
+        }
         // Before the window exists, so the first frame is already in the right
         // appearance and nothing flashes. The screenshot paths further down
         // assign `NSApp.appearance` themselves and deliberately run after this,

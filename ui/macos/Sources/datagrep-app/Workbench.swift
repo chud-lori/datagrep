@@ -43,6 +43,14 @@ struct Workbench: View {
         // every accent in the window red.
         .tint(model.isProd ? Color.red : nil)
         .sheet(isPresented: $model.showNewConnection) { NewConnectionSheet(model: model) }
+        // What the commit did, per document. Presented from the same place as
+        // the other sheets so nothing about a write is drawn inside the grid's
+        // AppKit host.
+        .sheet(isPresented: $model.showMutationReport) {
+            if let report = model.mutationReport {
+                MutationReportSheet(model: model, report: report)
+            }
+        }
         .animation(.smooth(duration: 0.25), value: model.sidebarShown)
         // Feed the live content width so the sidebar can auto-collapse before the
         // balanced split would clip it. The window's own contentMinSize is the
@@ -178,6 +186,18 @@ private struct ResultsPane: View {
     @ObservedObject private var stage = StartupStage.shared
 
     var body: some View {
+        // A real bottom row, NOT a `.safeAreaInset` — the same lesson the
+        // window's status bar carries: a bar attached as a safe-area inset did
+        // not reserve its height until something forced a relayout, and here
+        // that would put it over the last row of the grid, which is exactly the
+        // row someone has just been editing.
+        VStack(spacing: 0) {
+            grid
+            StagedEditsSlot(model: model, edits: model.edits)
+        }
+    }
+
+    private var grid: some View {
         Chrome.pane(
             ZStack {
                 // `.opacity()` and NOT an `if`, so the grid is built once and
@@ -209,6 +229,23 @@ private struct ResultsPane: View {
                 }
             }
         )
+    }
+}
+
+/// The staged-edits bar's place in the layout, and nothing else.
+///
+/// Its own view because it has to *observe* `PendingEdits`: the staging store
+/// is written from the AppKit side of the grid, and a parent that merely reads
+/// `model.edits` would not re-render when a cell was typed into.
+private struct StagedEditsSlot: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject var edits: PendingEdits
+
+    var body: some View {
+        if !edits.isEmpty {
+            StagedEditsBar(model: model, edits: edits)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
     }
 }
 

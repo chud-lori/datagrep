@@ -14,6 +14,9 @@ final class GridTableView: NSTableView {
     var onCopy: (() -> Void)?
     var onOpenFocusedCell: (() -> Void)?
     var onFocusChanged: (() -> Void)?
+    /// ⏎ on the focused cell. Nil-safe by construction: the controller only
+    /// starts an edit on a result the engine said is editable.
+    var onBeginEdit: (() -> Void)?
 
     private(set) var hoverRow = -1
     /// The rectangular block of cells the user has selected. `nil` until the
@@ -334,6 +337,8 @@ final class GridTableView: NSTableView {
             jump(to: 0, extend: shift)
         case 125 where cmd, 119:  // ⌘↓ / end -> last loaded row
             jump(to: numberOfRows - 1, extend: shift)
+        case 36:  // return -> edit the focused cell
+            onBeginEdit?()
         case 49:  // space -> inspect the focused cell
             onOpenFocusedCell?()
         case 53:  // escape -> collapse the block back to its focused cell
@@ -447,7 +452,21 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     private var isStreaming = false
     private var resultIsCapped = false
 
+    /// What the engine says this result may be edited into, or nil for the
+    /// read-only grid every other result is. Set from the query status on every
+    /// apply, so it can never outlive the result it describes.
+    private(set) var editable: EditableResult?
+    /// The staging store, owned by the model. Held weakly-by-reference here so
+    /// the grid can draw staged values without carrying its own copy of them.
+    var edits: PendingEdits?
+
     var onNestedCell: ((Int, UInt32, RowWindow) -> Void)?
+    /// An edit that could not be staged, in words that name the field and the
+    /// reason. Never silent: a cell that quietly refuses to keep what was typed
+    /// is indistinguishable from one that kept it and lost it.
+    var onEditRefused: ((String) -> Void)?
+    /// Something was staged or discarded — the commit bar redraws from this.
+    var onStagingChanged: (() -> Void)?
     var onHiddenColumnsChanged: ((Int) -> Void)?
     var onSortRequested: ((String) -> Void)?
     var onFilterRequested: ((String, String) -> Void)?
@@ -459,6 +478,10 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     /// the model (the sort is a re-issued query, not a client-side shuffle).
     var sortColumn: String?
     var sortAscending = true
+    /// The window's own veto, set by the model: a read-only connection offers
+    /// no edit at all, however editable the result itself is. Kept here rather
+    /// than consulted through the model so `apply(status:)` cannot race it.
+    var allowsEditing = true
 
     override func loadView() {
         let root = NSView()
@@ -495,6 +518,7 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
 
         tableView.onCopy = { [weak self] in self?.copySelection() }
         tableView.onOpenFocusedCell = { [weak self] in self?.openFocusedCell() }
+        tableView.onBeginEdit = { [weak self] in self?.beginEditingFocusedCell() }
         tableView.onFocusChanged = { [weak self] in
             guard let self else { return }
             self.onSelectionChanged?(self.selectionSummary())
@@ -562,6 +586,9 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     func beginNewResult(pager: RowPager) {
         self.pager?.invalidateAll()
         self.pager = pager
+        // Until the new result's status says otherwise, nothing here is
+        // editable — the previous result's answer describes rows that are gone.
+        editable = nil
         rowCount = 0
         rowNumberRuler.update(rowCount: 0)
         syncGutterHeaderWidth()
@@ -598,6 +625,7 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     /// existing column is never moved, renamed or re-sized by a schema delta —
     /// columns jumping mid-scroll is the failure mode.
     func apply(status: QueryStatus) {
+        editable = allowsEditing ? status.editable : nil
         applySchema(status.columns)
         let newCount = Int(status.rowsLoaded)
         let grew = newCount != rowCount
@@ -899,10 +927,18 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         case .null, .absent: text = ""
         default: text = win.text(absoluteRow: UInt64(row), col: colIndex)
         }
+        let field = fieldName(of: colIndex, in: win)
         cell.configure(
             kind: kind, text: text, row: row, column: colIndex, position: position, pending: false,
-            rightAligned: rightAlignedByID[tableColumn.identifier] ?? false)
+            rightAligned: rightAlignedByID[tableColumn.identifier] ?? false,
+            editable: editable != nil && kind != .nested,
+            staged: field.flatMap { edits?.value(row: row, field: $0) },
+            deleted: edits?.isDeleted(row: row) ?? false,
+            stagedState: edits?.document(atRow: row)?.state)
         cell.setShimmer(false)
+        cell.onEditCommitted = { [weak self] c, typed in
+            self?.stageEdit(row: c.row, column: c.column, typed: typed)
+        }
         cell.onNestedClick = { [weak self] c in
             guard let self, let p = self.pager, let w = p.window(for: UInt64(c.row)) else { return }
             self.onNestedCell?(c.row, c.column, w)
@@ -910,8 +946,165 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         return cell
     }
 
+    /// Double-click is the universal "edit this cell" gesture, so on an
+    /// editable result it edits. Everywhere else it keeps opening the
+    /// inspector, which is what it has always done.
     @objc private func tableDoubleClicked(_ sender: Any?) {
-        openFocusedCell()
+        guard editable != nil else {
+            openFocusedCell()
+            return
+        }
+        let row = tableView.clickedRow
+        let column = tableView.clickedColumn
+        guard row >= 0, column >= 0 else {
+            beginEditingFocusedCell()
+            return
+        }
+        beginEditing(row: row, columnPosition: column)
+    }
+
+    // MARK: - editing
+
+    /// The field name column `col` was read under, from the window itself.
+    ///
+    /// Not the table column's title: the title comes from the query status,
+    /// which reports what the *first* chunk revealed, while the value on screen
+    /// was read from this window's own projection. They agree for a
+    /// homogeneous result; where they do not, writing by the title would write
+    /// to a field the user never touched.
+    private func fieldName(of col: UInt32, in window: RowWindow) -> String? {
+        let names = window.columnNames()
+        guard col < names.count else { return nil }
+        return names[Int(col)]
+    }
+
+    /// Begin editing one cell, if it is one that can be edited.
+    func beginEditing(row: Int, columnPosition: Int) {
+        guard editable != nil, row >= 0, row < rowCount,
+            columnPosition >= 0, columnPosition < tableView.tableColumns.count
+        else { return }
+        let column = tableView.tableColumns[columnPosition]
+        guard !column.isHidden,
+            let cell = tableView.view(atColumn: columnPosition, row: row, makeIfNecessary: false)
+                as? GridCellView
+        else { return }
+        guard cell.canBeginEditing else {
+            if cell.kind == .nested {
+                onEditRefused?(
+                    "a document or an array is edited in the inspector, not in a grid cell")
+            }
+            return
+        }
+        cell.beginEditing()
+    }
+
+    func beginEditingFocusedCell() {
+        guard let (row, column) = tableView.focusedCell else { return }
+        beginEditing(row: row, columnPosition: column)
+    }
+
+    /// Stage one typed cell against the document it belongs to.
+    ///
+    /// Everything a write needs is captured here, at the moment of the edit:
+    /// the identity that says which document, and the guard values that say
+    /// which version of it was on screen. Reading either later would guard the
+    /// write against whatever the server holds by then, which is no guard.
+    private func stageEdit(row: Int, column: UInt32, typed: String) {
+        guard let edits, let editable, let pager, let window = pager.window(for: UInt64(row))
+        else { return }
+        guard let field = fieldName(of: column, in: window) else {
+            onEditRefused?("this column is not one of the fields the row was read under")
+            return
+        }
+        let loaded = window.loadedValue(absoluteRow: UInt64(row), col: column)
+        // Typing the loaded value back in is how an edit is taken back, so it
+        // un-stages the field rather than staging a write that changes nothing.
+        if let loaded, loaded.display == typed {
+            edits.unstage(row: row, field: field)
+            repaint(row)
+            onStagingChanged?()
+            return
+        }
+        switch MutationValue.typed(typed, like: loaded) {
+        case .failure(let why):
+            onEditRefused?("`\(field)`: \(why.message)")
+        case .success(let value):
+            guard let address = address(row: row, window: window, editable: editable) else { return }
+            edits.stage(
+                id: address.id, row: row, key: address.key, expect: address.expect,
+                field: field, value: value)
+            repaint(row)
+            onStagingChanged?()
+        }
+    }
+
+    /// Stage the document under `row` for deletion.
+    func stageDelete(row: Int) {
+        guard let edits, let editable, let pager, let window = pager.window(for: UInt64(row)),
+            let address = address(row: row, window: window, editable: editable)
+        else { return }
+        edits.stageDelete(id: address.id, row: row, key: address.key, expect: address.expect)
+        repaint(row)
+        onStagingChanged?()
+    }
+
+    /// Drop whatever is staged for one row.
+    func discardStaged(row: Int) {
+        guard let edits, edits.document(atRow: row) != nil else { return }
+        edits.discard(row: row)
+        repaint(row)
+        onStagingChanged?()
+    }
+
+    /// The address of the document a row was read from, or nil after saying why
+    /// not. The envelope is the engine's own answer to "which document is this
+    /// and which version" — nothing here infers it from a column.
+    private func address(row: Int, window: RowWindow, editable: EditableResult)
+        -> (id: String, key: [(field: String, value: MutationValue)],
+            expect: [(field: String, value: MutationValue)])?
+    {
+        guard let envelope = window.envelope(absoluteRow: UInt64(row)) else {
+            onEditRefused?(
+                "this row carries no document envelope, so datagrep cannot tell which document it is"
+            )
+            return nil
+        }
+        switch editable.address(envelope: envelope) {
+        case .failure(let why):
+            onEditRefused?(why.message)
+            return nil
+        case .success(let parts):
+            // Every identity field and its value, in the order the engine
+            // named them — two documents are the same one exactly when the
+            // engine would address them identically.
+            let id = parts.key.map { "\($0.field)=\($0.value.display)" }.joined(separator: "\u{1}")
+            return (id, parts.key, parts.expect)
+        }
+    }
+
+    /// Repaint one row after its staging changed, on the next runloop turn.
+    ///
+    /// One row, never a full reload — and never in this turn: staging is
+    /// reached from the field editor's own end-editing notification, and
+    /// rebuilding the cell that notification came from, inside it, is how a
+    /// text field ends up half torn down.
+    private func repaint(_ row: Int) {
+        DispatchQueue.main.async { [weak self] in self?.refreshRow(row) }
+    }
+
+    /// Repaint one row. One row, never a reload: a reload during editing closes
+    /// the field editor the user is still in.
+    func refreshRow(_ row: Int) {
+        guard row >= 0, row < rowCount, tableView.tableColumns.count > 0 else { return }
+        tableView.reloadData(
+            forRowIndexes: IndexSet(integer: row),
+            columnIndexes: IndexSet(integersIn: 0..<tableView.tableColumns.count))
+    }
+
+    /// Every staged row repainted — after a commit folds its outcomes back in,
+    /// or after Discard All.
+    func refreshStagedRows(_ rows: [Int]) {
+        for row in rows { refreshRow(row) }
     }
 
     // MARK: - cell text helpers
@@ -1141,6 +1334,23 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         menu.addItem(item("Sort by “\(column.title)”", #selector(ctxSort(_:))))
         menu.addItem(.separator())
         menu.addItem(item("Open in Inspector", #selector(ctxInspect(_:))))
+
+        // The editing half of the menu, present only on a result the engine
+        // said may be edited — never greyed-out-and-erroring.
+        guard editable != nil else { return }
+        menu.addItem(.separator())
+        if kind != .nested {
+            menu.addItem(item("Edit Cell", #selector(ctxEdit(_:))))
+        }
+        let staged = edits?.document(atRow: row)
+        if staged?.isDelete == true {
+            menu.addItem(item("Keep This Document", #selector(ctxDiscardStaged(_:))))
+        } else {
+            menu.addItem(item("Delete Document", #selector(ctxDelete(_:))))
+        }
+        if staged != nil {
+            menu.addItem(item("Discard Staged Changes", #selector(ctxDiscardStaged(_:))))
+        }
     }
 
     private func ctx(_ sender: Any?) -> (row: Int, colPos: Int, idx: UInt32, win: RowWindow)? {
@@ -1204,6 +1414,21 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     @objc private func ctxInspect(_ sender: Any?) {
         guard let c = ctx(sender) else { return }
         onNestedCell?(c.row, c.idx, c.win)
+    }
+
+    @objc private func ctxEdit(_ sender: Any?) {
+        guard let c = ctx(sender) else { return }
+        beginEditing(row: c.row, columnPosition: c.colPos)
+    }
+
+    @objc private func ctxDelete(_ sender: Any?) {
+        guard let c = ctx(sender) else { return }
+        stageDelete(row: c.row)
+    }
+
+    @objc private func ctxDiscardStaged(_ sender: Any?) {
+        guard let c = ctx(sender) else { return }
+        discardStaged(row: c.row)
     }
 }
 
