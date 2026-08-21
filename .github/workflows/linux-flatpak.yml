@@ -1,0 +1,67 @@
+name: Linux Flatpak (GTK4 UI)
+
+# The only build verification the GTK4/Flatpak route gets — the same role the
+# debian container leg in linux-qt.yml plays for the KF6 highlighter path.
+# ui/gtk4 does not exist yet, so today this proves the infrastructure the
+# issue #36 architecture decision rests on: the full engine dependency graph
+# compiling offline inside org.gnome.Sdk//50 with the rust-stable extension,
+# and a finished, installable .flatpak (uploaded as an artifact) coming out
+# the other end. The moment ui/gtk4 lands, this job is its first compiler.
+#
+# Run the same thing locally (Linux only): packaging/flatpak/README.md.
+
+on:
+  push:
+    branches: [main, "feat/**"]
+    paths:
+      - "ui/gtk4/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "packaging/flatpak/**"
+      - ".github/workflows/linux-flatpak.yml"
+  pull_request:
+    paths:
+      - "ui/gtk4/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "packaging/flatpak/**"
+      - ".github/workflows/linux-flatpak.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: linux-flatpak-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flatpak:
+    name: flatpak-builder (gnome 50)
+    runs-on: ubuntu-latest
+    # Fedora image with flatpak-builder and the GNOME 50 runtime/SDK
+    # pre-installed, maintained by flathub-infra for exactly this action.
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # flatpak-builder cuts the network before build commands run; this
+      # turns Cargo.lock into sources it downloads up front. Generated fresh
+      # every run so it can never go stale against the lockfile.
+      - name: Generate cargo offline sources
+        run: |
+          dnf install -y python3-aiohttp python3-tomlkit || \
+            python3 -m pip install --user aiohttp tomlkit
+          packaging/flatpak/generate-cargo-sources.sh
+
+      # Installs remaining deps (the rust-stable SDK extension) from flathub,
+      # builds, and uploads the bundle as an artifact — installable on any
+      # box with `flatpak install ./datagrep-gtk4.flatpak`.
+      - name: Build Flatpak
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: packaging/flatpak/io.github.chud_lori.datagrep.yml
+          bundle: datagrep-gtk4.flatpak
+          cache-key: flatpak-builder-${{ hashFiles('Cargo.lock') }}
