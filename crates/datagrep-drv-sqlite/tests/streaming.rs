@@ -1,7 +1,3 @@
-//! End-to-end proof of the streaming contract: a cursor over a 100k-row
-//! result must arrive in batches sized per the caller's `FetchHint`, never
-//! as one buffered blob.
-
 mod common;
 
 use datagrep_api::{FetchHint, Payload, Request, Shape};

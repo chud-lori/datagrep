@@ -1,13 +1,3 @@
-//! Integration tests against a real Postgres server. All `#[ignore]`d by
-//! default; run with `DATAGREP_TEST_PG=1 cargo test -p datagrep-drv-postgres --test
-//! integration -- --ignored --test-threads=1`. See `tests/README.md` for a
-//! one-liner to start a throwaway server.
-//!
-//! Connection defaults to `localhost:5432`, user `postgres`, database
-//! `postgres`, no password — override with `DATAGREP_TEST_PG_HOST`,
-//! `DATAGREP_TEST_PG_PORT`, `DATAGREP_TEST_PG_USER`, `DATAGREP_TEST_PG_PASSWORD`,
-//! `DATAGREP_TEST_PG_DB`.
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -57,9 +47,6 @@ async fn connect() -> Box<dyn Connection> {
     )
 }
 
-/// Streaming means the first chunk is available long before chunk 2 is even
-/// requested — proven here by timing the first batch of a 100k-row stream
-/// against the whole stream's completion time.
 #[tokio::test]
 #[ignore]
 async fn streams_100k_rows_first_batch_arrives_fast() {
@@ -114,11 +101,6 @@ async fn streams_100k_rows_first_batch_arrives_fast() {
     );
 }
 
-/// A weaker, environment-independent RSS proxy: this process's own RSS
-/// shouldn't grow by anything like the size of a 100k-row, ~5MB result set
-/// if batches are actually being dropped as they're consumed rather than
-/// accumulated. Best-effort (reads `/proc/self/status` on Linux, `ps` on
-/// macOS) — informational rather than a hard CI gate, since RSS is noisy.
 #[tokio::test]
 #[ignore]
 async fn streaming_does_not_retain_the_whole_result_set() {
@@ -155,17 +137,11 @@ async fn streaming_does_not_retain_the_whole_result_set() {
         if let datagrep_api::driver::Payload::Rows(r) = &batch.payload {
             rows += r.len() as u64;
         }
-        // Each `Batch` is dropped here at the end of the loop body — nothing
-        // upstream of this test is retaining previously-yielded batches.
     }
     let after = rss_kb();
     assert_eq!(rows, 100_000);
 
     if let (Some(before), Some(after)) = (before, after) {
-        // The full result is ~20MB of row text; if the driver buffered
-        // everything we'd expect RSS to grow by roughly that much. A few MB
-        // of steady-state growth (allocator arenas, decoded String churn) is
-        // fine; growth on the order of the dataset size is not.
         let grew_kb = after.saturating_sub(before);
         assert!(
             grew_kb < 15_000,
@@ -174,8 +150,6 @@ async fn streaming_does_not_retain_the_whole_result_set() {
     }
 }
 
-/// NUMERIC must never round-trip through f64 — a silently wrong number is
-/// worse than a crash.
 #[tokio::test]
 #[ignore]
 async fn numeric_round_trips_as_decimal_string() {
@@ -196,13 +170,9 @@ async fn numeric_round_trips_as_decimal_string() {
     };
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0], Value::Decimal(Arc::from("12345.6789")));
-    // 0.1 is famously inexact as f64 (0.1000000000000000055...); as a
-    // Postgres numeric literal it must come back exactly "0.1".
     assert_eq!(rows[0][1], Value::Decimal(Arc::from("0.1")));
 }
 
-/// Cancel is racy — the outcome is always `Requested`, never a guaranteed ack
-/// — but the connection must remain usable afterward.
 #[tokio::test]
 #[ignore]
 async fn cancel_mid_sleep_leaves_connection_usable() {
@@ -218,9 +188,6 @@ async fn cancel_mid_sleep_leaves_connection_usable() {
     };
 
     let result = conn.execute(Request::native("SELECT pg_sleep(5)")).await;
-    // Either the execute() call itself errors (cancelled mid-prepare/portal
-    // setup) or it succeeds and the *next* batch pull fails — accept either,
-    // but require some observable effect from the cancel.
     let saw_cancel_effect = match result {
         Err(_) => true,
         Ok(mut cursor) => cursor.next_batch(FetchHint::default()).await.is_err(),
@@ -236,8 +203,6 @@ async fn cancel_mid_sleep_leaves_connection_usable() {
         "pg_sleep(5) should not have completed normally within the test"
     );
 
-    // The connection must still be usable — a cancel that poisons the session
-    // it ran against is a correctness bug, not an acceptable side effect.
     conn.ping().await.expect("connection must survive a cancel");
     let mut cursor2 = conn
         .execute(Request::native("SELECT 1"))
@@ -254,7 +219,6 @@ async fn cancel_mid_sleep_leaves_connection_usable() {
     }
 }
 
-/// Design item 5: catalog browsing on a seeded schema, one query per level.
 #[tokio::test]
 #[ignore]
 async fn catalog_children_on_seeded_schema() {
@@ -361,9 +325,6 @@ async fn catalog_children_on_seeded_schema() {
         .ok();
 }
 
-/// Sanity check on the read-only auto-wrap: a `SELECT` compiled from
-/// `Op::Scan` streams through the extended-protocol portal path and yields a
-/// `Table` shape with the identity resolved for a plain single-table scan.
 #[tokio::test]
 #[ignore]
 async fn scan_op_streams_with_identity() {
@@ -416,26 +377,12 @@ async fn scan_op_streams_with_identity() {
         .ok();
 }
 
-/// Regression test for the connection-wide deadlock (TEST-REPORT.md F2).
-///
-/// The shape that used to hang forever: an open, deliberately **half-read**
-/// cursor pins its session, and then the caller does something else on the
-/// same `Connection` — browses the catalog (the GUI's "results grid open,
-/// click the schema tree") and runs another query. Both used to await the
-/// connection-wide client mutex with no timeout, so the driver froze at 0%
-/// CPU with the server showing `idle in transaction`.
-///
-/// Every step is wrapped in a real deadline: the whole point is that these
-/// operations *return*, so a regression must fail the test, not hang the
-/// suite the way the shipped one did.
 #[tokio::test]
 #[ignore]
 async fn catalog_and_queries_work_while_a_cursor_is_open() {
     const DEADLINE: Duration = Duration::from_secs(20);
     let conn = connect().await;
 
-    // Deliberately partial: 10k rows available, 10 pulled. The cursor is not
-    // drained, so its session stays pinned for the rest of the test.
     let mut cursor = conn
         .execute(Request::native(
             "SELECT g FROM generate_series(1, 10000) AS g",
@@ -491,8 +438,6 @@ async fn catalog_and_queries_work_while_a_cursor_is_open() {
         .iter()
         .any(|n| &*n.path.parts()[1] == "pg_catalog"));
 
-    // 2. Listing relations exercises the `relkind::text` decode (F3) *and*
-    //    does it on a second session while the first is pinned.
     let relations = tokio::time::timeout(
         DEADLINE,
         catalog.children(
@@ -515,9 +460,6 @@ async fn catalog_and_queries_work_while_a_cursor_is_open() {
         "pg_catalog is full of views; if none came back as View, relkind decoded wrong"
     );
 
-    // `describe` reads relkind too, from its own query — the second of the
-    // two sites that panicked. Point it at a view so the decoded value is
-    // actually load-bearing.
     let detail = tokio::time::timeout(
         DEADLINE,
         catalog.describe(&ObjectPath::new(vec![
@@ -564,11 +506,6 @@ async fn catalog_and_queries_work_while_a_cursor_is_open() {
         .expect("close");
 }
 
-/// The other half of "never hang": once every pooled session is pinned, an
-/// acquire *waits* — with a deadline — instead of blocking forever, and is
-/// served the moment a session comes back. Proven by pinning
-/// `MAX_SESSIONS` un-drained cursors and then racing one more query against
-/// releasing one of them.
 #[tokio::test]
 #[ignore]
 async fn a_query_at_the_session_cap_waits_and_is_served_not_wedged() {
@@ -582,8 +519,6 @@ async fn a_query_at_the_session_cap_waits_and_is_served_not_wedged() {
             ))
             .await
             .expect("execute");
-        // Pull one short batch and stop: the portal is *not* drained, so this
-        // cursor keeps its session pinned.
         cursor
             .next_batch(FetchHint {
                 max_rows: 10,
@@ -595,8 +530,6 @@ async fn a_query_at_the_session_cap_waits_and_is_served_not_wedged() {
         cursors.push(cursor);
     }
 
-    // Every session is now pinned. One more query has to wait — so release a
-    // cursor while it waits and check it gets served promptly.
     let spare = cursors.pop().expect("a cursor to release");
     let (result, ()) = tokio::join!(
         tokio::time::timeout(
@@ -635,11 +568,6 @@ async fn a_query_at_the_session_cap_waits_and_is_served_not_wedged() {
     }
 }
 
-/// `set_read_only` must bind the whole logical connection, not just whichever
-/// socket happened to be idle when it was called. Once a connection can own
-/// several sessions, a write slipping onto a freshly dialled one would turn a
-/// safety switch into a lie — so this pins the first session with an open
-/// cursor and checks the write is still refused on the second.
 #[tokio::test]
 #[ignore]
 async fn read_only_binds_every_pooled_session_not_just_the_first() {
@@ -656,8 +584,6 @@ async fn read_only_binds_every_pooled_session_not_just_the_first() {
         datagrep_api::driver::Enforcement::Server
     );
 
-    // Pin the session that `set_read_only` just configured, so the write
-    // below is forced onto a different, newly dialled one.
     let mut cursor = conn
         .execute(Request::native(
             "SELECT g FROM generate_series(1, 1000) AS g",
@@ -676,9 +602,6 @@ async fn read_only_binds_every_pooled_session_not_just_the_first() {
     let write = conn
         .execute(Request::native("INSERT INTO datagrep_ro_test VALUES (1)"))
         .await;
-    // SQLSTATE 25006 = read_only_sql_transaction: the *server* refused it, so
-    // this cannot pass for some unrelated reason (a busy pool, a missing
-    // table). Read-only is a property of the connection, not of one socket.
     match write {
         Err(datagrep_api::error::DbError::Query { code, .. }) => {
             assert_eq!(
@@ -742,8 +665,6 @@ async fn non_select_returns_ack_shape_without_a_portal() {
 #[tokio::test]
 #[ignore]
 async fn quote_ident_survives_a_hostile_identifier() {
-    // End-to-end proof that identifiers with an embedded quote round-trip
-    // safely through `quote_ident` rather than breaking the statement.
     let conn = connect().await;
     let hostile = "weird\"table";
     conn.execute(Request::native(format!(
@@ -770,11 +691,6 @@ async fn quote_ident_survives_a_hostile_identifier() {
     );
 }
 
-// ---------------------------------------------------------------------
-// Structured DDL (`Op::Ddl`)
-// ---------------------------------------------------------------------
-
-/// The first column of the first row, as a `Value`.
 async fn scalar(conn: &dyn Connection, sql: &str) -> Value {
     let mut cursor = conn.execute(Request::native(sql)).await.expect("query");
     let batch = cursor
@@ -796,8 +712,6 @@ fn p(parts: &[&str]) -> ObjectPath {
     ObjectPath::new(parts.iter().map(|s| Arc::from(*s)).collect())
 }
 
-/// A drop is issued with exactly the `(path, kind)` the catalog reported for
-/// the object — the contract the whole structured surface rests on.
 #[tokio::test]
 #[ignore]
 async fn structured_ddl_round_trips_through_the_catalog() {
@@ -850,8 +764,6 @@ async fn structured_ddl_round_trips_through_the_catalog() {
     assert_eq!(widgets.kind, ObjectKind::Table);
     assert_eq!(widgets_v.kind, ObjectKind::View);
 
-    // Create an index over an existing column, then address it as the
-    // table's path extended by the index name.
     ddl(
         conn.as_ref(),
         DdlOp::CreateIndex {
@@ -974,9 +886,6 @@ async fn structured_ddl_round_trips_through_the_catalog() {
         .expect("clean up");
 }
 
-/// A materialized view is `ObjectKind::View` in this catalog, and the server
-/// refuses `DROP VIEW` on one even with `IF EXISTS` — naming the statement to
-/// use instead. That refusal is surfaced, never worked around by guessing.
 #[tokio::test]
 #[ignore]
 async fn a_materialized_view_refuses_the_plain_view_drop() {
@@ -1019,8 +928,6 @@ async fn a_materialized_view_refuses_the_plain_view_drop() {
         .expect("clean up");
 }
 
-/// Object names are identifiers, so a name that tries to close its own
-/// quoting must reach the server as one name.
 #[tokio::test]
 #[ignore]
 async fn a_hostile_name_survives_a_structured_drop() {

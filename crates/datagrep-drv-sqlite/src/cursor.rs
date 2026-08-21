@@ -1,7 +1,3 @@
-//! The async-facing [`Cursor`] — a thin, `Send`-only handle that does no I/O
-//! of its own. Every pull sends a `FetchBatch` to the connection's worker
-//! thread and awaits the reply.
-
 use async_trait::async_trait;
 use datagrep_api::{Batch, Cursor, CursorStats, DbError, FetchHint, ResumeToken, Shape};
 
@@ -10,8 +6,6 @@ use crate::connection::{ExecOutcome, JobSender};
 pub struct SqliteCursor {
     shape: Shape,
     jobs: JobSender,
-    /// `None` for an `Ack`-shaped result — there is no server-side cursor to
-    /// step or close, everything worth knowing is already in `shape`.
     id: Option<u64>,
     resume_token: Option<ResumeToken>,
     stats: CursorStats,

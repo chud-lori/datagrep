@@ -1,7 +1,3 @@
-//! [`MongoConnection`] (ticket item 2): parses `Request::Native` MongoShell
-//! text via `datagrep_lang::mongo` (never reimplemented here) and dispatches both
-//! that and structured [`Op`]s to the official `mongodb` driver.
-
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,9 +29,6 @@ use crate::filter;
 use crate::transaction::MongoTransaction;
 use crate::value::{bson_to_value, value_to_bson, value_to_bson_for_field};
 
-/// Every request gets a server-side deadline, even when the caller supplied
-/// none: `maxTimeMS` always goes out, so even a query we turn out not to be
-/// able to kill is still bounded by the server itself.
 const DEFAULT_MAX_TIME: Duration = Duration::from_secs(30);
 
 pub struct MongoConnection {
@@ -44,19 +37,9 @@ pub struct MongoConnection {
     server_info: ServerInfo,
     transactions_supported: bool,
     closed: AtomicBool,
-    /// Client-side-only read-only gate (`set_read_only`); MongoDB has no
-    /// per-session server-enforced read-only switch outside of routing reads
-    /// to a secondary, which cannot honestly be called `Enforcement::Server`
-    /// on a standalone deployment — see `set_read_only`'s doc comment.
     read_only: AtomicBool,
     tag_counter: AtomicU64,
-    /// The `comment` tag of whichever `find`/`aggregate` is currently
-    /// in-flight on this connection, if any — how [`MongoCanceller`]
-    /// correlates a cancel request back to a real `currentOp` entry to
-    /// `killOp` (ticket item 6; see `canceller.rs`'s module doc).
     active_comment: Arc<Mutex<Option<Arc<str>>>>,
-    /// Cached result of the one-time `killOp`-privilege probe, shared with
-    /// every [`MongoCanceller`] this connection hands out.
     killop_probe: Arc<tokio::sync::OnceCell<bool>>,
 }
 
@@ -93,8 +76,6 @@ impl MongoConnection {
         Arc::from(format!("datagrep-{}-{}", std::process::id(), n))
     }
 
-    /// Tag the connection's currently-in-flight `find`/`aggregate` so a
-    /// concurrent [`MongoCanceller::cancel`] can find it in `currentOp`.
     async fn begin_op(&self) -> Arc<str> {
         let tag = self.new_tag();
         *self.active_comment.lock().await = Some(tag.clone());
@@ -105,11 +86,6 @@ impl MongoConnection {
         *self.active_comment.lock().await = None;
     }
 
-    /// `[collection]` addresses a collection under this connection's default
-    /// database; `[database, collection]` names one explicitly — Mongo,
-    /// unlike Postgres, lets one client reach any database without
-    /// reconnecting (ticket item 5's `catalog_levels: [database, collection,
-    /// field]`).
     fn resolve_path(&self, path: &ObjectPath) -> Result<(String, String), DbError> {
         resolve_object_path(&self.default_database, path)
     }
@@ -230,11 +206,6 @@ impl Connection for MongoConnection {
                 feature: "this MongoDB deployment does not support multi-document transactions (needs a replica set on 4.0+, or a sharded cluster on 4.2+)".into(),
             });
         }
-        // `TxOpts::isolation`/`read_only` have no direct MongoDB transaction
-        // equivalent (Mongo transactions are snapshot/majority-based, not
-        // configurable per the SQL isolation ladder) — accepted but not
-        // mapped, a documented gap rather than a silent downgrade of a flag
-        // that was never honorable here.
         let _ = opts;
         let mut session = self.client.start_session().await.map_err(map_mongo_error)?;
         session.start_transaction().await.map_err(map_mongo_error)?;
@@ -257,10 +228,6 @@ impl Connection for MongoConnection {
     }
 }
 
-// ---------------------------------------------------------------------
-// Native MongoShell text dispatch
-// ---------------------------------------------------------------------
-
 impl MongoConnection {
     async fn execute_text(
         &self,
@@ -272,9 +239,6 @@ impl MongoConnection {
             ParsedMongo::RawCommand(Value::Document(doc)) => {
                 self.execute_raw_command((*doc).clone(), timeout).await
             }
-            // The parser's `ParsedMongo::RawCommand` is documented to always
-            // carry a `Value::Document` (its own `parse_object` is the only
-            // producer of the `{...}` branch in `parse()`).
             ParsedMongo::RawCommand(_) => Err(DbError::Protocol(
                 "parser returned a non-document raw command".into(),
             )),
@@ -404,10 +368,6 @@ impl MongoConnection {
         let result = builder.await;
         self.end_op().await;
         let cursor = result.map_err(map_mongo_error)?;
-        // Ticket item 3: aggregate has no stable, re-issuable cursor
-        // key (pipeline stages like $group/$sort break any positional
-        // notion of "the next document after this one"), so resume is
-        // always `None`, with the reason documented right here.
         Ok(Box::new(MongoCursor::plain(cursor, ResumeStrategy::None)))
     }
 
@@ -568,7 +528,6 @@ impl MongoConnection {
         )))
     }
 
-    /// Run a planned DDL command, turning `absent_code` into an ack.
     async fn run_ddl_command(
         &self,
         plan: DdlCommand,
@@ -584,8 +543,6 @@ impl MongoConnection {
             .map_err(map_mongo_error)
         {
             Ok(_) => Ok(Box::new(AckCursor::new(None, Some(Arc::from(plan.ack))))),
-            // Presence-checked, not just compared: a write failure carries no
-            // code and would otherwise match a plan tolerating nothing.
             Err(DbError::Query { ref code, .. })
                 if plan.absent_code.is_some() && code.as_deref() == plan.absent_code =>
             {
@@ -637,10 +594,6 @@ impl MongoConnection {
         }
     }
 }
-
-// ---------------------------------------------------------------------
-// Structured `Op` dispatch
-// ---------------------------------------------------------------------
 
 impl MongoConnection {
     async fn execute_scan(
@@ -785,10 +738,6 @@ impl MongoConnection {
                     .update_one(id_filter, update)
                     .await
                     .map_err(map_mongo_error)?;
-                // Every generated mutation must affect exactly one document.
-                // A different count means the row the user edited is not the
-                // row on the server any more, so the write is rejected rather
-                // than applied to whatever now matches.
                 if result.matched_count != 1 {
                     return Err(DbError::Query {
                         code: None,
@@ -822,12 +771,6 @@ impl MongoConnection {
         }
     }
 
-    /// `Mutation::Update`/`Delete::key` carries the row identity as named
-    /// `(FieldPath, Value)` pairs, so the filter compiles directly from the
-    /// mutation — typically `{_id: …}`, but any caller-named field(s) work.
-    /// The old "assume a single bare value means `_id`" guess is gone. An
-    /// empty identity is refused, never guessed at — an empty filter would
-    /// match every document in the collection.
     fn id_filter(&self, key: &[(FieldPath, Value)]) -> Result<BsonDocument, DbError> {
         id_filter_from_key(key)
     }
@@ -855,9 +798,6 @@ impl MongoConnection {
         )])))
     }
 
-    /// Build the raw command-document form of a request for `explain`
-    /// (v1 scope: `find`/`aggregate` shell chains, raw command documents,
-    /// and `Op::Scan` — see the crate report's deviations for what's out).
     async fn build_explainable_command(&self, req: Request) -> Result<BsonDocument, DbError> {
         match req {
             Request::Native { text, params, .. } => {
@@ -951,9 +891,6 @@ fn chain_to_command_doc(stmt: &MongoStatement) -> Result<BsonDocument, DbError> 
     }
 }
 
-/// `[collection]` addresses a collection under `default_database`;
-/// `[database, collection]` names one explicitly (shared by
-/// [`MongoConnection`] and [`crate::transaction::MongoTransaction`]).
 pub(crate) fn resolve_object_path(
     default_database: &str,
     path: &ObjectPath,
@@ -970,22 +907,12 @@ pub(crate) fn resolve_object_path(
 pub(crate) struct DdlCommand {
     pub db: String,
     pub command: BsonDocument,
-    /// Server error code meaning "it was not there", tolerated under
-    /// `if_exists`.
     pub absent_code: Option<&'static str>,
     pub ack: &'static str,
 }
 
 const INDEX_NOT_FOUND: &str = "27";
 
-/// Plan a structured [`DdlOp`] as a command document, client-free so the
-/// mapping is testable without a server.
-///
-/// Trap: this engine's DDL is idempotent. Measured on mongod 7, `drop` and
-/// `dropDatabase` answer `ok: 1` for something that was never there and
-/// `createIndexes` is a no-op for a matching index, so the *unguarded* forms
-/// cannot mean "fail if it is already so" and are refused. `dropIndexes` is
-/// the exception and really does report IndexNotFound.
 pub(crate) fn plan_ddl(default_database: &str, op: &DdlOp) -> Result<DdlCommand, DbError> {
     match op {
         DdlOp::Native { text } => Err(DbError::Unsupported {
@@ -1059,8 +986,6 @@ pub(crate) fn plan_ddl(default_database: &str, op: &DdlOp) -> Result<DdlCommand,
             let (db, coll) = resolve_object_path(default_database, from)?;
             let (to_db, to_coll) = resolve_object_path(default_database, to)?;
             Ok(DdlCommand {
-                // An admin command over full `db.collection` namespaces, not
-                // names relative to `db`.
                 db: "admin".to_string(),
                 command: doc! {
                     "renameCollection": format!("{db}.{coll}"),
@@ -1108,7 +1033,6 @@ pub(crate) fn plan_ddl(default_database: &str, op: &DdlOp) -> Result<DdlCommand,
     }
 }
 
-/// `[db,] collection, index` → the collection it is on plus the index name.
 fn split_index_path(
     default_database: &str,
     path: &ObjectPath,
@@ -1138,10 +1062,6 @@ pub(crate) fn is_write_method(method_lower: &str) -> bool {
         || method_lower.starts_with("findoneandreplace")
 }
 
-/// Compile a mutation's named row identity (`key: Vec<(FieldPath, Value)>`)
-/// into a filter document — one entry per named field, typically just
-/// `{_id: …}`. Shared by [`MongoConnection`] and `transaction.rs`. An empty
-/// identity is refused: we never guess which document to affect.
 pub(crate) fn id_filter_from_key(key: &[(FieldPath, Value)]) -> Result<BsonDocument, DbError> {
     if key.is_empty() {
         return Err(DbError::Unsupported {
@@ -1158,10 +1078,6 @@ pub(crate) fn id_filter_from_key(key: &[(FieldPath, Value)]) -> Result<BsonDocum
     Ok(filter)
 }
 
-/// A non-empty `expect` precondition must be honoured or refused, never
-/// dropped — dropping it would turn a guarded write into a clobber. This
-/// driver does not compile preconditions into the update/delete filter yet,
-/// so it refuses. Shared by [`MongoConnection`] and `transaction.rs`.
 pub(crate) fn refuse_expect(expect: &[(FieldPath, Value)]) -> Result<(), DbError> {
     if expect.is_empty() {
         return Ok(());
@@ -1356,8 +1272,6 @@ mod tests {
 
     #[test]
     fn the_idempotent_forms_this_engine_cannot_promise_are_refused() {
-        // Measured against mongod 7: `drop`/`dropDatabase` answer ok for
-        // something that was never there, so "fail if missing" is a lie.
         for kind in [ObjectKind::Collection, ObjectKind::Database] {
             assert!(plan_ddl(
                 "app",

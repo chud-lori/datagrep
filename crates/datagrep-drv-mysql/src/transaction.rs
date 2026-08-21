@@ -1,9 +1,3 @@
-//! [`MySqlTransaction`]: the explicit, interactive transaction returned by
-//! [`crate::connection::MySqlConnection::begin`] — pinned to its
-//! connection's socket for its whole life because the backing actor holds
-//! the connection mutex for exactly that long. Silently moving a BEGIN to a
-//! different socket would be a correctness bug, not a performance detail.
-
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 
@@ -31,10 +25,6 @@ impl MySqlTransaction {
 impl Transaction for MySqlTransaction {
     async fn execute(&self, req: Request) -> Result<Box<dyn Cursor>, DbError> {
         if matches!(req, Request::Op(Op::Mutate(_))) {
-            // Parity with the sibling drivers: the generated-mutation path
-            // with its exactly-one-row rollback protocol runs only through
-            // `Connection::execute`; inside an interactive transaction, use
-            // the equivalent Native UPDATE/INSERT/DELETE text.
             return Err(DbError::Unsupported {
                 feature: "Op::Mutate inside an explicit interactive transaction is not \
                           implemented in v1; issue the equivalent Native \

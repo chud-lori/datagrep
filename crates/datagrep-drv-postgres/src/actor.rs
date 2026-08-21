@@ -1,27 +1,3 @@
-//! The per-transaction actor task — the answer to a real constraint in this
-//! crate: `tokio_postgres::Transaction<'a>` borrows `&'a mut Client`, but
-//! `Connection::execute` must return a `'static` `Box<dyn Cursor>`. Rather
-//! than fight that with unsafe self-referential structs, the `Transaction`
-//! (and any portals bound within it) live entirely on this task's stack;
-//! everything crossing back out to the rest of the driver is an owned,
-//! `'static` channel handle.
-//!
-//! One actor = one Postgres `Transaction`. It is used both for the
-//! transparent read-only wrapper `PgConnection::execute` opens around a
-//! streaming SELECT (tokio-postgres portals only exist inside a transaction,
-//! so read queries get a transparent read-only one), and for an explicit
-//! interactive [`crate::transaction::PgTransaction`] opened via `begin()`.
-//! Dropping every `Sender<ActorCmd>` clone (all
-//! cursors plus the owning `PgConnection`/`PgTransaction` handle) is treated
-//! as an implicit rollback — a safe default for "the caller went away".
-//!
-//! While it runs, the actor **pins** one physical session out of
-//! [`crate::pool::PgPool`] — moving an open transaction to another socket
-//! would be a correctness bug. It does *not* pin the whole logical
-//! connection: anything else — catalog browsing, the next `execute()` — takes
-//! a different session from the pool. See the `pool.rs` module docs for why
-//! that indirection exists.
-
 use std::collections::HashMap;
 
 use tokio::sync::{mpsc, oneshot, OwnedMutexGuard};
@@ -36,7 +12,6 @@ use crate::error::map_pg_error;
 use crate::pool::PgSession;
 use crate::value::{logical_type_of, DecodedCell, PgParam};
 
-/// What top-level `execute()` got back for one statement.
 pub enum ExecOutcome {
     Ack { affected: u64 },
     Cursor { portal_id: u64, schema: RowSchema },
@@ -73,10 +48,6 @@ fn to_pg_isolation(level: IsolationLevel) -> PgIsolation {
     }
 }
 
-/// Spawn the actor and return the command channel. `read_only`/`isolation`
-/// set the `START TRANSACTION` this actor opens immediately. The session's
-/// `Client` is `Option`-wrapped because [`crate::pool::PgPool::close`] takes
-/// it out of its slot to make every later operation observably `Closed`.
 pub fn spawn(
     mut guard: OwnedMutexGuard<PgSession>,
     read_only: bool,
@@ -98,26 +69,15 @@ pub fn spawn(
         let txn = match builder.start().await {
             Ok(t) => t,
             Err(e) => {
-                // Nobody has a reply channel yet except the first `Execute`
-                // caller (who hasn't sent anything); stash the error and hand
-                // it to whatever command arrives first, then exit.
                 run_broken(rx, map_pg_error(e)).await;
                 return;
             }
         };
         run(txn, rx).await;
-        // `guard` (and with it, this one pooled session) is held for the
-        // actor's whole lifetime — see the module doc: deliberate session
-        // pinning, not an oversight. It is released here, when the actor
-        // returns; cursors ask for that explicitly via `ActorCmd::Rollback`
-        // as soon as their portal is drained, so an idle-but-alive cursor
-        // handle no longer holds a socket hostage.
     });
     tx
 }
 
-/// Drain the command queue replying `Err` to everything — used when the
-/// opening `START TRANSACTION` itself failed.
 async fn run_broken(mut rx: mpsc::Receiver<ActorCmd>, err: DbError) {
     while let Some(cmd) = rx.recv().await {
         reply_error(cmd, clone_err(&err));
@@ -125,8 +85,6 @@ async fn run_broken(mut rx: mpsc::Receiver<ActorCmd>, err: DbError) {
 }
 
 fn clone_err(e: &DbError) -> DbError {
-    // DbError is not Clone (thiserror enum wrapping String); rebuild a
-    // Protocol-flavored equivalent so every waiting caller still gets told.
     DbError::Protocol(e.to_string())
 }
 
@@ -156,8 +114,6 @@ async fn run(txn: PgTxn<'_>, mut rx: mpsc::Receiver<ActorCmd>) {
         let cmd = match rx.recv().await {
             Some(c) => c,
             None => {
-                // All senders dropped without an explicit commit/rollback —
-                // roll back as the safe default (see module doc).
                 let _ = txn.rollback().await;
                 return;
             }
@@ -228,10 +184,6 @@ async fn execute_one(
         .map(|c| FieldDef {
             name: std::sync::Arc::from(c.name()),
             logical: logical_type_of(c.type_()),
-            // Postgres's RowDescription (what `Statement::columns()` is built
-            // from) does not report nullability, so we never assert
-            // `NULLABLE` here rather than guess — "nullable unknown" reads as
-            // an unset flag rather than a wrong claim either way.
             flags: FieldFlags::empty(),
             native_type: Some(std::sync::Arc::from(c.type_().name())),
         })
@@ -248,14 +200,6 @@ async fn execute_one(
     })
 }
 
-/// Best-effort primary key resolution for `RowSchema::identity` (design:
-/// "no PK ⇒ EDITABLE_RESULTS is false" — we simply leave `identity: None`
-/// whenever this can't cheaply and unambiguously determine one).
-///
-/// Only handles the common single-table case: every returned column must
-/// report the same `table_oid`, and every primary-key column of that table
-/// must be among the selected columns. Joins, expressions, and `DISTINCT`
-/// queries correctly fall back to `None`.
 async fn detect_identity(txn: &PgTxn<'_>, stmt: &tokio_postgres::Statement) -> Option<Identity> {
     let cols = stmt.columns();
     if cols.is_empty() {
@@ -287,7 +231,6 @@ async fn detect_identity(txn: &PgTxn<'_>, stmt: &tokio_postgres::Statement) -> O
     Some(Identity { field_indices })
 }
 
-/// Decode a full `Vec<Row>` into datagrep-api rows, in column order.
 pub fn decode_rows(rows: Vec<Row>) -> Vec<Vec<Value>> {
     rows.into_iter()
         .map(|row| {

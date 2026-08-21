@@ -1,27 +1,3 @@
-//! [`SqliteDriver`]: the stateless entry point. All per-server state lives
-//! in the `Connection`s it creates, never here.
-//!
-//! ## datagrep-api gaps this driver works around (do not fix by editing datagrep-api)
-//!
-//! 1. **No `NESTED_TRANSACTIONS`, `MULTI_STATEMENT`, `POSITIONAL_PARAMS`, or
-//!    `EXPRESSION_FILTER` bits in [`Caps`].** All four are genuinely true of
-//!    this driver (savepoints via plain SQL — see `transaction.rs`; `?`
-//!    positional params; `Predicate` compiles to a real `WHERE`), but
-//!    `datagrep_api::Caps` only defines the flags listed below. Reported upward
-//!    rather than silently invented.
-//! 2. **(Resolved.)** `Mutation::Update`/`Delete` now carry their row
-//!    identity as named `(FieldPath, Value)` pairs, so `connection.rs`
-//!    compiles the WHERE clause directly from the mutation — the old
-//!    positional `PRAGMA table_info` primary-key convention is gone.
-//! 3. **`Catalog::describe` takes no `ListOpts`**, so there is no per-call
-//!    signal for "include the expensive row count." Resolved conservatively:
-//!    `describe()` never runs `COUNT(*)` at all (see `catalog.rs`); a caller
-//!    that wants an exact count uses `Op::Count`.
-//! 4. **`Op::Scan` has no `offset` field**, only `resume`/keyset — so
-//!    `Caps::RANDOM_ACCESS_PAGE` (true; SQLite genuinely supports `OFFSET`)
-//!    is not currently reachable through the structured `Op` surface, only
-//!    via `Request::Native` text.
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -34,8 +10,6 @@ use datagrep_api::{
 
 use crate::connection::SqliteConnection;
 
-/// The SQLite driver. Zero fields: every stateful thing it produces
-/// ([`SqliteConnection`]) owns its own worker thread and rusqlite handle.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SqliteDriver;
 
@@ -66,8 +40,6 @@ impl Driver for SqliteDriver {
                 | Caps::RANDOM_ACCESS_PAGE
                 | Caps::SCHEMA_DECLARED
                 | Caps::READ_ONLY_SESSION
-                // `handle_mutate` wraps the batch in BEGIN…COMMIT and rolls
-                // back on any failure — all-or-nothing, honestly claimable.
                 | Caps::ATOMIC_BATCH,
             max_statement_bytes: None,
             default_fetch_rows: 2000,
@@ -101,8 +73,6 @@ impl Driver for SqliteDriver {
         }
     }
 
-    /// Accepts `sqlite:///path/to.db` (`path` = everything after the third
-    /// slash) and the literal `:memory:`.
     fn parse_url(&self, url: &str) -> Result<ConnectionConfig, ConfigError> {
         let path = if url == ":memory:" {
             ":memory:".to_string()

@@ -1,28 +1,3 @@
-//! [`PgCatalog`]: lazy, one-cheap-query-at-a-time browsing — never eager
-//! whole-catalog indexing, which would make connecting to a big server cost
-//! more than the user asked for. Every method below issues exactly one
-//! parameterized query against `pg_catalog`/`information_schema` equivalents,
-//! bounded by `ListOpts::limit`.
-//!
-//! # Two rules this file learned the hard way
-//!
-//! 1. **It borrows a session from [`crate::pool::PgPool`], never the
-//!    connection's one pinned client.** Browsing the schema tree while a
-//!    result grid is open is the single most common thing a user does; when
-//!    the catalog shared the cursor's socket, that froze the driver forever
-//!    (TEST-REPORT.md F2). Each method acquires one session, does its one
-//!    query on it, and gives it straight back.
-//! 2. **Every `pg_catalog` column whose Postgres type is not plainly `text`
-//!    is cast in SQL.** `pg_class.relkind` is the 1-byte `"char"` type
-//!    (OID 18), which `tokio_postgres` decodes as `i8` and *panics* on if you
-//!    ask for a `String` — which is precisely what happened on every table
-//!    listing and every `describe` against a real server (TEST-REPORT.md F3).
-//!    `::text` at the query site is deliberate: it is visible next to the
-//!    column, and it survives someone reordering the select list later.
-//!    (`name`-typed columns — `relname`, `nspname`, `attname`, `datname`,
-//!    `amname` — *are* decodable as `String`; `oid` as `u32`; those are left
-//!    alone.)
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -50,16 +25,11 @@ impl PgCatalog {
         Self { pool }
     }
 
-    /// Borrow a session for one catalog query. Never the session a cursor or
-    /// transaction has pinned — see the module docs.
     async fn session(&self) -> Result<PooledClient, DbError> {
         self.pool.acquire().await
     }
 }
 
-/// Postgres has no cross-database catalog access, so browsing a database
-/// other than the one this session is connected to is refused rather than
-/// silently answered from the wrong database.
 async fn require_current_database(client: &Client, db: &str) -> Result<(), DbError> {
     let row = client
         .query_one("SELECT current_database()::text", &[])
@@ -77,9 +47,6 @@ async fn require_current_database(client: &Client, db: &str) -> Result<(), DbErr
     Ok(())
 }
 
-/// Map `pg_class.relkind` (already cast to `text` at the query site) onto the
-/// engine-independent [`ObjectKind`]. `v` = view, `m` = materialized view;
-/// ordinary/partitioned/foreign tables (`r`/`p`/`f`) are all tables.
 fn object_kind_of(relkind: &str) -> ObjectKind {
     match relkind {
         "v" | "m" => ObjectKind::View,
@@ -87,16 +54,6 @@ fn object_kind_of(relkind: &str) -> ObjectKind {
     }
 }
 
-/// `row.get()` **panics** on a type mismatch *and* on an out-of-range index,
-/// which crashed the whole process on the `relkind` bug rather than surfacing a
-/// `DbError`. Every catalog read goes through here instead.
-///
-/// The queries below are this driver's own SQL, so in principle the types are
-/// known — but "in principle" is exactly what the `relkind` bug disproved. The
-/// peer is whatever is answering on the Postgres wire: a version whose
-/// `pg_catalog` column changed type, a pooler, or something merely
-/// Postgres-shaped. None of those may be able to abort the process, so a
-/// mismatch becomes a recoverable protocol error naming the column.
 fn try_get<'a, T>(row: &'a tokio_postgres::Row, idx: usize) -> Result<T, DbError>
 where
     T: tokio_postgres::types::FromSql<'a>,
@@ -110,9 +67,6 @@ where
     })
 }
 
-/// [`try_get`] for text columns, which carry the one mistake that actually
-/// happens: a `pg_catalog` column left without its `::text` cast is `"char"` or
-/// `name`, not `text`, and decodes as neither.
 fn try_get_text(row: &tokio_postgres::Row, idx: usize) -> Result<String, DbError> {
     row.try_get::<_, String>(idx).map_err(|e| {
         DbError::Protocol(format!(
@@ -298,10 +252,6 @@ impl Catalog for PgCatalog {
     }
 }
 
-/// Scan backwards from the caret over identifier characters to find the
-/// token being typed — the prefix fed to server-side `LIKE $1 || '%'`
-/// completion — matching happens on the server, never against a locally
-/// built index of the catalog.
 fn prefix_at_caret(text: &str, offset: usize) -> String {
     let bytes = text.as_bytes();
     let end = offset.min(bytes.len());
@@ -309,11 +259,6 @@ fn prefix_at_caret(text: &str, offset: usize) -> String {
     while start > 0 && matches!(bytes[start - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_') {
         start -= 1;
     }
-    // Rebuild from the bytes, not by slicing the `str`: the caret `offset` is
-    // an editor position, and both it and the backwards scan can stop inside
-    // a multi-byte character (type after any non-ASCII text and they do).
-    // Slicing a `str` off a char boundary panics; an empty prefix is the
-    // right answer for a caret that is not on one.
     std::str::from_utf8(&bytes[start..end])
         .unwrap_or("")
         .to_string()
@@ -398,10 +343,6 @@ impl PgCatalog {
         require_current_database(&session, db).await?;
         let rows = session
             .query(
-                // Cast to text, never selected bare: relkind is the
-                // 1-byte `"char"` type and decoding it as `String` panics
-                // (TEST-REPORT.md F3 — every table listing, against every
-                // real server).
                 "SELECT c.relname::text, c.relkind::text \
                  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
                  WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','p','f') \
@@ -491,11 +432,6 @@ impl PgCatalog {
         let client = &*session;
         require_current_database(client, db).await?;
 
-        // One cheap query for size facts — the `reltuples` estimate and
-        // `pg_relation_size`, never a `COUNT(*)` that would scan the table —
-        // plus the table comment. `relkind::text` for
-        // the same reason as in `list_relations` — bare `relkind` is `"char"`
-        // and panicked here on every `--describe` (TEST-REPORT.md F3).
         let size_row = client
             .query_opt(
                 "SELECT c.reltuples::float8, c.relkind::text, pg_relation_size(c.oid), \
@@ -521,14 +457,9 @@ impl PgCatalog {
             extra.push((Arc::from("size_bytes"), Arc::from(size_bytes.to_string())));
         }
 
-        // Indexes — fetched here and only here, on the explicit `describe()`
-        // of this one relation — never during tree expansion, never on
-        // connect. One catalog-only query.
         let indexes = self.list_indexes(client, schema, table).await?;
         extra.push((Arc::from("indexes"), Arc::from(indexes_json(&indexes))));
 
-        // Columns + types + default expressions, for the declared RowSchema
-        // (`SCHEMA_DECLARED`).
         let col_rows = client
             .query(
                 "SELECT a.attname::text, a.atttypid, a.attnotnull, \
@@ -561,10 +492,6 @@ impl PgCatalog {
             if !not_null {
                 flags |= FieldFlags::NULLABLE;
             }
-            // Index-derived flags, from the same single index query above:
-            // `INDEXED` = leading key column of some index (the position a
-            // lookup can use); `UNIQUE` = single-column unique index;
-            // `PRIMARY_KEY` = member of the primary-key index.
             let leading =
                 |ix: &PgIndexInfo| ix.columns.first().is_some_and(|(col, _)| col == &name);
             if indexes.iter().any(leading) {
@@ -639,13 +566,6 @@ impl PgCatalog {
         })
     }
 
-    /// All indexes of one relation: `pg_index` joined to `pg_class`/`pg_am`,
-    /// one row per key column (`generate_series` over `indnkeyatts`), grouped
-    /// client-side. `pg_get_indexdef(oid)` gives the whole definition,
-    /// `pg_get_indexdef(oid, n, true)` the nth key column's text (which also
-    /// covers expression indexes), `pg_get_expr(indpred, …)` the partial
-    /// predicate, and `pg_relation_size` the on-disk size — all catalog-only,
-    /// never touching the table's rows.
     async fn list_indexes(
         &self,
         client: &Client,
@@ -695,10 +615,6 @@ impl PgCatalog {
     }
 }
 
-/// One index of a relation, grouped from the per-key-column query in
-/// [`PgCatalog::list_indexes`]. `columns` is `(text, descending)` in key
-/// order; `descending` comes from `indoption` bit 0 and is only meaningful
-/// for b-tree — [`indexes_json`] nulls it out for other access methods.
 struct PgIndexInfo {
     name: String,
     unique: bool,
@@ -710,9 +626,6 @@ struct PgIndexInfo {
     columns: Vec<(String, bool)>,
 }
 
-/// The engine-independent index JSON shape (see the datagrep-ffi describe
-/// contract): `[{name, columns:[{name, order}], unique, primary, type,
-/// partial, filter, size_bytes, definition, sparse, expire_after_seconds}]`.
 fn indexes_json(indexes: &[PgIndexInfo]) -> String {
     let entries: Vec<String> = indexes
         .iter()
@@ -749,7 +662,6 @@ fn indexes_json(indexes: &[PgIndexInfo]) -> String {
     format!("[{}]", entries.join(","))
 }
 
-/// `{"col": "<default expression>"}`; `None` when no column has a default.
 fn column_defaults_json(defaults: &[(String, String)]) -> Option<String> {
     if defaults.is_empty() {
         return None;
@@ -761,10 +673,6 @@ fn column_defaults_json(defaults: &[(String, String)]) -> Option<String> {
     Some(format!("{{{}}}", entries.join(",")))
 }
 
-/// Minimal JSON string encoding. Hand-rolled on purpose: this crate's
-/// dependency policy keeps `serde_json` out of drivers (see the `Cargo.toml`
-/// note on `tokio-postgres` features), and the catalog only ever needs to
-/// *emit* a handful of strings/bools.
 fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -804,10 +712,6 @@ mod tests {
         assert_eq!(prefix_at_caret("", 0), "");
     }
 
-    /// The index JSON shape, pinned by parsing (serde_json is dev-only):
-    /// cross-engine keys all present, b-tree key order/direction kept,
-    /// non-btree methods get `order: null`, and partial predicates ride in
-    /// `filter`.
     #[test]
     fn indexes_json_has_the_cross_engine_shape() {
         let indexes = vec![
@@ -896,10 +800,6 @@ mod tests {
         assert_eq!(parsed["note"], "'say \"hi\"'::text");
     }
 
-    /// `relkind` is a single character, and only `v`/`m` are views. Pinned
-    /// because the mapping used to be an inline `match` duplicated at two
-    /// sites — both of which also decoded the column with the wrong Rust
-    /// type (TEST-REPORT.md F3).
     #[test]
     fn relkind_maps_onto_object_kind() {
         assert_eq!(object_kind_of("v"), ObjectKind::View);
@@ -909,17 +809,8 @@ mod tests {
         assert_eq!(object_kind_of("f"), ObjectKind::Table);
     }
 
-    /// Every `pg_catalog` column this file reads as a Rust `String` must be
-    /// either a `name` (which `tokio_postgres` does decode as `String`) or
-    /// explicitly `::text`-cast. `relkind` is the 1-byte `"char"` type, so a
-    /// bare qualified reference to it in a select list is the exact panic
-    /// reported in TEST-REPORT.md F3. Every SQL mention in this file is
-    /// qualified (`c.…`), so scanning for that is enough to catch a
-    /// reintroduction — and cheaper than another live server round trip.
     #[test]
     fn relkind_is_never_selected_without_a_text_cast() {
-        // Built at runtime, not written literally: a literal needle would
-        // match this very test and make the scan self-referential.
         let needle = format!("c.{}", "relkind");
         let src = include_str!("catalog.rs");
         let mut from = 0usize;

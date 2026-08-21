@@ -1,8 +1,3 @@
-//! Shared connect helper for the integration tests. Every test uses only
-//! the public `datagrep-api` seam — no `pub(crate)` access — so these are honest
-//! end-to-end exercises of the driver as any consumer above `datagrep-api` would
-//! use it.
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

@@ -1,17 +1,3 @@
-//! Integration tests against a live MySQL or MariaDB server.
-//!
-//! Ignored by default; run with a server URL in `DATAGREP_TEST_MYSQL`:
-//!
-//! ```sh
-//! docker run --rm -d --name dg-mysql -p 3306:3306 -e MYSQL_ROOT_PASSWORD=secret mysql:8
-//! DATAGREP_TEST_MYSQL='mysql://root:secret@127.0.0.1:3306/mysql' \
-//!     cargo test -p datagrep-drv-mysql -- --ignored
-//! docker stop dg-mysql
-//! ```
-//!
-//! The same suite runs against MariaDB (`mariadb:11`) by pointing the URL at
-//! it — see `tests/README.md`.
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -50,7 +36,6 @@ fn native_params(sql: impl Into<Arc<str>>, params: Vec<Value>) -> Request {
     }
 }
 
-/// Run a statement expected to produce an Ack (DDL, INSERT, …).
 async fn run_ddl(conn: &dyn Connection, sql: &str) {
     let mut cur = conn.execute(native(sql)).await.unwrap_or_else(|e| {
         panic!("statement failed: {sql}: {e}");
@@ -63,8 +48,6 @@ async fn run_ddl(conn: &dyn Connection, sql: &str) {
     {}
 }
 
-/// Collect every row of a request (test helper only — production code never
-/// collects).
 async fn collect_rows(conn: &dyn Connection, req: Request) -> Vec<Vec<Value>> {
     let mut cur = conn.execute(req).await.expect("execute");
     let mut rows = Vec::new();
@@ -76,8 +59,6 @@ async fn collect_rows(conn: &dyn Connection, req: Request) -> Vec<Vec<Value>> {
     rows
 }
 
-/// A 100,000-row SELECT with no table: five cross-joined digit derived
-/// tables. Portable across MySQL and MariaDB (no CTE depth variables).
 fn seq_100k_sql() -> String {
     let digits = "(SELECT 0 x UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL \
          SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL \
@@ -114,9 +95,6 @@ async fn server_info_reports_actual_product_and_version() {
     conn.close().await.unwrap();
 }
 
-/// Streaming proof: with 100k rows in flight, the first batch surfaces after
-/// only `max_rows` rows and long before the stream is complete — the driver
-/// never collects.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
 async fn streaming_100k_rows_first_batch_arrives_before_completion() {
@@ -164,8 +142,6 @@ async fn streaming_100k_rows_first_batch_arrives_before_completion() {
     conn.close().await.unwrap();
 }
 
-/// DECIMAL round-trips as an exact string — never through f64, which would
-/// silently round it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
 async fn decimal_round_trips_as_string() {
@@ -212,8 +188,6 @@ async fn run_ddl_req(conn: &dyn Connection, req: Request) {
     {}
 }
 
-/// Cancel mid-`SLEEP(30)` via `KILL QUERY` from the pooled second
-/// connection; control returns quickly and the connection stays usable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
 async fn cancel_mid_sleep_returns_cancelled_and_connection_survives() {
@@ -241,10 +215,6 @@ async fn cancel_mid_sleep_returns_cancelled_and_connection_survives() {
 
     match outcome {
         Err(DbError::Cancelled) => {}
-        // `SELECT SLEEP(30)` interrupted mid-sleep returns a row (value 1)
-        // on some versions instead of erroring; then the query just ends
-        // early. Both are legitimate KILL observations — but it must NOT
-        // take the full 30s.
         Ok(()) => {}
         Err(other) => panic!("expected Cancelled (or early end), got {other}"),
     }
@@ -261,16 +231,11 @@ async fn cancel_mid_sleep_returns_cancelled_and_connection_survives() {
     conn.close().await.unwrap();
 }
 
-/// The known mysql gotcha: an undrained result poisons the connection and
-/// the error surfaces on the NEXT query. The driver must drain on every exit
-/// path — including a cursor that is simply dropped mid-stream.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
 async fn undrained_result_does_not_poison_connection() {
     let conn = connect().await;
 
-    // Case 1: pull one batch of a 100k-row result, then drop the cursor
-    // without close() or draining.
     {
         let mut cur = conn.execute(native(seq_100k_sql())).await.expect("execute");
         let first = cur
@@ -312,8 +277,6 @@ async fn undrained_result_does_not_poison_connection() {
     conn.close().await.unwrap();
 }
 
-/// Catalog: lazy per-level listing plus `describe()` with the cross-driver
-/// `indexes` JSON array (name, ordered columns, unique, primary).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
 async fn catalog_lists_levels_and_describe_reports_indexes() {
@@ -453,8 +416,6 @@ async fn catalog_lists_levels_and_describe_reports_indexes() {
     conn.close().await.unwrap();
 }
 
-/// The type mapping against a real server: every documented conversion in
-/// one round trip, both text protocol (no params) and binary (with params).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
 async fn type_menagerie_decodes_honestly() {
@@ -498,8 +459,6 @@ async fn type_menagerie_decodes_honestly() {
     )
     .await;
 
-    // Text protocol (no params) and binary protocol (bound param) must
-    // decode identically.
     for req in [
         native(format!("SELECT * FROM {db}.t")),
         native_params(
@@ -551,9 +510,6 @@ async fn type_menagerie_decodes_honestly() {
             "TIMESTAMP is UTC (session pinned to +00:00)"
         );
         assert_eq!(r[11], Value::I64(2024), "YEAR");
-        // MySQL has a native JSON wire type → Value::Json. MariaDB's JSON is
-        // an alias for LONGTEXT (no JSON wire type exists), so Str is the
-        // truthful decode of what that server actually declares.
         let is_mariadb = &*conn.server_info().product == "MariaDB";
         match (&r[12], is_mariadb) {
             (Value::Json(j), false) => assert!(j.contains("\"k\""), "raw JSON text: {j}"),
@@ -574,8 +530,6 @@ async fn type_menagerie_decodes_honestly() {
     conn.close().await.unwrap();
 }
 
-/// Multi-statement scripts (split by datagrep-lang): preceding statements
-/// execute, the last one streams.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
 async fn multi_statement_script_streams_last_result() {
@@ -594,7 +548,6 @@ async fn multi_statement_script_streams_last_result() {
     conn.close().await.unwrap();
 }
 
-/// `set_read_only` is server-enforced, and honestly reported as such.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
 async fn set_read_only_is_server_enforced() {
@@ -623,8 +576,6 @@ async fn set_read_only_is_server_enforced() {
     conn.close().await.unwrap();
 }
 
-/// EXPLAIN and (where the server supports it) EXPLAIN ANALYZE / ANALYZE,
-/// gated by the version-probed capability.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
 async fn explain_and_explain_analyze_respect_capability() {
@@ -652,8 +603,6 @@ async fn explain_and_explain_analyze_respect_capability() {
     conn.close().await.unwrap();
 }
 
-/// Transactions: rollback discards, commit persists; savepoints work via
-/// native SQL inside the pinned transaction.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
 async fn transactions_commit_rollback_and_savepoints() {
@@ -708,10 +657,6 @@ async fn transactions_commit_rollback_and_savepoints() {
     conn.close().await.unwrap();
 }
 
-// ---------------------------------------------------------------------
-// Structured DDL (`Op::Ddl`)
-// ---------------------------------------------------------------------
-
 async fn ddl_op(conn: &dyn Connection, op: DdlOp) -> Result<(), DbError> {
     let mut cur = conn.execute(Request::Op(Op::Ddl(op))).await?;
     while cur.next_batch(FetchHint::default()).await?.is_some() {}
@@ -730,8 +675,6 @@ async fn count_of(conn: &dyn Connection, sql: &str) -> i64 {
     }
 }
 
-/// Drop, rename and index creation issued as structured operations, with the
-/// object addressed by the path and kind the catalog reports.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
 async fn structured_ddl_round_trips_through_the_catalog() {
@@ -901,10 +844,6 @@ async fn structured_ddl_round_trips_through_the_catalog() {
     conn.close().await.unwrap();
 }
 
-/// The one place the two flavors genuinely disagree. MySQL has no
-/// `IF NOT EXISTS` on `CREATE INDEX` and no `IF EXISTS` on `DROP INDEX`;
-/// MariaDB has both. The guard is refused rather than dropped, so this
-/// asserts the actual server's actual answer either way.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
 async fn index_existence_guards_follow_the_flavor() {
@@ -947,8 +886,6 @@ async fn index_existence_guards_follow_the_flavor() {
             .await
             .expect("and so that is idempotent too");
     } else {
-        // Refused by the driver, before anything is sent — the server would
-        // answer ER_PARSE_ERROR, which says nothing useful about why.
         let err = ddl_op(conn.as_ref(), guarded_create)
             .await
             .expect_err("MySQL has no CREATE INDEX IF NOT EXISTS");
@@ -987,8 +924,6 @@ async fn index_existence_guards_follow_the_flavor() {
     conn.close().await.unwrap();
 }
 
-/// Object names are identifiers: a name that tries to close its own quoting
-/// must reach the server as one name and take nothing else with it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live server: set DATAGREP_TEST_MYSQL"]
 async fn a_hostile_name_survives_a_structured_drop() {

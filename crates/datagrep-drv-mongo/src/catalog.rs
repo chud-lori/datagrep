@@ -1,11 +1,3 @@
-//! [`MongoCatalog`] (ticket item 5). Browsing is lazy and on demand — never
-//! an eager whole-catalog index, which would make connecting to a large
-//! deployment cost a full crawl nobody asked for. `database` and `collection`
-//! levels
-//! are cheap server enumerations (`listDatabases`/`listCollections`); the
-//! `field` level has no server-declared schema at all (`SCHEMA_DECLARED` is
-//! false), so it is *inferred* by sampling — and always labeled as such.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -23,18 +15,12 @@ use datagrep_api::shape::{LogicalType, ObjectPath};
 use crate::error::map_mongo_error;
 use crate::value::bson_to_value;
 
-/// Default `$sample` size for [`MongoCatalog::infer_shape`] (ticket item 5).
 const DEFAULT_SAMPLE_SIZE: u32 = 500;
-/// `complete()`'s field-name candidate cap (ticket item 5).
 const COMPLETE_LIMIT: usize = 50;
 
 pub struct MongoCatalog {
     client: mongodb::Client,
     default_database: String,
-    /// Cache of the most recent [`InferredSchema`] per `(database,
-    /// collection)`, seeded by [`MongoCatalog::infer_shape`] and reused by
-    /// both the field level of `children()` and `complete()` (ticket item 5:
-    /// "field names from cached inference").
     field_cache: Arc<Mutex<HashMap<(String, String), InferredSchema>>>,
 }
 
@@ -129,9 +115,6 @@ impl MongoCatalog {
             .collect())
     }
 
-    /// Cached inference, populated lazily on first use — never eagerly, since
-    /// sampling a collection nobody opened is pure waste. A cache hit costs
-    /// nothing; a miss runs one `$sample` at the default size.
     async fn inferred(&self, db: &str, coll: &str) -> Result<InferredSchema, DbError> {
         let key = (db.to_string(), coll.to_string());
         if let Some(cached) = self.field_cache.lock().await.get(&key) {
@@ -142,9 +125,6 @@ impl MongoCatalog {
         Ok(schema)
     }
 
-    /// All indexes of one collection via `listIndexes` (the official
-    /// driver's typed `list_indexes`), with per-index on-disk sizes taken
-    /// from the `collStats` reply the caller already paid for.
     async fn list_index_entries(
         &self,
         db: &str,
@@ -166,9 +146,6 @@ impl MongoCatalog {
                 .and_then(bson_as_i64);
             let opts = model.options.as_ref();
             out.push(MongoIndexInfo {
-                // `_id_` is unique by definition even though `listIndexes`
-                // does not spell it out, and it is the closest thing a
-                // collection has to a primary key.
                 unique: opts.and_then(|o| o.unique).unwrap_or(false) || name == "_id_",
                 primary: name == "_id_",
                 sparse: opts.and_then(|o| o.sparse).unwrap_or(false),
@@ -213,11 +190,6 @@ impl MongoCatalog {
     }
 }
 
-/// Record one sampled document's top-level fields into `root`, recursing one
-/// level into document-valued fields so nested paths ("address.city") are
-/// visible too — a shallow but honest `FieldTrie`. Full arbitrary-depth
-/// recursion is a grid/view-projection concern above this seam, not the
-/// catalog's.
 fn record_doc(root: &mut Vec<(Arc<str>, FieldTrie)>, doc: &BsonDocument) {
     for (k, v) in doc.iter() {
         let idx = match root
@@ -262,11 +234,6 @@ impl Catalog for MongoCatalog {
             LevelDef {
                 name: Arc::from("field"),
                 kind: ObjectKind::Field,
-                // Never free: listing fields means sampling documents.
-                // `OnDemand` keeps the UI from auto-expanding into a
-                // `$sample` aggregation just because someone clicked a
-                // disclosure triangle — the Mongo-shaped version of firing a
-                // `KEYS *` at a server to populate a tree node.
                 enumeration: Enumeration::OnDemand,
             },
         ]
@@ -288,11 +255,6 @@ impl Catalog for MongoCatalog {
                 })
             }
         };
-        // v1 simplification: one fetch, client-side prefix/limit filtering,
-        // no resumable server-side page token — database/collection counts
-        // are small enough on virtually every real deployment that this
-        // never approaches the cost of Postgres's thousand-table case. See
-        // the crate report's deviations.
         Ok(Page { items, next: None })
     }
 
@@ -327,18 +289,9 @@ impl Catalog for MongoCatalog {
                         extra.push((Arc::from(label), Arc::from(display_number(v))));
                     }
                 }
-                // Real indexes via `listIndexes`, fetched here and only here —
-                // on the explicit `describe()` of this one collection, never
-                // during tree expansion and never on connect, so browsing a
-                // deployment never fans out into a command per collection.
-                // Sizes come from the `collStats` reply already in hand.
                 let index_sizes = result.get_document("indexSizes").ok();
                 let indexes = self.list_index_entries(db, coll, index_sizes).await?;
                 extra.push((Arc::from("indexes"), Arc::from(indexes_json(&indexes))));
-                // The field list is *inferred from a sample* (`$sample`,
-                // cached per collection) — Mongo declares no schema, and the
-                // payload says so explicitly (`inferred_schema`/`sampled_docs`)
-                // so no UI can present inference as ground truth.
                 let inferred = self.inferred(db, coll).await?;
                 extra.push((
                     Arc::from("sampled_docs"),
@@ -355,10 +308,6 @@ impl Catalog for MongoCatalog {
                         has_children: true,
                         comment: None,
                     },
-                    // `SCHEMA_DECLARED` is false: Mongo has no server-declared
-                    // schema, so `describe()` never fabricates a `RowSchema`
-                    // here — the sampled field list rides in `extra` under
-                    // `inferred_columns`, labeled as inference.
                     schema: None,
                     extra,
                 })
@@ -474,20 +423,13 @@ impl Catalog for MongoCatalog {
     }
 }
 
-/// One index of a collection, flattened from the driver's `IndexModel` for
-/// [`indexes_json`] — kept as a plain struct so the JSON shape is unit
-/// testable without a server.
 struct MongoIndexInfo {
     name: String,
-    /// Key order as declared. `MongoKeyOrder::Other` carries the non-b-tree
-    /// key kinds (`"text"`, `"2dsphere"`, `"hashed"`, …).
     keys: Vec<(String, MongoKeyOrder)>,
     unique: bool,
     primary: bool,
     sparse: bool,
-    /// `partialFilterExpression`, already rendered to JSON text.
     filter_json: Option<String>,
-    /// TTL (`expireAfterSeconds`).
     expire_after_seconds: Option<i64>,
     size_bytes: Option<i64>,
 }
@@ -513,14 +455,6 @@ fn key_order(v: &Bson) -> MongoKeyOrder {
     }
 }
 
-/// The engine-independent index JSON shape (see the datagrep-ffi describe
-/// contract): `[{name, columns:[{name, order}], unique, primary, type,
-/// partial, filter, size_bytes, definition, sparse, expire_after_seconds}]`.
-///
-/// Mongo specifics: a special key kind (`text`, `2dsphere`, `hashed`)
-/// becomes the index's `type` and that key's `order` is `null` (direction is
-/// a b-tree concept); everything else is `"btree"`, which is what a regular
-/// Mongo index is. `definition` is `null` — Mongo has no DDL text to show.
 fn indexes_json(indexes: &[MongoIndexInfo]) -> String {
     let entries: Vec<String> = indexes
         .iter()
@@ -567,9 +501,6 @@ fn indexes_json(indexes: &[MongoIndexInfo]) -> String {
     format!("[{}]", entries.join(","))
 }
 
-/// The sampled field list in the same column shape declared-schema engines
-/// use, so the UI needs one renderer — with `presence_ratio` carrying the
-/// honesty (a field seen in 60% of sampled documents is not a column).
 fn inferred_columns_json(schema: &InferredSchema) -> String {
     let entries: Vec<String> = schema
         .root
@@ -610,9 +541,6 @@ fn inferred_columns_json(schema: &InferredSchema) -> String {
     format!("[{}]", entries.join(","))
 }
 
-/// A BSON document as JSON text, covering the types a
-/// `partialFilterExpression` realistically contains; anything exotic
-/// degrades to its display string rather than lying or failing.
 fn document_json(doc: &BsonDocument) -> String {
     let entries: Vec<String> = doc
         .iter()
@@ -647,9 +575,6 @@ fn bson_as_i64(v: &Bson) -> Option<i64> {
     }
 }
 
-/// Minimal JSON string encoding. Hand-rolled on purpose: drivers keep
-/// `serde_json` out of their runtime dependency set (see the workspace
-/// dependency notes), and the catalog only ever needs to *emit* JSON here.
 fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -679,8 +604,6 @@ fn display_number(b: &Bson) -> String {
     }
 }
 
-/// Scan backwards from the caret over identifier characters (same convention
-/// as `datagrep-drv-postgres::catalog::prefix_at_caret`).
 fn prefix_at_caret(text: &str, offset: usize) -> String {
     let bytes = text.as_bytes();
     let end = offset.min(bytes.len());
@@ -690,11 +613,6 @@ fn prefix_at_caret(text: &str, offset: usize) -> String {
     {
         start -= 1;
     }
-    // Rebuild from the bytes, not by slicing the `str`: the caret `offset` is
-    // an editor position, and both it and the backwards scan can stop inside
-    // a multi-byte character (type after any non-ASCII text and they do).
-    // Slicing a `str` off a char boundary panics; an empty prefix is the
-    // right answer for a caret that is not on one.
     std::str::from_utf8(&bytes[start..end])
         .unwrap_or("")
         .to_string()
@@ -711,11 +629,6 @@ mod tests {
         assert_eq!(prefix_at_caret("", 0), "");
     }
 
-    /// FieldTrie inference over a synthetic heterogeneous document set,
-    /// exercising exactly the shape ticket item 5/`record_doc` builds:
-    /// presence ratios and mixed types stay visible rather than collapsing
-    /// to a majority type — "usually an int" is a different fact from "an
-    /// int", and the catalog must not flatten one into the other.
     #[test]
     fn record_doc_builds_heterogeneous_field_trie_with_correct_presence() {
         let mut root: Vec<(Arc<str>, FieldTrie)> = Vec::new();
@@ -776,10 +689,6 @@ mod tests {
         let _ = Value::I64(0); // keep datagrep_api::Value import used in this module
     }
 
-    /// The index JSON shape, pinned by parsing (serde_json is dev-only):
-    /// compound key order and 1/-1 directions survive, TTL rides in
-    /// `expire_after_seconds`, partial filters ride in `filter`, and special
-    /// key kinds become the index `type` with `order: null`.
     #[test]
     fn indexes_json_has_the_cross_engine_shape() {
         let indexes = vec![
@@ -864,9 +773,6 @@ mod tests {
         assert_eq!(indexes_json(&[]), "[]");
     }
 
-    /// The inferred field list keeps the declared-column JSON shape but says
-    /// it is inference: heterogeneous types stay visible and the presence
-    /// ratio rides along.
     #[test]
     fn inferred_columns_json_labels_inference_honestly() {
         let mut root: Vec<(Arc<str>, FieldTrie)> = Vec::new();

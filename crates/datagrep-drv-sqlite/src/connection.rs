@@ -1,8 +1,3 @@
-//! The dedicated-worker-thread bridge. One `std::thread` per
-//! connection owns the `rusqlite::Connection` for its entire life; every
-//! async method sends a [`WorkerMsg`] and awaits a `tokio::sync::oneshot`
-//! reply. See `lib.rs` for the full rationale.
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
@@ -26,26 +21,17 @@ use crate::scan::{ColumnMeta, OpenScan};
 use crate::transaction::SqliteTransaction;
 use crate::value::{quote_ident, SqlParam};
 
-/// What `Connection::execute` produced, as seen by the worker.
 pub(crate) enum ExecOutcome {
     Ack { affected: Option<u64> },
     Cursor { id: u64, schema: Arc<RowSchema> },
 }
 
-/// A `FetchBatch` reply bundles the batch with the cursor-side state
-/// (`resume_token`, `stats`) `Cursor::resume_token`/`Cursor::stats` need —
-/// those two trait methods are synchronous, so `SqliteCursor` caches
-/// whatever the worker last reported rather than round-tripping per call.
 pub(crate) struct FetchReply {
     pub batch: Option<Batch>,
     pub resume_token: Option<ResumeToken>,
     pub stats: CursorStats,
 }
 
-/// A type-erased unit of catalog work: the closure runs on the worker
-/// thread with `&rusqlite::Connection` and sends its own typed reply, which
-/// is what lets one `WorkerMsg` variant serve every `Catalog` method without
-/// `WorkerMsg` itself being generic.
 pub(crate) struct CatalogJob {
     task: Box<dyn FnOnce(&rusqlite::Connection) + Send>,
 }
@@ -58,10 +44,6 @@ impl CatalogJob {
 
 pub(crate) enum WorkerMsg {
     Execute {
-        // Boxed: `Request` is the largest variant by far (it embeds `Op`,
-        // which embeds `Predicate`/`MutationBatch`), and clippy correctly
-        // flags an enum sized to its biggest member — every other `WorkerMsg`
-        // that flows through the same channel would pay for it too.
         req: Box<Request>,
         reply: oneshot::Sender<Result<ExecOutcome, DbError>>,
     },
@@ -95,10 +77,6 @@ pub(crate) enum WorkerMsg {
     Shutdown,
 }
 
-/// Cloneable handle to a connection's worker thread. Every driver type that
-/// needs to reach the connection (`SqliteConnection`, `SqliteCursor`,
-/// `SqliteTransaction`, `SqliteCatalog`) holds one of these rather than the
-/// `rusqlite::Connection` itself.
 #[derive(Clone)]
 pub(crate) struct JobSender(std_mpsc::Sender<WorkerMsg>);
 
@@ -151,9 +129,6 @@ impl JobSender {
         self.call(|reply| WorkerMsg::Ping { reply }).await
     }
 
-    /// Run `f` on the worker thread with `&rusqlite::Connection` and return
-    /// its result. Used by `SqliteCatalog` so introspection never leaves the
-    /// connection's owning thread either.
     pub async fn run_catalog_job<F, T>(&self, f: F) -> Result<T, DbError>
     where
         F: FnOnce(&rusqlite::Connection) -> Result<T, DbError> + Send + 'static,
@@ -214,11 +189,6 @@ fn build_server_info(conn: &rusqlite::Connection, path: &str) -> ServerInfo {
     }
 }
 
-/// The worker thread's entire body. Everything rusqlite-related for this
-/// connection happens here and nowhere else — `conn` never crosses a thread
-/// boundary. `cursors` is declared after `conn` so it drops
-/// first, finalizing every open statement before the connection itself
-/// closes (no "still has open statements" teardown error, no thread leak).
 pub(crate) fn run_worker(
     path: String,
     read_only: bool,
@@ -309,8 +279,6 @@ pub(crate) fn run_worker(
             WorkerMsg::Catalog(job) => job.run(&conn),
         }
     }
-    // Loop exits either via `Shutdown` or every `Sender` having been
-    // dropped. Either way `cursors` then `conn` drop right here.
 }
 
 struct PreparedRequest {
@@ -399,11 +367,6 @@ fn build_row_schema(columns: &[ColumnMeta], identity: Option<Identity>) -> RowSc
     RowSchema { fields, identity }
 }
 
-/// Best-effort identity detection for a plain `SELECT *`-style `Op::Scan`
-/// against a real table: look up its declared primary key and, if every PK
-/// column made it into the output, report it. Anything else (raw SQL,
-/// projections, joins, expressions) stays `None` — never guess at what to
-/// mutate.
 fn detect_identity(
     conn: &rusqlite::Connection,
     req: &Request,
@@ -477,11 +440,6 @@ fn handle_execute<'conn>(
     Ok(ExecOutcome::Cursor { id, schema })
 }
 
-/// `Mutation::Update`/`Delete` carry their row identity as **named**
-/// `(FieldPath, Value)` pairs (the same shape as `sets`), so the WHERE
-/// clause compiles directly from the mutation — no `PRAGMA table_info`
-/// lookup, no positional primary-key convention. The one-row invariant is
-/// still enforced by [`expect_exactly_one`].
 fn handle_mutate(
     conn: &rusqlite::Connection,
     batch: &MutationBatch,
@@ -510,9 +468,6 @@ fn handle_mutate(
     })
 }
 
-/// Compile the named row identity into `"col" = ? AND …`. The field names
-/// come from the mutation itself (`key: Vec<(FieldPath, Value)>`); an empty
-/// key is refused — we never guess which row to affect.
 fn keyed_where(
     key: &[(datagrep_api::FieldPath, Value)],
     params: &mut Vec<Value>,
@@ -533,9 +488,6 @@ fn keyed_where(
     Ok(clauses.join(" AND "))
 }
 
-/// A non-empty `expect` precondition must be honoured or refused, never
-/// dropped — dropping it would turn a guarded write into a clobber. This
-/// driver does not compile preconditions yet, so it refuses.
 fn refuse_expect(expect: &[(datagrep_api::FieldPath, Value)]) -> Result<(), DbError> {
     if expect.is_empty() {
         return Ok(());
@@ -625,9 +577,6 @@ fn apply_mutation(conn: &rusqlite::Connection, m: &Mutation) -> Result<u64, DbEr
     }
 }
 
-/// Every grid update must affect exactly one row or it rolls back with
-/// "row identity changed — refresh". A stale or ambiguous row identity that
-/// matched several rows would silently edit rows the user never touched.
 fn expect_exactly_one(n: usize, verb: &str) -> Result<(), DbError> {
     if n == 1 {
         Ok(())
@@ -682,8 +631,6 @@ fn handle_end_tx(
     Ok(())
 }
 
-/// The async-facing connection object. Holds no `rusqlite` state directly —
-/// everything routes through [`JobSender`] to the worker thread.
 pub struct SqliteConnection {
     jobs: JobSender,
     worker: Mutex<Option<thread::JoinHandle<()>>>,

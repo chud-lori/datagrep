@@ -1,28 +1,3 @@
-//! The per-request/per-transaction actor task.
-//!
-//! Same constraint the Postgres driver hit, different type: mysql_async's
-//! `QueryResult<'a, 't, P>` mutably borrows its `Conn` for as long as the
-//! result is being streamed, while `Connection::execute` must hand back a
-//! `'static` `Box<dyn Cursor>`. (The Mongo driver escaped this
-//! because its `ClientSession`/cursor pair is fully owned; MySQL is not so
-//! lucky.) Rather than an unsafe self-referential struct, the `Conn` and the
-//! in-flight `QueryResult` live entirely on this task's stack; everything
-//! crossing back out is an owned, `'static` channel handle.
-//!
-//! **The undrained-result gotcha, handled here**: a MySQL connection with an
-//! unconsumed result set is poisoned — the leftover packets surface as an
-//! error on the *next* statement. Every exit path below (batch exhaustion,
-//! cursor close, cursor drop, cancel-induced error, a new statement arriving
-//! while a result is open) either fully drains the `QueryResult` or observes
-//! that the server already terminated it, before the `Conn` is ever used
-//! again. The integration test `undrained_result_does_not_poison_connection`
-//! exercises exactly this.
-//!
-//! Backpressure: rows are pulled off the socket one
-//! `QueryResult::next()` at a time, only inside `FetchBatch` handling —
-//! nobody calls `next_batch`, nothing is read, the TCP window closes, the
-//! server stops producing. Nothing here ever calls `collect`.
-
 use std::time::Duration;
 
 use mysql_async::consts::ColumnFlags;
@@ -39,7 +14,6 @@ use crate::error::map_mysql_error;
 use crate::sql::Flavor;
 use crate::value::{decode_value, field_def_of, to_my_value};
 
-/// What `execute()` got back for one request.
 pub enum ExecOutcome {
     Ack {
         affected: u64,
@@ -52,18 +26,13 @@ pub enum ExecOutcome {
     },
 }
 
-/// One pulled chunk, already decoded to seam values.
 pub struct Fetched {
     pub rows: Vec<Vec<ApiValue>>,
-    /// The result set ended with (or before) this pull.
     pub done: bool,
-    /// Server warning count, reported once the set is finished.
     pub warnings: u16,
 }
 
 pub enum ActorCmd {
-    /// A pre-split script: statements 0..n-1 run to completion (drained),
-    /// the last one streams. Splitting happened upstream via datagrep-lang.
     Execute {
         statements: Vec<String>,
         params: Vec<ApiValue>,
@@ -87,18 +56,12 @@ pub enum ActorCmd {
     },
 }
 
-/// Whether the actor wraps a single `execute()` call or an interactive
-/// transaction.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    /// Exits as soon as the one request (and its streaming tail) completes.
     Simple,
-    /// Opens `START TRANSACTION`, serves many requests, exits on
-    /// commit/rollback; channel drop = rollback (safe default).
     Transaction,
 }
 
-/// Spawn an actor for one `Connection::execute` call.
 pub fn spawn_simple(
     guard: OwnedMutexGuard<Option<Conn>>,
     flavor: Flavor,
@@ -106,8 +69,6 @@ pub fn spawn_simple(
     spawn(guard, flavor, Mode::Simple, None, false)
 }
 
-/// Spawn an actor wrapping an explicit transaction. `isolation`/`read_only`
-/// shape the `START TRANSACTION` it opens immediately.
 pub fn spawn_transaction(
     guard: OwnedMutexGuard<Option<Conn>>,
     flavor: Flavor,
@@ -144,10 +105,6 @@ fn spawn(
 
         let poisoned = run(conn, &mut rx, flavor, mode).await;
         if poisoned {
-            // A transport/protocol failure mid-stream: the Conn's state is
-            // no longer trustworthy. Take it so every later use of this
-            // connection observes `Closed` rather than inheriting a
-            // half-broken session.
             guard.take();
         }
         // Dropping `guard` here releases the connection to the next caller.
@@ -177,14 +134,12 @@ async fn open_transaction(
     conn.query_drop(start).await.map_err(map_mysql_error)
 }
 
-/// Answer every queued/future command with `Closed`.
 async fn drain_replying_closed(rx: &mut mpsc::Receiver<ActorCmd>) {
     while let Some(cmd) = rx.recv().await {
         reply_error(cmd, DbError::Closed);
     }
 }
 
-/// Answer every queued/future command with a copy of `err`.
 async fn drain_replying(rx: &mut mpsc::Receiver<ActorCmd>, err: &DbError) {
     while let Some(cmd) = rx.recv().await {
         reply_error(cmd, clone_err(err));
@@ -192,8 +147,6 @@ async fn drain_replying(rx: &mut mpsc::Receiver<ActorCmd>, err: &DbError) {
 }
 
 fn clone_err(e: &DbError) -> DbError {
-    // DbError is not Clone; a Protocol-flavored copy still tells every
-    // waiting caller what happened.
     DbError::Protocol(e.to_string())
 }
 
@@ -212,7 +165,6 @@ fn reply_error(cmd: ActorCmd, err: DbError) {
     }
 }
 
-/// The command loop. Returns `true` when the `Conn` should be poisoned.
 async fn run(
     conn: &mut Conn,
     rx: &mut mpsc::Receiver<ActorCmd>,
@@ -254,10 +206,6 @@ async fn run(
                 match outcome {
                     ExecuteEnd::Continue => {
                         if mode == Mode::Simple {
-                            // The one request this actor exists for is fully
-                            // finished (drained/closed) — release the Conn
-                            // immediately instead of waiting for the cursor
-                            // handle to be dropped.
                             break 'outer;
                         }
                     }
@@ -266,8 +214,6 @@ async fn run(
                 }
             }
             ActorCmd::FetchBatch { reply, .. } => {
-                // No result set is open; the cursor this belongs to is long
-                // finished.
                 let _ = reply.send(Ok(Fetched {
                     rows: Vec::new(),
                     done: true,
@@ -298,8 +244,6 @@ async fn run(
         }
     }
 
-    // All senders dropped without an explicit end: roll back as the safe
-    // default for "the caller went away" (matches the sibling drivers).
     if mode == Mode::Transaction && !committed_or_rolled_back {
         if let Err(e) = conn.query_drop("ROLLBACK").await {
             tracing::warn!(error = %e, "implicit rollback failed");
@@ -318,19 +262,12 @@ async fn run_tx_end(conn: &mut Conn, mode: Mode, sql: &str) -> Result<(), DbErro
     conn.query_drop(sql).await.map_err(map_mysql_error)
 }
 
-/// How one `Execute` (plus its streaming tail) ended.
 enum ExecuteEnd {
-    /// Fully finished; the Conn is clean and reusable.
     Continue,
-    /// A command arrived while a result was open; the result was drained and
-    /// the command still needs processing.
     Deferred(ActorCmd),
-    /// Transport/protocol failure — the Conn must not be reused.
     Poisoned,
 }
 
-/// Run a pre-split script. Statements `0..n-1` are executed and fully
-/// drained; the last statement streams through `FetchBatch` commands.
 #[allow(clippy::too_many_arguments)]
 async fn handle_execute(
     conn: &mut Conn,
@@ -352,10 +289,6 @@ async fn handle_execute(
         return ExecuteEnd::Continue;
     };
 
-    // Always push a server-side deadline where one exists, so even a
-    // statement we cannot cancel is bounded. MySQL's `max_execution_time`
-    // applies to SELECT only; MariaDB's `max_statement_time` applies to all
-    // statements. Both are reset afterwards.
     let timeout_was_set = match timeout {
         Some(t) => match set_server_deadline(conn, flavor, t).await {
             Ok(()) => true,
@@ -426,8 +359,6 @@ async fn handle_script(
     reply: oneshot::Sender<Result<ExecOutcome, DbError>>,
     next_cursor_id: &mut u64,
 ) -> ExecuteEnd {
-    // Statements before the last: run to completion, results fully drained
-    // (a mid-script SELECT is legal; its rows are simply not streamed).
     for stmt in preceding {
         match run_and_drain(conn, stmt).await {
             Ok(()) => {}
@@ -443,11 +374,6 @@ async fn handle_script(
         }
     }
 
-    // The final statement: parameterized → binary protocol (real bound
-    // params, so a value can never be re-parsed as SQL); no params → text
-    // protocol. The two protocols
-    // return differently-typed `QueryResult`s, hence the split into a
-    // shared generic continuation.
     if params.is_empty() {
         match conn.query_iter(last).await {
             Ok(qr) => finish_result(qr, rx, row_limit, reply, next_cursor_id).await,
@@ -481,8 +407,6 @@ fn exec_error(e: DbError, reply: oneshot::Sender<Result<ExecOutcome, DbError>>) 
     }
 }
 
-/// Shared (protocol-generic) tail of `handle_script`: classify the pending
-/// result as Ack or streaming cursor and serve it.
 async fn finish_result<P: mysql_async::prelude::Protocol>(
     mut qr: mysql_async::QueryResult<'_, '_, P>,
     rx: &mut mpsc::Receiver<ActorCmd>,
@@ -533,9 +457,6 @@ async fn finish_result<P: mysql_async::prelude::Protocol>(
     stream_result(&mut qr, rx, cursor_id, &columns, row_limit).await
 }
 
-/// Serve `FetchBatch` commands against one open result set until it is
-/// exhausted, closed, abandoned, or preempted. Every branch leaves the
-/// underlying `Conn` fully drained (the undrained-result gotcha).
 async fn stream_result<P: mysql_async::prelude::Protocol>(
     qr: &mut mysql_async::QueryResult<'_, '_, P>,
     rx: &mut mpsc::Receiver<ActorCmd>,
@@ -548,8 +469,6 @@ async fn stream_result<P: mysql_async::prelude::Protocol>(
         let cmd = match rx.recv().await {
             Some(c) => c,
             None => {
-                // Cursor (and everything else) dropped mid-stream: drain so
-                // the Conn is clean for the next actor.
                 return match drain(qr).await {
                     Ok(()) => ExecuteEnd::Continue,
                     Err(_) => ExecuteEnd::Poisoned,
@@ -577,11 +496,6 @@ async fn stream_result<P: mysql_async::prelude::Protocol>(
                             break;
                         }
                         Err(e) => {
-                            // The server terminated the set (this is also the
-                            // KILL QUERY path: ER_QUERY_INTERRUPTED arrives
-                            // here and maps to Cancelled). mysql_async clears
-                            // the pending set on a read error, but there may
-                            // be trailing sets — drained below.
                             fetch_err = Some(map_mysql_error(e));
                             break;
                         }
@@ -599,8 +513,6 @@ async fn stream_result<P: mysql_async::prelude::Protocol>(
                 }
                 sent_rows += rows.len() as u64;
                 if !done && row_limit.is_some_and(|limit| sent_rows >= limit) {
-                    // Driver-enforced row cap (`ExecOpts::row_limit`): stop
-                    // at the source and discard the remainder.
                     done = true;
                 }
                 let warnings = if done { qr.warnings() } else { 0 };
@@ -632,8 +544,6 @@ async fn stream_result<P: mysql_async::prelude::Protocol>(
             }
             ActorCmd::CloseCursor { .. } => {}
             other => {
-                // A new Execute (or Commit/Rollback) preempts the open
-                // cursor: drain first, then let the outer loop process it.
                 return match drain(qr).await {
                     Ok(()) => ExecuteEnd::Deferred(other),
                     Err(_) => {
@@ -646,9 +556,6 @@ async fn stream_result<P: mysql_async::prelude::Protocol>(
     }
 }
 
-/// Consume everything left in a result (remaining rows AND remaining result
-/// sets) so the connection is clean. An `ER_QUERY_INTERRUPTED` while draining
-/// counts as success — the server has already ended the set.
 async fn drain<P: mysql_async::prelude::Protocol>(
     qr: &mut mysql_async::QueryResult<'_, '_, P>,
 ) -> Result<(), DbError> {
@@ -664,8 +571,6 @@ async fn drain<P: mysql_async::prelude::Protocol>(
             Err(e) => {
                 let e = map_mysql_error(e);
                 if e.is_recoverable() {
-                    // Set terminated by the server (kill/timeout); trailing
-                    // sets, if any, keep draining.
                     if qr.is_empty() {
                         return Ok(());
                     }
@@ -677,7 +582,6 @@ async fn drain<P: mysql_async::prelude::Protocol>(
     }
 }
 
-/// Execute one non-final script statement and consume its results entirely.
 async fn run_and_drain(conn: &mut Conn, stmt: &str) -> Result<(), DbError> {
     let qr = conn.query_iter(stmt).await.map_err(map_mysql_error)?;
     qr.drop_result().await.map_err(map_mysql_error)
@@ -691,7 +595,6 @@ fn non_empty(s: String) -> Option<String> {
     }
 }
 
-/// Build the seam schema from result-set column metadata.
 pub fn schema_of(columns: &[Column]) -> RowSchema {
     let fields = columns.iter().map(field_def_of).collect();
     RowSchema {
@@ -700,17 +603,6 @@ pub fn schema_of(columns: &[Column]) -> RowSchema {
     }
 }
 
-/// Best-effort row identity from column metadata alone (no extra round trip:
-/// the MySQL column-definition packet carries table, original name, and
-/// PRI_KEY per column). Single-table results only; joins/expressions fall
-/// back to `None` → not editable: with no identity there is no safe way to
-/// name the row an edit is meant to hit.
-///
-/// Known limitation, stated: with a composite primary key only partially
-/// selected, the selected key columns still carry PRI_KEY_FLAG, so the
-/// derived identity can be too narrow. The backstop — every generated
-/// mutation must affect exactly 1 row or the batch rolls back — is what makes
-/// this safe rather than silently wrong.
 fn detect_identity(columns: &[Column]) -> Option<Identity> {
     let first_table = columns
         .first()
@@ -736,7 +628,6 @@ fn detect_identity(columns: &[Column]) -> Option<Identity> {
     }
 }
 
-/// Decode one wire row into seam values, in column order.
 fn decode_row(row: Row, columns: &[Column]) -> Vec<ApiValue> {
     row.unwrap()
         .into_iter()

@@ -1,35 +1,3 @@
-//! [`PgConnection`]: one *logical* connection to a Postgres server, backed by
-//! a small [`crate::pool::PgPool`] of physical sessions.
-//!
-//! # Why a logical connection is not a single socket
-//!
-//! A streaming cursor and an interactive transaction both **pin** the socket
-//! they run on: `tokio_postgres::Transaction<'a>` borrows `&'a mut Client`,
-//! and a portal only exists inside a transaction. A pool that silently moved
-//! a BEGIN to a different socket would be a correctness bug, so the pin is
-//! not negotiable.
-//!
-//! Earlier this driver drew the wrong conclusion from that and made *every*
-//! operation queue behind the pinned socket: `catalog()` and the next
-//! `execute()` awaited the same `Mutex<Client>` with no timeout. Holding an
-//! open cursor and doing anything else — the GUI's "results grid open, click
-//! the schema tree" — hung forever with the server sitting `idle in
-//! transaction` (TEST-REPORT.md F2).
-//!
-//! What actually follows from the constraint is the opposite: a cursor pins
-//! *its* session, so everything else must use a different one. Hence:
-//!
-//! * a cursor gives its session back the moment its portal is drained, not
-//!   when the handle is dropped ([`crate::cursor::PgCursor`]);
-//! * anything that needs the server while a session is pinned acquires
-//!   another from the pool, dialled lazily with the same config;
-//! * at the pool's cap the wait is bounded and ends in
-//!   `DbError::ResourceExhausted` naming what holds the sessions — never a
-//!   silent freeze.
-//!
-//! The full reasoning, including the server-side lock angle, is in the
-//! `pool.rs` module docs.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -54,8 +22,6 @@ use crate::sql;
 use crate::transaction::PgTransaction;
 use crate::value::PgParam;
 
-/// A cheap, PII-free label for tracing spans — never the statement text
-/// itself. Query text can carry customer data, so it is never logged.
 fn request_kind(req: &Request) -> &'static str {
     match req {
         Request::Native { .. } => "native",
@@ -77,10 +43,6 @@ impl PgConnection {
         Self { pool, server_info }
     }
 
-    /// Compile a `Request` down to `(sql, params)`. `Native` text passes
-    /// through verbatim — what the user typed is what the server runs, never
-    /// a translation of it; `Op` is compiled by `sql.rs`, always via bound
-    /// `$n` parameters so a value can never become SQL.
     fn compile(req: &Request) -> Result<(String, Vec<Value>), DbError> {
         match req {
             Request::Native { text, params, .. } => Ok((text.to_string(), params.clone())),
@@ -113,10 +75,6 @@ impl PgConnection {
         text: String,
         params: Vec<Value>,
     ) -> Result<Box<dyn Cursor>, DbError> {
-        // One session for the whole call: prepare on it, and — if this turns
-        // out to be SELECT-ish — hand that same session to the cursor's
-        // actor. Preparing on one socket and binding on another would be
-        // both wasteful and, for temp tables/search_path, wrong.
         let session = self.pool.acquire().await?;
         let stmt = session.prepare(&text).await.map_err(map_pg_error)?;
         let is_select_ish = !stmt.columns().is_empty();
@@ -131,17 +89,6 @@ impl PgConnection {
             return Ok(Box::new(AckCursor::new(affected)));
         }
 
-        // SELECT-ish: portals only exist inside a transaction. Wrapped
-        // read-only, since this is a transparent, single-statement wrapper
-        // the caller never explicitly commits — see `actor.rs` module docs.
-        //
-        // Known gap: a write that also returns rows (`INSERT ... RETURNING`)
-        // reaches this branch too (it has columns) and will fail inside a
-        // READ ONLY transaction. Distinguishing "returns rows because it's a
-        // SELECT" from "returns rows because of a RETURNING clause" needs
-        // the statement's command tag, which `Statement::columns()` alone
-        // doesn't give us. Documented as a known limitation in the crate
-        // report rather than papered over.
         drop(stmt);
         let cmd_tx = actor::spawn(session.into_guard(), true, None);
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -155,10 +102,6 @@ impl PgConnection {
             .map_err(|_| DbError::Closed)?;
         match reply_rx.await.map_err(|_| DbError::Closed)?? {
             ExecOutcome::Ack { affected } => {
-                // No portal was bound, so nothing will ever release this
-                // actor's session for us — end its transaction now instead of
-                // leaving a socket pinned until the task happens to be
-                // scheduled after `cmd_tx` drops.
                 Self::rollback(&cmd_tx).await;
                 Ok(Box::new(AckCursor::new(affected)))
             }
@@ -206,10 +149,6 @@ impl PgConnection {
                     return Err(e);
                 }
             };
-            // A generated mutation must affect exactly one row or it rolls
-            // back: a row identity that now matches zero or many rows means
-            // the grid's picture of the table is stale, and editing on a
-            // stale picture silently rewrites the wrong rows.
             if !matches!(m, Mutation::Insert { .. }) && affected != 1 {
                 let _ = Self::rollback(&cmd_tx).await;
                 return Err(DbError::Query {
@@ -277,17 +216,10 @@ impl Connection for PgConnection {
     }
 
     fn canceller(&self) -> Arc<dyn Canceller> {
-        // A logical connection can own several physical sessions, so "cancel
-        // this connection's work" means cancelling each of them; the pool is
-        // snapshotted at `cancel()` time so sessions dialled after this call
-        // are covered too.
         Arc::new(PgCanceller::new(self.pool.clone()))
     }
 
     fn catalog(&self) -> Arc<dyn Catalog> {
-        // Deliberately the *pool*, not a pinned client: catalog browsing must
-        // keep working while a result cursor is open (that interleaving is
-        // exactly what used to deadlock).
         Arc::new(PgCatalog::new(self.pool.clone()))
     }
 
@@ -301,21 +233,11 @@ impl Connection for PgConnection {
     }
 
     async fn set_read_only(&self, on: bool) -> Result<Enforcement, DbError> {
-        // Recorded on the pool, not fired once at one socket: every session
-        // this connection owns — including ones dialled later, and ones
-        // pinned by a cursor right now — reconciles to this before it is
-        // handed out again.
         self.pool.set_read_only(on).await?;
         Ok(Enforcement::Server)
     }
 
     async fn close(&self) -> Result<(), DbError> {
-        // Idempotent, and deliberately non-blocking: idle sessions have their
-        // `Client` dropped here so the sockets shut down promptly, a session
-        // still pinned by a live cursor is released by its own actor, and
-        // every subsequent operation sees the closed flag and returns
-        // `DbError::Closed`, per the trait's contract. Waiting for a pinned
-        // session here would re-create the hang this design removes.
         self.pool.close();
         Ok(())
     }

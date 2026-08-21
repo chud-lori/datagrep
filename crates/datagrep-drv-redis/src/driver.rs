@@ -1,5 +1,3 @@
-//! [`RedisDriver`]: the `datagrep-api` `Driver` impl.
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,47 +17,10 @@ use crate::catalog::key_enumeration_from_dbsize;
 use crate::connection::RedisConnection;
 use crate::error::map_redis_error;
 
-/// Flags this driver's connections report, decided up front and explained
-/// per-flag. Callers branch on capabilities, never on the driver's id.
-///
-/// **Deliberately absent, with reasons** (see the crate-level report for the
-/// full write-up):
-/// - `TRANSACTIONS` — `MULTI`/`EXEC` is a single optimistic pipeline, not an
-///   interactive transaction (no mid-transaction reads of your own writes,
-///   no savepoints); `begin()` returns `DbError::Unsupported` so the UI
-///   greys the button rather than offering a control that lies.
-/// - `DDL` — Redis has no schema to declare.
-/// - `SCHEMA_DECLARED` — same reason; the catalog is enumeration-only.
-/// - `EXACT_COUNT_CHEAP` — `DBSIZE` is O(1) and exact for the *whole*
-///   keyspace, but counting a prefix subset has no O(1) form; see
-///   `connection.rs`'s `Op::Count` handling.
-/// - `RANDOM_ACCESS_PAGE` — SCAN cursors are the only pagination Redis has.
-/// - `READ_ONLY_SESSION` — Redis has no server-side read-only session mode;
-///   `set_read_only` always returns `Enforcement::Client`.
-/// - `SERVER_CANCEL` — cannot be expressed as a single static bit: almost
-///   every command can only be `ClientAbandon`-cancelled, but a *blocking*
-///   command (`BLPOP`, `WAIT`, `XREAD BLOCK`, …) genuinely can be killed
-///   server-side via a second connection's `CLIENT KILL ID`. Rather than
-///   set a capability flag that's true for some commands and a lie for
-///   most, this is left unset and `RedisCanceller::kind()` reports the
-///   truth dynamically, per cancel, which is exactly what `CancelOutcome`
-///   exists for. Flagged as a `datagrep-api` capability-model gap in the
-///   crate report.
-///
-/// `KEY_ENUMERATION` is intentionally *not* included in this constant: it
-/// depends on a post-handshake `DBSIZE` probe and is added by
-/// [`RedisConnection::capabilities`], never here.
-/// `ATOMIC_BATCH`: `execute_mutate` sends the whole batch as one
-/// `MULTI`/`EXEC` pipeline (`pipe.atomic()`), so a `MutationBatch` really is
-/// all-or-nothing — distinct from `TRANSACTIONS`, which stays off because
-/// Redis has no interactive `begin`.
 pub const REDIS_CAPS: Caps = Caps::EDITABLE_RESULTS
     .union(Caps::EXPRESSION_FILTER)
     .union(Caps::ATOMIC_BATCH);
 
-/// Baseline (pre-handshake) capabilities. `KEY_ENUMERATION` is optimistically
-/// set here — before connecting there is no `DBSIZE` to probe — and is the
-/// one flag `RedisConnection::capabilities` may turn back off.
 pub fn redis_capabilities_baseline() -> Capabilities {
     Capabilities {
         flags: REDIS_CAPS | Caps::KEY_ENUMERATION,
@@ -72,8 +33,6 @@ pub fn redis_capabilities_baseline() -> Capabilities {
     }
 }
 
-/// The Redis driver adapter. Stateless — all per-server state
-/// lives in the [`RedisConnection`]s it creates.
 #[derive(Debug, Default)]
 pub struct RedisDriver;
 
@@ -174,13 +133,6 @@ impl Driver for RedisDriver {
             .or_else(|| str_field(cfg, "password").ok().flatten());
 
         if tls {
-            // TLS deferred: the required dependency list (`redis` with only
-            // `tokio-comp`/`connection-manager`) carries no TLS backend
-            // (`tls-native-tls`/`tls-rustls`). `config_schema`/`parse_url`
-            // stay honest about the field existing; silently downgrading a
-            // `rediss://` request to plaintext would be a security
-            // regression, so this fails fast instead (same call as
-            // `datagrep-drv-postgres`'s documented TLS deviation).
             return Err(DbError::Tls(
                 "TLS not yet implemented for the Redis driver; use tls=false for now".into(),
             ));
@@ -196,11 +148,6 @@ impl Driver for RedisDriver {
             if let Some(p) = &password {
                 info = info.set_password(p);
             }
-            // RESP3 unlocks the richer reply types `value.rs` maps
-            // (Double, Boolean, Map, BigNumber, …); under RESP2 everything
-            // downgrades to bulk strings/arrays and the mapping in
-            // `value.rs` never actually exercises those arms against a real
-            // server.
             info.set_protocol(redis::ProtocolVersion::RESP3)
         };
         let conn_info = redis::ConnectionAddr::Tcp(host.clone(), port)
@@ -276,19 +223,6 @@ fn bool_field(cfg: &ResolvedConfig, key: &str) -> Result<Option<bool>, DbError> 
     }
 }
 
-/// Hand-rolled `redis://`/`rediss://` splitter.
-///
-/// Grammar, matching the `redis` crate's own documented format
-/// (`redis-1.5.0/src/connection.rs`, `IntoConnectionInfo for &str`):
-/// `{redis|rediss}://[username][:password]@]host[:port][/db]`. Deliberately
-/// does not depend on the `redis` crate's own URL parser: that parser
-/// builds a private `ConnectionInfo` whose fields (`addr`, `redis`) have no
-/// public constructor from parts other than round-tripping through another
-/// URL string — reconstructing one from `ConnectionConfig`'s discrete
-/// fields, only to pass it back through `connect`, would be a pointless
-/// second serialization. Query strings and fragments (`?protocol=resp3`,
-/// `#insecure`) are accepted but ignored — this driver decides RESP3 and
-/// TLS posture itself (`connect`), never takes them from a pasted URL.
 fn parse_redis_url(url: &str) -> Result<ConnectionConfig, ConfigError> {
     let (scheme, rest) = url
         .split_once("://")
@@ -410,8 +344,6 @@ mod tests {
             cfg.values.get("password"),
             Some(&ConfigValue::Str("secret".into()))
         );
-        // No explicit db in the URL: defaults to 0 rather than leaving the
-        // field unset (config_schema declares `db` required).
         assert_eq!(cfg.values.get("db"), Some(&ConfigValue::Num(0.0)));
     }
 

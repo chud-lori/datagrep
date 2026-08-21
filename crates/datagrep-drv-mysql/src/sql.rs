@@ -1,34 +1,15 @@
-//! SQL generation for MySQL/MariaDB: identifier quoting and the `Op` → SQL
-//! compiler.
-//!
-//! The injection rules for this driver: values are ALWAYS bound as `?`
-//! parameters through the binary (prepared) protocol — never
-//! spliced as text — and identifiers always go through [`quote_ident`].
-//! (`mysql_async` has no client-side parameter interpolation for positional
-//! `?` params the way mysql-js's `interpolateParams` does: `exec_*` sends a
-//! real `COM_STMT_PREPARE`/`COM_STMT_EXECUTE` pair, so a bound value can
-//! never be re-parsed as SQL. The text-protocol `query_*` path takes no
-//! params at all, which is exactly why this module never emits a literal.)
-
 use std::fmt::Write as _;
 
 use datagrep_api::{
     DbError, DdlOp, FieldPath, ObjectKind, ObjectPath, PathSeg, Predicate, SortKey, Value,
 };
 
-/// Which server we are actually talking to — decided from `@@version` at
-/// connect. Only used where the two dialects genuinely diverge (EXPLAIN
-/// ANALYZE syntax, `IF [NOT] EXISTS` on index DDL); never for anything a
-/// capability flag should cover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flavor {
     MySql,
     MariaDb,
 }
 
-/// Quote a MySQL identifier: backtick style, embedded backticks doubled.
-/// Embedded NUL is rejected outright — MySQL identifiers cannot contain NUL
-/// and truncating at it would let a name lie about itself.
 pub fn quote_ident(ident: &str) -> Result<String, DbError> {
     if ident.contains('\0') {
         return Err(DbError::Unsupported {
@@ -47,10 +28,6 @@ pub fn quote_ident(ident: &str) -> Result<String, DbError> {
     Ok(out)
 }
 
-/// Render an [`ObjectPath`] as a dot-joined, individually quoted MySQL
-/// reference. MySQL's namespace is two-level (`database`.`table`) — there is
-/// no schema tier — so paths deeper than 2 parts are rejected honestly
-/// rather than silently truncated.
 pub fn quote_object_path(path: &ObjectPath) -> Result<String, DbError> {
     quote_parts(path.parts())
 }
@@ -80,15 +57,6 @@ fn quote_parts(parts: &[std::sync::Arc<str>]) -> Result<String, DbError> {
     Ok(out)
 }
 
-/// Render a [`FieldPath`] as a value-producing SQL expression against a
-/// quoted base column.
-///
-/// A bare single-segment path (`status`) is just the quoted column. A deeper
-/// path (`address.city`, `tags[0]`) becomes
-/// `JSON_UNQUOTE(JSON_EXTRACT(`col`, '$.city'))` — the function form is used
-/// (not the `->>` operator) because MariaDB never implemented `->>`. The
-/// JSON path is built only from validated identifier/index tokens; anything
-/// that could escape the single-quoted literal is rejected, never escaped.
 pub fn field_path_expr(path: &FieldPath) -> Result<String, DbError> {
     let segs = path.segments();
     let (head, rest) = segs.split_first().ok_or_else(|| DbError::Unsupported {
@@ -110,9 +78,6 @@ pub fn field_path_expr(path: &FieldPath) -> Result<String, DbError> {
     for seg in rest {
         match seg {
             PathSeg::Field(name) => {
-                // MySQL JSON path unquoted members must be identifier-like;
-                // anything else would need double-quoting inside the path
-                // literal, which opens escaping questions we refuse to have.
                 if name.is_empty()
                     || !name
                         .chars()
@@ -132,8 +97,6 @@ pub fn field_path_expr(path: &FieldPath) -> Result<String, DbError> {
     Ok(format!("JSON_UNQUOTE(JSON_EXTRACT({base}, '{json_path}'))"))
 }
 
-/// Accumulates `?` parameters while compiling a predicate/scan tree, so every
-/// `Value` in the request ends up bound, never spliced.
 #[derive(Default)]
 pub struct ParamBuilder {
     pub params: Vec<Value>,
@@ -146,9 +109,6 @@ impl ParamBuilder {
     }
 }
 
-/// Compile a [`Predicate`] to a SQL boolean expression, appending bound
-/// parameters to `pb`. Returns just the expression text — callers wrap it in
-/// `WHERE`.
 pub fn compile_predicate(pred: &Predicate, pb: &mut ParamBuilder) -> Result<String, DbError> {
     Ok(match pred {
         Predicate::Eq { field, value } => cmp(field, "=", value, pb)?,
@@ -159,8 +119,6 @@ pub fn compile_predicate(pred: &Predicate, pb: &mut ParamBuilder) -> Result<Stri
         Predicate::Ge { field, value } => cmp(field, ">=", value, pb)?,
         Predicate::In { field, values } => {
             if values.is_empty() {
-                // An empty IN-list matches nothing; a tautological false is
-                // valid SQL where `IN ()` is not.
                 return Ok("FALSE".to_string());
             }
             let expr = field_path_expr(field)?;
@@ -176,8 +134,6 @@ pub fn compile_predicate(pred: &Predicate, pb: &mut ParamBuilder) -> Result<Stri
             format!("{expr} LIKE {ph}")
         }
         Predicate::Exists { field } => {
-            // Top-level SQL columns always "exist" once the row does; a
-            // nested path is a JSON-presence test.
             if field.segments().len() <= 1 {
                 "TRUE".to_string()
             } else {
@@ -217,12 +173,6 @@ fn join_bool(parts: &[Predicate], op: &str, pb: &mut ParamBuilder) -> Result<Str
     Ok(rendered.join(&format!(" {op} ")))
 }
 
-/// Compile `ORDER BY` for a [`SortKey`] list. MySQL/MariaDB have no
-/// `NULLS FIRST`/`NULLS LAST` clause, and the engines' implicit placement
-/// differs by direction — so null placement is always emulated explicitly
-/// with a leading `(expr IS NULL)` key, making the request's `nulls_first`
-/// deterministic instead of silently engine-defined (`SortKey` doc's whole
-/// point).
 pub fn compile_order(order: &[SortKey]) -> Result<String, DbError> {
     let mut parts = Vec::with_capacity(order.len());
     for k in order {
@@ -234,7 +184,6 @@ pub fn compile_order(order: &[SortKey]) -> Result<String, DbError> {
     Ok(parts.join(", "))
 }
 
-/// Compile a projection list, or `*` when unset.
 pub fn compile_project(project: &Option<Vec<FieldPath>>) -> Result<String, DbError> {
     match project {
         None => Ok("*".to_string()),
@@ -249,10 +198,6 @@ pub fn compile_project(project: &Option<Vec<FieldPath>>) -> Result<String, DbErr
     }
 }
 
-/// Compile `Op::Scan` to `(sql, params)`. Keyset `resume` is accepted but
-/// ignored in v1 — same honest situation as the sibling drivers: this
-/// driver's cursor never emits a `ResumeToken`, so no caller can construct
-/// one to pass back in.
 pub fn compile_scan(
     path: &ObjectPath,
     filter: &Option<Predicate>,
@@ -277,11 +222,6 @@ pub fn compile_scan(
     Ok((sql, pb.params))
 }
 
-/// Compile `Op::Count`. `EXACT_COUNT_CHEAP` is honest for InnoDB only in the
-/// "cheap enough" sense (a `COUNT(*)` walks the smallest index, it does not
-/// scan rows); `exact: false` still runs the real count in v1 — the
-/// `information_schema.tables.table_rows` estimate is surfaced through
-/// `describe()` instead.
 pub fn compile_count(
     path: &ObjectPath,
     filter: &Option<Predicate>,
@@ -297,8 +237,6 @@ pub fn compile_count(
     Ok((sql, pb.params))
 }
 
-/// MySQL indexes are table-scoped: `DROP INDEX` and `ALTER TABLE … RENAME
-/// INDEX` both need the table, not just the name.
 fn split_index_path(path: &ObjectPath) -> Result<(String, String), DbError> {
     let parts = path.parts();
     let (name, owner) = parts
@@ -312,8 +250,6 @@ fn split_index_path(path: &ObjectPath) -> Result<(String, String), DbError> {
     Ok((quote_parts(owner)?, quote_ident(name)?))
 }
 
-/// Whole columns only: a JSON path key would silently become a functional
-/// index, which needs a parenthesised expression and a generated column.
 fn index_column(path: &FieldPath) -> Result<String, DbError> {
     match path.segments() {
         [PathSeg::Field(name)] => quote_ident(name),
@@ -325,12 +261,6 @@ fn index_column(path: &FieldPath) -> Result<String, DbError> {
     }
 }
 
-/// Compile a structured [`DdlOp`] to one statement. Names are identifiers,
-/// never values, so nothing here binds a parameter.
-///
-/// MySQL 8.0 has no `IF NOT EXISTS` on `CREATE INDEX` and no `IF EXISTS` on
-/// `DROP INDEX` — both are ER_PARSE_ERROR — where MariaDB 11 accepts them, so
-/// the guard is refused by flavor rather than dropped.
 pub fn compile_ddl(op: &DdlOp, flavor: Flavor) -> Result<String, DbError> {
     match op {
         DdlOp::Drop {
@@ -419,11 +349,6 @@ pub fn compile_ddl(op: &DdlOp, flavor: Flavor) -> Result<String, DbError> {
     }
 }
 
-/// Wrap an inner request's compiled SQL in the flavor's EXPLAIN form.
-/// `analyze` genuinely executes the statement: MySQL 8.0.18+ spells it
-/// `EXPLAIN ANALYZE`, MariaDB spells it `ANALYZE` — MariaDB has no
-/// `EXPLAIN ANALYZE` at all, so emitting the MySQL spelling there would be a
-/// guaranteed syntax error, not a degraded result.
 pub fn wrap_explain(inner_sql: &str, analyze: bool, flavor: Flavor) -> String {
     match (analyze, flavor) {
         (false, _) => format!("EXPLAIN {inner_sql}"),
@@ -432,17 +357,11 @@ pub fn wrap_explain(inner_sql: &str, analyze: bool, flavor: Flavor) -> String {
     }
 }
 
-/// A single generated mutation statement plus its bound params.
 pub struct MutationSql {
     pub sql: String,
     pub params: Vec<Value>,
 }
 
-/// Compile one `Mutation` into `UPDATE … SET … WHERE <key> = ?`,
-/// `INSERT INTO … VALUES (…)`, or `DELETE FROM … WHERE <key> = ?`. The row
-/// identity arrives as named `(FieldPath, Value)` pairs, so the WHERE clause
-/// compiles directly — no `information_schema` lookup, no positional
-/// convention.
 pub fn compile_mutation(m: &datagrep_api::Mutation) -> Result<MutationSql, DbError> {
     use datagrep_api::Mutation;
     let mut pb = ParamBuilder::default();
@@ -517,9 +436,6 @@ pub fn compile_mutation(m: &datagrep_api::Mutation) -> Result<MutationSql, DbErr
     }
 }
 
-/// A non-empty `expect` precondition must be honoured or refused, never
-/// dropped — dropping it would turn a guarded write into a clobber. This
-/// driver does not compile preconditions yet, so it refuses.
 fn refuse_expect(expect: &[(FieldPath, Value)]) -> Result<(), DbError> {
     if expect.is_empty() {
         return Ok(());
@@ -529,8 +445,6 @@ fn refuse_expect(expect: &[(FieldPath, Value)]) -> Result<(), DbError> {
     })
 }
 
-/// The named row identity as `` `col` = ? AND … ``. An empty key is refused —
-/// we never guess which row to affect.
 fn key_where(key: &[(FieldPath, Value)], pb: &mut ParamBuilder) -> Result<String, DbError> {
     if key.is_empty() {
         return Err(DbError::Unsupported {
@@ -546,8 +460,6 @@ fn key_where(key: &[(FieldPath, Value)], pb: &mut ParamBuilder) -> Result<String
     Ok(parts.join(" AND "))
 }
 
-/// Minimal JSON string escaper for the `describe()` `indexes` array — kept
-/// local so this crate doesn't grow a serde_json dependency for one field.
 pub fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     for c in s.chars() {
@@ -603,8 +515,6 @@ mod tests {
             .unwrap(),
             "RENAME TABLE `app`.`users` TO `app`.`people`"
         );
-        // MySQL has no separate schema namespace, so the catalog never
-        // produces one and neither does this.
         assert!(compile_ddl(
             &DdlOp::Drop {
                 path: users,
@@ -726,8 +636,6 @@ mod tests {
         assert_eq!(quote_object_path(&p).unwrap(), "`app`.`Users`");
         let single = ObjectPath::new(vec![Arc::from("t")]);
         assert_eq!(quote_object_path(&single).unwrap(), "`t`");
-        // MySQL has no db.schema.table — a 3-level path is refused, not
-        // silently truncated.
         let deep = ObjectPath::new(vec![Arc::from("a"), Arc::from("b"), Arc::from("c")]);
         assert!(quote_object_path(&deep).is_err());
         assert!(quote_object_path(&ObjectPath::root()).is_err());
@@ -894,8 +802,6 @@ mod tests {
 
     #[test]
     fn non_empty_expect_is_refused_not_dropped() {
-        // This driver does not compile `expect` preconditions yet; a caller
-        // asking for check-and-set must get Unsupported, never a plain write.
         let m = datagrep_api::Mutation::Update {
             path: ObjectPath::new(vec![Arc::from("t")]),
             key: vec![(FieldPath::field("id"), Value::I64(1))],

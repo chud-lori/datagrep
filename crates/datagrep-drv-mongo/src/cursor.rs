@@ -1,6 +1,3 @@
-//! [`MongoCursor`] (ticket item 3) plus the one-shot [`DocsCursor`]/[`AckCursor`]
-//! used for command replies, counts, and mutation acknowledgements.
-
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -16,23 +13,12 @@ use datagrep_api::value::Value;
 use crate::error::map_mongo_error;
 use crate::value::bson_to_value;
 
-/// How (if at all) this cursor can hand back a [`ResumeToken`] (ticket item
-/// 3: keyset on `_id` for `find`, `None` with a documented reason for
-/// `aggregate`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResumeStrategy {
-    /// Plain `find`: encode `{_id: {$gt: last}}` from the last document's
-    /// `_id` seen so far.
     IdKeyset,
-    /// `aggregate` (or anything else without a stable, index-backed cursor
-    /// key the core can safely re-issue a query against).
     None,
 }
 
-/// The two live-cursor shapes this driver produces: a plain `find`/
-/// `aggregate`/raw-cursor-command cursor, or one bound to an explicit
-/// transaction's [`mongodb::ClientSession`] (see `transaction.rs`'s module
-/// doc for why a full actor task turned out to be unnecessary here).
 enum Inner {
     Plain(mongodb::Cursor<BsonDocument>),
     Session {
@@ -41,12 +27,6 @@ enum Inner {
     },
 }
 
-/// Streams `find`/`aggregate`/raw-cursor-command results (ticket item 3).
-/// Each BSON document becomes a `Value::Document` with key order preserved
-/// (the order a document was written in is information the grid can show),
-/// and new top-level field paths emit `SchemaDelta::AddColumn` as they're
-/// first observed — so the grid grows a column mid-stream instead of having
-/// to refetch once a later document turns out to be wider.
 pub struct MongoCursor {
     inner: Option<Inner>,
     shape: Shape,
@@ -62,9 +42,6 @@ impl MongoCursor {
             inner: Some(Inner::Plain(cursor)),
             shape: Shape::Documents {
                 root_hint: None,
-                // Mongo documents do carry `_id`, but declaring it here waits
-                // for the write path to consume it — `None` keeps the stream
-                // truthfully non-editable for now.
                 identity: None,
             },
             resume,
@@ -83,9 +60,6 @@ impl MongoCursor {
             inner: Some(Inner::Session { cursor, session }),
             shape: Shape::Documents {
                 root_hint: None,
-                // Mongo documents do carry `_id`, but declaring it here waits
-                // for the write path to consume it — `None` keeps the stream
-                // truthfully non-editable for now.
                 identity: None,
             },
             resume,
@@ -120,12 +94,6 @@ impl MongoCursor {
         }
     }
 
-    /// Record any top-level field paths not yet seen on this cursor as
-    /// `SchemaDelta::AddColumn` (ticket item 3). Deliberately shallow (only
-    /// the document root): the `ViewProjection`/`FieldTrie` machinery that
-    /// ranks and promotes *nested* paths into columns is a datagrep-core
-    /// concern — this cursor only reports what's true about the wire-level
-    /// documents it streamed.
     fn track_schema(&mut self, doc: &BsonDocument) -> Vec<datagrep_api::shape::SchemaDelta> {
         let mut deltas = Vec::new();
         for (k, v) in doc.iter() {
@@ -213,20 +181,11 @@ impl Cursor for MongoCursor {
     }
 
     async fn close(&mut self) -> Result<(), DbError> {
-        // Dropping the inner `mongodb::Cursor`/`SessionCursor` is what makes
-        // "always drop the cursor" (ticket item 6) true: the driver's own
-        // `Drop` impl issues `killCursors` for any not-yet-exhausted server
-        // cursor. Taking the `Option` guarantees that happens exactly once,
-        // deterministically, rather than waiting on whenever this struct
-        // itself is eventually dropped.
         self.inner.take();
         Ok(())
     }
 }
 
-/// Decode a Mongo `_id`-keyset [`ResumeToken`] back into the `Bson` value to
-/// filter on (ticket item 3's round-trip; see `connection.rs`'s `Op::Scan`
-/// compilation).
 pub fn decode_id_keyset(token: &ResumeToken) -> Result<Bson, DbError> {
     let wrapper: BsonDocument = bson::from_slice(&token.0).map_err(|e| {
         DbError::Protocol(format!("resume token is not a valid keyset wrapper: {e}"))
@@ -237,10 +196,6 @@ pub fn decode_id_keyset(token: &ResumeToken) -> Result<Bson, DbError> {
         .ok_or_else(|| DbError::Protocol("resume token wrapper missing `_id`".to_string()))
 }
 
-/// A cursor that yields a fixed, already-materialized set of documents
-/// exactly once — used for raw-command replies that aren't cursor-shaped,
-/// `explain` output, and count/mutation acknowledgements framed as one
-/// visible document (ticket items 2 and 5).
 pub struct DocsCursor {
     shape: Shape,
     docs: Vec<Value>,
@@ -252,9 +207,6 @@ impl DocsCursor {
         Self {
             shape: Shape::Documents {
                 root_hint: None,
-                // Mongo documents do carry `_id`, but declaring it here waits
-                // for the write path to consume it — `None` keeps the stream
-                // truthfully non-editable for now.
                 identity: None,
             },
             docs,
@@ -299,9 +251,6 @@ impl Cursor for DocsCursor {
     }
 }
 
-/// A one-shot `Shape::Ack { affected, message }` cursor for mutations and
-/// DDL, the `message` used to honestly state
-/// which count strategy ran (ticket item 2: "surfacing which ran").
 pub struct AckCursor {
     shape: Shape,
     done: bool,

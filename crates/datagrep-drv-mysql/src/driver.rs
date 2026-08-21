@@ -1,7 +1,3 @@
-//! [`MySqlDriver`]: the `Driver` impl. Accepts both MySQL and MariaDB (same
-//! wire protocol); the actual product and version are detected from
-//! `@@version` at connect and reported honestly in `ServerInfo`.
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,10 +20,6 @@ use crate::connection::MySqlConnection;
 use crate::error::map_mysql_error;
 use crate::sql::Flavor;
 
-/// Capability flags shared by both flavors at any supported version.
-/// `EXPLAIN_ANALYZE` is the only version-gated flag — added post-handshake
-/// by [`mysql_capabilities`] when the server actually supports it (MySQL
-/// 8.0.18+, MariaDB 10.1+ via its `ANALYZE` spelling).
 pub const MYSQL_BASE_CAPS: Caps = Caps::TRANSACTIONS
     .union(Caps::NESTED_TRANSACTIONS)
     .union(Caps::DDL)
@@ -43,13 +35,8 @@ pub const MYSQL_BASE_CAPS: Caps = Caps::TRANSACTIONS
     .union(Caps::POSITIONAL_PARAMS)
     .union(Caps::EXPORT_STREAMING)
     .union(Caps::EXPRESSION_FILTER)
-    // `execute_mutate` wraps the batch in an explicit transaction and rolls
-    // back on any failure — all-or-nothing, honestly claimable.
     .union(Caps::ATOMIC_BATCH);
 
-/// Does this server version support a real "execute and report timings"
-/// EXPLAIN? MySQL grew `EXPLAIN ANALYZE` in 8.0.18; MariaDB has had
-/// `ANALYZE <statement>` since 10.1.
 pub fn supports_explain_analyze(flavor: Flavor, version: (u16, u16, u16)) -> bool {
     match flavor {
         Flavor::MySql => version >= (8, 0, 18),
@@ -57,7 +44,6 @@ pub fn supports_explain_analyze(flavor: Flavor, version: (u16, u16, u16)) -> boo
     }
 }
 
-/// Capabilities for a known flavor + version.
 pub fn mysql_capabilities(flavor: Flavor, version: (u16, u16, u16)) -> Capabilities {
     let mut flags = MYSQL_BASE_CAPS;
     if supports_explain_analyze(flavor, version) {
@@ -70,17 +56,10 @@ pub fn mysql_capabilities(flavor: Flavor, version: (u16, u16, u16)) -> Capabilit
         param_style: ParamStyle::QuestionMark,
         language: LanguageId::Sql(SqlDialect::Mysql),
         identifier_quote: '`',
-        // database → table|view → column. MySQL has no database/schema
-        // split; this is the honest two-organizational-level shape, not a
-        // Postgres imitation.
         catalog_levels: 3,
     }
 }
 
-/// Parse `@@version` into flavor + numeric version. MariaDB examples:
-/// `10.11.6-MariaDB-1:10.11.6+maria~ubu2204` and the replication-era
-/// `5.5.5-10.11.6-MariaDB` (the `5.5.5-` prefix is a compatibility shim and
-/// is stripped). MySQL examples: `8.0.36`, `8.4.0-commercial`.
 pub fn parse_server_version(version: &str) -> (Flavor, (u16, u16, u16)) {
     let flavor = if version.to_ascii_lowercase().contains("mariadb") {
         Flavor::MariaDb
@@ -107,8 +86,6 @@ pub fn parse_server_version(version: &str) -> (Flavor, (u16, u16, u16)) {
     (flavor, (nums[0], nums[1], nums[2]))
 }
 
-/// The MySQL/MariaDB driver adapter. Stateless — all per-server state lives
-/// in the [`MySqlConnection`]s it creates.
 #[derive(Debug, Default)]
 pub struct MySqlDriver;
 
@@ -129,8 +106,6 @@ impl Driver for MySqlDriver {
     }
 
     fn capabilities(&self) -> Capabilities {
-        // Pre-handshake baseline: assume a modern server; the connection's
-        // post-handshake capabilities() is the version-aware authority.
         mysql_capabilities(Flavor::MySql, (8, 0, 18))
     }
 
@@ -182,9 +157,6 @@ impl Driver for MySqlDriver {
     }
 
     fn parse_url(&self, url: &str) -> Result<ConnectionConfig, ConfigError> {
-        // Delegate to mysql_async's own URL parser rather than hand-rolling
-        // a second one that could disagree with the one we connect with.
-        // `mariadb://` is accepted as an alias — same wire protocol.
         let normalized = url
             .strip_prefix("mariadb://")
             .map(|rest| format!("mysql://{rest}"))
@@ -206,8 +178,6 @@ impl Driver for MySqlDriver {
             values.insert("user".to_string(), ConfigValue::Str(user.to_string()));
         }
         if let Some(pass) = opts.pass() {
-            // The caller routes this into the keychain and zeroizes the
-            // source string — a password must not linger in a config map.
             values.insert("password".to_string(), ConfigValue::Str(pass.to_string()));
         }
         if let Some(db) = opts.db_name() {
@@ -244,11 +214,7 @@ impl Driver for MySqlDriver {
             .user(Some(user))
             .pass(password)
             .db_name(database)
-            // Always TCP — never silently switch to a unix socket for
-            // "localhost" the way libmysql does; the profile said host:port.
             .prefer_socket(false)
-            // Pin the session to UTC so TIMESTAMP values arrive as their
-            // UTC reading and TzSpec::Utc is the truth (see value.rs docs).
             .setup(vec!["SET time_zone = '+00:00'".to_string()]);
         let opts = Opts::from(builder);
 
@@ -266,8 +232,6 @@ impl Driver for MySqlDriver {
             return Err(DbError::Cancelled);
         }
 
-        // One cheap post-handshake query: product + version (MariaDB
-        // announces itself in @@version, e.g. "10.11.6-MariaDB-1").
         let (version, version_comment): (String, String) = conn
             .query_first("SELECT @@version, @@version_comment")
             .await
@@ -289,9 +253,6 @@ impl Driver for MySqlDriver {
         };
         let caps = mysql_capabilities(flavor, parsed_version);
 
-        // Second-connection pool for `KILL QUERY`: the primary connection is
-        // busy running the statement being killed, so the kill needs its own
-        // socket. min 0 / max 2, so it opens nothing until the first cancel.
         let kill_opts =
             OptsBuilder::from_opts(opts).pool_opts(PoolOpts::default().with_constraints(
                 PoolConstraints::new(0, 2).expect("0 <= 2 is a valid pool constraint"),

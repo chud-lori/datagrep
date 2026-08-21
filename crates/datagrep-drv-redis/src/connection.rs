@@ -1,38 +1,3 @@
-//! [`RedisConnection`]: the `datagrep-api` `Connection` impl.
-//!
-//! Three request doors, matching `datagrep-api`'s `Request` enum:
-//! - [`Request::Native`] — hand-typed redis-cli text. Split into one command
-//!   per line with `datagrep_lang::redis` (already built/tested — never
-//!   reimplemented here), each dispatched in turn. The *last* command's
-//!   reply becomes the returned cursor: `Shape::Ack` for `OK`/nil/integer
-//!   replies, `Shape::Pairs` otherwise. Hand-typed text is never rewritten
-//!   or translated — only tokenized and dispatched as the user wrote it.
-//! - [`Request::Op`]`(Scan)` — the portable browse path. `SCAN`/`HSCAN`/
-//!   `SSCAN`/`ZSCAN` only, cursor-paged, **never `KEYS`** — `KEYS` blocks
-//!   the server for the length of the whole keyspace walk.
-//!   A 3-part path (one key) dispatches `TYPE` first and routes to the
-//!   right bounded reader — `RedisPairsCursor` for hash/set/zset,
-//!   `ListCursor` for a list, `StreamCursor` for a stream, or a one-shot
-//!   `GET` for a string — so a 1M-field hash pages instead of coming back
-//!   whole.
-//! - [`Request::Op`]`(Count)` — `DBSIZE` for the whole keyspace (exact,
-//!   O(1)); a per-key cardinality command for one key; a SCAN walk
-//!   (exact, cancellable) or a single-round SCAN extrapolation (estimate)
-//!   for a filtered/prefixed subset, since Redis has no O(1) way to count a
-//!   subset (`driver.rs`'s `REDIS_CAPS` doc: "`EXACT_COUNT_CHEAP`").
-//! - [`Request::Op`]`(Mutate)` — `SET`/`HSET`/`DEL`, batched through one
-//!   `MULTI`/`EXEC` pipeline so the batch is atomic "where the engine
-//!   allows" (`MutationBatch`'s own doc), even though interactive
-//!   transactions (`begin`) are not offered — see that method's doc for why
-//!   those are different claims.
-//!
-//! Cancellation: every request gets a fresh [`CancelFlag`],
-//! stashed behind a mutex so a subsequently-obtained [`Canceller`] targets
-//! *this* request. Commands that block the connection waiting on the server
-//! (`BLPOP`, `WAIT`, `XREAD BLOCK`, …) additionally get their `CLIENT ID`
-//! recorded so the canceller can `CLIENT KILL ID` them — seeded via
-//! `crate::cmd::is_blocking_invocation`, already built and tested.
-
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -55,24 +20,11 @@ use crate::driver::redis_capabilities_baseline;
 use crate::error::map_redis_error;
 use crate::value::from_resp;
 
-/// One live Redis connection. Holds no direct socket state itself — the
-/// `redis` crate's own `ConnectionManager` (auto-reconnecting, cheaply
-/// cloneable) does that; this type adds only what `datagrep-api` requires on top
-/// (capability gating, cancellation bookkeeping, the closed flag).
 pub struct RedisConnection {
     manager: redis::aio::ConnectionManager,
     client: redis::Client,
     server_info: ServerInfo,
-    /// Whether `KEY_ENUMERATION` is on, decided once at connect time from a
-    /// `DBSIZE` probe (`driver.rs`, `catalog::key_enumeration_from_dbsize`).
-    /// Redis has no notion of the keyspace shrinking back under the
-    /// threshold mid-session that we'd want to react to — this is a
-    /// connect-time decision, not a live one.
     key_enumeration: bool,
-    /// The `CancelFlag` for whatever request is currently (or was most
-    /// recently) dispatched. `execute` replaces it with a fresh flag before
-    /// building a cursor — `CancelFlag` has no reset, so "uncancelled for
-    /// this request" can only mean "a new flag".
     active_cancel: Mutex<CancelFlag>,
     blocking_client_id: BlockingClientId,
     closed: AtomicBool,
@@ -104,8 +56,6 @@ impl RedisConnection {
         }
     }
 
-    /// Install a brand new [`CancelFlag`] as "the current request's flag"
-    /// and return a clone of it for the cursor about to be built.
     fn fresh_cancel(&self) -> CancelFlag {
         let flag = CancelFlag::new();
         let mut slot = self
@@ -118,10 +68,6 @@ impl RedisConnection {
 
     // ---- Request::Native --------------------------------------------
 
-    /// Split `text` into one redis-cli command per line (`datagrep_lang::redis`,
-    /// already tokenizer-tested), dispatch each in turn, and shape the
-    /// *last* command's reply. A non-final command that errors aborts the
-    /// remaining ones rather than silently skipping past a failure.
     async fn execute_native(
         &self,
         text: &str,
@@ -173,13 +119,6 @@ impl RedisConnection {
             .unwrap_or_else(|| Box::new(OneShotCursor::ack(None, Some(Arc::from("no command"))))))
     }
 
-    /// Recognizes a hand-typed `SCAN`/`HSCAN`/`SSCAN`/`ZSCAN` as the final
-    /// statement of a `Request::Native` buffer and routes it through the
-    /// same paging [`RedisPairsCursor`] the structured `Op::Scan` path
-    /// uses, so a user who types `SCAN 0 MATCH user:*` by hand still gets a
-    /// resumable, bounded cursor instead of a single unpaged round trip.
-    /// Returns `Ok(None)` for any other command, which falls through to the
-    /// generic one-shot dispatch.
     fn native_scan_cursor(
         &self,
         args: &[String],
@@ -226,11 +165,6 @@ impl RedisConnection {
         ))))
     }
 
-    /// Dispatch one already-built command. When `blocking` is set, learns
-    /// this connection's `CLIENT ID` immediately beforehand and clears it
-    /// immediately after, so `RedisCanceller` can `CLIENT KILL ID` it while
-    /// it's in flight and never target a stale id once it returns
-    /// (`canceller.rs`'s `blocking_client_id` doc).
     async fn dispatch(
         &self,
         mgr: &mut redis::aio::ConnectionManager,
@@ -285,11 +219,6 @@ impl RedisConnection {
                     });
                 }
                 if &**prefix == NO_PREFIX_BUCKET {
-                    // The catalog's sentinel bucket for keys with no `:` —
-                    // there is no MATCH glob for "does not contain a
-                    // character"; scan everything and filter client-side so
-                    // this shows exactly the keys `RedisCatalog::list_keys`
-                    // promised under this bucket (catalog.rs).
                     return Ok(Box::new(NoColonFilterCursor {
                         inner: RedisPairsCursor::new(
                             self.manager.clone(),
@@ -319,11 +248,6 @@ impl RedisConnection {
         }
     }
 
-    /// `TYPE key` first, then route to the bounded reader for that type —
-    /// never come back with the whole value in one shot for an aggregate
-    /// type. A missing key maps to
-    /// [`Value::Absent`], never [`Value::Null`] (value.rs's own doc: this is
-    /// exactly the caller who knows *why* it got a Nil).
     async fn key_value_cursor(
         &self,
         key: &str,
@@ -385,9 +309,6 @@ impl RedisConnection {
                     .query_async(&mut mgr)
                     .await
                     .map_err(map_redis_error)?;
-                // Honest re-mapping: if the key vanished between TYPE and
-                // GET, a Nil here means "now absent", not "stored null"
-                // (value.rs's documented Nil-is-overloaded caveat).
                 let mapped = match from_resp(v) {
                     Value::Null => Value::Absent,
                     other => other,
@@ -485,11 +406,6 @@ impl RedisConnection {
         }
     }
 
-    /// Full `SCAN` walk to completion, tallying matches. Exact, but O(N) in
-    /// keyspace size — the caller asked for `exact: true` knowingly
-    /// (`EXACT_COUNT_CHEAP` is false for exactly this reason). Reuses
-    /// `RedisPairsCursor` rather than re-parsing SCAN replies, and honors
-    /// `cancel` at each round the same way a browse SCAN would.
     async fn count_exact_scan(
         &self,
         glob: &str,
@@ -514,9 +430,6 @@ impl RedisConnection {
         )))
     }
 
-    /// One bounded `SCAN` round, extrapolated against `DBSIZE`. Cheap, but
-    /// explicitly approximate — the returned message says so, per
-    /// `Caps::EXACT_COUNT_CHEAP`'s "false → the UI shows '≥ N'" contract.
     async fn count_estimate_scan(
         &self,
         glob: &str,
@@ -547,8 +460,6 @@ impl RedisConnection {
             _ => 0,
         };
         if cursor.resume_token().is_none() {
-            // The whole keyspace fit in one SCAN round — the sample IS the
-            // exact count, so say so rather than dressing it up as one.
             return Ok(Box::new(OneShotCursor::ack(Some(matched_n as u64), None)));
         }
         let ratio = matched_n as f64 / sample_count as f64;
@@ -564,11 +475,6 @@ impl RedisConnection {
 
     // ---- Request::Op(Mutate) --------------------------------------------
 
-    /// `SET`/`HSET`/`DEL` batched through one `MULTI`/`EXEC` pipeline —
-    /// atomic across the batch even though `begin()` (interactive
-    /// transactions) is unsupported; MULTI/EXEC is exactly the "single
-    /// optimistic pipeline" `driver.rs`'s `REDIS_CAPS` doc already commits
-    /// to, just used once per batch instead of exposed interactively.
     async fn mutate(&self, batch: MutationBatch) -> Result<Box<dyn Cursor>, DbError> {
         if batch.mutations.is_empty() {
             return Ok(Box::new(OneShotCursor::ack(Some(0), None)));
@@ -694,13 +600,6 @@ impl Connection for RedisConnection {
         Arc::new(RedisCatalog::new(self.manager.clone()))
     }
 
-    /// Always fails: `MULTI`/`EXEC` is a single optimistic pipeline, not an
-    /// interactive transaction — no mid-transaction reads of your own
-    /// writes, no savepoints, no partial rollback. Returning `Unsupported`
-    /// here (rather than offering a `Transaction` that lies about what it
-    /// can do) is what lets the UI grey the "begin transaction" button
-    /// instead of erroring at runtime (`driver.rs`'s `REDIS_CAPS` doc
-    /// comment).
     async fn begin(&self, _opts: TxOpts) -> Result<Box<dyn Transaction>, DbError> {
         Err(DbError::Unsupported {
             feature: "interactive transactions — Redis MULTI/EXEC is a single optimistic \
@@ -710,39 +609,17 @@ impl Connection for RedisConnection {
         })
     }
 
-    /// Redis has **no server-side session read-only mode** — there is no
-    /// command that puts a connection into a state where the server itself
-    /// refuses writes for the rest of the session (unlike SQLite's `PRAGMA
-    /// query_only` or a Postgres `SET default_transaction_read_only`).
-    /// `Enforcement::Client` is the honest answer: only `datagrep-lang`'s
-    /// client-side command classifier stands between a write command and the
-    /// server, and the UI's read-only badge must say exactly that rather
-    /// than implying a server-side guarantee that does not exist here.
     async fn set_read_only(&self, _on: bool) -> Result<Enforcement, DbError> {
         self.ensure_open()?;
         Ok(Enforcement::Client)
     }
 
     async fn close(&self) -> Result<(), DbError> {
-        // No explicit teardown call exists on `redis::aio::ConnectionManager`
-        // — it has no server-side session state to release beyond the TCP
-        // socket itself, which drops when this `RedisConnection` does.
-        // Marking `closed` is what makes every *subsequent* call through
-        // this handle honestly report `DbError::Closed` instead of quietly
-        // continuing to work off a manager the caller believes is gone.
         self.closed.store(true, Ordering::SeqCst);
         Ok(())
     }
 }
 
-/// Shape a hand-typed command's reply. `OK`/nil/integer replies become
-/// `Shape::Ack`; a `Map`-shaped reply (e.g. `CONFIG GET`, `HGETALL` under
-/// RESP3) becomes field-keyed `Shape::Pairs`; an `Array`-shaped reply
-/// (`LRANGE`, `SMEMBERS`, …) becomes index-keyed `Shape::Pairs` — the same
-/// convention `ListCursor` uses for its own rows; anything else becomes a
-/// single row keyed by the command name so no reply is ever dropped on the
-/// floor — the crate's "never lose bytes" rule, extended here to "never
-/// lose a reply".
 fn native_reply_cursor(args: &[String], reply: redis::Value) -> Box<dyn Cursor> {
     let command = args.first().cloned().unwrap_or_default();
     let value = from_resp(reply);
@@ -791,8 +668,6 @@ fn native_reply_cursor(args: &[String], reply: redis::Value) -> Box<dyn Cursor> 
     }
 }
 
-/// Case-insensitively find `option`'s following argument (e.g. `MATCH
-/// user:*` → `Some("user:*")`).
 fn find_option_value(args: &[String], option: &str) -> Option<String> {
     args.iter()
         .position(|a| a.eq_ignore_ascii_case(option))
@@ -800,12 +675,6 @@ fn find_option_value(args: &[String], option: &str) -> Option<String> {
         .cloned()
 }
 
-/// Resolve the redis key a `Mutation` targets. Redis's row identity *is* the
-/// key itself, so the mutation's named identity (`key: Vec<(FieldPath,
-/// Value)>`) must hold exactly one pair whose value is the key text — the
-/// field name is documentation ("key") in a flat keyspace, not a lookup. An
-/// empty identity falls back to the last segment of `path`, the catalog's
-/// own coordinate for a single key.
 fn mutation_key(path: &ObjectPath, key: &[(FieldPath, Value)]) -> Result<String, DbError> {
     match key {
         [] => path
@@ -836,9 +705,6 @@ fn mutation_key(path: &ObjectPath, key: &[(FieldPath, Value)]) -> Result<String,
     }
 }
 
-/// Whether `field` is the sentinel `value` field name used for
-/// `Mutation::Update { sets: [(value, x)] }` on a plain string key (as
-/// opposed to a named hash field).
 fn is_value_field(field: &datagrep_api::FieldPath) -> bool {
     matches!(field.segments(), [PathSeg::Field(name)] if &**name == "value")
 }
@@ -881,8 +747,6 @@ fn add_mutation_to_pipe(pipe: &mut redis::Pipeline, m: &Mutation) -> Result<(), 
                     let mut any = false;
                     for (field, value) in d.iter() {
                         if &**field == "key" {
-                            // Redundant with `path`; a Pairs-shaped edit row
-                            // for a hash view carries {"key": field, "value": v}.
                             continue;
                         }
                         pipe.arg(field.as_bytes()).arg(value_to_bytes(value)?);
@@ -939,10 +803,6 @@ fn add_mutation_to_pipe(pipe: &mut redis::Pipeline, m: &Mutation) -> Result<(), 
     Ok(())
 }
 
-/// A non-empty `expect` precondition must be honoured or refused, never
-/// dropped — dropping it would turn a guarded write into a clobber. This
-/// driver does not compile preconditions (a `WATCH`-based check-and-set is
-/// not built), so it refuses.
 fn refuse_expect(expect: &[(datagrep_api::FieldPath, Value)]) -> Result<(), DbError> {
     if expect.is_empty() {
         return Ok(());
@@ -952,13 +812,6 @@ fn refuse_expect(expect: &[(datagrep_api::FieldPath, Value)]) -> Result<(), DbEr
     })
 }
 
-/// Each mutation's own Redis reply, taken at face value rather than coerced
-/// into a uniform "1 row changed" — `DEL`/`HSET` report *their own* native
-/// counts (keys removed / new fields added), which is honest but does mean
-/// this is not directly comparable to a SQL affected-rows count (e.g.
-/// overwriting existing hash fields legitimately reports 0 new fields even
-/// though the write succeeded). Documented as a known limitation rather
-/// than papered over.
 fn mutation_affected(reply: redis::Value) -> Result<u64, DbError> {
     match reply {
         redis::Value::ServerError(e) => Err(DbError::Query {
@@ -972,11 +825,6 @@ fn mutation_affected(reply: redis::Value) -> Result<u64, DbError> {
     }
 }
 
-/// Wraps another cursor and stops once `limit` total rows have been
-/// emitted. Redis's SCAN family has no server-side `LIMIT` — `Op::Scan`'s
-/// `limit` would otherwise be silently ignored, which the rest of this
-/// crate refuses to do for a filter; enforcing it client-side here keeps
-/// that same promise for a row cap.
 struct LimitedCursor {
     inner: Box<dyn Cursor>,
     remaining: u64,
@@ -1060,11 +908,6 @@ fn truncate_payload(p: &mut Payload, n: usize) {
     }
 }
 
-/// Wraps a keyspace [`RedisPairsCursor`] and drops any pair whose key
-/// contains `:` — the client-side complement to `RedisCatalog`'s
-/// `"(no prefix)"` bucket (`catalog.rs`'s `NO_PREFIX_BUCKET`), reused here
-/// so `Op::Scan` on that bucket shows exactly the keys the catalog tree
-/// promised.
 struct NoColonFilterCursor {
     inner: RedisPairsCursor,
 }

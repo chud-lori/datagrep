@@ -1,11 +1,3 @@
-//! The load-bearing integration contract: browsing a real keyspace and a
-//! real huge hash goes through
-//! `SCAN`/`HSCAN`, incrementally, and `KEYS` is **never** sent — proven from
-//! outside the driver via `INFO commandstats`, not just by reading the
-//! source. Run with `cargo test -p datagrep-drv-redis --test scan_streaming --
-//! --ignored` against `DATAGREP_TEST_REDIS` (default `redis://localhost:6379`;
-//! see `README.md`).
-
 mod common;
 
 use std::collections::HashSet;
@@ -50,14 +42,6 @@ async fn scan_browses_50k_keys_incrementally_never_using_keys() {
         let Payload::Pairs(pairs) = batch.payload else {
             panic!("expected Shape::Pairs payload from a keyspace SCAN");
         };
-        // Redis's own docs are explicit that `COUNT` is a hint for how much
-        // *work* one round does, not a hard cap on the reply size — actual
-        // batches routinely land a little over. Bounding this driver's
-        // batches to *roughly* the hint (never "the whole keyspace in one
-        // shot") is the real "memory-flat" claim; a hard per-item cap here
-        // would mean silently dropping the overflow, since a SCAN cursor
-        // can't resume from the middle of a hash-table bucket (data loss,
-        // exactly what the cursor module doc says this driver refuses).
         assert!(
             pairs.len() <= hint.max_rows as usize * 2,
             "a SCAN batch of {} pairs is wildly over the {}-row hint — not incremental",
@@ -130,10 +114,6 @@ async fn hscan_pages_a_100k_field_hash_rather_than_returning_it_whole() {
         let Payload::Pairs(pairs) = batch.payload else {
             panic!("expected Shape::Pairs for a hash-typed key");
         };
-        // See the sibling SCAN test for why this is a generous multiple of
-        // the hint rather than a strict `<=`: `COUNT` bounds server-side
-        // work per round, not the reply size (Redis's own documented
-        // behavior for the whole SCAN family, HSCAN included).
         assert!(
             pairs.len() <= hint.max_rows as usize * 2,
             "HSCAN batch of {} fields is wildly over the {}-field hint — the hash came back whole",
@@ -173,9 +153,6 @@ async fn resume_token_continues_exactly_where_it_left_off() {
         })
     };
 
-    // First cursor: take exactly one batch, remember the resume token, then
-    // abandon it (never call next_batch again) — this is the "auto-disconnect,
-    // resume later" scenario resume_token exists for.
     let mut first = conn
         .execute(scan_req(None))
         .await

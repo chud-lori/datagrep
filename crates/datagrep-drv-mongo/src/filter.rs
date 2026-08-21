@@ -1,20 +1,3 @@
-//! `Predicate` -> BSON filter compilation (ticket item 2), under datagrep's
-//! NoSQL-injection rule: a value can never become part of the query's
-//! structure.
-//!
-//! **The injection rule, concretely.** Every comparison compiles to an
-//! explicit operator form (`{field: {"$eq": v}}`, never the bare
-//! `{field: v}` shorthand). MongoDB only treats a field's value as an
-//! operator document when *that exact position* holds a document whose keys
-//! all start with `$`; once a value is nested one level inside `$eq`/`$in`/
-//! etc. it is compared as an opaque literal and never reinterpreted for its
-//! own embedded `$`-prefixed keys. So a parameter value shaped like
-//! `{"$ne": null}` — the canonical NoSQL-injection payload — can
-//! never promote itself to an operator: `value_to_bson` maps it to a
-//! `Bson::Document` exactly like any other value, and the wrapping `$eq`
-//! guarantees it is compared, not executed. Values are always taken from the
-//! typed `Value` the caller supplied — nothing here ever touches query text.
-
 use bson::{doc, Bson, Document as BsonDocument};
 
 use datagrep_api::request::Predicate;
@@ -23,8 +6,6 @@ use datagrep_api::DbError;
 
 use crate::value::value_to_bson_for_field;
 
-/// `a.b[3].c` -> `"a.b.3.c"`, the dotted-path convention Mongo uses to
-/// address nested fields and array elements alike.
 pub fn field_path_to_mongo(path: &FieldPath) -> String {
     let mut out = String::new();
     for seg in path.segments() {
@@ -39,9 +20,6 @@ pub fn field_path_to_mongo(path: &FieldPath) -> String {
     out
 }
 
-/// Compile a single comparison to `{field: {op: value}}`, routing the value
-/// through [`value_to_bson_for_field`] (the `_id`-hex-string recovery
-/// heuristic, and never string-spliced — see the module doc).
 fn cmp_op(
     field: &FieldPath,
     op: &str,
@@ -52,8 +30,6 @@ fn cmp_op(
     Ok(doc! { f: { op: bson } })
 }
 
-/// Compile a [`Predicate`] tree to a Mongo filter document: `Op::Scan`'s
-/// filter is built natively as BSON, never translated into query text.
 pub fn compile_predicate(pred: &Predicate) -> Result<BsonDocument, DbError> {
     match pred {
         Predicate::Eq { field, value } => cmp_op(field, "$eq", value),
@@ -70,9 +46,6 @@ pub fn compile_predicate(pred: &Predicate) -> Result<BsonDocument, DbError> {
             }
             Ok(doc! { f: { "$in": Bson::Array(arr) } })
         }
-        // SQL-LIKE-flavored pattern; the pattern text is data, carried under
-        // `$regex` (an operator position), never spliced into the filter's
-        // structure.
         Predicate::Like { field, pattern } => {
             let f = field_path_to_mongo(field);
             Ok(doc! { f: { "$regex": like_to_regex(pattern), "$options": "" } })
@@ -81,11 +54,6 @@ pub fn compile_predicate(pred: &Predicate) -> Result<BsonDocument, DbError> {
             let f = field_path_to_mongo(field);
             Ok(doc! { f: { "$exists": true } })
         }
-        // `Predicate::IsNull` means "present, but null" — whereas
-        // Mongo's bare `{field: null}` also matches a field that is entirely
-        // *absent* (its well-known null/missing conflation), so this is
-        // compiled as an explicit conjunction to keep faith with the
-        // Absent-vs-Null distinction that is this crate's whole point.
         Predicate::IsNull { field } => {
             let f = field_path_to_mongo(field);
             Ok(doc! {
@@ -97,9 +65,6 @@ pub fn compile_predicate(pred: &Predicate) -> Result<BsonDocument, DbError> {
         }
         Predicate::And(parts) => Ok(doc! { "$and": compile_many(parts)? }),
         Predicate::Or(parts) => Ok(doc! { "$or": compile_many(parts)? }),
-        // `$not` only wraps a single-field operator expression in Mongo;
-        // `$nor` is the general-purpose negation of an arbitrary filter
-        // document and is what `Predicate::Not` needs here.
         Predicate::Not(inner) => Ok(doc! { "$nor": [compile_predicate(inner)?] }),
     }
 }
@@ -108,9 +73,6 @@ fn compile_many(parts: &[Predicate]) -> Result<Vec<BsonDocument>, DbError> {
     parts.iter().map(compile_predicate).collect()
 }
 
-/// Translate `Predicate::Like`'s SQL-style `%`/`_` wildcards into an
-/// anchored regex, escaping every other regex metacharacter in the pattern so
-/// only the two wildcard characters carry special meaning.
 fn like_to_regex(pattern: &str) -> String {
     let mut out = String::with_capacity(pattern.len() + 2);
     out.push('^');
@@ -129,9 +91,6 @@ fn like_to_regex(pattern: &str) -> String {
     out
 }
 
-/// AND a keyset resume constraint (`_id > last`) into a compiled filter
-/// (ticket item 3: `find` resumes via `{_id: {$gt: last}}`, so a resumed
-/// scan can't re-yield or skip documents the way an offset would).
 pub fn and_keyset(filter: Option<BsonDocument>, last_id: Bson) -> BsonDocument {
     let keyset = doc! { "_id": { "$gt": last_id } };
     match filter {
@@ -158,12 +117,6 @@ mod tests {
         assert_eq!(compiled, doc! { "status": { "$eq": "active" } });
     }
 
-    /// The canonical NoSQL-injection scenario: a parameter value shaped
-    /// like `{"$ne": null}` must never be able to rewrite the query
-    /// structure. Compiling through `$eq` guarantees the attacker-controlled
-    /// document only ever appears as $eq's literal operand, never as the
-    /// direct value of the field key (the one position Mongo treats as an
-    /// operator document).
     #[test]
     fn ne_null_shaped_parameter_value_cannot_alter_query_structure() {
         let malicious = Value::Document(Arc::new(DatagrepDocument::from_fields(vec![(
@@ -175,14 +128,9 @@ mod tests {
             value: malicious,
         };
         let compiled = compile_predicate(&pred).unwrap();
-        // The ENTIRE compiled filter's only top-level key is "x", and "x"'s
-        // value is a document whose only key is "$eq" — never "$ne" at the
-        // position Mongo would interpret it as an operator.
         assert_eq!(compiled.keys().collect::<Vec<_>>(), vec!["x"]);
         let inner = compiled.get_document("x").unwrap();
         assert_eq!(inner.keys().collect::<Vec<_>>(), vec!["$eq"]);
-        // The attacker's "$ne" survives only nested two levels deep, as an
-        // inert literal being compared for equality — not executed.
         let literal = inner.get_document("$eq").unwrap();
         assert_eq!(literal, &doc! { "$ne": Bson::Null });
         assert_eq!(

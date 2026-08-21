@@ -1,17 +1,3 @@
-//! An open transaction, pinned to its connection's worker thread — the
-//! `JobSender` it holds routes `BEGIN`/statements/`COMMIT`/`ROLLBACK` to the
-//! exact same `rusqlite::Connection` the owning `SqliteConnection` uses, so
-//! there is no pool that could silently move a `BEGIN` to a different
-//! socket.
-//!
-//! **Savepoints (nested transactions).** `datagrep-api`'s `Transaction` trait has
-//! no `begin`-from-a-transaction method, so nesting isn't a typed API here —
-//! it's just SQL. Once a `Transaction` is open, executing `Request::Native`
-//! text (`SAVEPOINT s1`, `RELEASE s1`, `ROLLBACK TO s1`) through
-//! [`SqliteTransaction::execute`] works exactly as it would on any other
-//! SQLite session, because it's the same `conn.execute_batch` path a plain
-//! statement takes.
-
 use async_trait::async_trait;
 use datagrep_api::{Cursor, DbError, Request, Transaction};
 

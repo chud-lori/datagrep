@@ -1,10 +1,3 @@
-//! Cancellation of a Redis SCAN loop. Redis commands are atomic, so the
-//! only long-running thing is the driver's own SCAN loop: stopping it needs
-//! no server round trip — the cursor observes `CancelFlag` at its next
-//! round-trip check and returns `DbError::Cancelled` promptly, and the
-//! *connection* must stay usable afterward (mirrors `datagrep-drv-sqlite`'s own
-//! cancellation test).
-
 mod common;
 
 use std::time::Duration;
@@ -41,14 +34,9 @@ async fn cancel_stops_a_long_scan_loop_promptly_and_leaves_the_connection_usable
             .cancel()
             .await
             .expect("cancel() itself must not fail");
-        // Redis cancellation is ClientAbandon for a plain SCAN loop — there
-        // is no server-side kill for it, only our own loop stopping.
         assert_eq!(outcome, datagrep_api::CancelOutcome::ClientAbandoned);
     });
 
-    // A tiny per-round COUNT forces many round trips over 20k keys, giving
-    // the spawned cancel plenty of chances to land before the scan would
-    // otherwise finish on its own.
     let hint = FetchHint {
         max_rows: 1,
         ..FetchHint::default()
@@ -71,9 +59,6 @@ async fn cancel_stops_a_long_scan_loop_promptly_and_leaves_the_connection_usable
     );
     cancel_task.await.expect("cancel task panicked");
 
-    // Load-bearing: the *connection* survives a cancelled *cursor* (mirrors
-    // datagrep-drv-sqlite's cancel.rs — cancelling a cursor must never poison the
-    // connection it came from).
     let mut check = conn
         .execute(Request::native("PING"))
         .await

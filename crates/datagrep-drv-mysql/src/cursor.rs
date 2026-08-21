@@ -1,6 +1,3 @@
-//! [`MySqlCursor`]: the streaming cursor over one result set served by the
-//! actor, plus the trivial `Ack` cursor for row-less statements.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -14,9 +11,6 @@ use datagrep_api::shape::{RowSchema, Shape};
 
 use crate::actor::ActorCmd;
 
-/// Pull-based cursor: each `next_batch` asks the actor for at
-/// most `hint.max_rows` rows; between pulls nothing is read off the socket,
-/// which is the entire backpressure story.
 pub struct MySqlCursor {
     cmd_tx: mpsc::Sender<ActorCmd>,
     cursor_id: u64,
@@ -72,9 +66,6 @@ impl Cursor for MySqlCursor {
         }
 
         let n = fetched.rows.len() as u64;
-        // Approximate wire size: the MySQL text/binary row size isn't
-        // surfaced by mysql_async, so estimate from decoded values only for
-        // the stats line — never used for correctness.
         let bytes: u64 = fetched.rows.iter().flatten().map(approx_value_bytes).sum();
         self.stats.rows += n;
         self.stats.bytes += bytes;
@@ -102,10 +93,6 @@ impl Cursor for MySqlCursor {
     }
 
     fn resume_token(&self) -> Option<ResumeToken> {
-        // v1: none. The result set lives on the pinned connection; once the
-        // stream is dropped the server-side state is gone — a keyset resume
-        // belongs to `Op::Scan { resume }` layered above, same stance as the
-        // sibling drivers.
         None
     }
 
@@ -118,9 +105,6 @@ impl Cursor for MySqlCursor {
             return Ok(());
         }
         self.closed = true;
-        // Best-effort: the actor drains the remaining rows so the
-        // connection is not poisoned (see actor.rs module docs). If the
-        // actor already exited, there is nothing left to drain.
         let _ = self
             .cmd_tx
             .send(ActorCmd::CloseCursor {
@@ -145,7 +129,6 @@ fn approx_value_bytes(v: &datagrep_api::Value) -> u64 {
     }
 }
 
-/// One-shot `Ack`-shaped cursor for statements that produce no rows.
 pub struct AckCursor {
     shape: Shape,
     notices: Vec<Notice>,

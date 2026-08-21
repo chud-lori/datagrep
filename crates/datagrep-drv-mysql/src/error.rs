@@ -1,28 +1,14 @@
-//! Error mapping: `mysql_async::Error` → the one `DbError` that crosses the
-//! datagrep-api seam ("coarse by design" — engine detail rides in
-//! `Query { code }` text, never as a leaked driver enum).
-
 use datagrep_api::DbError;
 
-/// MySQL error code for `ER_QUERY_INTERRUPTED` — what a statement killed via
-/// `KILL QUERY <conn_id>` dies with. Mapped to [`DbError::Cancelled`] rather
-/// than a query error: a cancel the user asked for is not a failure, and the
-/// UI must not dress it as one. The connection itself survives a query kill.
 pub const ER_QUERY_INTERRUPTED: u16 = 1317;
 
-/// MariaDB's statement-timeout error (`ER_STATEMENT_TIMEOUT`, 1969) and
-/// MySQL's (`ER_QUERY_TIMEOUT`, 3024) both mean a server-side deadline we set
-/// fired — that is [`DbError::Timeout`], not a query failure.
 pub const ER_STATEMENT_TIMEOUT_MARIADB: u16 = 1969;
 pub const ER_QUERY_TIMEOUT_MYSQL: u16 = 3024;
 
-/// Access-denied family: surfaced as [`DbError::Auth`] so the connection form
-/// can point at credentials instead of showing a generic query error.
 const ER_ACCESS_DENIED_ERROR: u16 = 1045;
 const ER_DBACCESS_DENIED_ERROR: u16 = 1044;
 const ER_MUST_CHANGE_PASSWORD: u16 = 1820;
 
-/// Translate a `mysql_async::Error`.
 pub fn map_mysql_error(err: mysql_async::Error) -> DbError {
     match err {
         mysql_async::Error::Server(e) => match e.code {
@@ -32,9 +18,6 @@ pub fn map_mysql_error(err: mysql_async::Error) -> DbError {
                 DbError::Auth(e.message)
             }
             code => DbError::Query {
-                // MySQL reports both a numeric code and a SQLSTATE; keep the
-                // numeric code (it is the more specific of the two) and put
-                // the SQLSTATE in the message tail so nothing is lost.
                 code: Some(code.to_string()),
                 message: if e.state.is_empty() || e.state == "HY000" {
                     e.message

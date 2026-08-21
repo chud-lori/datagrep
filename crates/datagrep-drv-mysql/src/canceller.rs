@@ -1,8 +1,3 @@
-//! [`MySqlCanceller`]: `KILL QUERY <conn_id>` issued from a
-//! *second*, pooled connection — the pinned primary connection is busy
-//! executing the very statement being killed, so it cannot deliver the kill
-//! itself. The pool holds no connections until the first cancel (min 0).
-
 use mysql_async::prelude::Queryable;
 use mysql_async::Pool;
 use tracing::Instrument as _;
@@ -32,17 +27,9 @@ impl Canceller for MySqlCanceller {
         Box::pin(
             async move {
                 let mut conn = self.pool.get_conn().await.map_err(map_mysql_error)?;
-                // `conn_id` is the u32 the server itself reported at
-                // handshake — a number we own, not user input; KILL takes no
-                // bound parameters.
                 conn.query_drop(format!("KILL QUERY {}", self.conn_id))
                     .await
                     .map_err(map_mysql_error)?;
-                // The OK to `KILL QUERY` means the server set the kill flag
-                // on that thread — the victim statement dies at its next
-                // check point, which is asynchronous. `Requested` is the
-                // honest outcome; claiming `ServerCancelled` would assert an
-                // ack the protocol doesn't give us.
                 Ok(CancelOutcome::Requested)
             }
             .instrument(tracing::info_span!(

@@ -1,5 +1,3 @@
-//! [`MongoDriver`]: the `Driver` impl (ticket item 1).
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,16 +16,6 @@ use datagrep_api::error::DbError;
 use crate::connection::MongoConnection;
 use crate::error::map_mongo_error;
 
-/// Capability flags every Mongo connection reports, independent of the
-/// post-handshake `TRANSACTIONS` bit (ticket item 1's flag list, minus the
-/// three explicitly-false ones: `EXACT_COUNT_CHEAP`, `RANDOM_ACCESS_PAGE`,
-/// `SCHEMA_DECLARED`).
-///
-/// `SERVER_CANCEL` here means "this engine has server-side cancel machinery
-/// in principle" — the *actual*, honestly-degraded strength of a given
-/// cancel is reported per-cancellation by [`crate::canceller::MongoCanceller::kind`]:
-/// `maxTimeMS` always goes out, but a true `killOp` needs privileges we may
-/// lack, in which case the cancel degrades to `ClientAbandon` and says so.
 const BASE_CAPS: Caps = Caps::DDL
     .union(Caps::EXPLAIN)
     .union(Caps::SERVER_CANCEL)
@@ -35,10 +23,6 @@ const BASE_CAPS: Caps = Caps::DDL
     .union(Caps::EXPRESSION_FILTER)
     .union(Caps::KEY_ENUMERATION);
 
-/// Baseline/post-handshake capabilities, parameterized on whether this
-/// server actually supports multi-document transactions. Those need a 4.0+
-/// replica set, which is only knowable after `hello` — so the flag is
-/// detected post-handshake and reported honestly, never assumed.
 pub fn mongo_capabilities(transactions_supported: bool) -> Capabilities {
     let mut flags = BASE_CAPS;
     if transactions_supported {
@@ -47,26 +31,15 @@ pub fn mongo_capabilities(transactions_supported: bool) -> Capabilities {
     Capabilities {
         flags,
         max_statement_bytes: Some(16 * 1024 * 1024), // BSON document hard limit
-        // Ticket: "default_fetch_rows 101 then 1000" — 101 is the honest
-        // single starting value; growth toward ~1000 is datagrep-core's adaptive
-        // sizing (`clamp(prev * target_ms / actual_ms, ...)`), not something
-        // a single `u32` field can express.
         default_fetch_rows: 101,
-        // The engine takes structured commands, not `$1`/`?`-templated text
-        // (ticket item 1).
         param_style: ParamStyle::None,
         language: LanguageId::MongoShell,
-        // Mongo has no quoted-identifier syntax; field/collection names are
-        // never re-quoted into generated text. Kept as the least-surprising
-        // placeholder since `Capabilities::identifier_quote` is not optional.
         identifier_quote: '"',
         // database -> collection -> field (ticket item 1's `catalog_levels`).
         catalog_levels: 3,
     }
 }
 
-/// The MongoDB driver adapter. Stateless — all per-server state
-/// lives in the [`MongoConnection`]s it creates.
 #[derive(Debug, Default)]
 pub struct MongoDriver;
 
@@ -87,8 +60,6 @@ impl Driver for MongoDriver {
     }
 
     fn capabilities(&self) -> Capabilities {
-        // Pre-handshake: transactions support is unknown, so the honest
-        // baseline reports it unavailable rather than guessing.
         mongo_capabilities(false)
     }
 
@@ -221,8 +192,6 @@ impl Driver for MongoDriver {
                 .unwrap_or("unknown")
                 .to_string();
 
-            // Multi-document transactions: replica sets from wire version 7
-            // (MongoDB 4.0), sharded clusters from wire version 8 (4.2).
             let transactions_supported = if is_mongos {
                 max_wire_version >= 8
             } else {
@@ -287,11 +256,6 @@ fn bool_field(cfg: &ResolvedConfig, key: &str) -> Result<Option<bool>, DbError> 
     }
 }
 
-/// Reassemble a `mongodb://`/`mongodb+srv://` connection string from the
-/// resolved config fields. The password lives in the keychain as a
-/// [`datagrep_api::config::SecretString`], never in `ConnectionConfig`, and is
-/// only ever pulled back in here at connect time — so a serialized config,
-/// a log line, or a debug dump can never carry it.
 fn build_uri(cfg: &ResolvedConfig) -> Result<String, DbError> {
     let hosts = str_field(cfg, "hosts")?.ok_or_else(|| {
         DbError::Config(ConfigError::MissingField {
@@ -347,9 +311,6 @@ fn build_uri(cfg: &ResolvedConfig) -> Result<String, DbError> {
     Ok(uri)
 }
 
-/// Minimal RFC-3986 `userinfo` percent-encoding for the handful of reserved
-/// characters that can appear in a username/password and would otherwise be
-/// misparsed as URI delimiters (`:`, `@`, `/`, `?`, `#`, `%`).
 fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -370,11 +331,6 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            // Read the pair out of the byte slice rather than by slicing the
-            // `&str`. `i + 1..i + 3` lands inside a multi-byte character
-            // whenever a `%` is followed by non-ASCII, and slicing a `str` off
-            // a char boundary panics — from a *pasted connection URL*, which is
-            // untrusted text that reaches here before anything dials.
             let pair = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
             if let Some(hex) = pair.and_then(|p| u8::from_str_radix(p, 16).ok()) {
                 out.push(hex);
@@ -388,12 +344,6 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Decompose a pasted `mongodb://`/`mongodb+srv://` URL into config fields
-/// (ticket item 1). Deliberately hand-rolled rather than
-/// `mongodb::options::ClientOptions::parse` (which is `async` and performs
-/// SRV/TXT DNS lookups for `mongodb+srv://` — wrong shape for a synchronous,
-/// no-network `Driver::parse_url`); this only splits the string, it never
-/// resolves anything.
 fn parse_mongo_url(url: &str) -> Result<ConnectionConfig, ConfigError> {
     let (srv, rest) = if let Some(r) = url.strip_prefix("mongodb+srv://") {
         (true, r)
@@ -601,12 +551,6 @@ mod tests {
         assert_eq!(uri, "mongodb://localhost:27017/appdb");
     }
 
-    /// `percent_decode` indexed the `&str` by byte offset, so a `%` followed by
-    /// a multi-byte character sliced off a char boundary and panicked. The
-    /// input is a *pasted connection URL* — untrusted text that reaches
-    /// `parse_url` before anything dials — so this was one paste from taking
-    /// the process down. Decoding now reads the byte pair directly and leaves a
-    /// `%` that is not followed by two hex ASCII digits alone.
     #[test]
     fn a_percent_escape_before_a_multibyte_char_does_not_panic() {
         for tail in [

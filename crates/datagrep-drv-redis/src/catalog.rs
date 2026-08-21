@@ -1,20 +1,3 @@
-//! [`RedisCatalog`] — the centrepiece of this driver. Every level below
-//! `db-index` is [`Enumeration::ScanOnly`] with `requires_prefix: true`:
-//! nothing here ever walks the full keyspace, and nothing auto-expands
-//! without the user supplying a prefix box. `KEYS *` as a browse primitive
-//! means one click DOSes the user's production database.
-//!
-//! Path convention used throughout this module (there is no schema to
-//! derive it from, so it's a driver-local decision, documented here once):
-//! - `[]` (root) → the `db-index` level.
-//! - `[db_index]` → the `keyspace-prefix` level (children of this db).
-//! - `[db_index, prefix]` → the `key` level (children of this prefix).
-//! - `[db_index, prefix, key]` → one specific key (`describe()` only; not a
-//!   `children()`-enumerable level — three levels means three, not four).
-//!
-//! A key with no `:` in its name is bucketed under the sentinel prefix
-//! `"(no prefix)"` rather than being dropped from the tree.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -31,27 +14,16 @@ use datagrep_api::Bytes;
 use crate::cmd::{derive_prefixes, prefix_glob};
 use crate::error::map_redis_error;
 
-/// Above this many keys, a `DBSIZE` probe marks the server "production
-/// sized" and `KEY_ENUMERATION` is reported `false`: past this point there
-/// is no "list all keys", ever.
 pub const KEY_ENUMERATION_DBSIZE_THRESHOLD: i64 = 100_000;
 
-/// Pure predicate behind the `DBSIZE` probe — split out from `driver.rs`'s
-/// `connect` so it's unit-testable without a server.
 pub fn key_enumeration_from_dbsize(dbsize: i64) -> bool {
     dbsize <= KEY_ENUMERATION_DBSIZE_THRESHOLD
 }
 
-/// A sentinel bucket for keys with no `:` in their name — every real key
-/// still shows up in the tree, just not split further. `pub(crate)` so
-/// `connection.rs`'s `Op::Scan` path can recognize the same bucket and show
-/// exactly the keys this catalog promised under it (see `NoColonFilterCursor`).
 pub(crate) const NO_PREFIX_BUCKET: &str = "(no prefix)";
 
-/// How many keys `children()` samples per page and `complete()` asks for.
 const SAMPLE_COUNT: u32 = 200;
 
-/// What `describe()` reports for a key's `indexes` extra: none, truthfully.
 const EMPTY_INDEXES_JSON: &str = "[]";
 
 pub struct RedisCatalog {
@@ -80,10 +52,6 @@ impl RedisCatalog {
         Ok(Page { items, next: None })
     }
 
-    /// `[db_index]` → keyspace-prefix listing. Requires an explicit
-    /// (possibly empty) `opts.prefix` — `Enumeration::ScanOnly{
-    /// requires_prefix: true}` means the UI always shows the "Scan for
-    /// keys…" box first, never auto-expands.
     async fn list_prefixes(
         &self,
         _db_index: &Arc<str>,
@@ -96,9 +64,6 @@ impl RedisCatalog {
         } else {
             Some(prefix_glob(&scoped))
         };
-        // Prefixes are derived by sampling with `SCAN COUNT n` and
-        // splitting on ':' — never a full keyspace walk. Exactly one SCAN
-        // round trip, not an iterate-to-completion loop.
         let sampled_keys = scan_once(
             &mut mgr,
             opts.resume.as_ref(),
@@ -124,19 +89,12 @@ impl RedisCatalog {
         Ok(Page { items, next: None })
     }
 
-    /// `[db_index, prefix]` → key listing, one `SCAN MATCH prefix* COUNT
-    /// limit` round trip per page, cursor-paged via `opts.resume`.
     async fn list_keys(
         &self,
         db_index: &Arc<str>,
         prefix: &Arc<str>,
         opts: ListOpts,
     ) -> Result<Page<ObjectNode>, DbError> {
-        // `opts.prefix` refines further within the parent bucket when
-        // given; otherwise the parent bucket itself is the scope. The
-        // sentinel "no prefix" bucket has nothing to `MATCH` against — it
-        // falls through to a whole-keyspace `SCAN`, filtered below to keys
-        // that truly have no `:`.
         let scoped = opts.prefix.as_deref().unwrap_or("");
         let match_glob = if &**prefix == NO_PREFIX_BUCKET {
             None
@@ -182,10 +140,6 @@ impl RedisCatalog {
             .query_async(&mut mgr)
             .await
             .ok();
-        // `MEMORY USAGE` walks the whole value to size it, which is exactly
-        // the kind of unbounded work this driver otherwise refuses to do
-        // silently — `SAMPLES` bounds the walk for aggregate types instead
-        // of visiting every element.
         let memory_bytes: Option<i64> = redis::cmd("MEMORY")
             .arg("USAGE")
             .arg(key)
@@ -195,9 +149,6 @@ impl RedisCatalog {
             .await
             .ok();
 
-        // Redis has no secondary indexes on plain keys — an honest, empty
-        // `[]` (the cross-engine describe contract's "none", as opposed to
-        // an absent key meaning "not reported"). Never fabricated.
         let mut extra = vec![
             (Arc::from("indexes"), Arc::from(EMPTY_INDEXES_JSON)),
             (Arc::from("type"), Arc::from(ty.as_str())),
@@ -316,13 +267,6 @@ impl Catalog for RedisCatalog {
         _path: &ObjectPath,
         _sample_size: u32,
     ) -> Result<InferredSchema, DbError> {
-        // `SCHEMA_DECLARED` is off and `Shape::Pairs` is not a `Documents`
-        // shape, so there is no per-field schema to sample here the way
-        // Mongo/ES documents have — that inference target simply doesn't
-        // exist for a Redis key listing. Returning an honestly-empty
-        // result (rather than fabricating one, or erroring, since the
-        // trait method itself is a legitimate no-op call every driver
-        // must answer) keeps the seam total.
         Ok(InferredSchema {
             sampled: 0,
             root: Vec::new(),
@@ -335,8 +279,6 @@ impl Catalog for RedisCatalog {
             return Ok(Vec::new());
         }
         let mut mgr = self.manager.clone();
-        // `SCAN MATCH prefix* COUNT 100`, capped at 50 results — one
-        // bounded round trip, never `KEYS`.
         let (_next, keys) = scan_once(&mut mgr, None, Some(&prefix_glob(&prefix)), 100).await?;
         Ok(keys
             .into_iter()
@@ -358,10 +300,6 @@ fn missing_prefix_error() -> DbError {
     }
 }
 
-/// One `SCAN` round trip starting from `resume` (or the beginning),
-/// returning `(next_page_token, matched_keys)`. `next_page_token` is `None`
-/// once the cursor has come back to `0` — mirrors `RedisPairsCursor`'s
-/// pagination but returns catalog-shaped output instead of a `Cursor`.
 async fn scan_once(
     manager: &mut redis::aio::ConnectionManager,
     resume: Option<&ResumeToken>,
@@ -422,9 +360,6 @@ async fn scan_once(
     Ok((next, keys))
 }
 
-/// `CONFIG GET databases`, falling back to Redis's own default of 16 when
-/// the server refuses `CONFIG` (managed Redis-likes often do) or the key
-/// is absent.
 async fn databases_count(manager: &mut redis::aio::ConnectionManager) -> u32 {
     let reply: Result<redis::Value, _> = redis::cmd("CONFIG")
         .arg("GET")
@@ -468,9 +403,6 @@ fn config_key_matches(v: &redis::Value, expect: &str) -> bool {
     }
 }
 
-/// Scan backwards from the caret over key-name-ish characters (Redis keys
-/// commonly use `:`/`-`/`_` as separators inside a single logical name, so
-/// the identifier class is wider than SQL's).
 fn prefix_at_caret(text: &str, offset: usize) -> String {
     let bytes = text.as_bytes();
     let end = offset.min(bytes.len());
@@ -501,9 +433,6 @@ mod tests {
         assert_eq!(prefix_at_caret("", 0), "");
     }
 
-    /// Redis's whole index story for the cross-engine describe contract:
-    /// a literal empty JSON array — present (so the UI can say "none"
-    /// rather than "not reported"), and never a fabricated entry.
     #[test]
     fn key_describe_reports_an_honest_empty_index_array() {
         assert_eq!(EMPTY_INDEXES_JSON, "[]");

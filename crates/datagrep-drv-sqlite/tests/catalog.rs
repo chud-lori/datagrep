@@ -1,6 +1,3 @@
-//! Catalog behavior on a seeded schema: database → table/view → column
-//! listing, `describe()`, and `complete()` — lazy, incremental, bounded.
-
 mod common;
 
 use std::sync::Arc;
@@ -125,8 +122,6 @@ async fn infer_shape_samples_real_storage_classes() {
     conn.execute(Request::native("CREATE TABLE t(v)"))
         .await
         .expect("create table failed");
-    // SQLite type affinity: an undeclared column can hold anything, and a
-    // real sample must see that, not a single declared type.
     conn.execute(Request::native("INSERT INTO t VALUES (1), ('two'), (3.0)"))
         .await
         .expect("seed rows failed");
