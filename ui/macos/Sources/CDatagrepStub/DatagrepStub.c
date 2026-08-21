@@ -787,6 +787,16 @@ char *datagrep_rows_cell_detail_json(DatagrepRows *r, uint64_t row, uint32_t col
  * editing on the status JSON's "editable" block, which this stub never emits,
  * so neither is reached in a stub build. */
 
+char *datagrep_rows_column_names_json(DatagrepRows *r) {
+    if (!r) return NULL;
+    Sb s;
+    sb_init(&s);
+    sb_put(&s, "[");
+    for (uint32_t i = 0; i < r->cols; i++) sb_putf(&s, "%s\"%s\"", i ? "," : "", COLS[i]);
+    sb_put(&s, "]");
+    return s.buf;
+}
+
 char *datagrep_rows_envelope_json(DatagrepRows *r, uint64_t row) {
     (void)r;
     (void)row;

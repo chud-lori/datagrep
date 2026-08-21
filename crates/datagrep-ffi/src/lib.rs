@@ -95,6 +95,7 @@ pub use query::{
 };
 pub use rows::{
     datagrep_query_rows, datagrep_rows_cell, datagrep_rows_cell_detail_json,
-    datagrep_rows_cell_kind, datagrep_rows_columns, datagrep_rows_count, datagrep_rows_free,
-    datagrep_rows_pending, DatagrepRows,
+    datagrep_rows_cell_kind, datagrep_rows_column_names_json, datagrep_rows_columns,
+    datagrep_rows_count, datagrep_rows_envelope_json, datagrep_rows_free, datagrep_rows_pending,
+    DatagrepRows,
 };

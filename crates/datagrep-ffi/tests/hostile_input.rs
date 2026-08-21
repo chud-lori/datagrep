@@ -34,8 +34,9 @@ use datagrep_ffi::{
     datagrep_profiles_remove, datagrep_query_cancel, datagrep_query_free,
     datagrep_query_on_progress, datagrep_query_rows, datagrep_query_run,
     datagrep_query_status_json, datagrep_rows_cell, datagrep_rows_cell_detail_json,
-    datagrep_rows_cell_kind, datagrep_rows_columns, datagrep_rows_count, datagrep_rows_free,
-    datagrep_rows_pending, datagrep_string_free, DatagrepCore,
+    datagrep_rows_cell_kind, datagrep_rows_column_names_json, datagrep_rows_columns,
+    datagrep_rows_count, datagrep_rows_envelope_json, datagrep_rows_free, datagrep_rows_pending,
+    datagrep_string_free, DatagrepCore,
 };
 
 // ---- helpers -----------------------------------------------------------
@@ -411,6 +412,8 @@ fn null_handles_are_errors_or_documented_defaults() {
         assert!(!datagrep_rows_pending(ptr::null_mut()));
         assert_eq!(datagrep_rows_cell_kind(ptr::null_mut(), 0, 0), 2, "ABSENT");
         assert!(datagrep_rows_cell_detail_json(ptr::null_mut(), 0, 0).is_null());
+        assert!(datagrep_rows_column_names_json(ptr::null_mut()).is_null());
+        assert!(datagrep_rows_envelope_json(ptr::null_mut(), 0).is_null());
 
         let mut len: usize = 99;
         assert!(datagrep_rows_cell(ptr::null_mut(), 0, 0, &mut len).is_null());

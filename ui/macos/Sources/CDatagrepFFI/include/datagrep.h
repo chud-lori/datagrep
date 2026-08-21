@@ -76,6 +76,10 @@ const char *datagrep_rows_cell(DatagrepRows *, uint64_t row, uint32_t col, size_
 /* 0 value  1 NULL  2 ABSENT  3 nested */
 uint8_t datagrep_rows_cell_kind(DatagrepRows *, uint64_t row, uint32_t col);
 char   *datagrep_rows_cell_detail_json(DatagrepRows *, uint64_t row, uint32_t col);
+/* This window's own column names as a JSON array — a document window projects
+ * its own, which a heterogeneous result can make differ from the status JSON's.
+ * Address a field by these, never by the header above the column. */
+char   *datagrep_rows_column_names_json(DatagrepRows *);
 /* The row's fields outside the projected root — for an ES hit the
  * `_index`/`_id`/`_routing` identity and the `_seq_no`/`_primary_term` guard a
  * write compares against. NULL when the result has no root. */

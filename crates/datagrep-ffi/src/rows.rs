@@ -702,6 +702,33 @@ pub unsafe extern "C" fn datagrep_rows_cell_detail_json(
     })
 }
 
+/// This window's column names, as a JSON array. Caller frees with
+/// `datagrep_string_free`.
+///
+/// A document window projects its own columns — the union of the field names
+/// *its* rows carry — while the status JSON reports the names the first chunk
+/// revealed. The two agree for a homogeneous result and can differ for a
+/// heterogeneous one, so anything that must address a field by name (an edit
+/// naming the field it sets) has to ask the window it read the value from
+/// rather than assume the header above it describes the same column.
+///
+/// # Safety
+/// `r` must come from `datagrep_query_rows` and not yet be freed.
+#[no_mangle]
+pub unsafe extern "C" fn datagrep_rows_column_names_json(r: *mut DatagrepRows) -> *mut c_char {
+    guard_quiet(std::ptr::null_mut(), || {
+        // SAFETY: `r` is NULL or a live window from `datagrep_query_rows`, per
+        // the contract; `rows_ref` maps NULL to `None`.
+        let Some(rows) = (unsafe { rows_ref(r) }) else {
+            return std::ptr::null_mut();
+        };
+        match serde_json::to_string(&rows.columns) {
+            Ok(text) => to_c_string(text),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
+}
+
 /// The hit envelope for one row as JSON — the identity and guard fields that
 /// live outside the projected columns. Caller frees with
 /// `datagrep_string_free`.

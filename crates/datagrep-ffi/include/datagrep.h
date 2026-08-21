@@ -220,6 +220,16 @@ uint8_t datagrep_rows_cell_kind(DatagrepRows*, uint64_t row, uint32_t col);
 // Full raw value of one cell as JSON, for the detail pane. Caller frees.
 char* datagrep_rows_cell_detail_json(DatagrepRows*, uint64_t row, uint32_t col);
 
+// This window's own column names, as a JSON array. Caller frees.
+//
+// A document result has no global column list, so a window projects the union
+// of the field names ITS rows carry, while the status JSON reports what the
+// first chunk revealed. Those agree for a homogeneous result and may not for a
+// heterogeneous one — so anything addressing a field by name (an edit naming
+// the field it sets) must ask the window the value came from, not the header
+// drawn above it.
+char* datagrep_rows_column_names_json(DatagrepRows*);
+
 // The row's fields OUTSIDE the projected root — its envelope — as one JSON
 // object. Caller frees. NULL for a row outside the window, and for any result
 // whose driver declared no root (there is then nothing outside the row).
