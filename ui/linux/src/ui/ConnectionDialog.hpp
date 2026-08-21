@@ -121,7 +121,6 @@ private:
     QString originalUrlNoPassword_;
     bool origReadOnly_ = false;
     bool origConfirmWrites_ = false;
-    QString origEnv_;
     QString origColor_;
     QString origAutoLimit_;    // as text; empty == unset
     QString origIdleTimeout_;  // as text; empty == unset
@@ -149,7 +148,6 @@ private:
     QCheckBox* tlsCheck_;
     QLineEdit* urlEdit_;
 
-    QComboBox* envBox_;
     QComboBox* colorBox_;
     QCheckBox* readOnlyCheck_;
     QCheckBox* confirmWritesCheck_;

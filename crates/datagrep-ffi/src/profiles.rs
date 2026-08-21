@@ -70,9 +70,8 @@ fn parse_patch(text: &str) -> Result<ProfilePatch, String> {
     }
     serde_json::from_str(trimmed).map_err(|e| {
         format!(
-            "patch/options JSON is invalid ({e}); accepted keys: name, url, env \
-             (\"dev\"|\"staging\"|\"prod\"), read_only, confirm_writes, auto_limit, \
-             idle_timeout_s, color"
+            "patch/options JSON is invalid ({e}); accepted keys: name, url, \
+             read_only, confirm_writes, auto_limit, idle_timeout_s, color"
         )
     })
 }

@@ -331,7 +331,6 @@ void MainWindow::reloadProfiles() {
         const QJsonObject o = v.toObject();
         const QString name = o.value(QStringLiteral("name")).toString();
         const QString driver = o.value(QStringLiteral("driver")).toString();
-        const QString env = o.value(QStringLiteral("env")).toString();
         const bool readOnly = o.value(QStringLiteral("read_only")).toBool(false);
 
         // The safety slice every surface shares — the swatch below, the banner
@@ -339,7 +338,6 @@ void MainWindow::reloadProfiles() {
         dg::ConnectionSafety safety;
         safety.name = name;
         safety.color = o.value(QStringLiteral("color")).toString();
-        safety.env = env;
         safety.readOnly = readOnly;
         safety.confirmWrites =
             o.value(QStringLiteral("confirm_writes")).toBool(false);
@@ -353,9 +351,6 @@ void MainWindow::reloadProfiles() {
         QStringList tip;
         if (!driver.isEmpty()) {
             tip << dg::engineDisplayName(driver);
-        }
-        if (!env.isEmpty()) {
-            tip << env;
         }
         if (readOnly) {
             tip << QStringLiteral("read-only");
@@ -372,11 +367,11 @@ void MainWindow::reloadProfiles() {
         }
         item->setToolTip(tip.join(QStringLiteral(" · ")));
 
-        // A prod row is tinted so it is unmistakable — the guardrail that keeps a
-        // production connection from looking like any other. Carried by weight
-        // AND colour, never colour alone.
-        if (env == QStringLiteral("prod")) {
-            item->setForeground(QBrush(QColor(0xC0, 0x39, 0x2B)));
+        // A marked row is bolded so it is unmistakable. Keyed on the colour
+        // marker, not on a dev/staging/prod tag: the engine dropped that enum,
+        // so this branch was dead and every marked connection looked ordinary.
+        // Weight, never colour alone — the swatch already carries the hue.
+        if (safety.isMarked()) {
             QFont f = item->font();
             f.setBold(true);
             item->setFont(f);
