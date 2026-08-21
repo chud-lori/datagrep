@@ -16,24 +16,21 @@ void     datagrep_string_free(char*);            // frees any char* this API ret
 
 // ---- profiles --------------------------------------------------------
 // Returns JSON:
-// [{"name":..,"driver":..,"env":"dev"|"staging"|"prod","read_only":bool,
-//   "has_secret":bool}, ...]
-// env tints prod rows; read_only badges guarded rows — no per-row round trip.
+// [{"name":..,"driver":..,"read_only":bool,"confirm_writes":bool,
+//   "color":str|null,"has_secret":bool}, ...]
 char* datagrep_profiles_list_json(DatagrepCore*, char** err_out);
-// Adds with default settings (env=dev, writeable, no limits). Use
-// datagrep_profiles_add_json to set env / safety settings at creation time.
+// Adds with default settings (writeable, no confirmation, no limits). Use
+// datagrep_profiles_add_json to set the safety settings at creation time.
 bool  datagrep_profiles_add(DatagrepCore*, const char* name, const char* url, char** err_out);
 // datagrep_profiles_add with initial settings. options_json is NULL, "", or any
 // subset of:
-// {"env":"dev"|"staging"|"prod","read_only":bool,"confirm_writes":bool,
+// {"read_only":bool,"confirm_writes":bool,
 //  "auto_limit":i64|null,"idle_timeout_s":i64|null,"color":str|null}
-// This is how a profile is born prod: env drives the prod guardrails (red
-// chrome, confirm-on-write).
 bool  datagrep_profiles_add_json(DatagrepCore*, const char* name, const char* url,
                                  const char* options_json, char** err_out);
 // Edit an existing profile, keyed by its current name. patch_json is any
 // subset of:
-// {"name":str,"url":str,"env":"dev"|"staging"|"prod","read_only":bool,
+// {"name":str,"url":str,"read_only":bool,
 //  "confirm_writes":bool,"auto_limit":i64|null,"idle_timeout_s":i64|null,
 //  "color":str|null}
 // Absent key = leave alone; JSON null = clear (auto_limit/idle_timeout_s/
@@ -45,7 +42,7 @@ bool  datagrep_profiles_add_json(DatagrepCore*, const char* name, const char* ur
 bool  datagrep_profiles_update(DatagrepCore*, const char* name,
                                const char* patch_json, char** err_out);
 // Full detail for one profile — what an edit dialog populates from. JSON:
-// {"name":str,"driver":str,"env":"dev"|"staging"|"prod","read_only":bool,
+// {"name":str,"driver":str,"read_only":bool,
 //  "confirm_writes":bool,"auto_limit":i64|null,"idle_timeout_s":i64|null,
 //  "color":str|null,"folder_id":str|null,"has_secret":bool,
 //  "secret":"••••"|null,"config":{key:str|num|bool,...},

@@ -76,12 +76,11 @@ fn parse_patch(text: &str) -> Result<ProfilePatch, String> {
     })
 }
 
-/// `[{"name":..,"driver":..,"read_only":bool,
-///    "has_secret":bool}, ...]`
+/// `[{"name":..,"driver":..,"read_only":bool,"confirm_writes":bool,
+///    "color":str|null,"has_secret":bool}, ...]`
 ///
-/// `env` and `read_only` ride along so the sidebar can tint prod connections
-/// and badge read-only ones without a `datagrep_profiles_get_json` round trip
-/// per row.
+/// Both UIs build their per-connection safety record from this one payload;
+/// a key missing here is a guardrail silently off everywhere.
 ///
 /// # Safety
 /// `core` must come from `datagrep_core_new`; `err_out` must be NULL or writable.
@@ -109,6 +108,8 @@ pub unsafe extern "C" fn datagrep_profiles_list_json(
                         "name": p.name,
                         "driver": p.driver_id,
                         "read_only": p.read_only,
+                        "confirm_writes": p.confirm_writes,
+                        "color": p.color,
                         "has_secret": p.secret_ref.is_some(),
                     })
                 })
@@ -120,10 +121,8 @@ pub unsafe extern "C" fn datagrep_profiles_list_json(
     )
 }
 
-/// Save a profile parsed from a connection URL, with default settings
-/// (`env=dev`, writeable). Kept exactly as the frozen header declares it;
-/// `datagrep_profiles_add_json` is the call that can set env and the safety
-/// settings at creation time.
+/// Save a profile parsed from a connection URL, with default settings;
+/// `datagrep_profiles_add_json` sets the safety settings at creation time.
 ///
 /// # Safety
 /// `core` must come from `datagrep_core_new`; `name`/`url` must be valid
@@ -154,13 +153,6 @@ pub unsafe extern "C" fn datagrep_profiles_add(
 /// `""` (same defaults as `datagrep_profiles_add`) or any subset of
 /// `{"read_only":bool,"confirm_writes":bool,
 ///   "auto_limit":i64|null,"idle_timeout_s":i64|null,"color":str|null}`.
-///
-/// This is how a profile is born prod: `env` is persisted, listed by
-/// `datagrep_profiles_list_json`, and handed to the engine on connect — the
-/// prod guardrails (red chrome, confirm-on-write) key off it.
-/// (`datagrep_profiles_add` used to hard-code
-/// `env=dev` with no way to change it; that is the bug this call and
-/// `datagrep_profiles_update` close.)
 ///
 /// # Safety
 /// `core` must come from `datagrep_core_new`; `name`/`url` must be valid
@@ -391,8 +383,8 @@ async fn update_profile(core: &CoreInner, name: &str, patch: ProfilePatch) -> Re
         .await
         .map_err(|e| format!("could not save the profile: {e}"))?;
 
-    // Drop the stale in-engine registration (old config, old read_only, old
-    // env) and its pool; the next query re-registers from disk.
+    // Drop the stale in-engine registration (old config, old read_only) and
+    // its pool; the next query re-registers from disk.
     core.forget_profile(name);
     if new_name != name {
         core.forget_profile(&new_name);
@@ -832,12 +824,14 @@ mod tests {
     }
 
     #[test]
-    fn add_json_persists_env_prod_and_settings_and_lists_them() {
+    fn add_json_persists_settings_and_lists_them() {
         let core = test_core();
         let name = CString::new("prod-db").unwrap();
         let url = CString::new(":memory:").unwrap();
-        let options =
-            CString::new(r#"{"read_only":true,"confirm_writes":true,"auto_limit":500}"#).unwrap();
+        let options = CString::new(
+            r#"{"read_only":true,"confirm_writes":true,"auto_limit":500,"color":"red"}"#,
+        )
+        .unwrap();
         let mut err: *mut c_char = std::ptr::null_mut();
         unsafe {
             expect_ok(
@@ -852,19 +846,19 @@ mod tests {
                 "datagrep_profiles_add_json",
             );
 
-            // env=prod survived the store round trip — no more hard-coded Dev.
             let p = saved(core, "prod-db");
             assert!(p.read_only);
             assert!(p.confirm_writes);
             assert_eq!(p.auto_limit, Some(500));
 
-            // The sidebar payload carries env + read_only per entry.
             let list = take_json(
                 datagrep_profiles_list_json(core, &mut err),
                 err,
                 "datagrep_profiles_list_json",
             );
             assert!(list.contains(r#""read_only":true"#), "list was {list}");
+            assert!(list.contains(r#""confirm_writes":true"#), "list was {list}");
+            assert!(list.contains(r#""color":"red""#), "list was {list}");
 
             // And the detail payload has everything the edit dialog needs.
             let detail = take_json(
@@ -876,6 +870,7 @@ mod tests {
             assert_eq!(detail["read_only"], true);
             assert_eq!(detail["confirm_writes"], true);
             assert_eq!(detail["auto_limit"], 500);
+            assert_eq!(detail["color"], "red");
             assert_eq!(detail["idle_timeout_s"], serde_json::Value::Null);
             assert_eq!(detail["secret"], serde_json::Value::Null);
             assert_eq!(detail["driver"], "sqlite");
