@@ -30,8 +30,6 @@ UpdateCheck::UpdateCheck(QObject* parent)
     : QObject(parent), network_(new QNetworkAccessManager(this)) {}
 
 QString UpdateCheck::currentVersion() {
-    // Defined by CMake from the workspace manifest — the same source the
-    // packaging scripts stamp on the artifacts.
     return QStringLiteral(DATAGREP_APP_VERSION);
 }
 

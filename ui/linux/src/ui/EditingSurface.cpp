@@ -87,10 +87,6 @@ void StagedEditsBar::refresh() {
     const int conflicts = edits_->conflictCount();
 
     if (pending == 0) {
-        // Everything staged was written. The grid still shows the rows as they
-        // were loaded with the typed values drawn over them, so the only way
-        // to see what the server holds is to ask it again — which is what the
-        // reload button offers.
         headline_->setText(
             written == 1
                 ? QStringLiteral("1 document written — the grid still shows what was loaded")
@@ -103,8 +99,6 @@ void StagedEditsBar::refresh() {
                 : QStringLiteral("%1 documents edited, not yet written").arg(pending));
     }
 
-    // Updates and deletes are different enough that a single count would hide
-    // one behind the other.
     QStringList parts;
     if (edits_->updateCount() > 0) {
         parts << QStringLiteral("%1 to update").arg(edits_->updateCount());
@@ -136,9 +130,6 @@ void StagedEditsBar::refresh() {
         reloadButton_->show();
     } else {
         discardButton_->show();
-        // A conflicted edit cannot simply be committed again — the same guard
-        // would refuse it — so the way forward is offered where the refusal is
-        // visible, not only inside the report.
         resolveButton_->setVisible(conflicts > 0);
         resolveButton_->setText(
             conflicts == 1 ? QStringLiteral("Resolve 1 Conflict…")

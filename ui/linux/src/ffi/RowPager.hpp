@@ -1,11 +1,4 @@
 // RowPager.hpp — a bounded, page-keyed LRU over dg::RowWindow.
-//
-// This is the whole memory story of the grid: the model may report 1,000,000
-// rows, but at most `maxPages * pageSize` rows are ever materialised at once, and
-// evicting a page drops its DatagrepRows immediately (dg::RowWindow's destructor
-// calls datagrep_rows_free). Mirrors DatagrepKit.RowPager.
-//
-// Dependency-free (std only): the pager is pure ABI plumbing with no Qt.
 
 #ifndef DATAGREP_ROW_PAGER_HPP
 #define DATAGREP_ROW_PAGER_HPP
@@ -20,12 +13,7 @@ namespace dg {
 
 class RowPager {
 public:
-    // 512-row pages, 4 pages resident => at most 2,048 rows materialised, exactly
-    // as the macOS grid is tuned. `query` must outlive the pager.
-    // maxPages is clamped to >= 1: the eviction loop in window() must never be
-    // able to evict the page it just inserted, or the returned pointer would
-    // dangle. (pageSize is likewise kept >= 1 so page arithmetic can't divide
-    // by zero.)
+    // maxPages is clamped >= 1 so eviction can never free the page just inserted.
     explicit RowPager(const Query& query, std::uint64_t pageSize = 512,
                       int maxPages = 4)
         : query_(query),
@@ -34,16 +22,11 @@ public:
 
     std::uint64_t pageSize() const { return pageSize_; }
 
-    // Drops every cached page. Each dg::RowWindow destructor frees its
-    // DatagrepRows. Call when a brand-new result replaces the old one.
     void invalidateAll() {
         pages_.clear();
         order_.clear();
     }
 
-    // Drops cached pages that were only partially filled while streaming (a
-    // half-page fetched at 40% progress), so it is re-fetched once more rows
-    // land. Fully-materialised pages are kept. Mirrors invalidatePartialPages().
     void invalidatePartialPages() {
         for (auto it = pages_.begin(); it != pages_.end();) {
             const RowWindow& w = it->second;
@@ -57,10 +40,6 @@ public:
         }
     }
 
-    // Returns the window that contains `absoluteRow`, fetching and caching its
-    // page on a miss. Returns nullptr if the row is not (yet) available — the
-    // caller draws a skeleton/blank cell. Never materialises more than one page
-    // per miss and never touches rows outside [page, page+pageSize).
     const RowWindow* window(std::uint64_t absoluteRow) {
         const std::uint64_t page = absoluteRow / pageSize_;
         auto it = pages_.find(page);

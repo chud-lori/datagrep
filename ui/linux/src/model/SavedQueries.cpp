@@ -14,8 +14,6 @@
 
 namespace {
 
-// Key names match the macOS store's Codable output; absent keys mean "none",
-// never empty strings.
 QJsonObject recordToJson(const dg::SavedQueryRecord& r) {
     QJsonObject o;
     o.insert(QStringLiteral("id"), r.id);
@@ -171,8 +169,6 @@ SavedQueryStore::Loaded SavedQueryStore::load() const {
     QHash<QString, LoadedTab> byId;
     QStringList discovered;
     for (const dg::SavedQueryRecord& r : allRecords()) {
-        // A record whose .sql has gone missing is dropped; a bare .sql with no
-        // sidecar is ignored (no id, no connection, no caret — guessing).
         QFile f(sqlPath(r));
         if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
             continue;
@@ -189,8 +185,6 @@ SavedQueryStore::Loaded SavedQueryStore::load() const {
             out.tabs.append(*it);
         }
     }
-    // Scratch tabs the session forgot are reopened anyway — unsaved work has
-    // nowhere else to live. Named ones stay closed; the saved list holds them.
     std::sort(discovered.begin(), discovered.end());
     for (const QString& id : discovered) {
         const auto it = byId.constFind(id);
@@ -206,8 +200,6 @@ SavedQueryStore::Loaded SavedQueryStore::load() const {
     return out;
 }
 
-// Filesystem-safe lower-kebab, matching the macOS slug so a synced tabs
-// directory stays one set of files.
 QString SavedQueryStore::slug(const QString& name) {
     QString out;
     bool lastWasDash = false;

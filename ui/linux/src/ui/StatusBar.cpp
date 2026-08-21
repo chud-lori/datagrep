@@ -6,8 +6,6 @@
 
 namespace {
 
-// Grouped thousands for prose ("first 12,000 rows"). The grid gutter stays
-// ungrouped; this is a sentence, not a row number.
 QString formatCount(std::uint64_t n) {
     QString s = QString::number(static_cast<qulonglong>(n));
     int pos = s.size() - 3;
@@ -45,16 +43,12 @@ StatusBar::StatusBar(QWidget* parent) : QWidget(parent) {
     stateLabel_ = makeChip(this);
     rowsLabel_ = makeChip(this);
     noticeLabel_ = makeChip(this);
-    // Orange, and it carries its own explanation as a tooltip. A partial result
-    // is never announced by tint alone.
     noticeLabel_->setStyleSheet(QStringLiteral("color: #c0700a; font-weight: 600;"));
     elapsedLabel_ = makeChip(this);
     readOnlyLabel_ = makeChip(this);
 
     messageLabel_ = new QLabel(this);
     messageLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    // The one elastic field. It truncates at the tail — never the middle, which
-    // is what splices two clauses into one nonsensical sentence.
     messageLabel_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
     cancelButton_ = new QPushButton(QStringLiteral("Cancel"), this);
@@ -95,8 +89,6 @@ void StatusBar::showMessage(const QString& text, bool error) {
 }
 
 bool StatusBar::limitHit(const dg::QueryStatus& s) const {
-    // Only meaningful once the result is complete: while streaming, N < limit
-    // just means more rows are still coming, not that the limit bit.
     if (s.state != dg::QueryState::Done || !limitHint_ || *limitHint_ == 0) {
         return false;
     }
@@ -108,16 +100,12 @@ QString StatusBar::rowCountText(const dg::QueryStatus& s) const {
     if (s.affectedRows.has_value()) {
         return QStringLiteral("%1 affected").arg(formatCount(*s.affectedRows));
     }
-    // Capped and @limit-hit both mean: the grid holds the FIRST N of a possibly
-    // longer result. Say so — never a final-looking "N rows".
     if (s.capped() || limitHit(s)) {
         return QStringLiteral("first %1 rows").arg(formatCount(s.rowsLoaded));
     }
     if (s.streaming()) {
         return QStringLiteral("%1 rows so far…").arg(formatCount(s.rowsLoaded));
     }
-    // Complete, but the engine streams without a known total: more may exist
-    // than were loaded, so "≥ N", not "N".
     if (!s.totalKnown) {
         return QStringLiteral("≥ %1 rows").arg(formatCount(s.rowsLoaded));
     }

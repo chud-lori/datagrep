@@ -52,9 +52,6 @@ QJsonValue MutationValue::abiJson() const {
 
 namespace {
 
-// Shortest text that round-trips the double, so "type the loaded value back to
-// un-stage it" works: a fixed 17-digit rendering of 0.1 would never equal the
-// "0.1" on screen.
 QString shortestDouble(double d) {
     for (int precision = 1; precision <= 17; ++precision) {
         const QString text = QString::number(d, 'g', precision);
@@ -98,10 +95,6 @@ std::optional<MutationValue> MutationValue::decode(const QJsonValue& v) {
         case QJsonValue::Null: return null();
         case QJsonValue::Bool: return boolean(v.toBool());
         case QJsonValue::Double: {
-            // Qt's JSON layer keeps whole numbers as integers internally;
-            // toVariant() surfaces that as LongLong. A bare .toDouble() here
-            // would turn every integer into F64 and rewrite the field's type
-            // on a server that types its fields.
             const QVariant var = v.toVariant();
             if (var.typeId() == QMetaType::LongLong ||
                 var.typeId() == QMetaType::ULongLong ||
@@ -226,9 +219,6 @@ bool EditableResult::address(const QJsonObject& envelope, Address* out,
     out->key.clear();
     out->expect.clear();
     for (const QString& field : identity) {
-        // An identity field not on this row (an unrouted document carries no
-        // routing) is left out of the key rather than sent as null: absent and
-        // null are different facts, and the engine reads them so.
         if (!envelope.contains(field)) {
             continue;
         }
@@ -271,9 +261,6 @@ bool EditableResult::address(const QJsonObject& envelope, Address* out,
 
 namespace {
 
-// `(FieldPath, Value)` — a one-segment path paired with its value:
-// [[{"Field":"status"}], {"Str":"done"}]. Shared by the mutation and the
-// re-read address: two encoders for one wire shape is two things to get wrong.
 QJsonArray pair(const FieldValue& fv) {
     return QJsonArray{
         QJsonArray{QJsonObject{{QStringLiteral("Field"), fv.field}}},

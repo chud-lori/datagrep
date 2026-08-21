@@ -26,10 +26,6 @@ struct Span {
     int end;
 };
 
-// Splits `sql` into top-level statement spans, treating ';' as a separator only
-// when it is outside a string literal, quoted identifier, line comment or block
-// comment. The separators themselves are not included in a span. Trailing
-// whitespace-only spans are dropped by the caller.
 QVector<Span> splitStatements(const QString& sql) {
     QVector<Span> spans;
     int spanStart = 0;
@@ -107,9 +103,6 @@ SqlEditor::SqlEditor(QWidget* parent) : QPlainTextEdit(parent) {
     setPlaceholderText(QStringLiteral("SELECT …   (Ctrl+Return to run)"));
 
 #ifdef HAVE_KSYNTAXHIGHLIGHTING
-    // Preferred path: the maintained KSyntaxHighlighting engine. The Repository
-    // owns the bundled syntax definitions and themes; construct the highlighter
-    // against this editor's document and point it at the "SQL" definition.
     repository_ = new KSyntaxHighlighting::Repository();
     auto* ksh = new KSyntaxHighlighting::SyntaxHighlighter(document());
     ksh->setDefinition(repository_->definitionForName(QStringLiteral("SQL")));
@@ -128,15 +121,10 @@ void SqlEditor::applyTheme() {
     }
     auto* ksh = static_cast<KSyntaxHighlighting::SyntaxHighlighter*>(highlighter_);
 
-    // Pick a bundled theme (light or dark) that matches the current palette, so
-    // the highlight colours agree with the surrounding UI chrome.
     const KSyntaxHighlighting::Theme theme = repository_->themeForPalette(palette());
     ksh->setTheme(theme);
 
     if (theme.isValid()) {
-        // Align the editor's own background / default text colour with the theme
-        // so untokenised text and the caret line read correctly. Guard the
-        // re-entrant PaletteChange this setPalette() triggers.
         applyingTheme_ = true;
         QPalette pal = palette();
         pal.setColor(QPalette::Base,
@@ -169,8 +157,6 @@ QString SqlEditor::statementUnderCursor() const {
     const int pos = textCursor().position();
     const QVector<Span> spans = splitStatements(sql);
     for (const Span& s : spans) {
-        // The cursor belongs to the span it sits within; a cursor exactly on a
-        // separator boundary attaches to the statement that just ended.
         if (pos >= s.start && pos <= s.end) {
             const QString stmt = sql.mid(s.start, s.end - s.start).trimmed();
             if (!stmt.isEmpty()) {

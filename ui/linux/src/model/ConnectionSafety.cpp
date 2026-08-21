@@ -5,10 +5,6 @@
 namespace dg {
 
 std::optional<QColor> connectionColor(const QString& name) {
-    // Fixed sRGB values rather than palette roles: the marker must read as the
-    // SAME colour on every theme, in the list swatch and in the banner, because
-    // it is the user's own code for "careful here". Values are the familiar
-    // system hues the macOS palette resolves to.
     const QString n = name.toLower();
     if (n == QStringLiteral("red")) return QColor(0xE0, 0x38, 0x2F);
     if (n == QStringLiteral("orange")) return QColor(0xF2, 0x82, 0x1B);
@@ -25,9 +21,6 @@ std::optional<QColor> connectionColor(const QString& name) {
 
 namespace {
 
-// The statement with leading whitespace and leading `--` comment lines removed
-// — directives (`-- @limit …`) and headers sit there and must not be mistaken
-// for the verb. Mirrors the skip loop in the macOS classifier exactly.
 QString skipLeadingComments(const QString& sql) {
     QString s = sql;
     for (;;) {
@@ -56,8 +49,6 @@ QString headWord(const QString& sql) {
 }  // namespace
 
 bool isWriteStatement(const QString& sql) {
-    // The same verb list as the macOS classifier — the two apps must agree on
-    // what counts as a write, or the same profile behaves differently per OS.
     static const QStringList kWriteVerbs = {
         QStringLiteral("insert"),  QStringLiteral("update"),
         QStringLiteral("delete"),  QStringLiteral("drop"),

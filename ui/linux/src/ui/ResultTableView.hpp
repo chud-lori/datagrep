@@ -1,13 +1,4 @@
-// ResultTableView.hpp — the QTableView bound to ResultModel, with a copy path
-// that is provably free of row numbers.
-//
-// Qt's item views ship NO built-in Ctrl+C, so copy is implemented here. The
-// implementation reads selectionModel()->selectedIndexes() — model cells only —
-// and joins them with tabs and newlines. Because the row-number gutter is a
-// QHeaderView (see RowNumberHeader.hpp) and header values are never QModelIndex,
-// they cannot appear in selectedIndexes(), and therefore cannot appear in copied
-// output. This is the structural copy-safety guarantee, mirroring the macOS
-// grid whose copy paths enumerate tableColumns only.
+// ResultTableView.hpp — the QTableView bound to ResultModel.
 
 #ifndef DATAGREP_RESULT_TABLE_VIEW_HPP
 #define DATAGREP_RESULT_TABLE_VIEW_HPP
@@ -27,14 +18,11 @@ public:
     void setModel(QAbstractItemModel* model) override;
 
 public slots:
-    // Copies the current selection to the clipboard as TSV (tab between columns,
-    // newline between rows). Row numbers are structurally excluded — see the file
-    // header. Bound to QKeySequence::Copy.
+    // Copies the current selection as TSV. Bound to QKeySequence::Copy.
+    // Reads selectedIndexes() only, so header row numbers structurally cannot appear.
     void copySelection() const;
 
 protected:
-    // The editing half of the grid menu, present only on a result the engine
-    // said may be edited — never greyed-out-and-erroring.
     void contextMenuEvent(QContextMenuEvent* event) override;
 
 private:

@@ -123,8 +123,6 @@ QString rows(const std::optional<int>& n) {
 
 namespace {
 
-// The JSON key names ARE the contract: they match the macOS store's Codable
-// output line for line, which itself mirrors the engine's query_history schema.
 QJsonObject entryToJson(const dg::QueryHistoryEntry& e) {
     QJsonObject o;
     o.insert(QStringLiteral("id"), e.id);
@@ -148,8 +146,6 @@ QJsonObject entryToJson(const dg::QueryHistoryEntry& e) {
     return o;
 }
 
-// Defensive: a hand-edited or truncated line degrades to "skip this entry",
-// never to losing the file.
 std::optional<dg::QueryHistoryEntry> entryFromJson(const QJsonObject& o) {
     dg::QueryHistoryEntry e;
     e.sql = o.value(QStringLiteral("sql")).toString();
@@ -192,8 +188,6 @@ dg::HistoryRetention readRetention(const QString& dir) {
         return dg::HistoryRetention{};
     }
     const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
-    // Clamped on read too — a retention.json hand-edited to 0 must not be read
-    // as "delete everything".
     return dg::HistoryRetention::clamped(
         o.value(QStringLiteral("maxEntries")).toInt(10000),
         o.value(QStringLiteral("maxDays")).toInt(180));
@@ -246,9 +240,6 @@ void QueryHistoryStore::load() {
     }
     loaded_ = true;
     QDir dir(directory_);
-    // The filenames are ISO dates, so a reversed name sort is newest-first —
-    // and newest-first means reading can stop as soon as the entry budget is
-    // met; older files stay on disk until pruned.
     const QStringList files = dir.entryList({QStringLiteral("*.jsonl")}, QDir::Files,
                                             QDir::Name | QDir::Reversed);
     const QString cutoff = cutoffDayKey(retention_.maxDays);
@@ -297,8 +288,6 @@ void QueryHistoryStore::record(dg::QueryHistoryEntry entry) {
         entry.textHash = hashText(entry.sql);
     }
 
-    // Dedupe: the most recent entry with the same statement on the same
-    // connection, inside the window, with the same outcome AND the same error.
     int found = -1;
     for (int i = 0; i < entries_.size(); ++i) {
         const dg::QueryHistoryEntry& e = entries_.at(i);
@@ -481,8 +470,6 @@ QVector<dg::QueryHistoryEntry> QueryHistoryStore::filter(
         if (earliest.has_value() && e.startedAt() < *earliest) {
             continue;
         }
-        // AND across terms: typing more words narrows. The error text is
-        // searched too — "deadlock" should find the query that hit one.
         bool matches = true;
         for (const QString& t : terms) {
             if (!e.sql.contains(t, Qt::CaseInsensitive) &&
@@ -585,8 +572,6 @@ void QueryHistoryStore::flush() {
     }
     dirtyDays_.clear();
 
-    // Drop any day file retention has outlived. Derived from what is actually
-    // in memory, so a stale or hand-edited directory heals itself.
     const QString cutoff = cutoffDayKey(retention_.maxDays);
     QDir dir(directory_);
     const QStringList files = dir.entryList({QStringLiteral("*.jsonl")}, QDir::Files);
@@ -598,8 +583,6 @@ void QueryHistoryStore::flush() {
     }
 }
 
-// `days` counts inclusive of today: a retention of 1 keeps today and nothing
-// else — "keep 1 day" that quietly kept two would be an undocumented cap.
 QString QueryHistoryStore::cutoffDayKey(int days, const QDate& today) {
     return today.addDays(-(std::max(1, days) - 1)).toString(Qt::ISODate);
 }

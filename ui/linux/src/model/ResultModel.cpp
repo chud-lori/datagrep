@@ -15,8 +15,6 @@
 ResultModel::ResultModel(QObject* parent) : QAbstractTableModel(parent) {}
 
 ResultModel::~ResultModel() {
-    // Order matters: drop the pager (frees resident DatagrepRows) before the
-    // Query it borrows. query_'s destructor then joins the feeder.
     pager_.reset();
     query_.reset();
 }
@@ -33,8 +31,6 @@ void ResultModel::setQuery(std::unique_ptr<dg::Query> query) {
     columnTypes_.clear();
     columnRightAligned_.clear();
     status_ = dg::QueryStatus{};
-    // A new result is new rows: the values staged edits were typed against are
-    // gone, and so are the loaded versions their guards carry.
     editable_.reset();
     namesWindow_ = nullptr;
     namesCache_.clear();
@@ -43,14 +39,7 @@ void ResultModel::setQuery(std::unique_ptr<dg::Query> query) {
     }
     if (query_) {
         pager_ = std::make_unique<dg::RowPager>(*query_);
-        // Marshal the background progress callback onto the GUI thread. The ABI
-        // fires the callback from a feeder thread; a queued invocation of
-        // onProgressTick() is our equivalent of the macOS DispatchQueue.main hop.
-        // Capturing `this` is safe: the Query (and thus the callback) is destroyed
-        // in this object's destructor, before `this` becomes invalid.
         query_->onProgress([this]() {
-            // Runs on a foreign tokio thread — do the ABSOLUTE MINIMUM here and
-            // never touch model state. Coalesce, then hop to the GUI thread.
             if (tickQueued_.exchange(true)) {
                 return;  // a tick is already queued; drop this one
             }
@@ -77,8 +66,6 @@ void ResultModel::reset() {
     columnTypes_.clear();
     columnRightAligned_.clear();
     status_ = dg::QueryStatus{};
-    // A new result is new rows: the values staged edits were typed against are
-    // gone, and so are the loaded versions their guards carry.
     editable_.reset();
     namesWindow_ = nullptr;
     namesCache_.clear();
@@ -117,8 +104,6 @@ QVariant ResultModel::data(const QModelIndex& index, int role) const {
     const auto absRow = static_cast<std::uint64_t>(row);
     const auto absCol = static_cast<std::uint32_t>(col);
 
-    // A window fetch can throw (ABI error mid-stream). Never let it escape into
-    // Qt's paint loop; degrade to a blank/skeleton cell.
     const dg::RowWindow* window = nullptr;
     try {
         window = pager_->window(absRow);
@@ -126,12 +111,6 @@ QVariant ResultModel::data(const QModelIndex& index, int role) const {
         window = nullptr;
     }
 
-    // A window narrower than the announced schema (fetched before a schema
-    // delta appended columns) must never be asked for a column it does not
-    // have: the ABI indexes row*cols+col into a flat cell array, so an
-    // out-of-range column returns ANOTHER ROW'S cell, not an error. Render as
-    // pending instead — refreshStatus() already dropped such windows, and the
-    // re-fetch comes back full-width.
     if (window != nullptr && absCol >= window->columns()) {
         window = nullptr;
     }
@@ -150,8 +129,6 @@ QVariant ResultModel::data(const QModelIndex& index, int role) const {
 
     const dg::CellKind kind = window->kind(absRow, absCol);
 
-    // The staged overlay: a value typed over this cell draws instead of the
-    // loaded one — "I typed something" has to be visible before it is written.
     const dg::StagedDocument* stagedDoc =
         (editable_ && edits_ != nullptr) ? edits_->documentAtRow(row) : nullptr;
     std::optional<dg::MutationValue> stagedValue;
@@ -164,9 +141,6 @@ QVariant ResultModel::data(const QModelIndex& index, int role) const {
 
     switch (role) {
         case Qt::EditRole:
-            // What the field editor opens with: the staged value if one is
-            // typed, else the cell as loaded (NULL edits as "NULL"; typing it
-            // back un-stages, never writes the string).
             if (stagedValue) {
                 return stagedValue->display();
             }
@@ -211,8 +185,6 @@ QVariant ResultModel::data(const QModelIndex& index, int role) const {
                 case dg::CellKind::Null:
                     return QStringLiteral("NULL");
                 case dg::CellKind::Absent:
-                    // Field genuinely not present in this document — render blank,
-                    // distinct from NULL. The delegate can style it via CellKindRole.
                     return QString();
                 case dg::CellKind::Value:
                 case dg::CellKind::Nested:
@@ -235,8 +207,6 @@ QVariant ResultModel::data(const QModelIndex& index, int role) const {
             if (stagedValue) {
                 return QVariant();
             }
-            // NULL / ABSENT / nested read as chrome, not data — muted like the
-            // macOS grid's placeholder colour.
             if (kind == dg::CellKind::Null || kind == dg::CellKind::Absent ||
                 kind == dg::CellKind::Nested) {
                 return QBrush(QColor(0x88, 0x88, 0x88));
@@ -273,11 +243,6 @@ QVariant ResultModel::headerData(int section, Qt::Orientation orientation,
         }
     }
 
-    // Vertical header == the row-number gutter. Returning the 1-based row number
-    // here is the WHOLE copy-safety story: a vertical-header value is not a
-    // QModelIndex, is never part of selectedIndexes(), and our copy path only
-    // ever serialises selectedIndexes(). The number is therefore STRUCTURALLY
-    // incapable of appearing in copied output. See RowNumberHeader.hpp.
     if (orientation == Qt::Vertical) {
         if (role == Qt::DisplayRole) {
             if (section < 0 || static_cast<std::uint64_t>(section) >= exposedRows_) {
@@ -297,8 +262,6 @@ Qt::ItemFlags ResultModel::flags(const QModelIndex& index) const {
     if (!index.isValid()) {
         return Qt::NoItemFlags;
     }
-    // Editable only when the engine's status said so AND the connection's
-    // read-only veto did not apply — everything else stays a read-only grid.
     Qt::ItemFlags f = Qt::ItemIsSelectable | Qt::ItemIsEnabled;
     if (editable_ && cellEditable(index.row(), index.column())) {
         f |= Qt::ItemIsEditable;
@@ -344,8 +307,6 @@ bool ResultModel::setData(const QModelIndex& index, const QVariant& value,
     if (window == nullptr || static_cast<std::uint32_t>(col) >= window->columns()) {
         return false;
     }
-    // The write names a field, so the cached names must be THIS window's — a
-    // stale hit here would stage against a field the user never touched.
     namesWindow_ = nullptr;
     const QString field = fieldName(window, col);
     if (field.isEmpty()) {
@@ -355,8 +316,6 @@ bool ResultModel::setData(const QModelIndex& index, const QVariant& value,
     }
     const auto loaded = loadedValue(window, row, col);
     const QString typed = value.toString();
-    // Typing the loaded value back in is how an edit is taken back, so it
-    // un-stages the field rather than staging a write that changes nothing.
     if (loaded && loaded->display() == typed) {
         edits_->unstage(row, field);
         refreshStagedRows({row});
@@ -496,8 +455,6 @@ void ResultModel::fetchMore(const QModelIndex& parent) {
 }
 
 void ResultModel::onProgressTick() {
-    // Clear the coalescing latch first, so a callback that arrives while we work
-    // queues the NEXT tick rather than being dropped.
     tickQueued_.store(false);
     if (!query_) {
         return;
@@ -505,11 +462,6 @@ void ResultModel::onProgressTick() {
     refreshStatus();
     revealMore();
 
-    // Cells that drew as skeletons before their page landed must repaint now
-    // that more rows are loaded. Emitting dataChanged over the whole exposed
-    // range is O(1) to signal — the view intersects it with the viewport and
-    // repaints only what is on screen, exactly like the macOS "reload visible
-    // rows only" pass.
     if (exposedRows_ > 0 && columnCount_ > 0) {
         emit dataChanged(index(0, 0),
                          index(static_cast<int>(exposedRows_) - 1, columnCount_ - 1));
@@ -528,9 +480,6 @@ void ResultModel::refreshStatus() {
         next.error = QString::fromUtf8(e.what());
     }
 
-    // Columns only ever APPEND on the right — an existing column is never moved
-    // or renamed by a schema delta (columns jumping mid-scroll is the failure
-    // mode). If the count grew, tell the view about the new columns.
     const int newColumnCount = static_cast<int>(next.columns.size());
     if (newColumnCount > columnCount_) {
         beginInsertColumns(QModelIndex(), columnCount_, newColumnCount - 1);
@@ -541,10 +490,6 @@ void ResultModel::refreshStatus() {
         }
         columnCount_ = newColumnCount;
         endInsertColumns();
-        // Every resident window predates the wider schema and only carries the
-        // OLD column count. Asking such a window for a new column would index
-        // row*oldCols+col into its flat cell array — aliasing another row's
-        // cell, not erroring. Drop them all; they re-fetch with the new width.
         if (pager_) {
             pager_->invalidateAll();
         }
@@ -557,20 +502,13 @@ void ResultModel::refreshStatus() {
 
     loadedRows_ = next.rowsLoaded;
     status_ = next;
-    // The veto applied here, on every snapshot, so editability can never
-    // outlive the result (or the read-only decision) it describes.
     editable_ = allowsEditing_ ? next.editable : std::nullopt;
-    // Windows may have been dropped above; the names cache keys on their
-    // addresses and must not survive them.
     namesWindow_ = nullptr;
     namesCache_.clear();
     emit statusChanged(status_);
 }
 
 void ResultModel::revealMore() {
-    // Terminal => announce the whole remainder so the scrollbar is honest even
-    // without scrolling. Streaming => reveal one bounded batch and let the view
-    // pull the rest through repeated fetchMore() as it scrolls.
     const std::uint64_t target =
         status_.streaming()
             ? std::min(loadedRows_, exposedRows_ + kFetchBatch)
@@ -579,9 +517,6 @@ void ResultModel::revealMore() {
 }
 
 void ResultModel::revealTo(std::uint64_t target) {
-    // rows_loaded is u64 on the wire but a QModelIndex row is an int: clamp the
-    // exposure ceiling so the beginInsertRows arithmetic below can never
-    // overflow. (Every cast of exposedRows_ elsewhere relies on this clamp.)
     constexpr std::uint64_t kMaxRows =
         static_cast<std::uint64_t>(std::numeric_limits<int>::max());
     target = std::min(target, kMaxRows);
@@ -618,8 +553,6 @@ QString ResultModel::cellDetailJson(int row, int column) const {
     }
     if (window == nullptr ||
         static_cast<std::uint32_t>(column) >= window->columns()) {
-        // Same out-of-range hazard as data(): a stale narrow window would hand
-        // back the WRONG cell, never an error. Refuse instead.
         return QString();
     }
     if (auto detail = window->cellDetailJson(static_cast<std::uint64_t>(row),

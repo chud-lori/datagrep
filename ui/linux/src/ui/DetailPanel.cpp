@@ -22,9 +22,6 @@
 
 namespace {
 
-// Pretty-print a JSON payload for reading. A cell's detail can be a bare
-// scalar ("abc", 42), which QJsonDocument refuses as a document — those are
-// shown verbatim, which for a scalar IS the pretty form.
 QString prettyJson(const QString& json) {
     const QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());
     if (doc.isNull()) {
@@ -33,8 +30,6 @@ QString prettyJson(const QString& json) {
     return QString::fromUtf8(doc.toJson(QJsonDocument::Indented)).trimmed();
 }
 
-// "12.3 MB" from a byte count. One decimal, binary steps — a size a person
-// compares, not audits.
 QString humanBytes(double bytes) {
     static const char* kUnits[] = {"B", "KB", "MB", "GB", "TB"};
     int unit = 0;
@@ -48,8 +43,6 @@ QString humanBytes(double bytes) {
                            .arg(QLatin1String(kUnits[unit]));
 }
 
-// One section header row ("Columns (12)", "Indexes — not reported"). Bold so
-// the tree reads as sections without needing a second widget per group.
 QTreeWidgetItem* sectionItem(QTreeWidget* tree, const QString& text) {
     auto* item = new QTreeWidgetItem(tree);
     item->setText(0, text);
@@ -61,9 +54,6 @@ QTreeWidgetItem* sectionItem(QTreeWidget* tree, const QString& text) {
     return item;
 }
 
-// The details string for one column of the described object: the most specific
-// type the engine reported, then the facts as short markers. Only facts that
-// ARRIVED are printed — an absent field is not a false one.
 QString columnDetails(const QJsonObject& c) {
     QStringList parts;
     QString type = c.value(QStringLiteral("native_type")).toString();
@@ -105,8 +95,6 @@ QString columnDetails(const QJsonObject& c) {
     return parts.join(QStringLiteral(" · "));
 }
 
-// The details string for one index: its column list with per-column order,
-// then its properties.
 QString indexDetails(const QJsonObject& ix) {
     QStringList cols;
     const QJsonArray columns = ix.value(QStringLiteral("columns")).toArray();
@@ -236,10 +224,6 @@ void DetailPanel::buildCellTab() {
         QStringLiteral("Click a cell in the grid to see its whole value — a "
                        "{…} chip opens here on its own."));
 
-    // The product's honesty claim, spelled out where it can be read: a field
-    // missing from a document is a different fact from a field that is null,
-    // and both are different from an empty string. Same legend as the macOS
-    // cell pane.
     auto* legend = new QLabel(
         QStringLiteral("NULL — present, and null\n"
                        "(empty) — present, empty string\n"
@@ -396,10 +380,6 @@ void DetailPanel::showCell(int row, int column, const QString& detailJson,
     const QString value = detailJson.isEmpty()
                               ? QStringLiteral("(no detail available)")
                               : prettyJson(detailJson);
-    // On a result with a projection root the columns are the document's own
-    // fields, so which document a value belongs to is no longer visible in the
-    // grid — and this pane is exactly where someone comes to ask. The envelope
-    // leads, because it is the answer.
     const QJsonObject envelope =
         QJsonDocument::fromJson(envelopeJson.toUtf8()).object();
     if (!envelope.isEmpty()) {

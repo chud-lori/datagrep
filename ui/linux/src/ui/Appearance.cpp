@@ -8,8 +8,6 @@ namespace {
 
 QString settingsKey() { return QStringLiteral("appearance"); }
 
-// Stored values match the macOS raw values (system/light/dark), even though
-// the stores themselves are platform-native (QSettings here, defaults there).
 QString toString(Appearance::Mode mode) {
     switch (mode) {
         case Appearance::Mode::Light:
@@ -111,8 +109,6 @@ bool Appearance::isDark() const {
 
 void Appearance::apply(Mode mode) {
     if (mode == Mode::System && !forced_) {
-        // Nothing to undo: leave the platform theme in charge rather than
-        // freezing its palette by setting it explicitly.
         emit effectivePaletteChanged(QApplication::palette(), isDark());
         return;
     }
@@ -130,8 +126,6 @@ bool Appearance::eventFilter(QObject* watched, QEvent* event) {
     if (watched == qApp &&
         event->type() == QEvent::ApplicationPaletteChange && !applying_ &&
         !forced_) {
-        // The platform theme moved while we follow it: track the new palette
-        // and tell listeners (icon variants resolve off this signal).
         systemPalette_ = QApplication::palette();
         emit effectivePaletteChanged(systemPalette_, isDark(systemPalette_));
     }
