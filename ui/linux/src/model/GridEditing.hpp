@@ -37,7 +37,6 @@ struct StagedField {
     std::optional<MutationValue> loaded;
 };
 
-// One document's staged changes, addressed the way the engine addresses it.
 struct StagedDocument {
     QString id;
     QVector<FieldValue> key;
@@ -100,7 +99,6 @@ public:
     bool apply(const MutationReport& report, const QStringList& committedIds);
 
 signals:
-    // Something was staged, discarded or resolved; the bar redraws from this.
     void stagingChanged();
 
 private:

@@ -53,7 +53,6 @@ private:
     bool b_ = false;
 };
 
-// One field paired with its value — the wire's `(FieldPath, Value)`.
 struct FieldValue {
     QString field;
     MutationValue value;
@@ -90,7 +89,6 @@ struct DocumentMutation {
     QJsonObject abiJson() const;
 };
 
-// The MutationBatch blob datagrep_mutate parses.
 QString mutationBatchJson(const QVector<DocumentMutation>& mutations);
 
 struct DocumentAddress {
@@ -98,7 +96,6 @@ struct DocumentAddress {
     QJsonObject abiJson() const;
 };
 
-// The address list datagrep_reread_documents parses.
 QString documentAddressBatchJson(const QVector<DocumentAddress>& addresses);
 
 struct ServerValue {
@@ -147,7 +144,6 @@ struct MutationNotice {
     bool isWarning() const { return severity == QStringLiteral("warning"); }
 };
 
-// The report datagrep_mutate returns.
 struct MutationReport {
     QVector<MutationRow> rows;
     QVector<MutationNotice> notices;

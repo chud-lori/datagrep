@@ -19,7 +19,6 @@ class ResultModel : public QAbstractTableModel {
     Q_OBJECT
 
 public:
-    // Custom roles the grid delegate / view read alongside the standard ones.
     enum Roles {
         CellKindRole = Qt::UserRole + 1,
         // true when the row's page has not been fetched yet: draw a skeleton.
@@ -34,7 +33,6 @@ public:
 
     void reset();
 
-    // --- QAbstractItemModel ------------------------------------------------
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     int columnCount(const QModelIndex& parent = QModelIndex()) const override;
     QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
@@ -47,19 +45,15 @@ public:
     bool canFetchMore(const QModelIndex& parent) const override;
     void fetchMore(const QModelIndex& parent) override;
 
-    // Latest decoded status; also emitted via statusChanged().
     const dg::QueryStatus& status() const { return status_; }
 
-    // Cancel the running query, returning the server's verbatim outcome message.
     QString cancel();
 
-    // Raw JSON detail of one cell, for the detail pane.
     QString cellDetailJson(int row, int column) const;
 
     // Kind of one loaded cell, or nullopt when its window is not resident.
     std::optional<dg::CellKind> cellKind(int row, int column) const;
 
-    // The row's envelope (fields outside the projected root) as JSON, or empty.
     QString envelopeJson(int row) const;
 
     void setAllowsEditing(bool allows) { allowsEditing_ = allows; }
@@ -70,7 +64,6 @@ public:
 
     void stageDeleteRow(int row);
     void discardStagedRow(int row);
-    // Repaint rows whose staging changed (after a commit report / a rebase).
     void refreshStagedRows(const QVector<int>& rows);
 
     bool cellEditable(int row, int column) const;
@@ -96,14 +89,11 @@ private:
 
     // From the window itself, never the status header — heterogeneous results differ.
     QString fieldName(const dg::RowWindow* window, int col) const;
-    // One cell's loaded value (nullopt for nested and absent cells).
     std::optional<dg::MutationValue> loadedValue(const dg::RowWindow* window,
                                                  int row, int col) const;
-    // The row's address, or false after emitting editRefused with the reason.
     bool addressRow(int row, const dg::RowWindow* window,
                     dg::EditableResult::Address* out);
 
-    // Rows revealed per fetchMore() call while streaming.
     static constexpr std::uint64_t kFetchBatch = 4096;
 
     std::unique_ptr<dg::Query> query_;
