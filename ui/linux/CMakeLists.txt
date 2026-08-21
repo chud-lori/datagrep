@@ -135,9 +135,11 @@ add_executable(datagrep
     src/model/ConnectionSafety.cpp
     src/model/QueryHistory.cpp
     src/model/QueryStatus.cpp
+    src/model/SavedQueries.cpp
     src/model/ResultModel.cpp
     src/ui/ConnectionDialog.cpp
     src/ui/DetailPanel.cpp
+    src/ui/EditorTabs.cpp
     src/ui/HistoryPanel.cpp
     src/ui/MainWindow.cpp
     src/ui/ResultTableView.cpp

@@ -6,6 +6,7 @@
 #include "model/ResultModel.hpp"
 #include "ui/ConnectionDialog.hpp"
 #include "ui/DetailPanel.hpp"
+#include "ui/EditorTabs.hpp"
 #include "ui/HistoryPanel.hpp"
 #include "ui/ResultTableView.hpp"
 #include "ui/SchemaTree.hpp"
@@ -82,6 +83,32 @@ std::optional<std::uint64_t> parseLimitDirective(const QString& sql) {
         }
     }
     return std::nullopt;
+}
+
+// The `-- @connection NAME` block directive. Mirrors the macOS directive of the
+// same name: text the user wrote outranks the tab's binding and the sidebar.
+QString parseConnectionDirective(const QString& sql) {
+    const QStringList lines = sql.split(QLatin1Char('\n'));
+    for (const QString& raw : lines) {
+        const QString line = raw.trimmed();
+        if (!line.startsWith(QStringLiteral("--"))) {
+            continue;
+        }
+        const QString body = line.mid(2).trimmed();
+        if (!body.startsWith(QLatin1Char('@'))) {
+            continue;
+        }
+        const QString rest = body.mid(1);
+        const int sp = rest.indexOf(QLatin1Char(' '));
+        if (sp < 0 || rest.left(sp).toLower() != QStringLiteral("connection")) {
+            continue;
+        }
+        const QString value = rest.mid(sp + 1).trimmed();
+        if (!value.isEmpty()) {
+            return value;
+        }
+    }
+    return QString();
 }
 
 }  // namespace
@@ -185,9 +212,17 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     sidebar->setStretchFactor(0, 0);
     sidebar->setStretchFactor(1, 1);
 
-    // --- editor over grid --------------------------------------------------
-    editor_ = new SqlEditor(this);
-    connect(editor_, &SqlEditor::runRequested, this, &MainWindow::runStatement);
+    // --- editors over grid: one unified tab bar across all connections ------
+    editors_ = new EditorTabs(this);
+    connect(editors_, &EditorTabs::runRequested, this, &MainWindow::runStatement);
+    // Binding a tab to a profile moves the window there, so the schema tree
+    // and safety surfaces describe the connection the next run will hit.
+    connect(editors_, &EditorTabs::connectionBound, this,
+            [this](const QString& name) { selectConnection(name); });
+    connect(editors_, &EditorTabs::newConnectionRequested, this,
+            &MainWindow::onAddConnection);
+    connect(editors_, &EditorTabs::statusMessage, this,
+            [this](const QString& text) { status_->showMessage(text); });
 
     auto* editorToolbar = new QToolBar(this);
     auto* runAction = editorToolbar->addAction(QStringLiteral("Run  (Ctrl+↵)"));
@@ -204,7 +239,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     editorLayout->setContentsMargins(0, 0, 0, 0);
     editorLayout->setSpacing(0);
     editorLayout->addWidget(editorToolbar);
-    editorLayout->addWidget(editor_);
+    editorLayout->addWidget(editors_);
 
     model_ = new ResultModel(this);
     connect(model_, &ResultModel::statusChanged, this,
@@ -295,6 +330,7 @@ void MainWindow::reloadProfiles() {
     const QJsonArray arr = QJsonDocument::fromJson(json.toUtf8()).array();
     safetyByProfile_.clear();
     driverByProfile_.clear();
+    QVector<QPair<QString, QString>> connectionOptions;
     for (const QJsonValue& v : arr) {
         const QJsonObject o = v.toObject();
         const QString name = o.value(QStringLiteral("name")).toString();
@@ -313,6 +349,7 @@ void MainWindow::reloadProfiles() {
             o.value(QStringLiteral("confirm_writes")).toBool(false);
         safetyByProfile_.insert(name, safety);
         driverByProfile_.insert(name, driver);
+        connectionOptions.append({name, driver});
 
         auto* item = new QListWidgetItem(name, connections_);
 
@@ -362,6 +399,7 @@ void MainWindow::reloadProfiles() {
             item->setFont(f);
         }
     }
+    editors_->setConnections(connectionOptions);
     updateMarkedBanner();
 }
 
@@ -371,6 +409,7 @@ void MainWindow::onConnectionSelected() {
     editButton_->setEnabled(have);
     removeButton_->setEnabled(have);
     updateMarkedBanner();
+    editors_->setWindowConnection(profile);
     if (have) {
         schema_->showProfile(profile);
     }
@@ -466,13 +505,33 @@ void MainWindow::onRemoveConnection() {
 }
 
 void MainWindow::runStatement() {
-    const QString profile = selectedProfile();
+    SqlEditor* editor = editors_->currentEditor();
+    if (editor == nullptr) {
+        status_->showMessage(
+            QStringLiteral("No editor open — Ctrl+T opens one."), true);
+        return;
+    }
+    const QString sql = editor->statementUnderCursor();
+    if (sql.isEmpty()) {
+        return;
+    }
+    // Precedence: `-- @connection` in the text, then the tab's binding, then
+    // the window's selection.
+    QString profile = parseConnectionDirective(sql);
+    if (profile.isEmpty()) {
+        profile = editors_->activeConnection();
+    }
+    if (profile.isEmpty()) {
+        profile = selectedProfile();
+    }
     if (profile.isEmpty()) {
         status_->showMessage(QStringLiteral("Select a connection first."), true);
         return;
     }
-    const QString sql = editor_->statementUnderCursor();
-    if (sql.isEmpty()) {
+    if (!safetyByProfile_.contains(profile)) {
+        status_->showMessage(
+            QStringLiteral("connection ‘%1’ does not exist — not run").arg(profile),
+            true);
         return;
     }
     executeStatement(profile, sql);
@@ -540,20 +599,9 @@ bool MainWindow::selectConnection(const QString& name) {
 
 void MainWindow::onOpenHistoryInEditor(const QString& sql,
                                        const QString& connection) {
-    // No editor tabs yet, so append rather than replace: a history panel that
-    // overwrites the SQL someone was half way through writing has cost them
-    // more than it saved.
-    QTextCursor cursor = editor_->textCursor();
-    cursor.movePosition(QTextCursor::End);
-    if (!editor_->toPlainText().trimmed().isEmpty()) {
-        cursor.insertText(QStringLiteral("\n\n"));
-    }
-    cursor.insertText(sql);
-    editor_->setTextCursor(cursor);
-    editor_->setFocus();
-    if (!connection.isEmpty()) {
-        selectConnection(connection);  // gone connections just stay unselected
-    }
+    // A NEW tab, bound to the connection the entry ran against — never
+    // overwriting the SQL someone was half way through writing.
+    editors_->openInNewTab(sql, connection);
 }
 
 void MainWindow::onRerunFromHistory(const QString& sql, const QString& connection) {
@@ -612,7 +660,11 @@ void MainWindow::onSchemaObjectActivated(const QString& /*profile*/,
         return;
     }
     const QString leaf = path.last().toString();
-    QTextCursor cursor = editor_->textCursor();
+    SqlEditor* editor = editors_->ensureEditor();
+    if (editor == nullptr) {
+        return;
+    }
+    QTextCursor cursor = editor->textCursor();
     cursor.insertText(leaf);
-    editor_->setFocus();
+    editor->setFocus();
 }
