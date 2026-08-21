@@ -66,6 +66,9 @@ mkdir -p "$OUT_DIR"
 # are omitted deliberately — they are essential on any system that can run
 # apt/rpm. A Secret Service *provider* (GNOME Keyring / KWallet) is a
 # Recommends, not a hard dep: the app runs without one, saved passwords don't.
+# Same for the Qt platform theme plugins: without them the app still runs but
+# ignores the desktop's fonts, palette and file-dialog integration. (Fedora
+# ships them inside qt6-qtbase-gui, so the .rpm needs no extra entry.)
 COMMON=(
     -s dir
     --name datagrep
@@ -91,6 +94,8 @@ fpm "${COMMON[@]}" -t deb \
     --depends libdbus-1-3 \
     --depends zlib1g \
     --deb-recommends "gnome-keyring | kwalletd6" \
+    --deb-recommends qt6-gtk-platformtheme \
+    --deb-recommends qt6-xdgdesktopportal-platformtheme \
     usr
 
 # .rpm — Fedora/RHEL names. qt6-qtbase-gui carries Qt6Gui/Widgets and pulls
