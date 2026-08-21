@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
@@ -57,7 +57,7 @@ mod imp {
     use std::sync::OnceLock;
 
     pub struct Sidebar {
-        pub core: RefCell<Option<Rc<Core>>>,
+        pub core: RefCell<Option<Arc<Core>>>,
         pub profiles: gio::ListStore,
         pub selection: gtk::SingleSelection,
         pub connections: gtk::ListView,
@@ -240,7 +240,7 @@ impl Sidebar {
         glib::Object::new()
     }
 
-    pub fn set_core(&self, core: Rc<Core>) {
+    pub fn set_core(&self, core: Arc<Core>) {
         self.imp().schema.set_core(core.clone());
         *self.imp().core.borrow_mut() = Some(core);
         self.reload();
