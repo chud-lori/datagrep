@@ -1,39 +1,39 @@
-/* Polish over Fusion; colors match the palette in Theme.cpp. QComboBox,
- * QSpinBox and QCheckBox stay unstyled: partial QSS on those discards the
- * whole native rendering, arrows included. */
+/* Polish over Fusion; @token@ colors are substituted per light/dark table in
+ * Theme.cpp. QComboBox/QSpinBox/QCheckBox stay unstyled: partial QSS on those
+ * discards the whole native rendering, arrows included. */
 
 QDialogButtonBox {
     dialogbuttonbox-buttons-have-icons: 0;
 }
 
 QPushButton {
-    background-color: #ffffff;
-    border: 1px solid #c8cdd5;
+    background-color: @surface@;
+    border: 1px solid @border@;
     border-radius: 6px;
     padding: 5px 16px;
     min-height: 18px;
 }
 QPushButton:hover {
-    background-color: #f2f4f7;
+    background-color: @surfaceHover@;
 }
 QPushButton:pressed {
-    background-color: #e6e9ee;
+    background-color: @surfacePressed@;
 }
 QPushButton:default {
-    background-color: #3584e4;
-    border-color: #2b70c4;
+    background-color: @accent@;
+    border-color: @accentBorder@;
     color: #ffffff;
 }
 QPushButton:default:hover {
-    background-color: #2f79d5;
+    background-color: @accentHover@;
 }
 QPushButton:default:pressed {
-    background-color: #2a6cc0;
+    background-color: @accentPressed@;
 }
 QPushButton:disabled {
-    background-color: #f2f3f5;
-    border-color: #dfe2e7;
-    color: #a0a6b0;
+    background-color: @disabledSurface@;
+    border-color: @disabledBorder@;
+    color: @disabledText@;
 }
 QPushButton:flat {
     background: transparent;
@@ -47,10 +47,10 @@ QToolButton {
     padding: 3px;
 }
 QToolButton:hover {
-    background-color: #e8ebef;
+    background-color: @hoverTint@;
 }
 QToolButton:pressed {
-    background-color: #dde1e7;
+    background-color: @pressedTint@;
 }
 
 QToolBar {
@@ -61,17 +61,17 @@ QToolBar {
 }
 
 QLineEdit {
-    background-color: #ffffff;
-    border: 1px solid #c8cdd5;
+    background-color: @viewBg@;
+    border: 1px solid @border@;
     border-radius: 6px;
     padding: 4px 8px;
 }
 QLineEdit:focus {
-    border-color: #3584e4;
+    border-color: @accent@;
 }
 QLineEdit:disabled {
-    background-color: #f2f3f5;
-    color: #a0a6b0;
+    background-color: @disabledSurface@;
+    color: @disabledText@;
 }
 
 QTabBar::tab {
@@ -81,26 +81,26 @@ QTabBar::tab {
     padding: 6px 14px;
 }
 QTabBar::tab:selected {
-    border-bottom-color: #3584e4;
+    border-bottom-color: @accent@;
 }
 QTabBar::tab:hover:!selected {
-    background-color: #eceef2;
+    background-color: @tabHover@;
 }
 
 QHeaderView::section {
-    background-color: #f4f5f7;
+    background-color: @headerBg@;
     border: none;
-    border-right: 1px solid #e0e3e8;
-    border-bottom: 1px solid #d3d7dd;
+    border-right: 1px solid @headerBorderRight@;
+    border-bottom: 1px solid @headerBorderBottom@;
     padding: 4px 8px;
 }
 
 QTableView {
-    gridline-color: #e3e6ea;
+    gridline-color: @gridline@;
 }
 QTableView, QTreeView, QListView, QPlainTextEdit {
-    background-color: #ffffff;
-    border: 1px solid #d5d9df;
+    background-color: @viewBg@;
+    border: 1px solid @viewBorder@;
 }
 QTreeView::item {
     padding: 2px;
@@ -117,7 +117,7 @@ QScrollBar:horizontal {
     margin: 2px;
 }
 QScrollBar::handle {
-    background-color: #c3c9d1;
+    background-color: @scrollHandle@;
     border-radius: 4px;
 }
 QScrollBar::handle:vertical {
@@ -127,7 +127,7 @@ QScrollBar::handle:horizontal {
     min-width: 30px;
 }
 QScrollBar::handle:hover {
-    background-color: #a9b1bb;
+    background-color: @scrollHandleHover@;
 }
 QScrollBar::add-line, QScrollBar::sub-line {
     width: 0;
@@ -138,8 +138,8 @@ QScrollBar::add-page, QScrollBar::sub-page {
 }
 
 QMenu {
-    background-color: #ffffff;
-    border: 1px solid #c8cdd5;
+    background-color: @surface@;
+    border: 1px solid @border@;
     padding: 4px;
 }
 QMenu::item {
@@ -147,17 +147,17 @@ QMenu::item {
     padding: 5px 24px 5px 12px;
 }
 QMenu::item:selected {
-    background-color: #3584e4;
+    background-color: @accent@;
     color: #ffffff;
 }
 QMenu::separator {
-    background-color: #e3e6ea;
+    background-color: @separator@;
     height: 1px;
     margin: 4px 8px;
 }
 
 QGroupBox {
-    border: 1px solid #d5d9df;
+    border: 1px solid @viewBorder@;
     border-radius: 6px;
     margin-top: 12px;
     padding-top: 4px;
@@ -165,13 +165,13 @@ QGroupBox {
 QGroupBox::title {
     subcontrol-origin: margin;
     left: 8px;
-    color: #5c6470;
+    color: @mutedText@;
 }
 
 QToolTip {
-    background-color: #ffffff;
-    border: 1px solid #c8cdd5;
-    color: #23272e;
+    background-color: @surface@;
+    border: 1px solid @border@;
+    color: @tooltipText@;
     padding: 4px 6px;
 }
 

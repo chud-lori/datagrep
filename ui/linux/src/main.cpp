@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
 
     // Style, base palette and stylesheet first; the stored light/dark choice
     // then overrides the palette. Both must land before the window polishes.
-    dg::applyTheme(app);
+    dg::applyTheme();
     Appearance::instance().applyStored();
 
     MainWindow window;

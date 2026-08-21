@@ -5,11 +5,18 @@
 #ifndef DATAGREP_THEME_HPP
 #define DATAGREP_THEME_HPP
 
-class QApplication;
+#include <QPalette>
 
 namespace dg {
 
-void applyTheme(QApplication& app);
+// The two palettes Appearance switches between; light is also the startup look.
+QPalette lightPalette();
+QPalette darkPalette();
+
+// Re-applies :/style/datagrep.qss with the light or dark color table.
+void applyStyleSheet(bool dark);
+
+void applyTheme();
 
 }  // namespace dg
 
