@@ -39,6 +39,9 @@ StatusBar::StatusBar(QWidget* parent) : QWidget(parent) {
     layout->setContentsMargins(8, 2, 8, 2);
     layout->setSpacing(12);
 
+    identityLabel_ = makeChip(this);
+    identityLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    identityLabel_->hide();
     stateLabel_ = makeChip(this);
     rowsLabel_ = makeChip(this);
     noticeLabel_ = makeChip(this);
@@ -59,6 +62,7 @@ StatusBar::StatusBar(QWidget* parent) : QWidget(parent) {
     cancelButton_->setToolTip(QStringLiteral("Cancel the running statement"));
     connect(cancelButton_, &QPushButton::clicked, this, &StatusBar::cancelRequested);
 
+    layout->addWidget(identityLabel_);
     layout->addWidget(stateLabel_);
     layout->addWidget(rowsLabel_);
     layout->addWidget(noticeLabel_);
@@ -66,6 +70,12 @@ StatusBar::StatusBar(QWidget* parent) : QWidget(parent) {
     layout->addWidget(readOnlyLabel_);
     layout->addWidget(messageLabel_, 1);
     layout->addWidget(cancelButton_);
+}
+
+void StatusBar::showIdentity(const QString& text, const QString& tooltip) {
+    identityLabel_->setText(text);
+    identityLabel_->setToolTip(tooltip);
+    identityLabel_->setVisible(!text.isEmpty());
 }
 
 void StatusBar::setLimitHint(std::optional<std::uint64_t> limit) {

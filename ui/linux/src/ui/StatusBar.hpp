@@ -60,6 +60,10 @@ public:
     // Free-text status line (errors, hints, copy confirmations). `error` tints it.
     void showMessage(const QString& text, bool error = false);
 
+    // Where the selected connection points: "profile · product version · db".
+    // Empty text hides the chip.
+    void showIdentity(const QString& text, const QString& tooltip);
+
 signals:
     // The Cancel button was pressed. MainWindow routes this to the model, which
     // owns the datagrep_query_cancel call and frees the outcome JSON exactly once.
@@ -77,6 +81,7 @@ private:
     // grid holds the first N of a possibly longer result.
     bool limitHit(const dg::QueryStatus& s) const;
 
+    QLabel* identityLabel_;
     QLabel* stateLabel_;
     QLabel* rowsLabel_;
     QLabel* noticeLabel_;   // incomplete-result warning, orange
