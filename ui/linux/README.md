@@ -27,7 +27,7 @@ ui/linux/
       RowNumberHeader.hpp/.cpp# the copy-safe row-number gutter (vertical header)
       SchemaTree.hpp/.cpp     # lazy schema tree, one level per expansion
       SqlEditor.hpp/.cpp      # QPlainTextEdit + statement-under-cursor
-      SqlHighlighter.hpp/.cpp # placeholder SQL highlighter (upgrade seam below)
+      SqlHighlighter.hpp/.cpp # fallback SQL highlighter (KSyntax preferred, below)
 ```
 
 ## Build dependencies
@@ -139,48 +139,55 @@ The row number is also never injected as a model column 0, which would defeat
 the guarantee. It is chrome, derived purely from the row index, so painting it
 never touches the pager (zero fetches while scrolling the gutter).
 
-## SQL editor and the upgrade seam
+## SQL editor
 
-The editor is a `QPlainTextEdit` with a small placeholder `QSyntaxHighlighter`
-(`SqlHighlighter`). "Run the statement under the cursor" splits the buffer on
-`;` boundaries that are outside strings/identifiers/comments and sends exactly
-that substring to `datagrep_query_run`.
+The editor is a `QPlainTextEdit`. "Run the statement under the cursor" splits
+the buffer on `;` boundaries that are outside strings/identifiers/comments and
+sends exactly that substring to `datagrep_query_run`.
 
 The editor talks to its highlighter only through the `QSyntaxHighlighter` base,
-so upgrading is localised:
+and which concrete highlighter colours the text is decided at configure time:
 
-- **Preferred: KSyntaxHighlighting** (KF6, **MIT**). Ships a
-  `QSyntaxHighlighter` subclass plus a maintained SQL definition and themes.
-  Add `find_package(KF6SyntaxHighlighting)` and construct it against the
-  editor's document — a near drop-in for `SqlHighlighter`.
+- **KSyntaxHighlighting** (KF6, **MIT**) when `find_package` locates it: the
+  maintained SQL definition plus a bundled theme matched to the widget palette,
+  re-picked on light/dark palette changes. Install
+  `libkf6syntaxhighlighting-dev` (Debian/Ubuntu) or
+  `kf6-syntax-highlighting-devel` (Fedora); opt out with
+  `-DDATAGREP_USE_KSYNTAXHIGHLIGHTING=OFF`.
+- Otherwise the built-in `SqlHighlighter` fallback compiles instead, so a
+  missing KF6 package degrades the colours, never the build.
 - **QScintilla** gives a full editor widget (folding, autocomplete) but is
   **GPLv3 / commercial only**; adopting it would impose GPLv3 on the whole UI
   binary, so it is intentionally not wired in. If the project accepts that
   licensing, replace the `QPlainTextEdit` with a `QsciScintilla`.
 
-## Packaging (plan — not yet implemented)
+## Packaging
 
-Packaging is deliberately left as a stub for a follow-up. The intended shape:
+`.deb`, `.rpm` and AppImage are built from the binary the CMake build already
+produces — this `CMakeLists.txt` deliberately has **no** `install()`/CPack
+wiring, so packaging consumes the build's output rather than re-plumbing it:
 
-- **AppImage** (primary, distro-agnostic): build with CMake in Release, run
-  `linuxdeploy` + `linuxdeploy-plugin-qt` to pull in the Qt6 runtime and
-  platform plugins, and bundle `libdbus-1` transitively. Ship a `.desktop` file
-  and an icon (reuse `assets/`). Produces one portable `datagrep-x86_64.AppImage`.
-- **.deb** (Debian/Ubuntu): CPack `DEB` generator, or `dpkg-buildpackage` with a
-  `debian/` dir. `Depends:` should list `libqt6widgets6`, `libdbus-1-3`, and a
-  Secret Service provider recommendation.
-- **.rpm** (Fedora/RHEL): CPack `RPM` generator or a `.spec`, `Requires:`
-  `qt6-qtbase-gui`, `dbus-libs`.
+- `packaging/build-packages.sh` stages an FHS tree (binary, `.desktop`, hicolor
+  icons) and runs `fpm -s dir` once per format, with per-distro runtime
+  dependencies (Qt6 base, `libdbus-1-3`, zlib). A Secret Service *provider*
+  (GNOME Keyring / KWallet) is a `.deb` `Recommends`, never a hard dependency —
+  it is a host service no package can supply.
+- `packaging/build-appimage.sh` drives `linuxdeploy` + `linuxdeploy-plugin-qt`
+  (`QMAKE` pointed at `qmake6`, since bare `qmake` on Debian is Qt5 or absent)
+  to bundle the Qt runtime and platform plugins into one portable
+  `datagrep-<version>-x86_64.AppImage`.
+- `.github/workflows/linux-package.yml` runs the same build as `linux-qt.yml`
+  and then both scripts — on `v*` tags and manual dispatch only, because
+  compile verification is `linux-qt.yml`'s job on every push.
 
-A `CPack` block will be added to `CMakeLists.txt` with `install(TARGETS …)` and
-a `.desktop`/icon install once the layout is agreed. None of this changes the
-engine or the ABI.
+See `packaging/README.md` for per-distro dependency reasoning and how to run
+the scripts locally. None of this changes the engine or the ABI.
 
-## Status of this scaffold
+## Status
 
-This is the **start** of the Linux UI (issue #4). The code is written to build on
-Linux with Qt6 present; it was authored and statically verified against
-`crates/datagrep-ffi/include/datagrep.h` on a machine without Qt6/CMake, so it
-has **not** been compiled here. The FFI signatures, ownership/free rules and the
-model↔ABI mapping are verified against the header; a Linux build with Qt6 is the
-remaining step to confirm it compiles and links clean.
+This is the foundation of the Linux UI (issue #4). It is authored and statically
+verified against `crates/datagrep-ffi/include/datagrep.h` on a machine without
+Qt6, and compiled and linked clean by `linux-qt.yml` on every push — CI is the
+build verification. What CI cannot prove is runtime behaviour: the app has not
+yet been exercised against a live database on a real Linux desktop, so first
+launch, Secret Service integration and grid feel remain to be confirmed there.
