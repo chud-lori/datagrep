@@ -495,6 +495,78 @@ void MainWindow::onConnectionSelected() {
     if (have) {
         schema_->showProfile(profile);
     }
+    refreshConnectionInfo();
+}
+
+void MainWindow::refreshConnectionInfo() {
+    const QString profile = selectedProfile();
+    if (!core_ || profile.isEmpty()) {
+        infoShownProfile_.clear();
+        status_->showIdentity(QString(), QString());
+        return;
+    }
+    if (profile != infoShownProfile_) {
+        infoShownProfile_ = profile;
+        status_->showIdentity(
+            QStringLiteral("%1 · %2").arg(
+                profile, dg::engineDisplayName(driverByProfile_.value(profile))),
+            QStringLiteral("Engine from the saved profile — the server has not "
+                           "answered yet."));
+    }
+    if (infoInFlight_) {
+        infoPending_ = profile;
+        return;
+    }
+    infoInFlight_ = true;
+    const std::string profileStd = profile.toStdString();
+    dg::Core* core = core_.get();
+    std::thread([this, core, profile, profileStd]() {
+        QString json;
+        try {
+            json = QString::fromStdString(core->connectionInfoJson(profileStd));
+        } catch (const dg::Error&) {
+        }
+        QMetaObject::invokeMethod(
+            this,
+            [this, profile, json]() {
+                infoInFlight_ = false;
+                if (!infoPending_.isEmpty()) {
+                    infoPending_.clear();
+                    refreshConnectionInfo();
+                    return;
+                }
+                applyConnectionInfo(profile, json);
+            },
+            Qt::QueuedConnection);
+    }).detach();
+}
+
+void MainWindow::applyConnectionInfo(const QString& profile, const QString& json) {
+    if (json.isEmpty() || profile != selectedProfile()) {
+        return;
+    }
+    const QJsonObject o = QJsonDocument::fromJson(json.toUtf8()).object();
+    const QString database = o.value(QStringLiteral("database")).toString();
+    const QJsonObject server = o.value(QStringLiteral("server")).toObject();
+    const QString product = server.value(QStringLiteral("product")).toString();
+    const QString version = server.value(QStringLiteral("version")).toString();
+
+    QString what = product.isEmpty()
+                       ? dg::engineDisplayName(driverByProfile_.value(profile))
+                       : product;
+    if (!version.isEmpty() && version.toLower() != QStringLiteral("unknown")) {
+        what += QLatin1Char(' ') + version;
+    }
+    QStringList parts{profile, what};
+    if (!database.isEmpty()) {
+        parts << database;
+    }
+    status_->showIdentity(
+        parts.join(QStringLiteral(" · ")),
+        server.isEmpty()
+            ? QStringLiteral("Engine from the saved profile — the server has "
+                             "not answered yet.")
+            : QStringLiteral("As reported by the server at handshake."));
 }
 
 void MainWindow::updateMarkedBanner() {
@@ -623,6 +695,7 @@ void MainWindow::executeStatement(const QString& profile, const QString& sql) {
     if (!core_) {
         return;
     }
+    infoRefreshedForQuery_ = false;
     // The confirm-writes promise. The engine has no notion of this profile
     // setting, so the prompt lives here: classify the statement, and ask before
     // sending — never after. The classifier is a fat-finger guardrail (first
@@ -1070,6 +1143,14 @@ void MainWindow::onStatusChanged(const dg::QueryStatus& status) {
     status_->updateStatus(status);
     // Safe on every tick: this records once, when the query goes terminal.
     history_->executionProgressed(status);
+    // A finished query may be this profile's first connection — the handshake
+    // facts (product, version) exist only now. Once per query: terminal
+    // statuses re-emit on scroll.
+    if (dg::isTerminal(status.state) && !infoRefreshedForQuery_ &&
+        lastProfile_ == selectedProfile()) {
+        infoRefreshedForQuery_ = true;
+        refreshConnectionInfo();
+    }
 }
 
 void MainWindow::onSchemaObjectActivated(const QString& /*profile*/,

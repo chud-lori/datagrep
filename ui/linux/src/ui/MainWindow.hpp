@@ -96,6 +96,12 @@ private:
     // can never describe a connection other than the one queries would hit.
     void updateMarkedBanner();
 
+    // The identity chip: profile · server product+version · database, from
+    // datagrep_connection_info_json. The dial can block, so it runs off-thread
+    // like sendMutations; a stale answer is dropped against the selection.
+    void refreshConnectionInfo();
+    void applyConnectionInfo(const QString& profile, const QString& json);
+
     std::unique_ptr<dg::Core> core_;
 
     QListWidget* connections_;
@@ -125,6 +131,11 @@ private:
     dg::ConflictReview conflictReview_;
     bool isCommitting_ = false;
     bool isRereading_ = false;
+
+    bool infoInFlight_ = false;
+    bool infoRefreshedForQuery_ = false;
+    QString infoPending_;
+    QString infoShownProfile_;
 
     // The safety facts per profile, rebuilt on every reloadProfiles(). The list
     // rows, the banner and the run path all read THIS map, so they can never
