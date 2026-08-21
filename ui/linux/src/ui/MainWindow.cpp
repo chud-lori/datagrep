@@ -185,6 +185,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     inspectorDock_->setAllowedAreas(Qt::LeftDockWidgetArea |
                                     Qt::RightDockWidgetArea);
     addDockWidget(Qt::RightDockWidgetArea, inspectorDock_);
+    // Otherwise the dock opens at its content's sizeHint.
+    resizeDocks({inspectorDock_}, {300}, Qt::Horizontal);
     // The schema pane follows the sidebar selection; the tree made the describe
     // call, the panel only draws it, so selecting never describes twice.
     connect(schema_, &SchemaTree::objectDescribed, inspector_,
@@ -218,6 +220,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     sidebar->addWidget(schema_);
     sidebar->setStretchFactor(0, 0);
     sidebar->setStretchFactor(1, 1);
+    sidebar->setChildrenCollapsible(false);
+    sidebar->setSizes({220, 480});
 
     // --- editors over grid: one unified tab bar across all connections ------
     editors_ = new EditorTabs(this);
@@ -299,15 +303,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* rightPane = new QSplitter(Qt::Vertical, this);
     rightPane->addWidget(editorPane);
     rightPane->addWidget(gridPane);
-    rightPane->setStretchFactor(0, 0);
-    rightPane->setStretchFactor(1, 1);
+    rightPane->setStretchFactor(0, 1);
+    rightPane->setStretchFactor(1, 2);
+    rightPane->setChildrenCollapsible(false);
+    rightPane->setSizes({280, 420});
 
     auto* root = new QSplitter(Qt::Horizontal, this);
     root->addWidget(sidebar);
     root->addWidget(rightPane);
     root->setStretchFactor(0, 0);
     root->setStretchFactor(1, 1);
-    root->setSizes({260, 900});
+    root->setChildrenCollapsible(false);
+    root->setSizes({240, 960});
 
     // --- the marked-connection band -----------------------------------------
     // When the selected connection carries a user-chosen colour, this band sits
