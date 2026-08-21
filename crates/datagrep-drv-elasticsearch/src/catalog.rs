@@ -44,6 +44,20 @@
 //! here — this driver's canceller only ever cancels tasks datagrep itself
 //! tagged, and a button that cancelled a stranger's reindex from a browser
 //! would be a different feature with a different confirmation.
+//!
+//! # Index templates, also a read
+//!
+//! Three more sources, same rules. Templates are **three** systems, not one:
+//! composable `_index_template`, the `_component_template` pieces those are
+//! `composed_of`, and legacy `_template`, which still wins when no composable
+//! template matches — so listing only the first would hide the template that
+//! actually governs a new index. Each is the JSON API rather than
+//! `_cat/templates`: cat renders `index_patterns` as the string `"[logs-*]"`
+//! where the JSON API returns a real array, and cat does not know about
+//! component templates at all.
+//!
+//! Authoring a template is not offered. That is DDL, it has no structured
+//! request to compile to, and the honest route stays the engine's own text.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -86,6 +100,11 @@ const CAT_SHARDS_COLUMNS: &str = "index,shard,prirep,state,docs,store,node,unass
 /// shard-level sub-tasks, and the full per-action counts are always in
 /// `task_actions`.
 const RUNNING_TASK_CAP: usize = 25;
+/// Cap on each template listing, for the same reason as [`PROBLEM_SHARD_CAP`]:
+/// a stock 8.15 cluster ships 45 composable, 44 component and 5 legacy
+/// templates before anyone has authored one. The `*_count` keys always carry
+/// the server's full total.
+const TEMPLATE_CAP: usize = 50;
 
 pub struct EsCatalog {
     http: Arc<EsHttp>,
@@ -350,22 +369,51 @@ impl EsCatalog {
             .await
     }
 
-    /// The root-level describe: cluster / node / shard health and what the
-    /// cluster is running, in `ObjectDetail::extra`. Never fails as a whole —
-    /// each of the four sources is fetched and folded in independently, so a
-    /// permissions or version problem on one endpoint marks that source and
-    /// leaves the others intact (see the module doc).
+    /// One template listing, by endpoint.
+    async fn templates(&self, endpoint: &str) -> Result<Json, DbError> {
+        self.http
+            .request(Method::Get, endpoint, &[], None, None, None)
+            .await
+    }
+
+    /// The root-level describe: cluster / node / shard health, what the
+    /// cluster is running, and the three template systems, in
+    /// `ObjectDetail::extra`. Never fails as a whole — each source is fetched
+    /// and folded in independently, so a permissions or version problem on one
+    /// endpoint marks that source and leaves the others intact (see the module
+    /// doc).
     async fn describe_root(&self) -> Result<ObjectDetail, DbError> {
         let health = self.cluster_health().await;
         let nodes = self.cat_nodes().await;
         let shards = self.cat_shards(None).await;
         let tasks = self.tasks().await;
+        let index_templates = self.templates("/_index_template").await;
+        let component_templates = self.templates("/_component_template").await;
+        let legacy_templates = self.templates("/_template").await;
 
         let mut extra: Vec<(Arc<str>, Arc<str>)> = Vec::new();
         push_cluster_health_extra(&mut extra, &health);
         push_nodes_extra(&mut extra, &nodes);
         push_shards_extra(&mut extra, &shards);
         push_tasks_extra(&mut extra, &tasks);
+        push_template_extra(
+            &mut extra,
+            "index_templates",
+            &index_templates,
+            parse_index_templates,
+        );
+        push_template_extra(
+            &mut extra,
+            "component_templates",
+            &component_templates,
+            parse_component_templates,
+        );
+        push_template_extra(
+            &mut extra,
+            "legacy_templates",
+            &legacy_templates,
+            parse_legacy_templates,
+        );
 
         Ok(ObjectDetail {
             node: ObjectNode {
@@ -627,6 +675,158 @@ fn push_tasks_extra(extra: &mut Vec<(Arc<str>, Arc<str>)>, result: &Result<Json,
             &format!("listing capped at {RUNNING_TASK_CAP} longest-running; task_actions has the full counts"),
         );
     }
+}
+
+/// Fold one template listing into `extra`: the server's full count, a capped
+/// listing, and a truncation note. On failure: marked under `<key>_error`,
+/// others still render.
+fn push_template_extra(
+    extra: &mut Vec<(Arc<str>, Arc<str>)>,
+    key: &str,
+    result: &Result<Json, DbError>,
+    parse: fn(&Json, usize) -> TemplateSummary,
+) {
+    let json = match result {
+        Ok(json) => json,
+        Err(e) => {
+            push_pair(extra, &format!("{key}_error"), &e.to_string());
+            return;
+        }
+    };
+    let summary = parse(json, TEMPLATE_CAP);
+    push_pair(extra, &format!("{key}_count"), &summary.total.to_string());
+    push_pair(extra, key, &summary.listing.to_string());
+    if summary.truncated {
+        push_pair(
+            extra,
+            &format!("{key}_truncated"),
+            &format!("listing capped at {TEMPLATE_CAP}; {key}_count has the server's full total"),
+        );
+    }
+}
+
+/// What the root describe reports about one template system: how many the
+/// server has, and a capped listing of them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateSummary {
+    pub total: usize,
+    /// JSON array of up to `cap` templates, sorted by name.
+    pub listing: Json,
+    pub truncated: bool,
+}
+
+/// Sort by name, cap, and count. Sorting by anything cleverer — precedence, or
+/// "user-authored first" — would be a guess at which templates matter, and the
+/// system ones are indistinguishable from a naming convention.
+fn summarise_templates(mut rows: Vec<Json>, cap: usize) -> TemplateSummary {
+    rows.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    let total = rows.len();
+    let truncated = total > cap;
+    rows.truncate(cap);
+    TemplateSummary {
+        total,
+        listing: Json::Array(rows),
+        truncated,
+    }
+}
+
+/// Which of `settings` / `mappings` / `aliases` a template body sets, under
+/// the server's own key names. It is the one thing a listing can say about a
+/// composable template that a name cannot: `composed_of: ["x"]` is otherwise a
+/// dangling reference, and this tells a component that contributes a mapping
+/// apart from one that only sets shard counts. Sorted explicitly because the
+/// workspace parses JSON order-preserving.
+///
+/// This is why the template listings are fetched whole and summarised here
+/// rather than trimmed with `filter_path`: an exclusion such as
+/// `-index_templates.index_template.template.mappings.properties` prunes the
+/// emptied container along with it, so the `mappings` key vanishes and this
+/// would report "sets nothing" for a template that sets a mapping. Cheaper,
+/// and silently wrong.
+fn template_keys(body: Option<&Json>) -> Json {
+    let mut keys: Vec<Json> = body
+        .and_then(Json::as_object)
+        .map(|o| o.keys().map(|k| json!(k)).collect())
+        .unwrap_or_default();
+    keys.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    Json::Array(keys)
+}
+
+/// Summarise `GET /_index_template`. Entries without a name are skipped, not
+/// fatal — the same rule the `_cat` parsers follow.
+pub fn parse_index_templates(json: &Json, cap: usize) -> TemplateSummary {
+    let rows = json
+        .get("index_templates")
+        .and_then(Json::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let name = entry.get("name").and_then(Json::as_str)?;
+                    let body = entry.get("index_template")?;
+                    Some(json!({
+                        "name": name,
+                        "index_patterns": body.get("index_patterns").cloned(),
+                        "priority": body.get("priority").and_then(Json::as_i64),
+                        "composed_of": body.get("composed_of").cloned(),
+                        "version": body.get("version").and_then(Json::as_i64),
+                        // A data-stream template creates a stream, not an
+                        // index; the compact `_cat` listing does not say so.
+                        "data_stream": body.get("data_stream").is_some(),
+                        "template_keys": template_keys(body.get("template")),
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    summarise_templates(rows, cap)
+}
+
+/// Summarise `GET /_component_template`. A component has no index pattern and
+/// no precedence of its own — it only contributes a body to whatever composes
+/// it, so that body's keys are the whole of what a listing can say.
+pub fn parse_component_templates(json: &Json, cap: usize) -> TemplateSummary {
+    let rows = json
+        .get("component_templates")
+        .and_then(Json::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let name = entry.get("name").and_then(Json::as_str)?;
+                    let body = entry.get("component_template")?;
+                    Some(json!({
+                        "name": name,
+                        "version": body.get("version").and_then(Json::as_i64),
+                        "template_keys": template_keys(body.get("template")),
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    summarise_templates(rows, cap)
+}
+
+/// Summarise `GET /_template`. Legacy templates are a bare object keyed by
+/// name, and their precedence field is `order`, not `priority` — two different
+/// spellings for two systems that coexist on the same cluster.
+pub fn parse_legacy_templates(json: &Json, cap: usize) -> TemplateSummary {
+    let rows = json
+        .as_object()
+        .map(|map| {
+            map.iter()
+                .map(|(name, body)| {
+                    json!({
+                        "name": name,
+                        "index_patterns": body.get("index_patterns").cloned(),
+                        "order": body.get("order").and_then(Json::as_i64),
+                        "version": body.get("version").and_then(Json::as_i64),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    summarise_templates(rows, cap)
 }
 
 /// What the root describe reports about `_tasks` without ever carrying every
@@ -1810,6 +2010,127 @@ mod tests {
             None,
             "no truncation note under the cap"
         );
+    }
+
+    #[test]
+    fn index_templates_are_listed_by_name_with_what_they_define() {
+        let json = json!({ "index_templates": [
+            { "name": "logs", "index_template": {
+                "index_patterns": ["logs-*"], "priority": 200,
+                "composed_of": ["log-mappings"], "version": 3,
+                "template": { "mappings": { "properties": {} }, "settings": {} } } },
+            { "name": "events", "index_template": {
+                "index_patterns": ["events-*"], "priority": 100,
+                "composed_of": [], "data_stream": {},
+                "template": { "aliases": {} } } },
+            { "name": "bare", "index_template": { "index_patterns": ["b-*"] } },
+            { "index_template": { "index_patterns": ["nameless-*"] } }
+        ]});
+
+        let summary = parse_index_templates(&json, 50);
+        assert_eq!(
+            summary.total, 3,
+            "an entry without a name is skipped, not fatal"
+        );
+        assert!(!summary.truncated);
+        let rows = summary.listing.as_array().unwrap();
+        assert_eq!(rows[0]["name"], json!("bare"), "sorted by name");
+        assert_eq!(rows[1]["name"], json!("events"));
+        assert_eq!(rows[2]["name"], json!("logs"));
+        // Patterns stay a real array — the reason this reads the JSON API and
+        // not `_cat/templates`, which renders them as the string "[logs-*]".
+        assert_eq!(rows[2]["index_patterns"], json!(["logs-*"]));
+        assert_eq!(rows[2]["priority"], json!(200));
+        assert_eq!(rows[2]["composed_of"], json!(["log-mappings"]));
+        assert_eq!(rows[2]["template_keys"], json!(["mappings", "settings"]));
+        assert_eq!(rows[1]["data_stream"], json!(true));
+        assert_eq!(rows[2]["data_stream"], json!(false));
+        // A template that sets nothing is still a template.
+        assert_eq!(rows[0]["template_keys"], json!([]));
+        assert_eq!(rows[0]["priority"], json!(null));
+
+        let capped = parse_index_templates(&json, 2);
+        assert!(capped.truncated);
+        assert_eq!(capped.listing.as_array().unwrap().len(), 2);
+        assert_eq!(capped.total, 3, "the count stays the server's total");
+
+        assert_eq!(parse_index_templates(&json!(null), 50).total, 0);
+    }
+
+    #[test]
+    fn component_and_legacy_templates_keep_their_own_spellings() {
+        let components = parse_component_templates(
+            &json!({ "component_templates": [
+                { "name": "log-mappings", "component_template": {
+                    "version": 2, "template": { "mappings": { "properties": {} } } } },
+                { "name": "shard-count", "component_template": {
+                    "template": { "settings": {} } } }
+            ]}),
+            50,
+        );
+        assert_eq!(components.total, 2);
+        let rows = components.listing.as_array().unwrap();
+        assert_eq!(rows[0]["name"], json!("log-mappings"));
+        assert_eq!(rows[0]["version"], json!(2));
+        // What a component contributes is the whole of what a listing can say
+        // about it: it has no pattern and no precedence of its own.
+        assert_eq!(rows[0]["template_keys"], json!(["mappings"]));
+        assert_eq!(rows[1]["template_keys"], json!(["settings"]));
+
+        // Legacy templates are a bare object keyed by name, and rank by
+        // `order` where the composable ones rank by `priority`.
+        let legacy = parse_legacy_templates(
+            &json!({
+                "old-logs": { "index_patterns": ["logs-*"], "order": 10, "version": 1 },
+                "old-events": { "index_patterns": ["events-*"] }
+            }),
+            50,
+        );
+        assert_eq!(legacy.total, 2);
+        let rows = legacy.listing.as_array().unwrap();
+        assert_eq!(rows[0]["name"], json!("old-events"));
+        assert_eq!(rows[0]["order"], json!(null));
+        assert_eq!(rows[1]["name"], json!("old-logs"));
+        assert_eq!(rows[1]["order"], json!(10));
+        assert_eq!(rows[1]["index_patterns"], json!(["logs-*"]));
+
+        assert_eq!(parse_legacy_templates(&json!([]), 50).total, 0);
+    }
+
+    #[test]
+    fn a_failing_template_endpoint_marks_only_its_own_source() {
+        let mut extra: Vec<(Arc<str>, Arc<str>)> = Vec::new();
+        push_template_extra(
+            &mut extra,
+            "index_templates",
+            &Ok(json!({ "index_templates": [
+                { "name": "logs", "index_template": { "index_patterns": ["logs-*"] } }
+            ]})),
+            parse_index_templates,
+        );
+        push_template_extra(
+            &mut extra,
+            "component_templates",
+            &Err(DbError::Unsupported {
+                feature: "forbidden".into(),
+            }),
+            parse_component_templates,
+        );
+        let get = |k: &str| {
+            extra
+                .iter()
+                .find(|(key, _)| &**key == k)
+                .map(|(_, v)| v.to_string())
+        };
+        assert_eq!(get("index_templates_count").as_deref(), Some("1"));
+        let listing: Json = serde_json::from_str(&get("index_templates").unwrap()).unwrap();
+        assert_eq!(listing[0]["name"], json!("logs"));
+        assert_eq!(get("index_templates_truncated"), None);
+        // The forbidden source is named, and it does not take the other down.
+        assert!(get("component_templates_error")
+            .expect("the failed source is marked")
+            .contains("forbidden"));
+        assert_eq!(get("component_templates"), None);
     }
 
     #[test]
