@@ -93,6 +93,7 @@ private:
     };
 
     void buildUi();
+    void showError(const QString& text);  // sets + shows; hidden while empty
     void seedForEdit(const QString& name);
     void applyFieldsToUi(const Fields& f);   // fields -> widgets (no URL round-trip)
     Fields fieldsFromUi() const;             // widgets -> fields

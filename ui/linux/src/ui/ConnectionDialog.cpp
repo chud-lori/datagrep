@@ -326,9 +326,7 @@ ConnectionDialog* ConnectionDialog::forNewConnection(dg::Core* core, QWidget* pa
     d->setWindowTitle(QStringLiteral("New Connection"));
     d->editing_ = false;
     d->buttons_->button(QDialogButtonBox::Save)->setText(QStringLiteral("Add"));
-    d->enforcementButton_->setEnabled(false);
-    d->enforcementButton_->setToolTip(
-        QStringLiteral("Available after the connection is saved."));
+    d->enforcementButton_->hide();  // nothing to check until the profile exists
     d->onEngineChanged(d->engineBox_->currentIndex());  // shape + first URL
     return d;
 }
@@ -350,6 +348,7 @@ ConnectionDialog* ConnectionDialog::forEditing(dg::Core* core, const QString& na
 
 void ConnectionDialog::buildUi() {
     auto* outer = new QVBoxLayout(this);
+    outer->setSpacing(10);
 
     // --- engine + connection fields ---------------------------------------
     engineBox_ = new QComboBox(this);
@@ -412,6 +411,8 @@ void ConnectionDialog::buildUi() {
     fileRowLayout->addWidget(browseButton_);
 
     auto* connForm = new QFormLayout();
+    // Explicit: the default growth policy is style-dependent.
+    connForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     connForm->addRow(QStringLiteral("Engine"), engineBox_);
     connForm->addRow(QStringLiteral("Name"), nameEdit_);
     hostLabel_ = new QLabel(QStringLiteral("Host"), this);
@@ -467,13 +468,13 @@ void ConnectionDialog::buildUi() {
         QStringLiteral("seconds before an unused connection is dropped"));
 
     auto* settingsForm = new QFormLayout();
+    settingsForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     settingsForm->addRow(QStringLiteral("Colour"), colorBox_);
     settingsForm->addRow(QStringLiteral("Row limit"), autoLimitEdit_);
     settingsForm->addRow(QStringLiteral("Idle timeout (s)"), idleTimeoutEdit_);
 
     auto* settingsGroup = new QGroupBox(QStringLiteral("Settings"), this);
     settingsGroup->setLayout(settingsForm);
-    outer->addWidget(settingsGroup);
 
     // --- safety ------------------------------------------------------------
     readOnlyCheck_ = new QCheckBox(QStringLiteral("Read-only"), this);
@@ -497,6 +498,7 @@ void ConnectionDialog::buildUi() {
     enforcementLabel_ = new QLabel(this);
     enforcementLabel_->setWordWrap(true);
     enforcementLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    enforcementLabel_->hide();  // shown once there is an answer to report
 
     auto* safetyLayout = new QVBoxLayout();
     safetyLayout->addWidget(readOnlyCheck_);
@@ -508,17 +510,27 @@ void ConnectionDialog::buildUi() {
     roHint->setStyleSheet(QStringLiteral("color: gray; font-size: 11px;"));
     safetyLayout->addWidget(roHint);
     safetyLayout->addWidget(confirmWritesCheck_);
-    safetyLayout->addWidget(enforcementButton_);
+    auto* enforcementRow = new QHBoxLayout();
+    enforcementRow->addWidget(enforcementButton_);
+    enforcementRow->addStretch(1);
+    safetyLayout->addLayout(enforcementRow);
     safetyLayout->addWidget(enforcementLabel_);
+    safetyLayout->addStretch(1);
 
     auto* safetyGroup = new QGroupBox(QStringLiteral("Safety"), this);
     safetyGroup->setLayout(safetyLayout);
-    outer->addWidget(safetyGroup);
+
+    auto* midRow = new QHBoxLayout();
+    midRow->addWidget(settingsGroup, 1);
+    midRow->addWidget(safetyGroup, 1);
+    outer->addLayout(midRow);
 
     // --- errors + buttons --------------------------------------------------
     errorLabel_ = new QLabel(this);
     errorLabel_->setWordWrap(true);
+    errorLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     errorLabel_->setStyleSheet(QStringLiteral("color: #c0392b;"));
+    errorLabel_->hide();
     outer->addWidget(errorLabel_);
 
     buttons_ = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel,
@@ -528,13 +540,37 @@ void ConnectionDialog::buildUi() {
     outer->addWidget(buttons_);
 
     if (core_ == nullptr) {
-        errorLabel_->setText(QStringLiteral(
+        showError(QStringLiteral(
             "The datagrep engine is not available, so connections cannot be saved."));
         buttons_->button(QDialogButtonBox::Save)->setEnabled(false);
     }
 
-    resize(520, 640);
+    // Visual order, not construction order (the File row sits above Database).
+    QWidget::setTabOrder(engineBox_, nameEdit_);
+    QWidget::setTabOrder(nameEdit_, hostEdit_);
+    QWidget::setTabOrder(hostEdit_, portEdit_);
+    QWidget::setTabOrder(portEdit_, fileEdit_);
+    QWidget::setTabOrder(fileEdit_, browseButton_);
+    QWidget::setTabOrder(browseButton_, databaseEdit_);
+    QWidget::setTabOrder(databaseEdit_, usernameEdit_);
+    QWidget::setTabOrder(usernameEdit_, passwordEdit_);
+    QWidget::setTabOrder(passwordEdit_, tlsCheck_);
+    QWidget::setTabOrder(tlsCheck_, urlEdit_);
+    QWidget::setTabOrder(urlEdit_, colorBox_);
+    QWidget::setTabOrder(colorBox_, autoLimitEdit_);
+    QWidget::setTabOrder(autoLimitEdit_, idleTimeoutEdit_);
+    QWidget::setTabOrder(idleTimeoutEdit_, readOnlyCheck_);
+    QWidget::setTabOrder(readOnlyCheck_, confirmWritesCheck_);
+    QWidget::setTabOrder(confirmWritesCheck_, enforcementButton_);
+
+    setMinimumWidth(560);
+    setSizeGripEnabled(true);
     onReadOnlyToggled(false);
+}
+
+void ConnectionDialog::showError(const QString& text) {
+    errorLabel_->setText(text);
+    errorLabel_->setVisible(!text.isEmpty());
 }
 
 void ConnectionDialog::reshapeForEngine(const Engine& e) {
@@ -609,6 +645,7 @@ ConnectionDialog::Fields ConnectionDialog::fieldsFromUi() const {
 void ConnectionDialog::renderUrlFromFields() {
     syncing_ = true;
     urlEdit_->setText(buildUrl(fieldsFromUi(), /*includePassword=*/false));
+    urlEdit_->setCursorPosition(0);  // setText scrolls to the tail
     syncing_ = false;
 }
 
@@ -675,6 +712,7 @@ void ConnectionDialog::onCheckEnforcement() {
     if (core_ == nullptr || originalName_.isEmpty()) {
         return;
     }
+    enforcementLabel_->show();
     QString json;
     try {
         json = QString::fromStdString(core_->connectionInfoJson(originalName_.toStdString()));
@@ -736,9 +774,8 @@ void ConnectionDialog::seedForEdit(const QString& name) {
     try {
         json = QString::fromStdString(core_->profileGetJson(name.toStdString()));
     } catch (const dg::Error& e) {
-        errorLabel_->setText(
-            QStringLiteral("Could not read this connection back: %1")
-                .arg(QString::fromUtf8(e.what())));
+        showError(QStringLiteral("Could not read this connection back: %1")
+                      .arg(QString::fromUtf8(e.what())));
         // The engine reshape still needs doing so the form is usable.
         onEngineChanged(engineBox_->currentIndex());
         return;
@@ -790,6 +827,7 @@ void ConnectionDialog::seedForEdit(const QString& name) {
     onReadOnlyToggled(origReadOnly_);
     // Now that the fields are in place, render the baseline URL.
     urlEdit_->setText(buildUrl(fieldsFromUi(), /*includePassword=*/false));
+    urlEdit_->setCursorPosition(0);
     syncing_ = false;
 
     originalUrlNoPassword_ = urlEdit_->text();
@@ -896,22 +934,21 @@ void ConnectionDialog::onAccept() {
     }
     const QString name = nameEdit_->text().trimmed();
     if (name.isEmpty()) {
-        errorLabel_->setText(QStringLiteral("A name is required."));
+        showError(QStringLiteral("A name is required."));
         return;
     }
 
     if (!editing_) {
         const QString url = buildUrl(fieldsFromUi(), /*includePassword=*/true);
         if (url.isEmpty()) {
-            errorLabel_->setText(
-                QStringLiteral("A host (or, for SQLite, a file) is required."));
+            showError(QStringLiteral("A host (or, for SQLite, a file) is required."));
             return;
         }
         try {
             core_->addProfileJson(name.toStdString(), url.toStdString(),
                                   optionsJson().toStdString());
         } catch (const dg::Error& e) {
-            errorLabel_->setText(QString::fromUtf8(e.what()));
+            showError(QString::fromUtf8(e.what()));
             return;
         }
         savedName_ = name;
@@ -930,7 +967,7 @@ void ConnectionDialog::onAccept() {
     try {
         core_->updateProfile(originalName_.toStdString(), patch.toStdString());
     } catch (const dg::Error& e) {
-        errorLabel_->setText(QString::fromUtf8(e.what()));
+        showError(QString::fromUtf8(e.what()));
         return;
     }
     savedName_ = name;  // the patch renamed it if name changed
