@@ -1,0 +1,12 @@
+<!-- The engine brand marks, referenced from the macOS target's resource set:
+     one artwork source for both platforms, so the marks cannot drift apart.
+     Dark variants are produced at render time (EngineIcon.cpp), not shipped. -->
+<RCC>
+  <qresource prefix="/engines">
+    <file alias="postgresql.svg">../macos/Sources/DatagrepKit/Resources/EngineIcons/postgresql.svg</file>
+    <file alias="mysql.svg">../macos/Sources/DatagrepKit/Resources/EngineIcons/mysql.svg</file>
+    <file alias="sqlite.svg">../macos/Sources/DatagrepKit/Resources/EngineIcons/sqlite.svg</file>
+    <file alias="redis.svg">../macos/Sources/DatagrepKit/Resources/EngineIcons/redis.svg</file>
+    <file alias="mongodb.svg">../macos/Sources/DatagrepKit/Resources/EngineIcons/mongodb.svg</file>
+  </qresource>
+</RCC>

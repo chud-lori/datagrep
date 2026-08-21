@@ -84,6 +84,7 @@ private:
     };
 
     QString displayTitle(const Tab& tab) const;
+    QString driverFor(const QString& connection) const;
     void updateTabChrome(int index);
     int indexOfId(const QString& id) const;
     Tab* activeTab();

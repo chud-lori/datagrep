@@ -38,7 +38,10 @@ permissions:
 jobs:
   package:
     name: package (ubuntu)
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`. glibc is forward-compatible only, so the
+    # oldest glibc we build against is the oldest distro that can run the
+    # result — 24.04's 2.39 produced packages that refuse to start on 22.04.
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
