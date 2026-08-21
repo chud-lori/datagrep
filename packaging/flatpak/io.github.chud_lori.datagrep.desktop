@@ -1,0 +1,14 @@
+# Desktop entry the Flatpak exports for the GTK4 UI (issue #36). The Qt
+# packages keep packaging/datagrep.desktop; the two ids never collide.
+# GTK4 sets the app id as the Wayland app-id / X11 WM_CLASS, so
+# StartupWMClass must equal it, not "datagrep".
+[Desktop Entry]
+Type=Application
+Name=datagrep
+GenericName=Database Query Tool
+Comment=Browse schemas and run queries against your databases
+Exec=datagrep
+Icon=io.github.chud_lori.datagrep
+Terminal=false
+Categories=Development;Database;GTK;
+StartupWMClass=io.github.chud_lori.datagrep
