@@ -101,9 +101,21 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
 option(DATAGREP_USE_KSYNTAXHIGHLIGHTING
        "Use KF6::SyntaxHighlighting for SQL highlighting when available" ON)
 
+# CI knob. Because the package is optional by design, a build environment that
+# lacks it silently compiles the fallback — which means the KSyntax code path
+# could rot without any build ever noticing. The CI leg that exists to compile
+# that path sets this ON so a missing package is a hard configure error there,
+# while every other build keeps the graceful fallback.
+option(DATAGREP_REQUIRE_KSYNTAXHIGHLIGHTING
+       "Fail configuration when KF6SyntaxHighlighting cannot be found" OFF)
+
 set(DATAGREP_HAVE_KSYNTAXHIGHLIGHTING OFF)
 if(DATAGREP_USE_KSYNTAXHIGHLIGHTING)
-    find_package(KF6SyntaxHighlighting QUIET)
+    if(DATAGREP_REQUIRE_KSYNTAXHIGHLIGHTING)
+        find_package(KF6SyntaxHighlighting REQUIRED)
+    else()
+        find_package(KF6SyntaxHighlighting QUIET)
+    endif()
     if(KF6SyntaxHighlighting_FOUND)
         set(DATAGREP_HAVE_KSYNTAXHIGHLIGHTING ON)
         message(STATUS
