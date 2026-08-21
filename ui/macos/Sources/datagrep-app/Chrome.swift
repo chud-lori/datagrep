@@ -79,6 +79,10 @@ struct QueryProgressBar: View {
 /// What the results pane shows when there is no grid worth showing.
 struct ResultsEmptyState: View {
     @ObservedObject var model: AppModel
+    /// Observed directly, because whether an editor is open is published by the
+    /// tabs model rather than by `AppModel`, and this view has to re-render
+    /// when the last tab closes.
+    @ObservedObject var tabs: EditorTabsModel
 
     var body: some View {
         if model.activeProfile.isEmpty {
@@ -91,12 +95,18 @@ struct ResultsEmptyState: View {
                     .buttonStyle(.borderedProminent)
             }
         } else if model.state == nil {
-            ContentUnavailableView {
-                Label("No result yet", systemImage: "command")
-            } description: {
-                Text("Press ⌘↩ to run the statement under the caret.")
+            // Only while there IS a statement to run. With no editor open the
+            // pane below already says "No editor open", and this one then told
+            // the user, in the largest type in the window, to press ⌘↩ to run
+            // a statement under a caret that does not exist.
+            if !tabs.tabs.isEmpty {
+                ContentUnavailableView {
+                    Label("No result yet", systemImage: "command")
+                } description: {
+                    Text("Press ⌘↩ to run the statement under the caret.")
+                }
             }
-        } else if model.rowsLoaded == 0 && model.state?.isTerminal == true && !model.isError {
+        } else if model.rowsLoaded == 0 && model.state == .done && !model.isError {
             ContentUnavailableView {
                 Label("No rows", systemImage: "tray")
             } description: {

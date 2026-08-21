@@ -41,7 +41,7 @@ struct Workbench: View {
         .overlay(alignment: .bottomTrailing) { UpdateNoticeView() }
         // Production guardrail, layer 1: a connection marked production tints
         // every accent in the window red.
-        .tint(model.isProd ? Color.red : nil)
+        .tint(model.markColor)
         .sheet(isPresented: $model.showNewConnection) { NewConnectionSheet(model: model) }
         .animation(.smooth(duration: 0.25), value: model.sidebarShown)
         // Feed the live content width so the sidebar can auto-collapse before the
@@ -103,7 +103,11 @@ private struct DetailArea: View {
                         .transition(.opacity)
                 }
             }
-            .overlay(alignment: .top) { ProdStripe(isProd: model.isProd) }
+            // Attached BEFORE the progress-bar inset, so the inset places the
+            // bar above it. As an overlay on the result of that inset it landed
+            // on the composite's top edge — exactly over the 3 pt progress bar,
+            // which made query progress invisible on any marked connection.
+            .overlay(alignment: .top) { MarkStripe(color: model.markColor) }
 
             // A real bottom row, NOT a `.safeAreaInset`: an always-present bar
             // laid out via safeAreaInset did not reserve its height until the
@@ -131,7 +135,11 @@ private struct DetailArea: View {
         .animation(.smooth(duration: 0.22), value: model.isRunning)
         .animation(.smooth(duration: 0.2), value: model.isError)
         .navigationTitle(model.activeProfile.isEmpty ? "datagrep" : model.activeProfile)
-        .navigationSubtitle(model.connectionSubtitle)
+        // NO `.navigationSubtitle`. Every fact it carried is now in the badge
+        // (engine, database), the read-only accessory (the lock) and the status
+        // bar (state, rows) — and it truncated mid-word even at a wide window,
+        // which is the exact failure the status bar's density ladder exists to
+        // avoid. It was also ~280 pt of a toolbar measured to be out of room.
         // The single most expensive thing in the window at launch (~80 ms of
         // the ~330 ms it used to take). The toolbar's *background* is a window
         // property and is painted from the first frame either way, so what is
@@ -203,7 +211,7 @@ private struct ResultsPane: View {
                     ResultTextView(model: model)
                 }
                 if !model.showsGrid {
-                    ResultsEmptyState(model: model)
+                    ResultsEmptyState(model: model, tabs: model.editor.tabs)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(Color(nsColor: .textBackgroundColor))
                 }
@@ -320,17 +328,17 @@ private struct DeferredInspector: ViewModifier {
     }
 }
 
-/// Three points of red along the top edge of the content. Drawn as an overlay
-/// so it costs no layout and never moves anything.
-private struct ProdStripe: View {
-    let isProd: Bool
+/// Three points of the connection's own colour along the top edge of the
+/// content. Drawn as an overlay so it costs no layout and never moves anything.
+private struct MarkStripe: View {
+    let color: Color?
     var body: some View {
-        if isProd {
+        if let color {
             Rectangle()
-                .fill(Color.red)
+                .fill(color)
                 .frame(height: 3)
-                .accessibilityLabel("production connection")
-                .help("This connection is marked production.")
+                .accessibilityLabel("marked connection")
+                .help("This connection is marked.")
         }
     }
 }
@@ -346,58 +354,142 @@ private struct ProdStripe: View {
 /// saturated element in an otherwise monochrome toolbar.
 ///
 /// The connection's own colour fills it, which is what finally makes that
-/// colour *readable* rather than an ambient wash — and red for production is
-/// then impossible to mistake for dev at a glance.
+/// colour *readable* rather than an ambient wash.
 private struct ConnectionBadge: View {
     @ObservedObject var model: AppModel
 
-    /// `mysql 8.0.36`, or just `mysql` until a handshake has confirmed a
+    /// What the server calls itself, preferred over the driver id: `product` is
+    /// the only thing that separates MariaDB from MySQL, or OpenSearch from
+    /// Elasticsearch — a distinction the driver id cannot make.
+    private var product: String {
+        if let p = model.connectionInfo?.product, !p.isEmpty, !Self.isUnknown(p) { return p }
+        return EngineStyle.displayName(for: model.activeDriver)
+    }
+
+    /// `MySQL 8.0.36`, or just `MySQL` until a handshake has confirmed a
     /// version. Never a guess: an unconfirmed version is the number someone
     /// would quote when asking whether a feature exists on their server.
     private var engine: String {
-        let name = EngineStyle.displayName(for: model.activeDriver)
-        guard let v = model.connectionInfo?.version, !v.isEmpty else { return name }
-        return "\(name) \(v)"
+        guard let v = model.connectionInfo?.version, !v.isEmpty, !Self.isUnknown(v) else {
+            return product
+        }
+        // `@@version` arrives as e.g. `8.0.36-0ubuntu0.22.04.1`. The build
+        // suffix is packaging trivia in the one element the eye lands on; the
+        // whole string stays in the tooltip.
+        let short = v.split(separator: "-", maxSplits: 1).first.map(String.init) ?? v
+        return "\(product) \(short)"
     }
 
+    /// Some drivers hand up the literal string `unknown` instead of declining
+    /// to answer, which would otherwise render as `PostgreSQL unknown` in the
+    /// most saturated element in the window. Treated as absent here so the
+    /// badge keeps its promise; the drivers should report nothing at all.
+    private static func isUnknown(_ s: String) -> Bool {
+        s.caseInsensitiveCompare("unknown") == .orderedSame
+    }
+
+    /// The connection's own colour, grey when it has none.
+    ///
+    /// This used to short-circuit on `isProd` and return red first — but
+    /// `isProd` *was* "has a colour", so the branch below was reachable only
+    /// when the colour was nil, and the badge could therefore only ever be red
+    /// or grey. A connection marked green got a red pill while the window tint
+    /// and the sidebar band both painted it green correctly.
     private var fill: Color {
-        if model.isProd { return .red }
-        return ConnectionColor.color(model.activeSafety.color) ?? Color(nsColor: .systemGray)
+        model.markColor ?? Color(nsColor: .systemGray)
     }
 
-    var body: some View {
-        if model.activeProfile.isEmpty {
-            EmptyView()
-        } else {
-            HStack(spacing: 6) {
-                Text(engine)
-                Text("·")
-                    .foregroundStyle(.secondary)
-                Text(model.activeProfile)
-                    .fontWeight(.semibold)
-                if let db = model.connectionInfo?.database {
-                    Text("·")
-                        .foregroundStyle(.secondary)
-                    Text(db)
-                }
-                if model.activeSafety.readOnly {
-                    Image(systemName: "lock.fill")
-                        .help(model.activeSafety.enforcement.headline)
-                }
-            }
+    /// One segment of the pill. Split out so the three densities below stay
+    /// readable rather than three copies of the same modifier stack.
+    private func pill(@ViewBuilder _ content: () -> some View) -> some View {
+        HStack(spacing: 6) { content() }
             .font(.system(size: 11, weight: .regular, design: .monospaced))
             .lineLimit(1)
             .foregroundStyle(.white)
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
             .background(fill, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-            // The badge must never be the widest thing in the toolbar: a long
-            // database name has to give way before the run and stop buttons do.
-            .frame(maxWidth: 420)
-            .help(
-                model.connectionInfo?.version == nil
-                    ? "\(model.activeProfile) — run a statement to learn the server version"
-                    : "\(engine) · \(model.activeProfile)")
+    }
+
+    private var separator: some View { Text("·").foregroundStyle(.secondary) }
+
+    /// Carries what the densest pill had to drop, including the full
+    /// unshortened version string.
+    private var tooltip: String {
+        var parts = [product]
+        if let v = model.connectionInfo?.version, !v.isEmpty, !Self.isUnknown(v) {
+            parts.append(v)
+        } else {
+            parts.append("version unknown — run a statement to learn it")
+        }
+        parts.append(model.activeProfile)
+        if let db = model.connectionInfo?.database { parts.append(db) }
+        if model.activeSafety.readOnly { parts.append(model.activeSafety.enforcement.headline) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The connection name, which must survive every density: it is the field
+    /// that answers "am I about to run this on the right server".
+    private var name: some View {
+        Text(model.activeProfile)
+            .fontWeight(.semibold)
+            .fixedSize()
+            .layoutPriority(3)
+    }
+
+    private var lock: some View {
+        Group {
+            if model.activeSafety.readOnly {
+                Image(systemName: "lock.fill")
+                    .help(model.activeSafety.enforcement.headline)
+            }
+        }
+    }
+
+    var body: some View {
+        if model.activeProfile.isEmpty {
+            // Not an EmptyView. The most saturated element in the window
+            // pointing at the thing you have to do first is worth more than a
+            // hole in the middle of the toolbar.
+            pill {
+                Text("No connection")
+            }
+            .help("No connection selected — ⌘N adds one")
+        } else {
+            // Sheds detail rather than truncating. Left to itself SwiftUI was
+            // free to cut the connection NAME while keeping `PostgreSQL 16.2`,
+            // which is precisely backwards. Same idiom the status bar already
+            // uses for its four densities.
+            ViewThatFits(in: .horizontal) {
+                pill {
+                    Text(engine).fixedSize()
+                    separator
+                    name
+                    if let db = model.connectionInfo?.database {
+                        separator
+                        Text(db).fixedSize()
+                    }
+                    lock
+                }
+                pill {
+                    name
+                    if let db = model.connectionInfo?.database {
+                        separator
+                        Text(db)
+                    }
+                    lock
+                }
+                pill {
+                    name
+                    lock
+                }
+            }
+            // The badge must never be the widest thing in the toolbar. 420 pt
+            // was not a cap on a ~1000 pt toolbar — it let the pill keep full
+            // width while Run, Cancel and New Connection went to the overflow
+            // chevron, which is the reverse of the intended priority.
+            .frame(maxWidth: 260)
+            .help(tooltip)
         }
     }
 }
@@ -415,8 +507,10 @@ private struct WorkbenchToolbar: ToolbarContent {
             } label: {
                 Label("Toggle Sidebar", systemImage: "sidebar.leading")
             }
-            .keyboardShortcut("s", modifiers: [.control, .command])
-            .help("Show or hide the connections sidebar (⌃⌘S)")
+            // NO `.keyboardShortcut`: ⌃⌘S is owned by the View menu item in
+            // AppDelegate. Binding it here too is the same double-binding that
+            // made one ⌘↩ run a statement twice.
+            .help("Show or hide the connections sidebar  ⌃⌘S")
 
             // New Connection lives in the window toolbar, as its own icon.
             //
@@ -455,8 +549,8 @@ private struct WorkbenchToolbar: ToolbarContent {
                     }
                 }
                 Divider()
+                // ⌘N belongs to the File menu item; this entry only names it.
                 Button("New Connection…") { model.showNewConnection = true }
-                    .keyboardShortcut("n", modifiers: .command)
                 Button("Remove “\(model.activeProfile)”") { model.removeActiveProfile() }
                     .disabled(model.activeProfile.isEmpty)
             } label: {
@@ -477,54 +571,60 @@ private struct WorkbenchToolbar: ToolbarContent {
             ConnectionBadge(model: model)
         }
 
+        // DECLARATION ORDER IS SURVIVAL PRIORITY. A toolbar group overflows
+        // from its tail, so whatever is declared last is what disappears into
+        // the `»` chevron first. Run was previously declared third, behind two
+        // items that only sometimes exist, and went to the chevron at ordinary
+        // window widths. The primary verb of the app now comes first.
         ToolbarItemGroup(placement: .primaryAction) {
+            // Run and Cancel were two buttons that could never both be live —
+            // one was always greyed out. One button that swaps its glyph costs
+            // half the width and never shows a dead control.
+            Button {
+                if model.isRunning { model.cancel() } else { model.runStatementUnderCaret() }
+            } label: {
+                Label(
+                    model.isRunning ? "Cancel" : "Run",
+                    systemImage: model.isRunning ? "stop.fill" : "play.fill")
+            }
+            // NO `.keyboardShortcut` here. ⌘↩ and ⌘. are owned by the Query
+            // menu items in AppDelegate, and binding ⌘↩ in both places fired
+            // the statement TWICE on one press: the first result painted, then
+            // the second run's opening status — zero rows, zero columns — wiped
+            // the grid a frame later and left "running on …" behind.
+            .disabled(model.activeProfile.isEmpty && !model.isRunning)
+            .help(
+                model.isRunning
+                    ? "Cancel — returns instantly, then reports what the server actually did  ⌘."
+                    : "Run the statement under the caret  ⌘↩")
+
             // Grid ⇄ Text result view. In the toolbar (the way Finder keeps its
             // icon/list/column switcher) rather than floated over the grid, where
             // it covered the last column's header.
-            if model.showsGrid {
-                Picker("Result view", selection: $model.showResultAsText) {
-                    Image(systemName: "tablecells").tag(false)
-                    Image(systemName: "text.alignleft").tag(true)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .help("Show the result as a grid or as a copyable plain-text table")
+            //
+            // Shown-and-disabled rather than hidden, so Run does not slide
+            // sideways the moment a result lands. The editor's tab menu already
+            // states the rule: an entry that appears only sometimes is harder
+            // to learn than one that says why it is off.
+            Picker("Result view", selection: $model.showResultAsText) {
+                Image(systemName: "tablecells").tag(false)
+                Image(systemName: "text.alignleft").tag(true)
             }
-
-            if model.hasDerivedClauses {
-                Button {
-                    model.clearDerived()
-                } label: {
-                    Label("Clear sort & filters", systemImage: "line.3.horizontal.decrease.circle")
-                }
-                .help("Remove the ORDER BY / WHERE datagrep added by clicking headers and cells")
-            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(!model.showsGrid)
+            .help("Show the result as a grid or as a copyable plain-text table")
 
             Button {
-                model.runStatementUnderCaret()
+                model.clearDerived()
             } label: {
-                Label("Run", systemImage: "play.fill")
+                Label("Clear sort & filters", systemImage: "line.3.horizontal.decrease.circle")
             }
-            // NO `.keyboardShortcut` here. ⌘↩ is owned by the Query menu item
-            // in AppDelegate, and binding it in both places fired the statement
-            // TWICE on one press: the first result painted, then the second
-            // run's opening status — zero rows, zero columns — wiped the grid a
-            // frame later and left "running on …" behind. The menu keeps it
-            // because that is where the shortcut is discoverable.
-            .disabled(model.activeProfile.isEmpty || model.isRunning)
-            .help("Run the statement under the caret  ⌘↩")
+            .disabled(!model.hasDerivedClauses)
+            .help("Remove the ORDER BY / WHERE datagrep added by clicking headers and cells")
 
-            Button {
-                model.cancel()
-            } label: {
-                Label("Cancel", systemImage: "stop.fill")
-            }
-            .keyboardShortcut(".", modifiers: .command)
-            .disabled(!model.isRunning)
-            .help("Cancel — returns instantly, then reports what the server actually did  ⌘.")
-
+            // ⌘Y is the Query menu's; not re-bound here.
             HistoryToolbarButton(history: model.history)
-                .keyboardShortcut("y", modifiers: .command)
 
             Button {
                 withAnimation(.smooth(duration: 0.22)) { model.showDetail.toggle() }

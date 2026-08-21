@@ -12,17 +12,6 @@ struct SidebarView: View {
                 ForEach(model.roots) { node in
                     NodeRow(node: node, model: model, filter: model.searchText, depth: 0)
                 }
-                if model.roots.isEmpty {
-                    Button {
-                        model.showNewConnection = true
-                    } label: {
-                        Label("Add a connection…", systemImage: "plus.circle")
-                            .font(.callout)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Color.accentColor)
-                    .padding(.vertical, 4)
-                }
             } header: {
                 Text("Connections")
                     .font(.caption2)
@@ -33,6 +22,36 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        // The add lives in a bottom bar, which is where Reminders, Notes and
+        // Xcode put "add to the thing this sidebar lists".
+        //
+        // Two earlier attempts put a bare + on the section header and both were
+        // rejected as decoration. They shared three properties this does not:
+        // inside the scrolling list, wordless, and immediately beside a
+        // secondary-grey label to be mistaken for. A footer sits outside the
+        // scroll area behind a divider, so it reads as chrome, and it can say
+        // what it does. It also survives when the toolbar overflows, which was
+        // measured to happen to every toolbar item at ordinary window widths.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                Divider()
+                HStack(spacing: 0) {
+                    Button {
+                        model.showNewConnection = true
+                    } label: {
+                        Label("New Connection", systemImage: "plus")
+                            .font(.callout)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("New connection  ⌘N")
+                    Spacer(minLength: 0)
+                }
+            }
+            .background(.bar)
+        }
         // A band, not a tint. Sequel Ace shrinking the same signal to a dot
         // produced sustained backlash, so a marked connection gets full width.
         .safeAreaInset(edge: .top, spacing: 0) {
