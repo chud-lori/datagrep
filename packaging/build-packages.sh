@@ -51,6 +51,7 @@ COMMON=(
     --force
 )
 
+# Recommends, not hard deps: the app runs without them, saved passwords do not.
 fpm "${COMMON[@]}" -t deb \
     --depends libqt6core6 \
     --depends libqt6gui6 \
@@ -58,7 +59,6 @@ fpm "${COMMON[@]}" -t deb \
     --depends libqt6network6 \
     --depends libdbus-1-3 \
     --depends zlib1g \
-  # Recommends, not hard deps: the app runs without them, saved passwords do not.
     --deb-recommends "gnome-keyring | kwalletd6" \
     --deb-recommends qt6-gtk-platformtheme \
     --deb-recommends qt6-xdgdesktopportal-platformtheme \
