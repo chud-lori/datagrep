@@ -10,6 +10,7 @@
 
 #include "model/ConnectionSafety.hpp"
 #include "model/QueryStatus.hpp"
+#include "ui/ConflictResolution.hpp"
 
 #include <QHash>
 #include <QMainWindow>
@@ -18,6 +19,7 @@
 
 namespace dg {
 class Core;
+class PendingEdits;
 }
 class DetailPanel;
 class EditorTabs;
@@ -26,6 +28,7 @@ class QueryHistoryStore;
 class ResultModel;
 class ResultTableView;
 class SchemaTree;
+class StagedEditsBar;
 class StatusBar;
 class QDockWidget;
 class QLabel;
@@ -52,8 +55,33 @@ private slots:
     void onOpenHistoryInEditor(const QString& sql, const QString& connection);
     void onRerunFromHistory(const QString& sql, const QString& connection);
 
+    // --- staged document edits (Elasticsearch grid editing) ----------------
+    void commitStagedEdits();
+    void discardStagedEditsPrompt();
+    void reviewConflicts();
+    void reloadResult();
+
 private:
     QString selectedProfile() const;
+
+    // The commit itself, after the confirmation. datagrep_mutate blocks, so it
+    // runs on its own thread and reports back through a queued call — the
+    // window keeps drawing and says "committing…" instead of freezing on a
+    // cluster that is thinking.
+    void sendMutations(const QVector<dg::StagedDocument>& pending,
+                       const QString& profile);
+    void finishCommit(const QString& reportJson, const QString& failure,
+                      const QStringList& ids, const QVector<int>& rows);
+    void finishReread(const QString& serverJson, const QString& failure,
+                      const QVector<dg::StagedDocument>& conflicted);
+    void presentReport(const dg::MutationReport& report);
+    void presentConflictReview();
+
+    // The sentence that has to be read before the click. Numbered rather than
+    // abstract: "if #3 fails, #1 and #2 stay written" is something someone can
+    // picture, where "the batch is not atomic" is something they can nod at.
+    static QString commitWarning(int count, bool atomic);
+    static QString reportHeadline(const dg::MutationReport& report);
 
     // The one run path. Every statement — typed or replayed from history —
     // goes through here, so the confirm-writes prompt and the history record
@@ -83,6 +111,16 @@ private:
     ResultTableView* grid_;
     ResultModel* model_;
     StatusBar* status_;
+    dg::PendingEdits* edits_;
+    StagedEditsBar* stagedBar_;
+
+    // What the current result was run against — the profile a commit or a
+    // re-read must address, whatever the sidebar has selected since.
+    QString lastProfile_;
+    QString lastSql_;
+    dg::ConflictReview conflictReview_;
+    bool isCommitting_ = false;
+    bool isRereading_ = false;
 
     // The safety facts per profile, rebuilt on every reloadProfiles(). The list
     // rows, the banner and the run path all read THIS map, so they can never

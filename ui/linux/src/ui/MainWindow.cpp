@@ -2,10 +2,12 @@
 
 #include "ffi/DatagrepFfi.hpp"
 #include "model/ConnectionSafety.hpp"
+#include "model/GridEditing.hpp"
 #include "model/QueryHistory.hpp"
 #include "model/ResultModel.hpp"
 #include "ui/ConnectionDialog.hpp"
 #include "ui/DetailPanel.hpp"
+#include "ui/EditingSurface.hpp"
 #include "ui/EditorTabs.hpp"
 #include "ui/HistoryPanel.hpp"
 #include "ui/ResultTableView.hpp"
@@ -28,6 +30,7 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QPainter>
 #include <QPen>
 #include <QPixmap>
@@ -41,7 +44,9 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <algorithm>
 #include <optional>
+#include <thread>
 
 namespace {
 
@@ -244,6 +249,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     model_ = new ResultModel(this);
     connect(model_, &ResultModel::statusChanged, this,
             &MainWindow::onStatusChanged);
+    edits_ = new dg::PendingEdits(this);
+    model_->setPendingEdits(edits_);
+    // An edit that could not be staged is said out loud — a cell that quietly
+    // refuses what was typed is indistinguishable from one that lost it.
+    connect(model_, &ResultModel::editRefused, this,
+            [this](const QString& why) { status_->showMessage(why, true); });
 
     grid_ = new ResultTableView(this);
     grid_->setModel(model_);
@@ -266,9 +277,26 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                     *kind == dg::CellKind::Nested);
             });
 
+    stagedBar_ = new StagedEditsBar(edits_, this);
+    connect(stagedBar_, &StagedEditsBar::commitRequested, this,
+            &MainWindow::commitStagedEdits);
+    connect(stagedBar_, &StagedEditsBar::discardRequested, this,
+            &MainWindow::discardStagedEditsPrompt);
+    connect(stagedBar_, &StagedEditsBar::resolveRequested, this,
+            &MainWindow::reviewConflicts);
+    connect(stagedBar_, &StagedEditsBar::reloadRequested, this,
+            &MainWindow::reloadResult);
+
+    auto* gridPane = new QWidget(this);
+    auto* gridLayout = new QVBoxLayout(gridPane);
+    gridLayout->setContentsMargins(0, 0, 0, 0);
+    gridLayout->setSpacing(0);
+    gridLayout->addWidget(grid_, 1);
+    gridLayout->addWidget(stagedBar_);
+
     auto* rightPane = new QSplitter(Qt::Vertical, this);
     rightPane->addWidget(editorPane);
-    rightPane->addWidget(grid_);
+    rightPane->addWidget(gridPane);
     rightPane->setStretchFactor(0, 0);
     rightPane->setStretchFactor(1, 1);
 
@@ -571,6 +599,13 @@ void MainWindow::executeStatement(const QString& profile, const QString& sql) {
     try {
         auto query = std::make_unique<dg::Query>(
             core_->run(profile.toStdString(), sql.toStdString()));
+        // The window's veto on editing, decided per statement: a read-only
+        // connection offers no edit at all, however editable the result it
+        // returns. Set before the result exists, so no window of rows is ever
+        // editable for an instant.
+        model_->setAllowsEditing(!safety.readOnly);
+        lastProfile_ = profile;
+        lastSql_ = sql;
         // Reset the status bar's per-result honesty state and tell it whether the
         // statement carried an @limit BEFORE handing the query to the model — the
         // model reads the first status snapshot synchronously inside setQuery, so
@@ -623,6 +658,339 @@ void MainWindow::onRerunFromHistory(const QString& sql, const QString& connectio
         }
     }
     executeStatement(profile, sql);
+}
+
+void MainWindow::commitStagedEdits() {
+    if (!core_ || isCommitting_) {
+        return;
+    }
+    const QVector<dg::StagedDocument> pending = edits_->pending();
+    if (pending.isEmpty() || lastProfile_.isEmpty()) {
+        return;
+    }
+    const bool atomic =
+        model_->editable() ? model_->editable()->atomicBatch : false;
+
+    QMessageBox box(QMessageBox::Warning,
+                    QStringLiteral("Commit document edits"),
+                    pending.size() == 1
+                        ? QStringLiteral("Commit 1 document edit to ‘%1’?")
+                              .arg(lastProfile_)
+                        : QStringLiteral("Commit %1 document edits to ‘%2’?")
+                              .arg(pending.size())
+                              .arg(lastProfile_),
+                    QMessageBox::Cancel, this);
+    box.setInformativeText(commitWarning(pending.size(), atomic));
+    QPushButton* commitButton = box.addButton(
+        pending.size() == 1
+            ? QStringLiteral("Commit 1 Document")
+            : QStringLiteral("Commit %1 Documents").arg(pending.size()),
+        QMessageBox::DestructiveRole);
+    // Nothing is written by pressing return on a dialog nobody read.
+    box.setDefaultButton(QMessageBox::Cancel);
+    box.exec();
+    if (box.clickedButton() != commitButton) {
+        return;
+    }
+    sendMutations(pending, lastProfile_);
+}
+
+QString MainWindow::commitWarning(int count, bool atomic) {
+    if (atomic) {
+        return QStringLiteral(
+                   "This connection applies the batch atomically: either all %1 "
+                   "are written, or none are.")
+            .arg(count);
+    }
+    if (count == 1) {
+        return QStringLiteral(
+            "The document is written on its own. If it fails, nothing is "
+            "written and the edit stays staged for another try.");
+    }
+    const int example = std::min(3, count);
+    const int before = example - 1;
+    // Deliberately does not promise that the batch stops at the first failure:
+    // on this engine a multi-document batch goes as one bulk request and every
+    // item is attempted, while a single-document path halts. What is true
+    // either way is that nothing is rolled back and the report names each
+    // document — so that is what it says.
+    return QStringLiteral(
+               "%1 documents will be written one by one, and there is no "
+               "transaction: if #%2 fails, the %3 before it stay written and "
+               "nothing is rolled back. The report then names every document — "
+               "written, refused, or never attempted — and anything not written "
+               "stays staged.")
+        .arg(count)
+        .arg(example)
+        .arg(before == 1 ? QStringLiteral("one") : QString::number(before));
+}
+
+void MainWindow::sendMutations(const QVector<dg::StagedDocument>& pending,
+                               const QString& profile) {
+    isCommitting_ = true;
+    stagedBar_->setCommitting(true);
+    status_->showMessage(QStringLiteral("committing %1 document(s) to %2…")
+                             .arg(pending.size())
+                             .arg(profile));
+    QVector<int> rows;
+    QStringList ids;
+    QVector<dg::DocumentMutation> batch;
+    for (const dg::StagedDocument& doc : pending) {
+        rows.append(doc.row);
+        ids.append(doc.id);
+        batch.append(doc.mutation());
+    }
+    const std::string batchJson = dg::mutationBatchJson(batch).toStdString();
+    const std::string profileStd = profile.toStdString();
+    dg::Core* core = core_.get();
+    // core_ outlives every window this app opens; the queued reply is dropped
+    // if `this` is gone, exactly like a queued signal.
+    std::thread([this, core, profileStd, batchJson, ids, rows]() {
+        QString reportJson;
+        QString failure;
+        try {
+            reportJson =
+                QString::fromStdString(core->mutateJson(profileStd, batchJson));
+        } catch (const dg::Error& e) {
+            failure = QString::fromUtf8(e.what());
+        } catch (const std::exception& e) {
+            failure = QString::fromUtf8(e.what());
+        }
+        QMetaObject::invokeMethod(
+            this,
+            [this, reportJson, failure, ids, rows]() {
+                finishCommit(reportJson, failure, ids, rows);
+            },
+            Qt::QueuedConnection);
+    }).detach();
+}
+
+void MainWindow::finishCommit(const QString& reportJson, const QString& failure,
+                              const QStringList& ids, const QVector<int>& rows) {
+    isCommitting_ = false;
+    stagedBar_->setCommitting(false);
+    if (!failure.isEmpty()) {
+        // The batch never ran at all — a read-only refusal, or a driver that
+        // refused every write up front. Nothing was written, and everything
+        // stays staged.
+        status_->showMessage(failure, true);
+        return;
+    }
+    dg::MutationReport report;
+    QString whyNot;
+    if (!dg::MutationReport::decode(reportJson, &report, &whyNot)) {
+        status_->showMessage(whyNot, true);
+        return;
+    }
+    const bool linedUp = edits_->apply(report, ids);
+    model_->refreshStagedRows(rows);
+    status_->showMessage(
+        linedUp ? reportHeadline(report)
+                : QStringLiteral(
+                      "the engine reported %1 outcome(s) for %2 document(s), so "
+                      "datagrep cannot say which is which — read the report, and "
+                      "re-run the statement to see what was written")
+                      .arg(report.rows.size())
+                      .arg(ids.size()),
+        !report.isClean() || !linedUp);
+    presentReport(report);
+}
+
+QString MainWindow::reportHeadline(const dg::MutationReport& report) {
+    QStringList parts;
+    parts << QStringLiteral("%1 applied").arg(report.applied);
+    if (report.failed > 0) {
+        parts << (report.conflicts > 0
+                      ? QStringLiteral("%1 failed (%2 a version conflict)")
+                            .arg(report.failed)
+                            .arg(report.conflicts)
+                      : QStringLiteral("%1 failed").arg(report.failed));
+    }
+    if (report.notAttempted > 0) {
+        parts << QStringLiteral("%1 never attempted, still staged")
+                     .arg(report.notAttempted);
+    }
+    return parts.join(QStringLiteral(" · "));
+}
+
+void MainWindow::presentReport(const dg::MutationReport& report) {
+    MutationReportDialog dialog(report, this);
+    bool wantResolve = false;
+    connect(&dialog, &MutationReportDialog::resolveConflictsRequested, this,
+            [&wantResolve]() { wantResolve = true; });
+    dialog.exec();
+    if (wantResolve) {
+        reviewConflicts();
+    }
+}
+
+void MainWindow::reviewConflicts() {
+    if (!core_ || isRereading_ || isCommitting_) {
+        return;
+    }
+    const QVector<dg::StagedDocument> conflicted = edits_->conflicted();
+    if (conflicted.isEmpty() || lastProfile_.isEmpty()) {
+        return;
+    }
+    if (!model_->editable()) {
+        status_->showMessage(
+            QStringLiteral(
+                "this result no longer says how its documents are identified, so "
+                "datagrep cannot read them back — re-run the statement"),
+            true);
+        return;
+    }
+    QVector<dg::DocumentAddress> addresses;
+    for (const dg::StagedDocument& doc : conflicted) {
+        addresses.append(doc.address());
+    }
+    isRereading_ = true;
+    stagedBar_->setRereading(true);
+    status_->showMessage(QStringLiteral("reading what the server holds now…"));
+
+    const std::string addressesJson =
+        dg::documentAddressBatchJson(addresses).toStdString();
+    const std::string profileStd = lastProfile_.toStdString();
+    dg::Core* core = core_.get();
+    std::thread([this, core, profileStd, addressesJson, conflicted]() {
+        QString serverJson;
+        QString failure;
+        try {
+            serverJson = QString::fromStdString(
+                core->rereadDocumentsJson(profileStd, addressesJson));
+        } catch (const dg::Error& e) {
+            failure = QString::fromUtf8(e.what());
+        } catch (const std::exception& e) {
+            failure = QString::fromUtf8(e.what());
+        }
+        QMetaObject::invokeMethod(
+            this,
+            [this, serverJson, failure, conflicted]() {
+                finishReread(serverJson, failure, conflicted);
+            },
+            Qt::QueuedConnection);
+    }).detach();
+}
+
+void MainWindow::finishReread(const QString& serverJson, const QString& failure,
+                              const QVector<dg::StagedDocument>& conflicted) {
+    isRereading_ = false;
+    stagedBar_->setRereading(false);
+    if (!failure.isEmpty()) {
+        status_->showMessage(failure, true);
+        return;
+    }
+    QVector<dg::ServerDocument> server;
+    QString whyNot;
+    if (!dg::ServerDocument::decodeAll(serverJson, &server, &whyNot)) {
+        status_->showMessage(whyNot, true);
+        return;
+    }
+    // Matched by position, exactly like the commit report. A list that does
+    // not line up one-for-one is not guessed at: showing one document's server
+    // values against another's edits is how somebody overwrites the wrong
+    // thing.
+    if (server.size() != conflicted.size()) {
+        status_->showMessage(
+            QStringLiteral("the engine answered for %1 of %2 documents, so "
+                           "datagrep cannot say which answer belongs to which — "
+                           "re-run the statement")
+                .arg(server.size())
+                .arg(conflicted.size()),
+            true);
+        return;
+    }
+    conflictReview_ =
+        dg::ConflictReview::build(conflicted, server, *model_->editable());
+    status_->showMessage(
+        QStringLiteral("%1 conflict(s) to resolve").arg(conflicted.size()));
+    presentConflictReview();
+}
+
+void MainWindow::presentConflictReview() {
+    ConflictReviewDialog dialog(conflictReview_, this);
+    // A rebase is staged again, not written: it re-guards the edit against the
+    // version the user has just looked at, and the commit button is still the
+    // only thing that writes. A rebase that wrote immediately would be the
+    // silent retry this whole flow exists to avoid.
+    connect(&dialog, &ConflictReviewDialog::rebaseChosen, this,
+            [this, &dialog](const QString& id) {
+                const dg::ConflictDocument* found = nullptr;
+                for (const dg::ConflictDocument& doc : conflictReview_.documents) {
+                    if (doc.id == id) {
+                        found = &doc;
+                        break;
+                    }
+                }
+                if (found == nullptr || !found->canRebase) {
+                    status_->showMessage(
+                        QStringLiteral(
+                            "the server did not return a version for this "
+                            "document, so the edit could only be re-sent "
+                            "unguarded — which would overwrite whatever is "
+                            "there now"),
+                        true);
+                    return;
+                }
+                if (auto row = edits_->rebase(id, found->rebaseGuard)) {
+                    model_->refreshStagedRows({*row});
+                }
+                status_->showMessage(QStringLiteral(
+                    "re-applied onto the current version — still staged, and "
+                    "still not written. Commit to write it."));
+                dialog.removeDocument(id);
+            });
+    connect(&dialog, &ConflictReviewDialog::discardChosen, this,
+            [this, &dialog](const QString& id) {
+                if (auto row = edits_->discardById(id)) {
+                    model_->refreshStagedRows({*row});
+                }
+                status_->showMessage(QStringLiteral(
+                    "edit discarded — the server's version is untouched"));
+                dialog.removeDocument(id);
+            });
+    dialog.exec();
+}
+
+void MainWindow::discardStagedEditsPrompt() {
+    QVector<int> rows;
+    for (const dg::StagedDocument& doc : edits_->documents()) {
+        rows.append(doc.row);
+    }
+    if (rows.isEmpty()) {
+        return;
+    }
+    QMessageBox box(QMessageBox::Warning,
+                    QStringLiteral("Discard staged edits"),
+                    QStringLiteral("Discard %1 staged document edit(s)?")
+                        .arg(edits_->pendingCount()),
+                    QMessageBox::NoButton, this);
+    box.setInformativeText(QStringLiteral(
+        "Nothing has been written yet, and nothing will be. The values you "
+        "typed are lost."));
+    QPushButton* discardButton = box.addButton(QStringLiteral("Discard"),
+                                               QMessageBox::DestructiveRole);
+    QPushButton* keepButton = box.addButton(QStringLiteral("Keep Editing"),
+                                            QMessageBox::RejectRole);
+    box.setDefaultButton(keepButton);
+    box.exec();
+    if (box.clickedButton() != discardButton) {
+        return;
+    }
+    edits_->discardAll();
+    model_->refreshStagedRows(rows);
+    status_->showMessage(QStringLiteral("staged edits discarded"));
+}
+
+void MainWindow::reloadResult() {
+    // The grid still holds the rows as they were loaded, with typed values
+    // drawn over them — re-asking the server is offered, never done
+    // automatically: a re-query costs a round trip and resets the scroll of a
+    // result someone may still be reading.
+    if (lastSql_.isEmpty() || lastProfile_.isEmpty()) {
+        return;
+    }
+    executeStatement(lastProfile_, lastSql_);
 }
 
 void MainWindow::cancelQuery() {

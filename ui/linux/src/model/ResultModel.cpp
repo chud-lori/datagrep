@@ -2,6 +2,10 @@
 
 #include <QBrush>
 #include <QColor>
+#include <QFont>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMetaObject>
 #include <QPalette>
 
@@ -29,6 +33,14 @@ void ResultModel::setQuery(std::unique_ptr<dg::Query> query) {
     columnTypes_.clear();
     columnRightAligned_.clear();
     status_ = dg::QueryStatus{};
+    // A new result is new rows: the values staged edits were typed against are
+    // gone, and so are the loaded versions their guards carry.
+    editable_.reset();
+    namesWindow_ = nullptr;
+    namesCache_.clear();
+    if (edits_ != nullptr) {
+        edits_->discardAll();
+    }
     if (query_) {
         pager_ = std::make_unique<dg::RowPager>(*query_);
         // Marshal the background progress callback onto the GUI thread. The ABI
@@ -65,6 +77,14 @@ void ResultModel::reset() {
     columnTypes_.clear();
     columnRightAligned_.clear();
     status_ = dg::QueryStatus{};
+    // A new result is new rows: the values staged edits were typed against are
+    // gone, and so are the loaded versions their guards carry.
+    editable_.reset();
+    namesWindow_ = nullptr;
+    namesCache_.clear();
+    if (edits_ != nullptr) {
+        edits_->discardAll();
+    }
     endResetModel();
     emit statusChanged(status_);
 }
@@ -130,8 +150,63 @@ QVariant ResultModel::data(const QModelIndex& index, int role) const {
 
     const dg::CellKind kind = window->kind(absRow, absCol);
 
+    // The staged overlay: a value typed over this cell draws instead of the
+    // loaded one — "I typed something" has to be visible before it is written.
+    const dg::StagedDocument* stagedDoc =
+        (editable_ && edits_ != nullptr) ? edits_->documentAtRow(row) : nullptr;
+    std::optional<dg::MutationValue> stagedValue;
+    if (stagedDoc != nullptr) {
+        const QString field = fieldName(window, col);
+        if (!field.isEmpty()) {
+            stagedValue = stagedDoc->valueOf(field);
+        }
+    }
+
     switch (role) {
+        case Qt::EditRole:
+            // What the field editor opens with: the staged value if one is
+            // typed, else the cell as loaded (NULL edits as "NULL"; typing it
+            // back un-stages, never writes the string).
+            if (stagedValue) {
+                return stagedValue->display();
+            }
+            switch (kind) {
+                case dg::CellKind::Null:
+                    return QStringLiteral("NULL");
+                case dg::CellKind::Absent:
+                    return QString();
+                default:
+                    return QString::fromStdString(window->cellText(absRow, absCol));
+            }
+        case Qt::FontRole:
+            if (stagedDoc != nullptr && stagedDoc->isDelete) {
+                QFont f;
+                f.setStrikeOut(true);
+                return f;
+            }
+            return QVariant();
+        case Qt::BackgroundRole:
+            if (stagedDoc != nullptr) {
+                if (stagedDoc->isDelete) {
+                    return QBrush(QColor(220, 60, 60, 36));
+                }
+                if (stagedDoc->isConflicted()) {
+                    return stagedValue ? QVariant(QBrush(QColor(235, 140, 20, 70)))
+                                       : QVariant();
+                }
+                if (stagedDoc->state.isDone()) {
+                    return stagedValue ? QVariant(QBrush(QColor(60, 170, 90, 46)))
+                                       : QVariant();
+                }
+                if (stagedValue) {
+                    return QBrush(QColor(235, 170, 40, 46));
+                }
+            }
+            return QVariant();
         case Qt::DisplayRole: {
+            if (stagedValue) {
+                return stagedValue->display();
+            }
             switch (kind) {
                 case dg::CellKind::Null:
                     return QStringLiteral("NULL");
@@ -156,6 +231,10 @@ QVariant ResultModel::data(const QModelIndex& index, int role) const {
             }
             return static_cast<int>(Qt::AlignLeft | Qt::AlignVCenter);
         case Qt::ForegroundRole:
+            // A staged value is data, however chrome the loaded cell was.
+            if (stagedValue) {
+                return QVariant();
+            }
             // NULL / ABSENT / nested read as chrome, not data — muted like the
             // macOS grid's placeholder colour.
             if (kind == dg::CellKind::Null || kind == dg::CellKind::Absent ||
@@ -218,9 +297,186 @@ Qt::ItemFlags ResultModel::flags(const QModelIndex& index) const {
     if (!index.isValid()) {
         return Qt::NoItemFlags;
     }
-    // Selectable + enabled, but NOT editable: the grid is read-only; edits go
-    // through re-issued SQL, never through the model.
-    return Qt::ItemIsSelectable | Qt::ItemIsEnabled;
+    // Editable only when the engine's status said so AND the connection's
+    // read-only veto did not apply — everything else stays a read-only grid.
+    Qt::ItemFlags f = Qt::ItemIsSelectable | Qt::ItemIsEnabled;
+    if (editable_ && cellEditable(index.row(), index.column())) {
+        f |= Qt::ItemIsEditable;
+    }
+    return f;
+}
+
+bool ResultModel::cellEditable(int row, int column) const {
+    if (!editable_ || !pager_ || row < 0 ||
+        static_cast<std::uint64_t>(row) >= exposedRows_ || column < 0 ||
+        column >= columnCount_) {
+        return false;
+    }
+    const dg::RowWindow* window = nullptr;
+    try {
+        window = pager_->window(static_cast<std::uint64_t>(row));
+    } catch (const dg::Error&) {
+        return false;
+    }
+    if (window == nullptr ||
+        static_cast<std::uint32_t>(column) >= window->columns()) {
+        return false;
+    }
+    // A document or an array is edited in the inspector, not in a grid cell.
+    return window->kind(static_cast<std::uint64_t>(row),
+                        static_cast<std::uint32_t>(column)) != dg::CellKind::Nested;
+}
+
+bool ResultModel::setData(const QModelIndex& index, const QVariant& value,
+                          int role) {
+    if (role != Qt::EditRole || !index.isValid() || !editable_ ||
+        edits_ == nullptr || !pager_) {
+        return false;
+    }
+    const int row = index.row();
+    const int col = index.column();
+    const dg::RowWindow* window = nullptr;
+    try {
+        window = pager_->window(static_cast<std::uint64_t>(row));
+    } catch (const dg::Error&) {
+        return false;
+    }
+    if (window == nullptr || static_cast<std::uint32_t>(col) >= window->columns()) {
+        return false;
+    }
+    // The write names a field, so the cached names must be THIS window's — a
+    // stale hit here would stage against a field the user never touched.
+    namesWindow_ = nullptr;
+    const QString field = fieldName(window, col);
+    if (field.isEmpty()) {
+        emit editRefused(QStringLiteral(
+            "this column is not one of the fields the row was read under"));
+        return false;
+    }
+    const auto loaded = loadedValue(window, row, col);
+    const QString typed = value.toString();
+    // Typing the loaded value back in is how an edit is taken back, so it
+    // un-stages the field rather than staging a write that changes nothing.
+    if (loaded && loaded->display() == typed) {
+        edits_->unstage(row, field);
+        refreshStagedRows({row});
+        return true;
+    }
+    dg::MutationValue coerced;
+    QString whyNot;
+    if (!dg::MutationValue::typedLike(typed, loaded, &coerced, &whyNot)) {
+        emit editRefused(QStringLiteral("`%1`: %2").arg(field, whyNot));
+        return false;
+    }
+    dg::EditableResult::Address address;
+    if (!addressRow(row, window, &address)) {
+        return false;
+    }
+    edits_->stage(address.id, row, address.key, address.expect, field, coerced,
+                  loaded);
+    refreshStagedRows({row});
+    return true;
+}
+
+bool ResultModel::rowIsStaged(int row) const {
+    return edits_ != nullptr && edits_->documentAtRow(row) != nullptr;
+}
+
+bool ResultModel::rowIsDeleted(int row) const {
+    return edits_ != nullptr && edits_->isDeleted(row);
+}
+
+void ResultModel::stageDeleteRow(int row) {
+    if (!editable_ || edits_ == nullptr || !pager_ || row < 0 ||
+        static_cast<std::uint64_t>(row) >= exposedRows_) {
+        return;
+    }
+    const dg::RowWindow* window = nullptr;
+    try {
+        window = pager_->window(static_cast<std::uint64_t>(row));
+    } catch (const dg::Error&) {
+        return;
+    }
+    if (window == nullptr) {
+        return;
+    }
+    dg::EditableResult::Address address;
+    if (!addressRow(row, window, &address)) {
+        return;
+    }
+    edits_->stageDelete(address.id, row, address.key, address.expect);
+    refreshStagedRows({row});
+}
+
+void ResultModel::discardStagedRow(int row) {
+    if (edits_ == nullptr || edits_->documentAtRow(row) == nullptr) {
+        return;
+    }
+    edits_->discardRow(row);
+    refreshStagedRows({row});
+}
+
+void ResultModel::refreshStagedRows(const QVector<int>& rows) {
+    if (columnCount_ == 0) {
+        return;
+    }
+    for (int row : rows) {
+        if (row >= 0 && static_cast<std::uint64_t>(row) < exposedRows_) {
+            emit dataChanged(index(row, 0), index(row, columnCount_ - 1));
+        }
+    }
+}
+
+QString ResultModel::fieldName(const dg::RowWindow* window, int col) const {
+    if (window == nullptr || col < 0) {
+        return QString();
+    }
+    if (window != namesWindow_) {
+        namesCache_.clear();
+        if (auto json = window->columnNamesJson()) {
+            const QJsonDocument doc =
+                QJsonDocument::fromJson(QByteArray::fromStdString(*json));
+            for (const QJsonValue& v : doc.array()) {
+                namesCache_ << v.toString();
+            }
+        }
+        namesWindow_ = window;
+    }
+    return col < namesCache_.size() ? namesCache_.at(col) : QString();
+}
+
+std::optional<dg::MutationValue> ResultModel::loadedValue(
+    const dg::RowWindow* window, int row, int col) const {
+    const auto absRow = static_cast<std::uint64_t>(row);
+    const auto absCol = static_cast<std::uint32_t>(col);
+    const dg::CellKind kind = window->kind(absRow, absCol);
+    if (kind == dg::CellKind::Nested || kind == dg::CellKind::Absent) {
+        return std::nullopt;
+    }
+    const auto detail = window->cellDetailJson(absRow, absCol);
+    if (!detail) {
+        return std::nullopt;
+    }
+    return dg::MutationValue::decodeFragment(QString::fromStdString(*detail));
+}
+
+bool ResultModel::addressRow(int row, const dg::RowWindow* window,
+                             dg::EditableResult::Address* out) {
+    const auto envelope = window->envelopeJson(static_cast<std::uint64_t>(row));
+    if (!envelope) {
+        emit editRefused(QStringLiteral(
+            "this row carries no document envelope, so datagrep cannot tell "
+            "which document it is"));
+        return false;
+    }
+    const QJsonDocument doc =
+        QJsonDocument::fromJson(QByteArray::fromStdString(*envelope));
+    QString whyNot;
+    if (!editable_->address(doc.object(), out, &whyNot)) {
+        emit editRefused(whyNot);
+        return false;
+    }
+    return true;
 }
 
 bool ResultModel::canFetchMore(const QModelIndex& parent) const {
@@ -301,6 +557,13 @@ void ResultModel::refreshStatus() {
 
     loadedRows_ = next.rowsLoaded;
     status_ = next;
+    // The veto applied here, on every snapshot, so editability can never
+    // outlive the result (or the read-only decision) it describes.
+    editable_ = allowsEditing_ ? next.editable : std::nullopt;
+    // Windows may have been dropped above; the names cache keys on their
+    // addresses and must not survive them.
+    namesWindow_ = nullptr;
+    namesCache_.clear();
     emit statusChanged(status_);
 }
 

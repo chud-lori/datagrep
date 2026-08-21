@@ -15,6 +15,8 @@
 #ifndef DATAGREP_QUERY_STATUS_HPP
 #define DATAGREP_QUERY_STATUS_HPP
 
+#include "Mutation.hpp"
+
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -77,6 +79,10 @@ struct QueryStatus {
     // profile is writeable.
     QString readOnlyEnforcement;  // "server" | "client" | "none" | ""
     bool readOnlyServerConfirmed = false;
+
+    // The "editable" block, when the engine says this result may be edited.
+    // nullopt is taken literally: no edit is offered at all.
+    std::optional<EditableResult> editable;
 
     bool capped() const { return state == QueryState::Capped; }
     bool streaming() const { return !isTerminal(state); }

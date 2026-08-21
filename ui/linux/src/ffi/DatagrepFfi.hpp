@@ -217,6 +217,15 @@ public:
         return std::string(p, len);  // COPY. Do not free p.
     }
 
+    // The field names THIS window projected, in column order, as owned JSON.
+    // Not the status' column list: on a heterogeneous document result the
+    // status reports what the first chunk revealed, while the value on screen
+    // was read under this window's own projection — an edit naming a field by
+    // the header could write a field the user never touched.
+    std::optional<std::string> columnNamesJson() const {
+        return detail::takeOwnedString(datagrep_rows_column_names_json(raw_));
+    }
+
     // Full raw value of one cell as owned JSON, for the detail pane. Freed here.
     std::optional<std::string> cellDetailJson(std::uint64_t absoluteRow,
                                               std::uint32_t col) const {
@@ -429,6 +438,25 @@ public:
         return detail::tryCallJson([&](char** err) {
             return datagrep_catalog_describe_json(raw_, profile.c_str(),
                                                   pathJson.c_str(), err);
+        });
+    }
+
+    // --- mutate / reread ---------------------------------------------------
+    // Both BLOCK until the server answers (the ABI is synchronous here, unlike
+    // datagrep_query_run) — callers must stay off the GUI thread. JSON in /
+    // JSON out; encoding and decoding live in the model layer.
+    std::string mutateJson(const std::string& profile,
+                           const std::string& mutationJson) const {
+        return detail::tryCallJson([&](char** err) {
+            return datagrep_mutate(raw_, profile.c_str(), mutationJson.c_str(), err);
+        });
+    }
+
+    std::string rereadDocumentsJson(const std::string& profile,
+                                    const std::string& addressesJson) const {
+        return detail::tryCallJson([&](char** err) {
+            return datagrep_reread_documents(raw_, profile.c_str(),
+                                             addressesJson.c_str(), err);
         });
     }
 
