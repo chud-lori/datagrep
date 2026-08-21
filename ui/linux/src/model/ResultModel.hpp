@@ -40,6 +40,7 @@
 #ifndef DATAGREP_RESULT_MODEL_HPP
 #define DATAGREP_RESULT_MODEL_HPP
 
+#include "GridEditing.hpp"
 #include "QueryStatus.hpp"
 #include "ffi/DatagrepFfi.hpp"
 #include "ffi/RowPager.hpp"
@@ -84,6 +85,10 @@ public:
     QVariant headerData(int section, Qt::Orientation orientation,
                         int role = Qt::DisplayRole) const override;
     Qt::ItemFlags flags(const QModelIndex& index) const override;
+    // The staging path: Qt's edit commit lands here. Stages against the
+    // document (never writes); typing the loaded value back un-stages.
+    bool setData(const QModelIndex& index, const QVariant& value,
+                 int role = Qt::EditRole) override;
 
     bool canFetchMore(const QModelIndex& parent) const override;
     void fetchMore(const QModelIndex& parent) override;
@@ -109,10 +114,37 @@ public:
     // when the driver declared no root or the window is not resident.
     QString envelopeJson(int row) const;
 
+    // --- editing -----------------------------------------------------------
+    // The window's veto, set by MainWindow per statement BEFORE the result
+    // exists: a read-only connection offers no edit at all, however editable
+    // the result itself is — so no window of rows is ever editable for an
+    // instant.
+    void setAllowsEditing(bool allows) { allowsEditing_ = allows; }
+    // The staging store, owned by MainWindow. Held by pointer so the grid can
+    // draw staged values without carrying its own copy of them.
+    void setPendingEdits(dg::PendingEdits* edits) { edits_ = edits; }
+    // What the engine says this result may be edited into, after the veto.
+    const std::optional<dg::EditableResult>& editable() const { return editable_; }
+
+    // Stage the document under `row` for deletion / drop its staged edits.
+    void stageDeleteRow(int row);
+    void discardStagedRow(int row);
+    // Repaint rows whose staging changed (after a commit report / a rebase).
+    void refreshStagedRows(const QVector<int>& rows);
+
+    // Whether one cell may begin an edit (kind is not nested, window resident).
+    bool cellEditable(int row, int column) const;
+    bool rowIsStaged(int row) const;
+    bool rowIsDeleted(int row) const;
+
 signals:
     // Fired after every status refresh so the status bar can update
     // rows/elapsed/capped/error without reaching into the model.
     void statusChanged(const dg::QueryStatus& status);
+    // An edit that could not be staged, in words that name the field and the
+    // reason. Never silent: a cell that quietly refuses to keep what was typed
+    // is indistinguishable from one that kept it and lost it.
+    void editRefused(const QString& why);
 
 private slots:
     // GUI-thread entry point for the background progress callback.
@@ -135,6 +167,19 @@ private:
 
     bool numericType(const QString& type) const;
 
+    // The field name column `col` was read under, from the window ITSELF — not
+    // the header: the status reports what the first chunk revealed, and on a
+    // heterogeneous result writing by the header would write a field the user
+    // never touched. Cached per window; cleared on every status refresh.
+    QString fieldName(const dg::RowWindow* window, int col) const;
+    // One cell's loaded value, when it is a value an edit can carry (nullopt
+    // for nested and absent cells).
+    std::optional<dg::MutationValue> loadedValue(const dg::RowWindow* window,
+                                                 int row, int col) const;
+    // The row's address, or false after emitting editRefused with the reason.
+    bool addressRow(int row, const dg::RowWindow* window,
+                    dg::EditableResult::Address* out);
+
     // Rows revealed per fetchMore() call while streaming. Large enough that
     // scrolling never starves, small enough that a mid-stream reveal is cheap.
     static constexpr std::uint64_t kFetchBatch = 4096;
@@ -151,6 +196,15 @@ private:
     QStringList columnNames_;
     QStringList columnTypes_;
     QVector<bool> columnRightAligned_;
+
+    bool allowsEditing_ = true;
+    std::optional<dg::EditableResult> editable_;
+    dg::PendingEdits* edits_ = nullptr;
+    // One-entry cache for the current window's projected field names: paints
+    // walk cells window by window, and re-parsing the JSON per cell would make
+    // every repaint O(columns²). Cleared whenever windows may be replaced.
+    mutable const dg::RowWindow* namesWindow_ = nullptr;
+    mutable QStringList namesCache_;
 
     // Coalesces chatty background progress callbacks into one queued GUI-thread
     // tick, mirroring the macOS ProgressBox: while a tick is already queued,

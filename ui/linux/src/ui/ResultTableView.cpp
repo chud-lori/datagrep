@@ -1,6 +1,10 @@
 #include "ResultTableView.hpp"
 
 #include "RowNumberHeader.hpp"
+#include "model/ResultModel.hpp"
+
+#include <QContextMenuEvent>
+#include <QMenu>
 
 #include <QAbstractItemModel>
 #include <QApplication>
@@ -23,7 +27,12 @@ ResultTableView::ResultTableView(QWidget* parent) : QTableView(parent) {
     setShowGrid(true);
     setWordWrap(false);
     setCornerButtonEnabled(true);  // corner "select all", like the macOS gutter head
-    setEditTriggers(QAbstractItemView::NoEditTriggers);
+    // Double-click is the universal "edit this cell" gesture. Whether a cell
+    // actually edits is the MODEL's answer (flags() grants ItemIsEditable only
+    // on a result the engine said is editable), so on everything else these
+    // triggers are inert and the grid stays read-only.
+    setEditTriggers(QAbstractItemView::DoubleClicked |
+                    QAbstractItemView::EditKeyPressed);
     setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
 
@@ -102,4 +111,34 @@ void ResultTableView::copySelection() const {
     }
 
     QApplication::clipboard()->setText(lines.join(QLatin1Char('\n')));
+}
+
+void ResultTableView::contextMenuEvent(QContextMenuEvent* event) {
+    auto* result = qobject_cast<ResultModel*>(model());
+    const QModelIndex idx = indexAt(event->pos());
+    if (result == nullptr || !idx.isValid() || !result->editable()) {
+        QTableView::contextMenuEvent(event);
+        return;
+    }
+    const int row = idx.row();
+    QMenu menu(this);
+    if (result->cellEditable(row, idx.column())) {
+        menu.addAction(QStringLiteral("Edit Cell"),
+                       [this, idx]() { edit(idx); });
+    }
+    const bool deleted = result->rowIsDeleted(row);
+    if (deleted) {
+        menu.addAction(QStringLiteral("Keep This Document"),
+                       [result, row]() { result->discardStagedRow(row); });
+    } else {
+        menu.addAction(QStringLiteral("Delete Document"),
+                       [result, row]() { result->stageDeleteRow(row); });
+    }
+    if (result->rowIsStaged(row) && !deleted) {
+        menu.addAction(QStringLiteral("Discard Staged Changes"),
+                       [result, row]() { result->discardStagedRow(row); });
+    }
+    if (!menu.isEmpty()) {
+        menu.exec(event->globalPos());
+    }
 }

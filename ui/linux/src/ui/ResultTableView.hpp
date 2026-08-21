@@ -14,6 +14,8 @@
 
 #include <QTableView>
 
+class QContextMenuEvent;
+class ResultModel;
 class RowNumberHeader;
 
 class ResultTableView : public QTableView {
@@ -29,6 +31,11 @@ public slots:
     // newline between rows). Row numbers are structurally excluded — see the file
     // header. Bound to QKeySequence::Copy.
     void copySelection() const;
+
+protected:
+    // The editing half of the grid menu, present only on a result the engine
+    // said may be edited — never greyed-out-and-erroring.
+    void contextMenuEvent(QContextMenuEvent* event) override;
 
 private:
     RowNumberHeader* rowHeader_;

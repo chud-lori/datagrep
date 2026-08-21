@@ -47,6 +47,8 @@ QueryStatus QueryStatus::parse(const QString& json) {
         });
     }
 
+    out.editable = EditableResult::decode(o.value(QStringLiteral("editable")));
+
     const QJsonValue ro = o.value(QStringLiteral("read_only"));
     if (ro.isObject()) {
         const QJsonObject roo = ro.toObject();
