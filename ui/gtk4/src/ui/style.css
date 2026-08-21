@@ -20,3 +20,8 @@ listview.dg-gutter > row:hover,
 listview.dg-gutter > row:selected {
   background: none;
 }
+
+/* Two lines per row, so the default one-line padding crowds them. */
+listview.dg-history > row {
+  padding: 6px 8px;
+}

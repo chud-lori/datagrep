@@ -22,18 +22,25 @@ ui/gtk4/
       status.rs             # decoded datagrep_query_status_json
       profile.rs            # decoded datagrep_profiles_list_json
       catalog.rs            # decoded datagrep_catalog_children_json, enumeration included
+      detail.rs             # decoded datagrep_catalog_describe_json: columns, indexes, stats
+      format.rs             # counts, bytes, durations, day titles — one spelling each
+      history.rs            # the query-history store: JSONL day files, retention, dedupe
       row.rs                # the GListModel item: an index, nothing else
       result.rs             # ResultModel: GListModel over the windowed row API  <- core
     ui/
-      mod.rs                # AdwApplication, style sheet, profile-store path
+      mod.rs                # AdwApplication, style sheet, config-directory paths
       window.rs             # the shell: toolbar view, split views, breakpoints, run path
       sidebar.rs            # connections list + its own flat header bar
       schema.rs             # the lazy catalog tree (GtkTreeListModel)
       grid.rs               # GtkColumnView + the row-number gutter
       status_bar.rs         # honest row counts, elapsed, cancel
+      utility.rs            # the utility pane: AdwViewSwitcher over Inspector and History
+      inspector.rs          # schema detail for the selected object, cell detail for the cell
+      history.rs            # the history panel: filters, day sections, rerun, retention
   examples/preview.rs       # snapshots the realised window to PNG (see "Building")
   tests/streaming.rs        # the model against the real engine, headless
   tests/catalog.rs          # the sidebar's data path against the real engine, headless
+  tests/history.rs          # the history store against the format the other two read
 ```
 
 The model came first because `GtkColumnView` is virtualised over a `GListModel`,
@@ -125,6 +132,61 @@ window composition above, low enough to compile on a stock `ubuntu-24.04`
 runner, which is what keeps CI feedback fast. The CI job asserts it with
 `pkg-config --atleast-version`, so the floor is a build failure rather than a
 paragraph. Anything from 1.5/1.6 is used only behind a runtime version check.
+
+## The utility pane
+
+GNOME has no docking, and inventing some would be the least native thing this
+front-end could do. The platform's answer is a collapsible pane at the end of
+the window, so the inspector and the history live in one `AdwOverlaySplitView`
+sidebar with an `AdwViewSwitcher` over two `AdwViewStack` pages. It mounts into
+`Window::utility_slot()`, an `AdwBin` that takes no space until it is filled,
+and it starts closed: the header toggle opens it, and only one click ever opens
+it unasked — a `{n fields}` chip, which is an unambiguous request to see inside.
+
+**Inspector.** Schema detail comes from `datagrep_catalog_describe_json`, called
+by the tree on *selection* and cached per node — a failure is cached too, so
+re-selecting a broken object cannot loop on the engine. `columns: null` and
+`columns: []` are drawn as two different sentences ("not reported" and "none"),
+because the engine means two different things by them. Cell detail is
+`datagrep_rows_cell_detail_json` plus the row envelope, and the legend under it
+spells out the four kinds the grid distinguishes; NULL, empty, ABSENT and
+nested are the distinction this product is ahead of the field on, and a pane
+that blurred them would give it back.
+
+**History, and why the store is here at all.** The engine keeps a
+`query_history` table, and **no `datagrep_history_*` entry point exists in the C
+ABI** — verified against `crates/datagrep-ffi`. Every front-end therefore keeps
+its own log, so the only thing that can make them one history is the file
+format. This store writes what `ui/linux/src/model/QueryHistory.cpp` and
+`ui/macos/Sources/DatagrepKit/QueryHistory.swift` write, byte for byte: one
+`YYYY-MM-DD.jsonl` per local day, oldest line first, compact JSON with keys in
+alphabetical order (Qt's `QJsonObject` sorts them; Swift asks for
+`.sortedKeys`), `retention.json` beside them, and the same FNV-1a `textHash`
+over the same whitespace normalisation. `tests/history.rs` asserts a Qt-written
+line loads and re-encodes to the identical bytes, which is the part that would
+silently rot otherwise.
+
+Four behaviours are contracts, not preferences:
+
+- **History is not scoped to the current connection.** Connection is a filter
+  the user may apply, never one applied for them.
+- **Retention is stated and editable** — "keeping the last 10,000 queries, up to
+  180 days" is on screen, and the dialog says where the files are.
+- **Failures are kept, with their error.** The query you want back is usually
+  the one that broke. A run that never got a query handle is recorded too:
+  the entry is opened before the engine is asked.
+- **The engine id is stored on every entry**, so a deleted connection still
+  reads.
+
+**Rerunning goes through `Window::run`**, the same path typed SQL takes. The
+panel emits `rerun-requested`; the pane selects the connection the entry names
+(and says so if it is gone), then calls `run` — it never builds a query itself,
+and it holds no `Core` handle to build one with. The confirm-writes prompt the
+Qt window puts in `executeStatement()` has no GTK counterpart yet; when it
+lands in `run`, a replay is behind it by construction rather than by anyone
+remembering to guard the second entry point. `run-started` is emitted after
+every guard and before the engine is asked, so a statement that gets refused is
+never recorded as one that ran.
 
 ## Streaming, and what the model exposes
 
@@ -218,3 +280,10 @@ reason about:
 ```
 PREVIEW_DIR=/tmp/dg PREVIEW_PNG=/tmp/dg/window.png cargo run --example preview
 ```
+
+It runs three statements a second apart (one DDL, one that fails, one that
+streams 5,000 rows), clicks a cell, describes a table, and writes three PNGs:
+`window.png` with the inspector open, `window-history.png` with the history
+page and its detail strip, and `window-rerun.png` after driving `history.rerun`
+— where the entry reads `×2`, which is the replay having gone through the run
+path rather than around it.

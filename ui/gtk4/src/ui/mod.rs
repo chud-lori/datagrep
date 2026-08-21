@@ -1,13 +1,19 @@
 mod grid;
+mod history;
+mod inspector;
 mod schema;
 mod sidebar;
 mod status_bar;
+mod utility;
 mod window;
 
 pub use grid::ResultsGrid;
+pub use history::HistoryPanel;
+pub use inspector::Inspector;
 pub use schema::SchemaTree;
 pub use sidebar::Sidebar;
 pub use status_bar::StatusBar;
+pub use utility::UtilityPane;
 pub use window::Window;
 
 use std::path::PathBuf;
@@ -32,7 +38,11 @@ pub fn run() -> glib::ExitCode {
 
 fn open(app: &adw::Application) {
     match Core::open(&profiles_db_path().to_string_lossy()) {
-        Ok(core) => Window::new(app, Rc::new(core)).present(),
+        Ok(core) => {
+            let window = Window::new(app, Rc::new(core));
+            UtilityPane::mount(&window, history_dir());
+            window.present();
+        }
         Err(error) => refuse_to_start(app, &error.0),
     }
 }
@@ -56,7 +66,8 @@ fn refuse_to_start(app: &adw::Application, reason: &str) {
     window.present();
 }
 
-fn load_style() {
+/// Also loaded by `examples/preview.rs`, so a render shows what a launch shows.
+pub fn load_style() {
     let Some(display) = gtk::gdk::Display::default() else {
         return;
     };
@@ -69,14 +80,23 @@ fn load_style() {
     );
 }
 
-/// Same filename the macOS app uses, so one `DATAGREP_CONFIG_DIR` serves both.
-fn profiles_db_path() -> PathBuf {
+/// The directory the macOS and Qt apps use, so one `DATAGREP_CONFIG_DIR` serves all three.
+fn config_dir() -> PathBuf {
     let dir = match std::env::var("DATAGREP_CONFIG_DIR") {
         Ok(value) if !value.is_empty() => expand_tilde(&value),
         _ => glib::user_data_dir().join("datagrep"),
     };
     let _ = std::fs::create_dir_all(&dir);
-    dir.join("profiles.sqlite")
+    dir
+}
+
+fn profiles_db_path() -> PathBuf {
+    config_dir().join("profiles.sqlite")
+}
+
+/// The day files the other two front-ends read and write, byte for byte.
+fn history_dir() -> PathBuf {
+    config_dir().join("history")
 }
 
 // A leading ~ arrives unexpanded when the variable comes from a launcher.

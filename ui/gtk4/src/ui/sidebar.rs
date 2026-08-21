@@ -103,6 +103,13 @@ mod imp {
                     Signal::builder("object-activated")
                         .param_types([String::static_type(), String::static_type()])
                         .build(),
+                    Signal::builder("object-described")
+                        .param_types([
+                            String::static_type(),
+                            String::static_type(),
+                            String::static_type(),
+                        ])
+                        .build(),
                 ]
             })
         }
@@ -138,6 +145,14 @@ mod imp {
                     sidebar.emit_by_name::<()>("object-activated", &[&profile, &path_json]);
                 }
             });
+
+            let sidebar = self.obj().downgrade();
+            self.schema
+                .connect_object_described(move |_, path, detail, error| {
+                    if let Some(sidebar) = sidebar.upgrade() {
+                        sidebar.emit_by_name::<()>("object-described", &[&path, &detail, &error]);
+                    }
+                });
 
             let connections = gtk::ScrolledWindow::builder()
                 .hscrollbar_policy(gtk::PolicyType::Never)
@@ -314,6 +329,22 @@ impl Sidebar {
                 .expect("the signal carries the sidebar");
             let name = values[1].get::<String>().unwrap_or_default();
             f(&sidebar, &name);
+            None
+        })
+    }
+
+    pub fn connect_object_described<F: Fn(&Self, &str, &str, &str) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.connect_local("object-described", false, move |values| {
+            let sidebar = values[0]
+                .get::<Self>()
+                .expect("the signal carries the sidebar");
+            let path = values[1].get::<String>().unwrap_or_default();
+            let detail = values[2].get::<String>().unwrap_or_default();
+            let error = values[3].get::<String>().unwrap_or_default();
+            f(&sidebar, &path, &detail, &error);
             None
         })
     }

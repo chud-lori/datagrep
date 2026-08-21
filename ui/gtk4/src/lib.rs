@@ -5,6 +5,7 @@ pub mod ui;
 
 pub use ffi::{CellKind, Core, Error, Query, RowWindow};
 pub use model::{
-    CatalogNode, Column, Enumeration, Profile, QueryState, QueryStatus, ResultModel, ResultRow,
+    CatalogNode, Column, Enumeration, HistoryEntry, HistoryFilter, HistoryStore, ObjectDetail,
+    Outcome, Profile, QueryState, QueryStatus, ResultModel, ResultRow, Retention,
 };
 pub use sql::Derived;

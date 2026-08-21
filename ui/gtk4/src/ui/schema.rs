@@ -33,6 +33,9 @@ mod node_imp {
         pub expandable: Cell<bool>,
         pub loaded: Cell<bool>,
         pub consented: Cell<bool>,
+        pub described: Cell<bool>,
+        pub describe_json: RefCell<String>,
+        pub describe_error: RefCell<String>,
     }
 
     #[glib::object_subclass]
@@ -165,9 +168,18 @@ mod imp {
         fn signals() -> &'static [Signal] {
             static SIGNALS: OnceLock<Vec<Signal>> = OnceLock::new();
             SIGNALS.get_or_init(|| {
-                vec![Signal::builder("object-activated")
-                    .param_types([String::static_type()])
-                    .build()]
+                vec![
+                    Signal::builder("object-activated")
+                        .param_types([String::static_type()])
+                        .build(),
+                    Signal::builder("object-described")
+                        .param_types([
+                            String::static_type(),
+                            String::static_type(),
+                            String::static_type(),
+                        ])
+                        .build(),
+                ]
             })
         }
 
@@ -175,6 +187,14 @@ mod imp {
             self.parent_constructed();
             self.view.add_css_class("navigation-sidebar");
             self.view.set_factory(Some(&self.factory()));
+
+            let tree = self.obj().downgrade();
+            self.selection
+                .connect_selected_item_notify(move |selection| {
+                    if let Some(tree) = tree.upgrade() {
+                        tree.imp().on_selected(selection);
+                    }
+                });
 
             let tree = self.obj().downgrade();
             self.view.connect_activate(move |_, position| {
@@ -297,6 +317,44 @@ mod imp {
             }
         }
 
+        /// Describes once per node — a remembered failure cannot loop on the engine.
+        fn on_selected(&self, selection: &gtk::SingleSelection) {
+            let selected = selection
+                .selected_item()
+                .and_downcast::<gtk::TreeListRow>()
+                .and_then(|row| row.item())
+                .and_downcast::<SchemaNode>()
+                .filter(|node| node.role() == Role::Object);
+            let Some(node) = selected else {
+                self.obj()
+                    .emit_by_name::<()>("object-described", &[&"", &"", &""]);
+                return;
+            };
+            let imp = node.imp();
+            if !imp.described.replace(true) {
+                match self.describe(&node.path_json()) {
+                    Ok(json) => *imp.describe_json.borrow_mut() = json,
+                    Err(error) => *imp.describe_error.borrow_mut() = error,
+                }
+            }
+            self.obj().emit_by_name::<()>(
+                "object-described",
+                &[
+                    &node.path_json(),
+                    &*imp.describe_json.borrow(),
+                    &*imp.describe_error.borrow(),
+                ],
+            );
+        }
+
+        fn describe(&self, path_json: &str) -> Result<String, String> {
+            let Some(core) = self.core.borrow().clone() else {
+                return Err(String::new());
+            };
+            core.catalog_describe_json(&self.profile.borrow(), path_json)
+                .map_err(|e| e.0)
+        }
+
         fn consent(&self, consent_row: &gtk::TreeListRow) {
             let Some(parent) = consent_row
                 .parent()
@@ -391,6 +449,23 @@ impl SchemaTree {
                 .expect("the signal carries the tree");
             let path = values[1].get::<String>().unwrap_or_default();
             f(&tree, &path);
+            None
+        })
+    }
+
+    /// The selected object's describe payload, or its failure; the tree made the call.
+    pub fn connect_object_described<F: Fn(&Self, &str, &str, &str) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.connect_local("object-described", false, move |values| {
+            let tree = values[0]
+                .get::<Self>()
+                .expect("the signal carries the tree");
+            let path = values[1].get::<String>().unwrap_or_default();
+            let detail = values[2].get::<String>().unwrap_or_default();
+            let error = values[3].get::<String>().unwrap_or_default();
+            f(&tree, &path, &detail, &error);
             None
         })
     }

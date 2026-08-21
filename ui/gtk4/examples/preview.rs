@@ -1,39 +1,86 @@
-// Verification harness: seeds a profile, runs a statement, snapshots the window to PNG.
+// Verification harness: seeds a profile, runs statements, snapshots the window to PNG.
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
 use datagrep_gtk::ffi::Core;
-use datagrep_gtk::ui::Window;
+use datagrep_gtk::ui::{UtilityPane, Window};
 
 fn main() {
     let dir = std::env::var("PREVIEW_DIR").expect("PREVIEW_DIR");
     let app = adw::Application::builder()
         .application_id("io.github.chud_lori.datagrep.Preview")
         .build();
+    app.connect_startup(|_| datagrep_gtk::ui::load_style());
     app.connect_activate(move |app| {
         let core = Rc::new(Core::open(&format!("{dir}/profiles.sqlite")).expect("core"));
         let _ = core.profiles_add("demo", &format!("sqlite://{dir}/demo.sqlite"));
         let window = Window::new(app, core);
+        let pane = UtilityPane::mount(&window, PathBuf::from(&dir).join("history"));
         window.present();
         assert!(window.select_connection("demo"), "profile is listed");
-        window.run(
-            "SELECT n AS id, 'name-' || n AS name, n * 1.5 AS score, \
-             'a longer text column value here ' || n AS note, NULL AS empty \
-             FROM (WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < 5000) \
-             SELECT n FROM c)",
-        );
+        window.reveal_utility();
 
-        expand_first_tree_row(window.upcast_ref());
+        // One statement per turn: history records on the terminal status tick.
+        let steps: Vec<Box<dyn Fn()>> = vec![
+            step(&window, |window| {
+                window.run("CREATE TABLE IF NOT EXISTS people (id INTEGER PRIMARY KEY, name TEXT NOT NULL, note TEXT)")
+            }),
+            step(&window, |window| window.run("SELECT * FROM nope")),
+            step(&window, |window| {
+                window.run(
+                    "SELECT n AS id, 'name-' || n AS name, n * 1.5 AS score, \
+                     'a longer text column value here ' || n AS note, NULL AS empty \
+                     FROM (WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < 5000) \
+                     SELECT n FROM c)",
+                )
+            }),
+            step(&window, |window| {
+                window
+                    .grid()
+                    .emit_by_name::<()>("cell-selected", &[&3u64, &3u32]);
+                expand_first_tree_row(window.upcast_ref());
+            }),
+            step(&window, |window| describe_first_object(window.upcast_ref())),
+        ];
 
         let out = std::env::var("PREVIEW_PNG").expect("PREVIEW_PNG");
         let app = app.clone();
-        glib::timeout_add_seconds_local(3, move || {
-            shoot(&window, &out);
-            app.quit();
-            glib::ControlFlow::Break
+        let mut tick = 0usize;
+        glib::timeout_add_seconds_local(1, move || {
+            if let Some(step) = steps.get(tick) {
+                step();
+                tick += 1;
+                return glib::ControlFlow::Continue;
+            }
+            // Each switch needs a frame: a paintable snapshotted in the same turn draws nothing.
+            tick += 1;
+            match tick - steps.len() {
+                1 => {
+                    shoot(&window, &out);
+                    pane.show_page("history");
+                    select_first_history_entry(&pane);
+                }
+                2 => {
+                    shoot(&window, &out.replace(".png", "-history.png"));
+                    // Replay through the window's one run path: the entry should say ×2.
+                    let _ = pane.history().activate_action("history.rerun", None);
+                }
+                _ => {
+                    shoot(&window, &out.replace(".png", "-rerun.png"));
+                    app.quit();
+                    return glib::ControlFlow::Break;
+                }
+            }
+            glib::ControlFlow::Continue
         });
     });
     app.run();
+}
+
+fn step(window: &Window, body: impl Fn(&Window) + 'static) -> Box<dyn Fn()> {
+    let window = window.clone();
+    Box::new(move || body(&window))
 }
 
 fn shoot(window: &Window, path: &str) {
@@ -57,18 +104,63 @@ fn shoot(window: &Window, path: &str) {
 
 /// Drives the first expander the way a click would, so the lazy fetch shows in the snapshot.
 fn expand_first_tree_row(widget: &gtk::Widget) -> bool {
-    if let Some(expander) = widget.downcast_ref::<gtk::TreeExpander>() {
+    if let Some(expander) = first_expander(widget) {
         if let Some(row) = expander.list_row() {
             row.set_expanded(true);
             return true;
         }
     }
+    false
+}
+
+/// Selects the first child of the expanded root — the click the inspector describes.
+fn describe_first_object(widget: &gtk::Widget) {
+    let Some(list) = first_expander(widget)
+        .and_then(|expander| expander.ancestor(gtk::ListView::static_type()))
+        .and_downcast::<gtk::ListView>()
+    else {
+        return;
+    };
+    if let Some(model) = list.model() {
+        model.select_item(1, true);
+    }
+}
+
+/// The entry under the day heading, found by css class: a GtkDropDown carries a list too.
+fn select_first_history_entry(pane: &UtilityPane) {
+    let mut found = Vec::new();
+    collect::<gtk::ListView>(pane.history().upcast_ref(), &mut found);
+    let list = found.iter().find(|list| list.has_css_class("dg-history"));
+    if let Some(model) = list.and_then(|list| list.model()) {
+        model.select_item(1, true);
+    }
+}
+
+fn first_expander(widget: &gtk::Widget) -> Option<gtk::TreeExpander> {
+    find::<gtk::TreeExpander>(widget)
+}
+
+fn collect<T: IsA<gtk::Widget>>(widget: &gtk::Widget, found: &mut Vec<T>) {
+    if let Some(matched) = widget.downcast_ref::<T>() {
+        found.push(matched.clone());
+    }
     let mut child = widget.first_child();
     while let Some(current) = child {
-        if expand_first_tree_row(&current) {
-            return true;
+        collect::<T>(&current, found);
+        child = current.next_sibling();
+    }
+}
+
+fn find<T: IsA<gtk::Widget>>(widget: &gtk::Widget) -> Option<T> {
+    if let Some(found) = widget.downcast_ref::<T>() {
+        return Some(found.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if let Some(found) = find::<T>(&current) {
+            return Some(found);
         }
         child = current.next_sibling();
     }
-    false
+    None
 }

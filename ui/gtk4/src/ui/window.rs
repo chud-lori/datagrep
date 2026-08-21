@@ -64,6 +64,23 @@ mod imp {
                     Signal::builder("object-activated")
                         .param_types([String::static_type(), String::static_type()])
                         .build(),
+                    Signal::builder("object-described")
+                        .param_types([
+                            String::static_type(),
+                            String::static_type(),
+                            String::static_type(),
+                        ])
+                        .build(),
+                    Signal::builder("run-started")
+                        .param_types([
+                            String::static_type(),
+                            String::static_type(),
+                            String::static_type(),
+                        ])
+                        .build(),
+                    Signal::builder("run-failed")
+                        .param_types([String::static_type()])
+                        .build(),
                 ]
             })
         }
@@ -192,6 +209,14 @@ mod imp {
 
             let window = self.obj().downgrade();
             self.sidebar
+                .connect_object_described(move |_, path, detail, error| {
+                    if let Some(window) = window.upgrade() {
+                        window.emit_by_name::<()>("object-described", &[&path, &detail, &error]);
+                    }
+                });
+
+            let window = self.obj().downgrade();
+            self.sidebar
                 .connect_object_activated(move |_, profile, path| {
                     if let Some(window) = window.upgrade() {
                         window.emit_by_name::<()>("object-activated", &[&profile, &path]);
@@ -236,6 +261,10 @@ mod imp {
             if sql.trim().is_empty() {
                 return;
             }
+            // Announced before the engine is asked, so a statement refused was never a run.
+            let driver = self.sidebar.selected_driver().unwrap_or_default();
+            let obj = self.obj();
+            obj.emit_by_name::<()>("run-started", &[&profile, &driver, &sql]);
             match core.query(&profile, &sql) {
                 Ok(query) => {
                     self.status.say("", false);
@@ -244,6 +273,7 @@ mod imp {
                 Err(error) => {
                     self.model.reset();
                     self.status.say(&error.0, true);
+                    obj.emit_by_name::<()>("run-failed", &[&error.0]);
                 }
             }
         }
@@ -281,6 +311,10 @@ impl Window {
         self.imp().model.clone()
     }
 
+    pub fn grid(&self) -> ResultsGrid {
+        self.imp().grid.clone()
+    }
+
     pub fn status_bar(&self) -> StatusBar {
         self.imp().status.clone()
     }
@@ -293,6 +327,11 @@ impl Window {
     /// Where the inspector / history pane mounts.
     pub fn utility_slot(&self) -> adw::Bin {
         self.imp().utility_slot.clone()
+    }
+
+    /// Slide the utility pane out, for the one click that unambiguously asks for it.
+    pub fn reveal_utility(&self) {
+        self.imp().utility.set_show_sidebar(true);
     }
 
     pub fn select_connection(&self, name: &str) -> bool {
@@ -309,6 +348,52 @@ impl Window {
                 .get::<Self>()
                 .expect("the signal carries the window");
             f(&window);
+            None
+        })
+    }
+
+    /// The selected catalog object's describe payload, or its failure.
+    pub fn connect_object_described<F: Fn(&Self, &str, &str, &str) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.connect_local("object-described", false, move |values| {
+            let window = values[0]
+                .get::<Self>()
+                .expect("the signal carries the window");
+            let path = values[1].get::<String>().unwrap_or_default();
+            let detail = values[2].get::<String>().unwrap_or_default();
+            let error = values[3].get::<String>().unwrap_or_default();
+            f(&window, &path, &detail, &error);
+            None
+        })
+    }
+
+    /// About to be sent: the connection, its engine, and the SQL as `run` will send it.
+    pub fn connect_run_started<F: Fn(&Self, &str, &str, &str) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.connect_local("run-started", false, move |values| {
+            let window = values[0]
+                .get::<Self>()
+                .expect("the signal carries the window");
+            let profile = values[1].get::<String>().unwrap_or_default();
+            let driver = values[2].get::<String>().unwrap_or_default();
+            let sql = values[3].get::<String>().unwrap_or_default();
+            f(&window, &profile, &driver, &sql);
+            None
+        })
+    }
+
+    /// The run never got a query handle, so no status tick will ever report it.
+    pub fn connect_run_failed<F: Fn(&Self, &str) + 'static>(&self, f: F) -> glib::SignalHandlerId {
+        self.connect_local("run-failed", false, move |values| {
+            let window = values[0]
+                .get::<Self>()
+                .expect("the signal carries the window");
+            let message = values[1].get::<String>().unwrap_or_default();
+            f(&window, &message);
             None
         })
     }
