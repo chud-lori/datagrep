@@ -9,4 +9,7 @@
     <file alias="redis.svg">../macos/Sources/DatagrepKit/Resources/EngineIcons/redis.svg</file>
     <file alias="mongodb.svg">../macos/Sources/DatagrepKit/Resources/EngineIcons/mongodb.svg</file>
   </qresource>
+  <qresource prefix="/style">
+    <file alias="datagrep.qss">style/datagrep.qss</file>
+  </qresource>
 </RCC>

@@ -172,6 +172,7 @@ add_executable(datagrep
     src/ui/SqlEditor.cpp
     src/ui/SqlHighlighter.cpp
     src/ui/StatusBar.cpp
+    src/ui/Theme.cpp
     src/ui/UpdateNotice.cpp
 )
 
