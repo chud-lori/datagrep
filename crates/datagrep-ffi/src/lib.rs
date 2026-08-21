@@ -82,6 +82,7 @@ pub mod ffi_util;
 pub mod mutate;
 pub mod profiles;
 pub mod query;
+pub mod reread;
 pub mod rows;
 pub mod runtime;
 
@@ -93,6 +94,7 @@ pub use query::{
     datagrep_query_cancel, datagrep_query_free, datagrep_query_on_progress, datagrep_query_run,
     datagrep_query_status_json, DatagrepProgressFn, DatagrepQuery,
 };
+pub use reread::datagrep_reread_documents;
 pub use rows::{
     datagrep_query_rows, datagrep_rows_cell, datagrep_rows_cell_detail_json,
     datagrep_rows_cell_kind, datagrep_rows_column_names_json, datagrep_rows_columns,

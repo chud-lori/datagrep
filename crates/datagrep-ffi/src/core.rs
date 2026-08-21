@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 
 use datagrep_api::caps::Caps;
 use datagrep_api::{ConfigValue, Enforcement};
+use datagrep_core::session::ConnLease;
 use datagrep_core::{CoreApi, ProfileId, QueryId};
 use datagrep_profiles::Store;
 use datagrep_secrets::{SecretRef, SecretResolver};
@@ -273,6 +274,38 @@ impl CoreInner {
             .run(lease, req)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    /// A live connection for `profile`, with the read-only guard already on
+    /// the socket the caller will use.
+    ///
+    /// The synchronous entry points ([`crate::mutate`], [`crate::reread`]) run
+    /// their request on a lease of their own rather than through
+    /// [`CoreInner::run_request`], because they keep the cursor and drain it
+    /// here instead of streaming it into the result store. This is the part
+    /// they share: resolve the profile, take a lease, record what the
+    /// connection reported, and — for a read-only profile — put
+    /// `set_read_only(true)` on the exact socket the request will run on, so
+    /// the driver refuses a write before it compiles anything.
+    pub(crate) async fn leased(
+        &self,
+        profile: &str,
+    ) -> Result<(ConnLease, datagrep_profiles::Profile), String> {
+        let (id, saved) = self.open_profile(profile).await?;
+        let session = self.api.session(id).map_err(|e| e.to_string())?;
+        let lease = session.acquire().await.map_err(|e| e.to_string())?;
+        self.record_server_info(profile, lease.server_info());
+        self.record_caps(profile, lease.capabilities().flags);
+        if saved.read_only {
+            match lease.set_read_only(true).await {
+                Ok(enforcement) => self.record_enforcement(profile, enforcement),
+                // The server half could not be confirmed on this socket. Never
+                // keep claiming `Server` from an earlier connection — the same
+                // rule `run_request` follows, for the same reason.
+                Err(_) => self.record_enforcement(profile, Enforcement::Client),
+            }
+        }
+        Ok((lease, saved))
     }
 
     /// The last [`Enforcement`] a live connection of this profile reported,

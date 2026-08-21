@@ -811,3 +811,13 @@ char *datagrep_mutate(DatagrepCore *c, const char *profile, const char *mutation
     set_err(err_out, "this build has no datagrep engine linked in, so nothing can be written");
     return NULL;
 }
+
+char *datagrep_reread_documents(DatagrepCore *c, const char *profile, const char *addresses_json,
+                                char **err_out) {
+    (void)c;
+    (void)profile;
+    (void)addresses_json;
+    set_err(err_out,
+            "this build has no datagrep engine linked in, so there is no server to read from");
+    return NULL;
+}

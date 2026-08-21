@@ -677,6 +677,25 @@ fn guard_fields(driver_id: &str) -> Vec<String> {
     }
 }
 
+/// The identity field that names the *object* a document lives in — the one
+/// part of a document's address that is a path rather than a filter.
+///
+/// Third line of the same table, and here for the same reason as
+/// [`guard_fields`]: re-reading a document to resolve a version conflict has to
+/// turn its identity back into an [`Op::Scan`], and only the engine knows which
+/// of `_index`/`_id`/`_routing` is the index. Putting that in the frontend
+/// would be the `if driver_id == …` the README bans; putting it here keeps the
+/// UI holding an opaque list of identity fields it never has to read.
+///
+/// An engine not listed here cannot be re-read by identity, and
+/// [`crate::reread`] says so rather than guessing which field is the path.
+pub(crate) fn object_path_field(driver_id: &str) -> Option<&'static str> {
+    match driver_id {
+        "elasticsearch" => Some("_index"),
+        _ => None,
+    }
+}
+
 // ---- free --------------------------------------------------------------
 
 /// Stop the query and free the handle.

@@ -196,6 +196,39 @@ void datagrep_query_on_progress(DatagrepQuery*, DatagrepProgressFn cb, void* ctx
 char* datagrep_mutate(DatagrepCore*, const char* profile, const char* mutation_json,
                       char** err_out);
 
+// Read what the server holds NOW for documents already addressed — the read
+// half of a version conflict. SYNCHRONOUS, like datagrep_mutate.
+//
+// This is what turns a 409 into a decision instead of a dead end: the caller
+// puts the value it loaded, the value here, and the value the user typed side
+// by side, then offers "rebase onto this version" or "discard mine". It never
+// re-sends anything — retry_on_conflict is exactly the clobber the guard
+// exists to prevent.
+//
+// addresses_json re-uses a mutation's own `key` (identity fields paired with
+// this document's values), so nothing has to build a second address:
+// {"documents":[{"key":[[[{"Field":"_index"}],{"Str":"events"}],
+//                       [[{"Field":"_id"}],{"Str":"abc"}]]}]}
+//
+// Returns an OWNED char* the caller MUST datagrep_string_free():
+// {"documents":[ {"found":true,
+//                 "envelope":{...},   // outside the projected root: which
+//                                     // document, and the FRESH guard values
+//                                     // (_seq_no/_primary_term) a rebase
+//                                     // re-guards against
+//                 "fields":{...}},    // the document itself, at its root
+//                {"found":false},                // gone from the server
+//                {"found":false,"error":str} ]}  // this one could not be read
+// One entry per address, IN THE ORDER SENT — matched by position, exactly like
+// the mutation report.
+//
+// NULL with *err_out set when the batch as a whole could not run: an
+// unparseable list, an unknown profile, a connection that could not be leased,
+// or an engine that has not said which identity field names the object a
+// document lives in (only Elasticsearch has, today).
+char* datagrep_reread_documents(DatagrepCore*, const char* profile,
+                                const char* addresses_json, char** err_out);
+
 // ---- rows: the hot path ----------------------------------------------
 // Materialises ONLY [offset, offset+len). Returns NULL on error.
 DatagrepRows* datagrep_query_rows(DatagrepQuery*, uint64_t offset, uint64_t len, char** err_out);

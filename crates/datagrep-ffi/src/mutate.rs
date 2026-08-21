@@ -11,7 +11,7 @@
 //! ## Read-only enforcement
 //!
 //! A read-only profile takes `set_read_only(true)` on the exact socket the
-//! write will run on, the same as `run_request`. The Elasticsearch connection's
+//! write will run on, the same as `run_request` ([`CoreInner::leased`]). The Elasticsearch connection's
 //! `read_only_active` guard then refuses the generated write before compiling
 //! anything, and that refusal surfaces here as an error string (NULL return),
 //! never a silent no-op.
@@ -40,7 +40,7 @@ use std::sync::Arc;
 
 use datagrep_api::driver::{FetchHint, Notice, NoticeSeverity, Payload};
 use datagrep_api::request::{MutationBatch, Op, Request};
-use datagrep_api::{Enforcement, Value};
+use datagrep_api::Value;
 
 use crate::cells::value_to_json;
 use crate::core::{core_ref, CoreInner, DatagrepCore};
@@ -118,23 +118,10 @@ async fn run_mutation(
     profile: &str,
     batch: MutationBatch,
 ) -> Result<(Vec<Value>, Vec<Notice>), String> {
-    let (id, saved) = core.open_profile(profile).await?;
-    let session = core.api.session(id).map_err(|e| e.to_string())?;
-    let lease = session.acquire().await.map_err(|e| e.to_string())?;
-    core.record_server_info(profile, lease.server_info());
-    core.record_caps(profile, lease.capabilities().flags);
-
-    // Same guard `run_request` applies: for a read-only profile, take a
-    // read-only session on this exact socket so the connection refuses the
-    // write. The driver's honest `Enforcement` is recorded per profile (ES is
-    // client-side only), and if the server half cannot be confirmed the badge
-    // comes down to `Client` rather than over-promising.
-    if saved.read_only {
-        match lease.set_read_only(true).await {
-            Ok(enforcement) => core.record_enforcement(profile, enforcement),
-            Err(_) => core.record_enforcement(profile, Enforcement::Client),
-        }
-    }
+    // The same guard `run_request` applies: for a read-only profile the
+    // read-only session is taken on this exact socket, so the connection
+    // refuses the write before it compiles anything.
+    let (lease, _) = core.leased(profile).await?;
 
     let mut cursor = lease
         .execute(Request::Op(Op::Mutate(batch)))
