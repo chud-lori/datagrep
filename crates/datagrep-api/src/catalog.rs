@@ -1,7 +1,3 @@
-//! Lazy, incremental catalog. Expand-on-demand only —
-//! eager whole-catalog indexing is the incumbents' defining mistake, and
-//! [`Enumeration`] is what stops a `KEYS *` because someone clicked a triangle.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -11,97 +7,65 @@ use crate::driver::ResumeToken;
 use crate::error::DbError;
 use crate::shape::{LogicalType, ObjectPath, RowSchema};
 
-/// Namespace browser for one connection. Every method is on-demand and
-/// cancellable; none may enumerate more than it was asked for.
 #[async_trait]
 pub trait Catalog: Send + Sync {
-    /// The hierarchy this engine exposes, top-down (database → schema → table).
     fn levels(&self) -> Vec<LevelDef>;
 
-    /// One page of children under `parent`. Paged so a 100k-relation server
-    /// never materializes at once.
     async fn children(
         &self,
         parent: &ObjectPath,
         opts: ListOpts,
     ) -> Result<Page<ObjectNode>, DbError>;
 
-    /// Full detail for one object (columns, indexes, comments).
     async fn describe(&self, path: &ObjectPath) -> Result<ObjectDetail, DbError>;
 
-    /// Sample-based schema inference for engines without a declared schema
-    /// (`SCHEMA_DECLARED` off) — the honest substitute, and labeled as such.
     async fn infer_shape(
         &self,
         path: &ObjectPath,
         sample_size: u32,
     ) -> Result<InferredSchema, DbError>;
 
-    /// Completion candidates for the editor; expected to be a bounded
-    /// server-side prefix query plus whatever is already cached — never a
-    /// full catalog crawl to populate a dropdown.
     async fn complete(&self, ctx: CompletionCtx) -> Result<Vec<Completion>, DbError>;
 }
 
-/// One level of the catalog hierarchy and how expensive it is to list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LevelDef {
-    /// Display name of the level ("schema", "collection", "key prefix").
     pub name: Arc<str>,
     pub kind: ObjectKind,
     pub enumeration: Enumeration,
 }
 
-/// How costly enumerating a level is — the UI adapts (auto-expand, a "Scan
-/// for keys…" box, or nothing at all) instead of firing blind queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Enumeration {
-    /// Effectively free: `information_schema`, `listCollections`.
     Cheap,
-    /// Only via cursor scan (Redis). UI shows a scan control; with
-    /// `requires_prefix` it refuses to scan without one.
     ScanOnly { requires_prefix: bool },
-    /// Listing costs metered API calls (DynamoDB `ListTables`).
     Paged,
-    /// Never auto-expand; the user must explicitly ask.
     OnDemand,
 }
 
-/// One node in the catalog tree — deliberately thin; detail is a separate,
-/// on-demand call.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectNode {
     pub path: ObjectPath,
     pub kind: ObjectKind,
-    /// Whether expanding is meaningful (drives the disclosure triangle).
     pub has_children: bool,
     pub comment: Option<Arc<str>>,
 }
 
-/// Everything we know about one object once the user actually opens it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectDetail {
     pub node: ObjectNode,
-    /// Declared schema, when the engine has one (`SCHEMA_DECLARED`).
     pub schema: Option<RowSchema>,
-    /// Engine-specific display facts (row estimate, size, engine) as pairs —
-    /// shown, never branched on.
     pub extra: Vec<(Arc<str>, Arc<str>)>,
 }
 
-/// One page of results plus the token to fetch the next — the catalog's unit
-/// of laziness.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Page<T> {
     pub items: Vec<T>,
-    /// `None` = no more pages.
     pub next: Option<ResumeToken>,
 }
 
-/// Bounds for a `children` listing; always bounded, never "everything".
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ListOpts {
-    /// Name prefix filter; required by `ScanOnly { requires_prefix: true }`.
     pub prefix: Option<Arc<str>>,
     pub limit: u32,
     pub resume: Option<ResumeToken>,
@@ -117,33 +81,20 @@ impl Default for ListOpts {
     }
 }
 
-/// Result of sampling documents: a trie of observed field paths with type
-/// frequencies — the honest schema for schemaless engines, and the seed for
-/// the grid's `ViewProjection`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct InferredSchema {
-    /// How many documents were sampled; every ratio is relative to this.
     pub sampled: u64,
-    /// Children of the document root.
     pub root: Vec<(Arc<str>, FieldTrie)>,
 }
 
-/// Per-path statistics from sampling. Presence is counted separately from
-/// types because `Absent` is not a type — "this field was missing" is a fact
-/// about the document, not one of the values the field can hold.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct FieldTrie {
-    /// In how many sampled parents this path was present at all.
     pub present: u64,
-    /// Observed types with frequency — heterogeneous columns stay visible
-    /// instead of being coerced to the majority type.
     pub types: Vec<(LogicalType, u64)>,
-    /// Nested fields (for document-valued paths), insertion-ordered.
     pub children: Vec<(Arc<str>, FieldTrie)>,
 }
 
 impl FieldTrie {
-    /// Record one observation of this path with the given type.
     pub fn record(&mut self, ty: LogicalType) {
         self.present += 1;
         match self.types.iter_mut().find(|(t, _)| *t == ty) {
@@ -152,8 +103,6 @@ impl FieldTrie {
         }
     }
 
-    /// Presence ratio relative to how often the parent was seen — the ranking
-    /// key for seeding view columns.
     pub fn presence_ratio(&self, parent_present: u64) -> f64 {
         if parent_present == 0 {
             0.0
@@ -163,29 +112,20 @@ impl FieldTrie {
     }
 }
 
-/// Where the caret is and what surrounds it — all the catalog needs to offer
-/// completions without a resident full schema.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompletionCtx {
-    /// The statement text being edited.
     pub text: Arc<str>,
-    /// Caret byte offset within `text`.
     pub offset: u32,
-    /// Namespace scope already established (current database/schema).
     pub scope: Option<ObjectPath>,
 }
 
-/// One completion candidate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Completion {
     pub label: Arc<str>,
     pub kind: ObjectKind,
-    /// Short annotation (type, table it belongs to).
     pub detail: Option<Arc<str>>,
 }
 
-/// What kind of namespace object something is — for icons and completion
-/// ranking, not for behavior branches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ObjectKind {
     Database,

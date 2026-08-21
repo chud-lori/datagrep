@@ -1,16 +1,7 @@
-//! Errors from the MongoShell parser. datagrep supports query expressions,
-//! not arbitrary JavaScript, and these variants are how that boundary is
-//! reported.
-
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MongoError {
-    /// The input isn't `db.<collection>.<method>(...)` chain syntax or a
-    /// `{ ... }` raw command document — it's arbitrary JavaScript (a
-    /// variable, a loop, a function, arithmetic, `new X(...)`, ...). The
-    /// message points at the escape hatch, because a user who hits this wall
-    /// needs to know there is a way through it.
     #[error("datagrep supports query expressions, not arbitrary JavaScript — use a raw command document for anything else")]
     UnsupportedJs,
 

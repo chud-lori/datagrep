@@ -1,51 +1,36 @@
-//! Declarative connection configuration. Drivers describe their form as data
-//! (`ConfigSchema`) so every frontend renders it without knowing the engine;
-//! secrets are resolved late and zeroized on drop, never stored.
-
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-/// A driver's connection form, as data — the UI renders it, no per-engine code.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ConfigSchema {
     pub fields: Vec<ConfigField>,
 }
 
-/// One field of the connection form.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfigField {
-    /// Stable key the value is stored under (e.g. `host`, `port`).
     pub key: Arc<str>,
-    /// Human label for the form.
     pub label: Arc<str>,
     pub kind: FieldKind,
     pub required: bool,
     pub default: Option<ConfigValue>,
-    /// Secret fields never enter `ConnectionConfig` — they live in the OS
-    /// keychain and only ever surface as a `SecretString`.
     pub secret: bool,
 }
 
-/// Widget/validation kind of a config field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FieldKind {
     Text,
-    /// Rendered masked; implies `secret` handling.
     Password,
     Number,
     Bool,
     Select {
         options: Vec<Arc<str>>,
     },
-    /// A filesystem path (e.g. an SQLite file), with a picker.
     Path,
 }
 
-/// A stored config value. Deliberately tiny — connection profiles are
-/// git-committable TOML a human can read and review, not arbitrary JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ConfigValue {
     Str(String),
@@ -53,16 +38,12 @@ pub enum ConfigValue {
     Bool(bool),
 }
 
-/// A connection profile minus its secrets. Safe to persist, export, and diff.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ConnectionConfig {
-    /// Which driver this profile belongs to (registry id, e.g. `postgres`).
     pub driver: Arc<str>,
     pub values: BTreeMap<String, ConfigValue>,
 }
 
-/// A profile plus its resolved secrets, built just-in-time for `connect` and
-/// dropped (zeroized) as soon as the handshake completes.
 #[derive(Debug)]
 pub struct ResolvedConfig {
     pub config: ConnectionConfig,
@@ -70,7 +51,6 @@ pub struct ResolvedConfig {
 }
 
 impl ResolvedConfig {
-    /// A resolved config with no secrets (e.g. SQLite, trust auth).
     pub fn without_secrets(config: ConnectionConfig) -> Self {
         Self {
             config,
@@ -79,8 +59,6 @@ impl ResolvedConfig {
     }
 }
 
-/// A secret that zeroizes its bytes on drop and redacts itself from `Debug` —
-/// never logged, never in crash dumps, never shown to the UI.
 pub struct SecretString(String);
 
 impl SecretString {
@@ -88,7 +66,6 @@ impl SecretString {
         Self(value)
     }
 
-    /// Deliberately loud name: every call site is a place secret bytes escape.
     pub fn expose(&self) -> &str {
         &self.0
     }
@@ -106,11 +83,8 @@ impl Drop for SecretString {
     }
 }
 
-/// Overwrite a string's bytes with zeros via volatile writes so the compiler
-/// cannot elide the wipe of a buffer that is about to be freed.
 fn zeroize_in_place(s: &mut str) {
-    // SAFETY: writing 0x00 bytes keeps the buffer valid UTF-8 (NUL is a valid
-    // one-byte scalar), so the String invariants hold.
+    // SAFETY: 0x00 is a one-byte UTF-8 scalar, so the String invariants hold.
     let bytes = unsafe { s.as_bytes_mut() };
     for b in bytes.iter_mut() {
         // SAFETY: `b` is a valid, aligned, exclusive reference into the buffer.
@@ -119,27 +93,11 @@ fn zeroize_in_place(s: &mut str) {
     std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 }
 
-/// A connection URL with any inline password masked, for an error message or a
-/// log line.
-///
-/// A pasted `postgres://alice:hunter2@host/db` is the one place a password
-/// arrives as ordinary text, before anything has had a chance to split it into
-/// a `SecretString` — and "could not parse `<url>`" is precisely the message a
-/// user copies into a bug report or a chat channel. So the redaction has to
-/// happen at the point of formatting, not at the point of storage.
-///
-/// The username, host, port and path survive: a redaction that hides those is
-/// useless for diagnosing the very error it accompanies, and none of them is
-/// the secret. Anything that is not a URL with credentials comes back
-/// unchanged.
 pub fn redact_url(url: &str) -> String {
     let Some(scheme_end) = url.find("://") else {
         return url.to_string();
     };
     let authority_start = scheme_end + 3;
-    // The authority runs to the first `/`, `?` or `#`. Bounding it matters:
-    // an `@` in a path or a query string is not a credential separator, and
-    // masking up to it would eat the part of the URL worth showing.
     let authority_end = url[authority_start..]
         .find(['/', '?', '#'])
         .map(|i| authority_start + i)
@@ -161,7 +119,6 @@ pub fn redact_url(url: &str) -> String {
     )
 }
 
-/// Configuration problems, reported per-field so the form can point at them.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
     #[error("missing required field `{key}`")]
@@ -222,8 +179,6 @@ mod tests {
         assert_eq!(back, cfg);
     }
 
-    /// The redaction has to keep enough of the URL to diagnose the error it is
-    /// attached to, and drop exactly the password.
     #[test]
     fn redact_url_masks_the_password_and_nothing_else() {
         assert_eq!(

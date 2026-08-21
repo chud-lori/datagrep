@@ -1,23 +1,3 @@
-//! The store-free export path.
-//!
-//! Export is a separate streaming endpoint: it runs its own cursor at full
-//! fetch size straight to a file and never goes through the result store.
-//!
-//! [`run_export_on`] drives one cursor directly into an [`ExportSink`]: each
-//! chunk is pulled, handed to the sink, and dropped before the next pull.
-//! The whole in-flight buffer is therefore **exactly one driver chunk**
-//! (itself bounded by [`EXPORT_FETCH_HINT`]'s 4 MB byte ceiling) — no result
-//! store, no global-budget accounting, no spill file, no hot window. That is
-//! what makes "Export all" ≠ "load all": a 10M-row export writes to disk at
-//! whatever rate the sink can absorb without the process's resident result
-//! bytes ([`crate::store::GlobalBudget`]) moving at all, which is also the
-//! white-box counter the tests below assert on.
-//!
-//! Backpressure still reaches the socket: the loop does not call
-//! `next_batch` again until the sink has returned, so a slow disk stalls the
-//! driver, which stalls the server — the same pull-only story as the feeder,
-//! minus the store.
-
 use datagrep_api::driver::{Batch, Cursor, FetchHint};
 use datagrep_api::error::DbError;
 use datagrep_api::request::Request;
@@ -26,60 +6,32 @@ use datagrep_api::shape::Shape;
 use crate::feeder::payload_rows;
 use crate::session::ConnLease;
 
-/// The fetch hint for the export path: full fetch size, since nothing here is
-/// waiting to be shown on screen. Rows are effectively bounded by the 4 MB
-/// byte ceiling; the generous row cap keeps a
-/// 10M-row export from doing 100k round trips, while one chunk stays small
-/// enough that dropping the future (Ctrl-C) never abandons much work.
 pub const EXPORT_FETCH_HINT: FetchHint = FetchHint {
     max_rows: 100_000,
     max_bytes: 4 * 1024 * 1024,
     target_ms: 250,
 };
 
-/// Where an export's chunks go. Implemented by frontends over their format
-/// writers (CSV, NDJSON, Arrow IPC, …).
-///
-/// The contract that keeps the path streaming: `chunk` receives each batch
-/// **by value** and the driver is not pulled again until it returns. A sink
-/// that writes and forgets keeps the whole pipeline at one chunk of memory;
-/// a sink that accumulates has re-implemented the store it was built to
-/// bypass.
 pub trait ExportSink: Send {
-    /// Called exactly once, with the cursor's shape, before any chunk.
     fn begin(&mut self, shape: &Shape) -> Result<(), DbError>;
 
-    /// One driver chunk. Return [`SinkFlow::Stop`] to end the export early
-    /// (deadline, user interrupt); the cursor is closed and [`run_export_on`]
-    /// returns normally with [`ExportStats::stopped`] set.
     fn chunk(&mut self, batch: Batch) -> Result<SinkFlow, DbError>;
 }
 
-/// Whether the sink wants the next chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SinkFlow {
     Continue,
-    /// Stop pulling; close the cursor and return what was written so far.
     Stop,
 }
 
-/// End-of-export totals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ExportStats {
-    /// Rows handed to the sink.
     pub rows: u64,
-    /// Chunks handed to the sink.
     pub batches: u64,
-    /// Bytes the driver reported reading.
     pub bytes: u64,
-    /// True when the sink stopped the export before end of stream.
     pub stopped: bool,
 }
 
-/// Run `req` on `lease`'s connection and stream the result straight into
-/// `sink`, never touching a result store. The cursor is closed on every exit
-/// path, success or failure, so an aborted export leaves no server-side
-/// portal open.
 pub async fn run_export_on(
     lease: &ConnLease,
     req: Request,
@@ -102,8 +54,6 @@ async fn drive(cursor: &mut dyn Cursor, sink: &mut dyn ExportSink) -> Result<Exp
         };
         stats.rows += payload_rows(&batch) as u64;
         stats.batches += 1;
-        // Handed over by value and dropped inside the sink: this is the
-        // path's entire buffer.
         if sink.chunk(batch)? == SinkFlow::Stop {
             stats.stopped = true;
             break;
@@ -124,9 +74,6 @@ mod tests {
     use datagrep_api::driver::Payload;
     use std::sync::Arc;
 
-    /// A sink that writes-and-forgets, recording only counters — including
-    /// the largest single chunk it ever held, the white-box proof that
-    /// nothing upstream accumulated.
     #[derive(Default)]
     struct CountingSink {
         rows: u64,
@@ -158,8 +105,6 @@ mod tests {
         }
     }
 
-    /// A core over a no-spill policy plus a mock driver, with a profile ready
-    /// to export from.
     async fn core_with(plan: MockPlan) -> (CoreApi, ProfileId, Arc<crate::testing::MockCounters>) {
         let policy = MemoryPolicy {
             total_result_budget: 16 * 1024 * 1024,
@@ -184,10 +129,6 @@ mod tests {
         (core, id, counters)
     }
 
-    /// **Export never goes through the store.** ~200k rows stream through
-    /// `run_export`; the global result budget (the white-box counter for
-    /// resident result bytes) must stay at zero the whole time, no query is
-    /// ever registered, and the sink never holds more than one bounded chunk.
     #[tokio::test]
     async fn export_streams_200k_rows_without_store_growth() {
         let (core, id, _counters) = core_with(MockPlan {
@@ -211,9 +152,6 @@ mod tests {
             sink.max_chunk_rows <= EXPORT_FETCH_HINT.max_rows as usize,
             "a single chunk exceeded the fetch hint"
         );
-        // The store-free proof: nothing was ever admitted to any result
-        // store, so the process-wide resident result byte counter never moved
-        // and no query id was ever allocated.
         assert_eq!(
             core.result_bytes(),
             0,
@@ -226,10 +164,6 @@ mod tests {
         core.shutdown().await;
     }
 
-    /// **The soft row cap never touches the export path.** The 500k cap in
-    /// the policy above exists for the grid's result store; export bypasses
-    /// the store entirely, so a 600k-row export delivers every row — exactly,
-    /// not "roughly", and never silently clipped at the cap.
     #[tokio::test]
     async fn export_ignores_the_soft_row_cap_and_delivers_every_row() {
         let (core, id, _counters) = core_with(MockPlan {
@@ -254,8 +188,6 @@ mod tests {
         core.shutdown().await;
     }
 
-    /// A sink can stop the export early (deadline, Ctrl-C); the cursor is
-    /// closed and the totals say so honestly.
     #[tokio::test]
     async fn a_sink_can_stop_an_export_early() {
         let (core, id, counters) = core_with(MockPlan::infinite(500)).await;

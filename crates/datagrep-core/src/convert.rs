@@ -1,29 +1,3 @@
-//! Row → Arrow conversion, the store's tabular boundary.
-//!
-//! Everything below `datagrep-api` speaks `Vec<Value>`; everything at and above the
-//! [`crate::store::ResultStore`] speaks Arrow. This module is that boundary and
-//! nothing else crosses it.
-//!
-//! Two storage decisions are implemented here:
-//!
-//! - **Columnar** — nulls live in Arrow validity bitmaps (one bit per
-//!   value), not in an `Option<T>` per cell, and `Value::Absent` — the
-//!   not-present marker that keeps a Mongo grid truthful — becomes a null slot
-//!   exactly like `Value::Null` does. Arrow simply has no third state, so the
-//!   distinction is preserved in the document lane
-//!   ([`crate::store::DocSegment`]) instead, which is why documents are
-//!   deliberately *not* Arrow.
-//! - **Dictionary encoding** — a string column whose sampled cardinality
-//!   over the first [`SAMPLE_BATCHES`] batches is under
-//!   [`DICTIONARY_RATIO`] of the sampled rows becomes
-//!   `Dictionary(Int32, Utf8)`. Its job is no longer shrinking a wire payload:
-//!   it shrinks the *shaping* work in the grid, where one shaped run is reused
-//!   for every row sharing a dictionary index.
-//!
-//! Anything Arrow has no honest column type for (intervals, arrays, nested
-//! documents, geometry, vectors, `Unsupported`) degrades to a `Utf8` display
-//! column rather than being dropped or coerced into a lie.
-
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -40,82 +14,42 @@ use datagrep_api::driver::Row;
 use datagrep_api::shape::{LogicalType, RowSchema};
 use datagrep_api::value::{Geometry, TzSpec, Value};
 
-/// How many leading batches feed the cardinality sample. Two is enough to see
-/// past a freakishly uniform first chunk without holding results back.
 pub const SAMPLE_BATCHES: usize = 2;
 
-/// Distinct/row ratio below which a string column is dictionary-encoded: under
-/// 10% distinct values, the repeated strings are worth an index.
 pub const DICTIONARY_RATIO: f64 = 0.10;
 
-/// Below this many sampled rows the ratio is noise, so the sample is ignored —
-/// a 3-row first batch must not decide the encoding of a 10M-row result.
 pub const MIN_SAMPLE_ROWS: usize = 16;
 
-/// One-shot conversion of a single chunk.
-///
-/// The sampling window degenerates to this one batch, so a low-cardinality
-/// string column is dictionary-encoded immediately. Streaming callers should
-/// use [`BatchConverter`], which samples across [`SAMPLE_BATCHES`] chunks and
-/// keeps one Arrow schema for the whole result set.
-///
-/// Total by construction: it never panics and never returns an error. Values
-/// that do not fit their column's Arrow type land as nulls with a warning —
-/// see [`BatchConverter::coerced`].
 pub fn rows_to_record_batch(schema: &RowSchema, rows: Vec<Row>) -> RecordBatch {
     let mut conv = BatchConverter::one_shot(Arc::new(schema.clone()));
     conv.convert(rows).batch
 }
 
-/// Output of one [`BatchConverter::convert`] call.
 #[derive(Debug, Clone)]
 pub struct Converted {
-    /// The chunk just converted, always in the converter's current schema.
     pub batch: RecordBatch,
-    /// Chunks emitted earlier, re-encoded because the sampling window just
-    /// closed and chose dictionary encoding. The `usize` is the chunk's
-    /// zero-based position in the sequence of batches this converter emitted.
-    ///
-    /// At most `SAMPLE_BATCHES - 1` entries, exactly once per converter: the
-    /// alternative — publishing chunk 1 only after chunk 2 arrives — would
-    /// double first-row latency, and the whole point of the pipeline is that
-    /// chunk 1 renders before chunk 2 is even requested.
     pub reencoded: Vec<(usize, RecordBatch)>,
 }
 
-/// Streaming row→Arrow converter with one locked schema per result set.
-///
-/// The Arrow column types are decided from the declared [`RowSchema`], refined
-/// by scanning the first chunk, and then **locked**: a grid column cannot
-/// change type while the user scrolls. String encoding (plain vs dictionary) is
-/// decided once, at the end of the sampling window.
 #[derive(Debug)]
 pub struct BatchConverter {
     schema: Arc<RowSchema>,
-    /// Locked after the first chunk.
     kinds: Vec<ColKind>,
-    /// Per-column distinct-value sample; `None` once a column is disqualified
-    /// (too many distinct values, or not a string column at all).
     samples: Vec<Option<HashSet<Arc<str>>>>,
     sampled_rows: usize,
     batches_seen: usize,
     sample_batches: usize,
-    /// Per-column: is this column dictionary-encoded? Empty until the window
-    /// closes.
     dict: Vec<bool>,
     arrow_schema: Option<SchemaRef>,
-    /// Chunks retained while the window is open, so they can be re-encoded.
     pending: Vec<RecordBatch>,
     coerced: u64,
 }
 
 impl BatchConverter {
-    /// A converter for one result set with the standard 2-batch sample window.
     pub fn new(schema: Arc<RowSchema>) -> Self {
         Self::with_window(schema, SAMPLE_BATCHES)
     }
 
-    /// Single-chunk converter: decide and encode from this batch alone.
     pub fn one_shot(schema: Arc<RowSchema>) -> Self {
         Self::with_window(schema, 1)
     }
@@ -136,13 +70,10 @@ impl BatchConverter {
         }
     }
 
-    /// The locked Arrow schema, once the first chunk has been converted.
     pub fn arrow_schema(&self) -> Option<SchemaRef> {
         self.arrow_schema.clone()
     }
 
-    /// Column indices that ended up dictionary-encoded. Empty while the
-    /// sampling window is still open.
     pub fn dictionary_columns(&self) -> Vec<usize> {
         self.dict
             .iter()
@@ -151,21 +82,14 @@ impl BatchConverter {
             .collect()
     }
 
-    /// How many cells did not fit their locked column type and were stored as
-    /// null. Non-zero means a driver violated its own declared schema; it is
-    /// surfaced rather than swallowed.
     pub fn coerced(&self) -> u64 {
         self.coerced
     }
 
-    /// True once the sampling window has closed and the schema is final.
     pub fn is_settled(&self) -> bool {
         self.batches_seen >= self.sample_batches
     }
 
-    /// Convert one chunk. Never fails: a chunk that cannot be assembled is
-    /// reported as an empty batch in the locked schema, which the store shows
-    /// as a gap rather than crashing the app.
     pub fn convert(&mut self, rows: Vec<Row>) -> Converted {
         let window_open = self.batches_seen < self.sample_batches;
 
@@ -218,8 +142,6 @@ impl BatchConverter {
         Converted { batch, reencoded }
     }
 
-    /// Accumulate distinct string values per candidate column, bounded: once a
-    /// column exceeds the ratio it can never qualify, so tracking stops.
     fn sample(&mut self, rows: &[Row]) {
         self.sampled_rows += rows.len();
         for (col, slot) in self.samples.iter_mut().enumerate() {
@@ -239,7 +161,6 @@ impl BatchConverter {
         }
     }
 
-    /// Close the sampling window and pick the final string encodings.
     fn settle(&mut self) {
         let enough = self.sampled_rows >= MIN_SAMPLE_ROWS;
         self.dict = self
@@ -256,9 +177,6 @@ impl BatchConverter {
     }
 }
 
-/// Re-encode the named `Utf8` columns of `batch` as `Dictionary(Int32, Utf8)`
-/// so every chunk of a result set shares one schema (spill and export both
-/// require it).
 fn dictionary_encode(batch: &RecordBatch, dict_cols: &[usize], target: &SchemaRef) -> RecordBatch {
     let rows = batch.num_rows();
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(batch.num_columns());
@@ -284,10 +202,8 @@ fn dictionary_encode(batch: &RecordBatch, dict_cols: &[usize], target: &SchemaRe
     finish_batch(target.clone(), columns, rows)
 }
 
-/// Arrow column type for one field, before any dictionary decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ColKind {
-    /// Nothing but `Null`/`Absent` was observed; Arrow's `Null` type.
     Null,
     Bool,
     I64,
@@ -295,20 +211,14 @@ enum ColKind {
     F64,
     Date,
     Time,
-    /// Microseconds with one column-wide timezone (`None` = naive).
     Timestamp(Option<Arc<str>>),
     Uuid,
     Bytes,
-    /// A genuine string column — the only dictionary-encoding candidate.
     Str,
-    /// `Utf8` display fallback: decimals, JSON text, and everything Arrow has
-    /// no honest column type for.
     Text,
 }
 
 impl ColKind {
-    /// Merge an observed value's kind into the column's running kind. Any
-    /// disagreement collapses to the lossless `Text` fallback.
     fn merge(self, other: ColKind) -> ColKind {
         match (self, other) {
             (a, ColKind::Null) => a,
@@ -319,7 +229,6 @@ impl ColKind {
     }
 }
 
-/// What a single value would need as a column type.
 fn value_kind(v: &Value) -> Option<ColKind> {
     Some(match v {
         Value::Null | Value::Absent => ColKind::Null,
@@ -333,9 +242,6 @@ fn value_kind(v: &Value) -> Option<ColKind> {
         Value::Uuid(_) => ColKind::Uuid,
         Value::Bytes(_) => ColKind::Bytes,
         Value::Str(_) => ColKind::Str,
-        // Decimal stays a string so NUMERIC never round-trips through f64 —
-        // a silently wrong number is worse than a crash. JSON stays raw text
-        // so key order and numeric precision survive re-display unchanged.
         Value::Decimal(_) | Value::Json(_) => ColKind::Text,
         Value::Interval { .. }
         | Value::Array(_)
@@ -347,7 +253,6 @@ fn value_kind(v: &Value) -> Option<ColKind> {
     })
 }
 
-/// The Arrow timezone string for a [`TzSpec`]; `None` means naive.
 fn tz_name(tz: &TzSpec) -> Option<Arc<str>> {
     match tz {
         TzSpec::Naive => None,
@@ -361,9 +266,6 @@ fn tz_name(tz: &TzSpec) -> Option<Arc<str>> {
     }
 }
 
-/// Seed each column from the declared logical type, then refine against the
-/// first chunk's actual values. Declared-schema engines agree on the first try;
-/// a disagreement degrades that column to the lossless `Text` fallback.
 fn decide_kinds(schema: &RowSchema, rows: &[Row]) -> Vec<ColKind> {
     schema
         .fields
@@ -378,8 +280,6 @@ fn decide_kinds(schema: &RowSchema, rows: &[Row]) -> Vec<ColKind> {
                 LogicalType::F64 => ColKind::F64,
                 LogicalType::Date => ColKind::Date,
                 LogicalType::Time => ColKind::Time,
-                // The declared type says nothing about the timezone; the data
-                // does, so start naive and let the first value refine it.
                 LogicalType::Timestamp => ColKind::Null,
                 LogicalType::Uuid => ColKind::Uuid,
                 LogicalType::Bytes => ColKind::Bytes,
@@ -401,8 +301,6 @@ fn decide_kinds(schema: &RowSchema, rows: &[Row]) -> Vec<ColKind> {
         .collect()
 }
 
-/// Build one `RecordBatch`, returning it plus the number of cells that did not
-/// fit their column type (stored as nulls).
 fn build_batch(
     schema: &RowSchema,
     kinds: &[ColKind],
@@ -431,9 +329,6 @@ fn build_batch(
     (finish_batch(arrow_schema, columns, n), coerced)
 }
 
-/// Assemble a batch, falling back to an empty batch of the same schema rather
-/// than panicking — a malformed chunk from one driver must never take the
-/// whole app down.
 fn finish_batch(schema: SchemaRef, columns: Vec<ArrayRef>, rows: usize) -> RecordBatch {
     let opts = RecordBatchOptions::new().with_row_count(Some(rows));
     match RecordBatch::try_new_with_options(schema.clone(), columns, &opts) {
@@ -445,16 +340,11 @@ fn finish_batch(schema: SchemaRef, columns: Vec<ArrayRef>, rows: usize) -> Recor
     }
 }
 
-/// A row's cell, treating a short row as absence rather than an error — a
-/// driver that sends fewer cells than its schema declares must not panic us.
 fn cell_of(row: &Row, col: usize) -> &Value {
     const ABSENT: &Value = &Value::Absent;
     row.get(col).unwrap_or(ABSENT)
 }
 
-/// Build one column. `Absent` and `Null` both become null slots in the Arrow
-/// validity bitmap, since Arrow has no third state; the `Absent`/`Null`
-/// distinction lives in the document lane, not here.
 fn build_column(kind: &ColKind, dict: bool, rows: &[Row], col: usize) -> (ArrayRef, u64) {
     let n = rows.len();
     let mut coerced = 0u64;
@@ -553,9 +443,6 @@ fn build_column(kind: &ColKind, dict: bool, rows: &[Row], col: usize) -> (ArrayR
     (array, coerced)
 }
 
-/// Truthful text for any value, for the `Utf8` fallback column and for the
-/// grid's own cell rendering. `None` for `Null` and `Absent` — the two things
-/// that must never render as the string `"null"`.
 pub fn display_value(v: &Value) -> Option<String> {
     let mut out = String::new();
     write_value(&mut out, v)?;
@@ -707,8 +594,6 @@ fn write_geometry(out: &mut String, g: &Geometry) {
     }
 }
 
-/// ISO-8601 date from a day count, via Howard Hinnant's civil-from-days —
-/// cheaper and smaller than pulling in a calendar crate for one format.
 fn write_date(out: &mut String, days: i32) {
     let z = days as i64 + 719_468;
     let era = z.div_euclid(146_097);
@@ -769,9 +654,6 @@ mod tests {
             .expect("column type")
     }
 
-    /// Every `Value` variant that has an Arrow column type lands in that type,
-    /// and every variant that does not lands in the `Utf8` display fallback
-    /// with its bytes intact.
     #[test]
     fn every_value_variant_maps_to_a_column() {
         let s = schema(vec![
@@ -867,9 +749,6 @@ mod tests {
         assert_eq!(col::<StringArray>(&b, 17).value(0), "0/1");
     }
 
-    /// `Absent` — the not-present marker that makes a document grid
-    /// truthful — becomes a null slot, indistinguishable in Arrow from `Null`.
-    /// The distinction survives in the document lane, never here.
     #[test]
     fn absent_and_null_both_become_nulls() {
         let s = schema(vec![
@@ -895,8 +774,6 @@ mod tests {
         assert_eq!(ints.null_count(), 2);
     }
 
-    /// A low-cardinality string column is dictionary-encoded, a
-    /// high-cardinality one is not.
     #[test]
     fn dictionary_encoding_kicks_in_on_low_cardinality() {
         let s = schema(vec![
@@ -931,7 +808,6 @@ mod tests {
         assert_eq!(values.len(), 2, "one shaped run per distinct value");
     }
 
-    /// A tiny sample must not decide the encoding of a whole result set.
     #[test]
     fn tiny_samples_do_not_trigger_dictionary_encoding() {
         let s = schema(vec![field("status", LogicalType::Str)]);
@@ -940,9 +816,6 @@ mod tests {
         assert_eq!(b.schema().field(0).data_type(), &DataType::Utf8);
     }
 
-    /// The encoding decision is taken over the first two batches, and the
-    /// chunks already emitted are re-encoded so the whole result set shares
-    /// one schema — which is what spill and export require.
     #[test]
     fn streaming_converter_settles_after_two_batches_and_reencodes() {
         let s = Arc::new(schema(vec![field("status", LogicalType::Str)]));
@@ -979,8 +852,6 @@ mod tests {
         assert_eq!(third.batch.schema(), second.batch.schema());
     }
 
-    /// A column whose values disagree with each other degrades to the lossless
-    /// `Utf8` display fallback rather than dropping the odd value.
     #[test]
     fn heterogeneous_column_degrades_to_text() {
         let s = schema(vec![field("mixed", LogicalType::Unknown)]);
@@ -997,9 +868,6 @@ mod tests {
         assert_eq!((c.value(0), c.value(1), c.value(2)), ("1", "two", "false"));
     }
 
-    /// Mixed timezones in one column cannot share an Arrow timestamp type, so
-    /// the column degrades to text rather than silently reinterpreting an
-    /// instant — a wrong instant is worse than an ugly cell.
     #[test]
     fn mixed_timezones_degrade_rather_than_reinterpret() {
         let s = schema(vec![field("ts", LogicalType::Timestamp)]);

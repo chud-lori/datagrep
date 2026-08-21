@@ -1,30 +1,3 @@
-//! The feeder task — where the memory contract is actually enforced.
-//!
-//! ```text
-//! ┌──────────┐ next_batch(hint) ┌───────────┐ mpsc::channel(2) ┌────────────┐
-//! │dyn Cursor│◀─────────────────│FeederTask │─────────────────▶│ResultStore │
-//! │ (driver) │──── Batch ──────▶│ 1/query   │   Batch (owned)  │ 1/query    │
-//! └──────────┘                  └───────────┘                  └────────────┘
-//! ```
-//!
-//! One feeder task per running query. It is the *only* thing that ever calls
-//! [`Cursor::next_batch`], and it calls it exactly as often as the store can
-//! absorb — no more. When the store stops admitting, the feeder blocks on the
-//! channel, stops calling `next_batch`, the driver stops reading the socket,
-//! the TCP window closes, and the server stops producing. Backpressure reaches
-//! the database for free on every engine with a real cursor.
-//!
-//! Two implementation choices carry that guarantee:
-//!
-//! - **A permit is reserved *before* the fetch.** `tx.reserve().await` first,
-//!   `next_batch` second. So the number of chunks alive between driver and
-//!   store is exactly [`DATA_CHANNEL_BOUND`], never bound+1 — the feeder never
-//!   holds a fetched-but-unsendable chunk.
-//! - **Every await is inside a `select!` with the query's cancellation
-//!   token.** There is no await in this file that a stop button cannot
-//!   interrupt, which is what makes "stop always returns control instantly"
-//!   true rather than aspirational.
-
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -38,31 +11,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::lock;
 
-/// **The bound of the data path, and the whole backpressure story.**
-///
-/// A bound of 2 means the feeder can never run more than two chunks ahead of
-/// the store. If any channel in the data path were unbounded, a fast server
-/// feeding a slow consumer would pile the entire result set up inside this
-/// process — the "load it all into RAM and hope" behaviour datagrep exists to
-/// avoid. The bound is what pushes the stall back down the socket instead.
-///
-/// Raising this raises the app's floor memory by one chunk per running query
-/// and buys nothing: chunk 1 already renders before chunk 2 is requested.
 pub const DATA_CHANNEL_BOUND: usize = 2;
 
-/// Why the feeder is not currently pulling. Surfaced in the status line so a
-/// stalled result set is never mysterious.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParkReason {
-    /// The bounded data channel is full — the store is behind.
     Backpressure,
-    /// The process-wide `total_result_budget` is exhausted; another result set
-    /// must shrink or close first.
     MemoryBudget,
-    /// This query's own hot window is full and spill is unavailable or full.
     HotWindow,
-    /// Nobody is looking: the viewport is far behind, so we stopped fetching
-    /// until `get_rows` asks for rows we do not have.
     ViewportIdle,
 }
 
@@ -77,30 +32,17 @@ impl fmt::Display for ParkReason {
     }
 }
 
-/// The feeder's publicly observable state, published on a `watch` channel so
-/// the store, the query supervisor, and the UI all read the same truth without
-/// polling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FeedState {
-    /// Pulling chunks.
     Streaming,
-    /// Deliberately not pulling; see [`ParkReason`].
     Parked(ParkReason),
-    /// The soft row cap was reached. The result is intact and complete up to
-    /// the cap; the UI offers "[Load more] [Export all]".
     Capped,
-    /// The cursor reported end of stream.
     Done,
-    /// The user stopped it. Not a failure, and never dressed as one.
     Cancelled,
-    /// The driver returned an error; the message is carried for the status
-    /// line and the full [`DbError`] is available from
-    /// [`FeederHandle::take_error`].
     Failed(Arc<str>),
 }
 
 impl FeedState {
-    /// True once the feeder task has stopped for good.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
@@ -109,33 +51,15 @@ impl FeedState {
     }
 }
 
-/// Adaptive fetch-sizing policy.
-///
-/// Start at the connection's `caps.default_fetch_rows`, then after each batch
-/// aim for a 40–120 ms wall-clock window per chunk under a 4 MB byte ceiling:
-/// `next = clamp(prev * target_ms / actual_ms, 100, 100_000)`. A chunk much
-/// faster than the window wastes a round trip; a chunk much slower delays the
-/// first screenful and stretches how long a stop takes to land, since a pull
-/// in flight has to finish before the loop can react.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeederPolicy {
-    /// First hint, from `Capabilities::default_fetch_rows` (PG 500,
-    /// ClickHouse 65 536, Mongo 101).
     pub start_fetch_rows: u32,
-    /// Lower clamp on the adaptive size.
     pub min_fetch_rows: u32,
-    /// Upper clamp — a 10M-row export must not do 100k round trips, but one
-    /// pull must still be interruptible.
     pub max_fetch_rows: u32,
-    /// Midpoint of the target window; the multiplier aims here.
     pub target_ms: u32,
-    /// Below this a chunk is too small to be worth the round trip.
     pub window_lo_ms: u32,
-    /// Above this a chunk delays the first screenful and blocks cancellation.
     pub window_hi_ms: u32,
-    /// Byte ceiling per chunk, independent of the row count.
     pub max_batch_bytes: u32,
-    /// Rows after which the feeder stops and reports [`FeedState::Capped`].
     pub soft_row_cap: u64,
 }
 
@@ -155,7 +79,6 @@ impl Default for FeederPolicy {
 }
 
 impl FeederPolicy {
-    /// The default policy, seeded from a connection's advertised start size.
     pub fn for_fetch_rows(start_fetch_rows: u32) -> Self {
         Self {
             start_fetch_rows: start_fetch_rows.max(1),
@@ -163,9 +86,6 @@ impl FeederPolicy {
         }
     }
 
-    /// `next = clamp(prev * target_ms / actual_ms, min, max)` — applied only
-    /// when the last chunk fell outside the 40–120 ms window, so a
-    /// well-behaved stream does not churn its fetch size every round trip.
     fn next_rows(&self, prev: u32, actual_ms: u64) -> u32 {
         if actual_ms >= self.window_lo_ms as u64 && actual_ms <= self.window_hi_ms as u64 {
             return prev;
@@ -174,8 +94,6 @@ impl FeederPolicy {
         scaled.clamp(self.min_fetch_rows as u64, self.max_fetch_rows as u64) as u32
     }
 
-    /// Clamp the row hint so the chunk also respects the 4 MB byte ceiling,
-    /// using the bytes/row the cursor has reported so far.
     fn cap_by_bytes(&self, rows: u32, bytes_per_row: f64) -> u32 {
         if bytes_per_row <= 0.0 {
             return rows;
@@ -185,24 +103,18 @@ impl FeederPolicy {
     }
 }
 
-/// Control block shared by the handle and the task.
 #[derive(Debug)]
 struct FeedCtl {
     paused: AtomicBool,
     reason: Mutex<ParkReason>,
-    /// Woken by [`FeederHandle::resume`]; the task waits on it while parked.
     wake: Notify,
     rows: AtomicU64,
     batches: AtomicU64,
     stats: Mutex<CursorStats>,
     error: Mutex<Option<DbError>>,
-    /// Last fetch hint actually used, for tests and the status line.
     last_hint_rows: AtomicU64,
 }
 
-/// Handle to one running feeder: observe its state, park and resume it, or
-/// stop it. Dropping the handle does **not** stop the feeder — the query owns
-/// the cancellation token; see [`FeederHandle::stop`].
 #[derive(Debug)]
 pub struct FeederHandle {
     ctl: Arc<FeedCtl>,
@@ -212,74 +124,55 @@ pub struct FeederHandle {
 }
 
 impl FeederHandle {
-    /// Current state, cheap and lock-free-ish.
     pub fn state(&self) -> FeedState {
         self.state.borrow().clone()
     }
 
-    /// A receiver for state changes — the no-polling way to follow a query.
     pub fn watch(&self) -> watch::Receiver<FeedState> {
         self.state.clone()
     }
 
-    /// Rows handed to the store so far.
     pub fn rows(&self) -> u64 {
         self.ctl.rows.load(Ordering::SeqCst)
     }
 
-    /// Chunks handed to the store so far.
     pub fn batches(&self) -> u64 {
         self.ctl.batches.load(Ordering::SeqCst)
     }
 
-    /// The driver's own running totals, as of the last pull.
     pub fn cursor_stats(&self) -> CursorStats {
         *lock(&self.ctl.stats)
     }
 
-    /// The row hint used for the most recent pull — the adaptive size.
     pub fn last_fetch_rows(&self) -> u32 {
         self.ctl.last_hint_rows.load(Ordering::SeqCst) as u32
     }
 
-    /// Take the failure that ended this feeder, if any.
     pub fn take_error(&self) -> Option<DbError> {
         lock(&self.ctl.error).take()
     }
 
-    /// Stop pulling, for `reason`. Idempotent; the current in-flight pull
-    /// completes (a driver cannot be interrupted mid-chunk without cancelling
-    /// the whole query), then the feeder waits. A feeder blocked on the data
-    /// channel is woken so it can move to the parked state rather than sitting
-    /// on a reservation nobody will fill.
     pub fn park(&self, reason: ParkReason) {
         *lock(&self.ctl.reason) = reason;
         self.ctl.paused.store(true, Ordering::SeqCst);
         self.ctl.wake.notify_waiters();
     }
 
-    /// Resume pulling. Idempotent; safe to call when not parked.
     pub fn resume(&self) {
         self.ctl.paused.store(false, Ordering::SeqCst);
         self.ctl.wake.notify_waiters();
     }
 
-    /// True while the feeder is deliberately not pulling.
     pub fn is_parked(&self) -> bool {
         self.ctl.paused.load(Ordering::SeqCst)
     }
 
-    /// The local half of a stop: cancel the token so every await in the task
-    /// unwinds, and let it close the cursor. Returns immediately — it never
-    /// waits on the server, so the stop button is always instant.
     pub fn stop(&self) {
         self.cancel.cancel();
         // A parked feeder is waiting on the notify, not on the token.
         self.ctl.wake.notify_waiters();
     }
 
-    /// Wait for the task to finish. Used by tests and by orderly shutdown; the
-    /// stop button never waits for this.
     pub async fn join(&self) {
         let handle = lock(&self.task).take();
         if let Some(handle) = handle {
@@ -289,19 +182,12 @@ impl FeederHandle {
 }
 
 impl Drop for FeederHandle {
-    /// Dropping the last handle to a feeder must not leave it pulling rows
-    /// nobody will ever read — that is a task leak that keeps burning the
-    /// socket, the server's resources, and our memory budget for nothing.
     fn drop(&mut self) {
         self.cancel.cancel();
         self.ctl.wake.notify_waiters();
     }
 }
 
-/// Spawn the feeder for one query.
-///
-/// `cancel` should be the query's node in the session → connection → query
-/// token tree; cancelling any ancestor stops this feeder too.
 pub fn spawn_feeder(
     cursor: Box<dyn Cursor>,
     tx: mpsc::Sender<Batch>,
@@ -343,7 +229,6 @@ pub fn spawn_feeder(
     }
 }
 
-/// Outcome of the pull loop, before the cursor is closed.
 enum Ending {
     Done,
     Capped,
@@ -364,14 +249,9 @@ async fn run_feeder(
 
     let ending = pull_loop(&mut cursor, &tx, policy, &cancel, &ctl, &state).await;
 
-    // The cursor is always released, on every exit path, so a cancelled query
-    // never leaves a server-side portal open.
     if let Err(err) = cursor.close().await {
         tracing::warn!(%err, "closing cursor after feeder exit");
     }
-    // Dropping the sender is what tells the store the stream is over; the
-    // terminal state is published first so the store never sees a closed
-    // channel with a stale `Streaming` state.
     let final_state = match ending {
         Ending::Done => FeedState::Done,
         Ending::Capped => FeedState::Capped,
@@ -414,13 +294,6 @@ async fn pull_loop(
             return Ending::Capped;
         }
 
-        // ---- park gate -------------------------------------------------
-        // A parked feeder holds no permit and no chunk: it costs nothing but
-        // the task's own stack while the user is not looking.
-        //
-        // `enable()` registers this task as a waiter *before* the flag is
-        // read, so a `resume` landing in between cannot be lost — the classic
-        // lost-wakeup that turns a parked query into a hung one.
         loop {
             let woken = ctl.wake.notified();
             tokio::pin!(woken);
@@ -441,13 +314,6 @@ async fn pull_loop(
             let _ = state.send(FeedState::Streaming);
         }
 
-        // ---- reserve before fetching -----------------------------------
-        // This ordering is the memory bound: at most DATA_CHANNEL_BOUND
-        // chunks exist between driver and store, and the feeder never holds a
-        // fetched chunk it cannot hand over.
-        //
-        // The wake branch exists so a `park` issued while we are blocked here
-        // is honoured: we drop the reservation attempt and re-enter the gate.
         let woken = ctl.wake.notified();
         tokio::pin!(woken);
         woken.as_mut().enable();
@@ -488,11 +354,6 @@ async fn pull_loop(
         // ---- account, adapt, hand over ---------------------------------
         let mut batch = batch;
         let mut rows = payload_rows(&batch) as u64;
-        // The cap boundary is exact: a chunk that would cross the soft row
-        // cap is trimmed to land on it, so a capped result holds *exactly*
-        // `soft_row_cap` rows — deterministic, run after run — instead of
-        // "the cap plus whatever was in flight". Only this task ever writes
-        // `ctl.rows`, so the load below cannot race another writer.
         let admitted = ctl.rows.load(Ordering::SeqCst);
         let remaining = policy.soft_row_cap.saturating_sub(admitted);
         if rows > remaining {
@@ -522,9 +383,6 @@ async fn pull_loop(
     }
 }
 
-/// Trim a chunk's payload to at most `keep` rows — the exact-boundary half
-/// of the soft row cap (a capped result is `soft_row_cap` rows, not
-/// "roughly").
 fn truncate_payload(payload: &mut datagrep_api::driver::Payload, keep: usize) {
     use datagrep_api::driver::Payload;
     match payload {
@@ -536,8 +394,6 @@ fn truncate_payload(payload: &mut datagrep_api::driver::Payload, keep: usize) {
     }
 }
 
-/// Rows in a chunk, per its payload shape. `Ack`/`Empty` results carry none.
-/// Shared with the store-free export path ([`crate::export`]).
 pub(crate) fn payload_rows(batch: &Batch) -> usize {
     use datagrep_api::driver::Payload;
     match &batch.payload {
@@ -555,8 +411,6 @@ mod tests {
     use crate::testing::{MockCursor, MockPlan};
     use std::time::Duration;
 
-    /// Poll a condition to a deadline. Tests here are about *task scheduling*,
-    /// so they wait for a real settle rather than a fixed sleep.
     async fn until(deadline_ms: u64, mut cond: impl FnMut() -> bool) -> bool {
         let start = Instant::now();
         while start.elapsed() < Duration::from_millis(deadline_ms) {
@@ -568,13 +422,6 @@ mod tests {
         cond()
     }
 
-    /// **The backpressure test — the one that justifies the whole design.**
-    ///
-    /// An endless producer and a consumer that never reads. If the data path
-    /// were unbounded the cursor would be called forever and RSS would track
-    /// the server's output rate. Instead `next_batch` must stall at exactly
-    /// [`DATA_CHANNEL_BOUND`] calls and stay there: the feeder parked, the
-    /// driver stopped reading its socket, and the server stopped producing.
     #[tokio::test]
     async fn feeder_parks_when_the_consumer_stops_reading() {
         let (cursor, counters) = MockCursor::standalone(MockPlan::infinite(100));
@@ -604,8 +451,6 @@ mod tests {
         );
     }
 
-    /// Draining the channel must let the feeder advance again, one chunk per
-    /// freed slot — backpressure that never releases is just a deadlock.
     #[tokio::test]
     async fn draining_the_channel_releases_the_feeder() {
         let (cursor, counters) = MockCursor::standalone(MockPlan::infinite(10));
@@ -631,9 +476,6 @@ mod tests {
         drop(feeder);
     }
 
-    /// **Cancellation mid-stream.** The feeder stops within one batch, the
-    /// state becomes `Cancelled`, and the cursor is closed so no
-    /// server-side portal is left open.
     #[tokio::test]
     async fn cancel_mid_stream_stops_within_one_batch_and_closes_the_cursor() {
         let plan = MockPlan {
@@ -669,8 +511,6 @@ mod tests {
         );
     }
 
-    /// A parked feeder is still instantly cancellable — the stop button cannot
-    /// be defeated by the feeder happening to be asleep.
     #[tokio::test]
     async fn a_parked_feeder_still_cancels_instantly() {
         let (cursor, _counters) = MockCursor::standalone(MockPlan::infinite(10));
@@ -693,9 +533,6 @@ mod tests {
         assert_eq!(feeder.state(), FeedState::Cancelled);
     }
 
-    /// **The soft row cap is honoured.** `SELECT * FROM events` on a 2 TB
-    /// table stops at the cap with the banner state, instead of streaming
-    /// until something dies.
     #[tokio::test]
     async fn soft_row_cap_stops_the_stream() {
         let policy = FeederPolicy {
@@ -725,8 +562,6 @@ mod tests {
         assert_eq!(counters.cursor_closes(), 1);
     }
 
-    /// Park/resume is the store's lever for the budget and the viewport; a
-    /// resumed feeder must actually pull again.
     #[tokio::test]
     async fn park_then_resume_round_trip() {
         let (cursor, counters) = MockCursor::standalone(MockPlan::infinite(5));
@@ -758,8 +593,6 @@ mod tests {
         assert_eq!(feeder.state(), FeedState::Streaming);
     }
 
-    /// A driver error ends the stream as `Failed`, keeps the real `DbError`
-    /// for the caller, and still closes the cursor.
     #[tokio::test]
     async fn driver_error_becomes_failed_state() {
         let plan = MockPlan {
@@ -782,8 +615,6 @@ mod tests {
         assert_eq!(counters.cursor_closes(), 1);
     }
 
-    /// The adaptive sizing arithmetic, pinned exactly so a refactor cannot
-    /// quietly change how fast the fetch size moves.
     #[test]
     fn adaptive_fetch_sizing_matches_the_design_formula() {
         let p = FeederPolicy::default();
@@ -802,8 +633,6 @@ mod tests {
         assert_eq!(p.next_rows(500, 0), 40_000);
     }
 
-    /// The 4 MB ceiling overrides the row target — one wide-row chunk must not
-    /// blow the per-query hot budget just because it was fast.
     #[test]
     fn byte_ceiling_caps_the_row_hint() {
         let p = FeederPolicy::default();
@@ -815,7 +644,6 @@ mod tests {
         assert_eq!(p.cap_by_bytes(1_000, 0.0), 1_000);
     }
 
-    /// The feeder must actually adapt in flight, not just own the formula.
     #[tokio::test]
     async fn feeder_grows_its_fetch_hint_on_a_fast_cursor() {
         let (cursor, _counters) = MockCursor::standalone(MockPlan::infinite(10));
@@ -837,8 +665,6 @@ mod tests {
         drop(rx);
     }
 
-    /// The invariant, asserted in code rather than trusted to review: an
-    /// unbounded data-path channel is a panic, not a subtle regression.
     #[tokio::test]
     #[should_panic(expected = "unbounded")]
     async fn an_over_bounded_channel_is_rejected() {

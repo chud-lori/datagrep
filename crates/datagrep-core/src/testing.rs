@@ -1,15 +1,3 @@
-//! Reusable mock driver stack, behind `#[cfg(any(test, feature = "testing"))]`.
-//!
-//! The memory contract can only be tested against a producer that never stops
-//! and a consumer that stops reading, so the mocks here are deliberately
-//! *hostile*: infinite batch production, a panic-on-execute mode for
-//! driver-panic isolation, a slow mode for adaptive fetch sizing, and a call
-//! counter so a test can prove the feeder actually parked rather than merely
-//! looking idle.
-//!
-//! Sibling crates (`datagrep-drv-*`, the spike UI) enable the `testing` feature to
-//! reuse this instead of growing their own half-correct copy.
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,10 +20,6 @@ use datagrep_api::request::Request;
 use datagrep_api::shape::{FieldDef, FieldFlags, LogicalType, ObjectPath, RowSchema, Shape};
 use datagrep_api::value::Value;
 
-/// Every mock call site bumps one of these. Shared (via `Arc`) by the driver
-/// and everything it creates, so a test reads one object to see the whole
-/// pipeline's behaviour — in particular [`MockCounters::next_batch_calls`],
-/// which is how "the feeder parked" is proven rather than assumed.
 #[derive(Debug, Default)]
 pub struct MockCounters {
     connects: AtomicUsize,
@@ -48,84 +32,53 @@ pub struct MockCounters {
 }
 
 impl MockCounters {
-    /// Completed `Driver::connect` calls.
     pub fn connects(&self) -> usize {
         self.connects.load(Ordering::SeqCst)
     }
 
-    /// `Connection::execute` calls (counted before any configured panic).
     pub fn executes(&self) -> usize {
         self.executes.load(Ordering::SeqCst)
     }
 
-    /// `Cursor::next_batch` calls — the backpressure probe. If this keeps
-    /// climbing while nobody is consuming, the data path is not bounded.
     pub fn next_batch_calls(&self) -> usize {
         self.next_batch.load(Ordering::SeqCst)
     }
 
-    /// `Cursor::close` calls; a cancelled query must close its cursor so no
-    /// server-side portal is left open.
     pub fn cursor_closes(&self) -> usize {
         self.cursor_closes.load(Ordering::SeqCst)
     }
 
-    /// `Connection::close` calls; an idle-reaped pool entry must actually close
-    /// its socket, not just be forgotten.
     pub fn conn_closes(&self) -> usize {
         self.conn_closes.load(Ordering::SeqCst)
     }
 
-    /// `Canceller::cancel` calls — the server half of a stop.
     pub fn cancels(&self) -> usize {
         self.cancels.load(Ordering::SeqCst)
     }
 
-    /// `Connection::ping` calls; liveness is checked lazily on next use, never
-    /// on a timer, so an idle app stays quiet.
     pub fn pings(&self) -> usize {
         self.pings.load(Ordering::SeqCst)
     }
 }
 
-/// What the mock cursor emits per batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MockPayload {
-    /// `Shape::Table` rows — the Arrow lane of the store.
     Rows,
-    /// `Shape::Documents` values — the non-Arrow lane of the store.
     Docs,
-    /// `Shape::Ack` — a statement acknowledgement (INSERT/DDL). Emits
-    /// `Payload::Empty` chunks; the affected count travels in the shape.
     Ack { affected: Option<u64> },
 }
 
-/// Everything configurable about the mock stack. `Default` is a small, finite,
-/// well-behaved result; every hostile behaviour is opt-in.
 #[derive(Debug, Clone)]
 pub struct MockPlan {
-    /// Batches before end-of-stream. **`None` means infinite** — the producer
-    /// the backpressure test needs.
     pub batches: Option<u64>,
-    /// Rows per batch, further bounded by the caller's [`FetchHint::max_rows`]
-    /// so adaptive fetch sizing is observable.
     pub rows_per_batch: usize,
-    /// Panic inside `Connection::execute`, for testing driver-panic isolation.
     pub panic_on_execute: bool,
-    /// Slow mode: sleep this long inside every `next_batch`.
     pub batch_delay: Option<Duration>,
-    /// Fail with a recoverable `DbError::Query` after this many batches.
     pub fail_after: Option<u64>,
-    /// Distinct values in the `status` column. Low values make the
-    /// dictionary-encoding heuristic fire.
     pub status_cardinality: usize,
     pub payload: MockPayload,
-    /// What this engine claims a cancel can do.
     pub cancel_kind: CancelKind,
-    /// What `Canceller::cancel` reports back.
     pub cancel_outcome: CancelOutcome,
-    /// Starting fetch size the connection advertises, which seeds the feeder's
-    /// adaptive sizing.
     pub default_fetch_rows: u32,
 }
 
@@ -147,7 +100,6 @@ impl Default for MockPlan {
 }
 
 impl MockPlan {
-    /// An endless producer — what the memory contract is actually tested with.
     pub fn infinite(rows_per_batch: usize) -> Self {
         Self {
             batches: None,
@@ -157,14 +109,10 @@ impl MockPlan {
     }
 }
 
-/// The `status` column's value pool; index modulo
-/// [`MockPlan::status_cardinality`] keeps cardinality exactly configurable.
 const STATUSES: [&str; 8] = [
     "active", "pending", "closed", "archived", "draft", "failed", "queued", "done",
 ];
 
-/// The schema every `MockPayload::Rows` cursor announces: one high-cardinality
-/// string (`name`), one low-cardinality string (`status`), and an integer key.
 pub fn mock_row_schema() -> RowSchema {
     let field = |name: &str, logical: LogicalType, flags: FieldFlags| FieldDef {
         name: Arc::from(name),
@@ -184,8 +132,6 @@ pub fn mock_row_schema() -> RowSchema {
     }
 }
 
-/// A driver that constructs nothing expensive and hands out [`MockConnection`]s
-/// wired to the same [`MockCounters`].
 #[derive(Debug)]
 pub struct MockDriver {
     plan: MockPlan,
@@ -204,13 +150,10 @@ impl MockDriver {
         }
     }
 
-    /// The counter object every connection/cursor this driver makes will bump.
     pub fn counters(&self) -> Arc<MockCounters> {
         self.counters.clone()
     }
 
-    /// Build a connection directly, skipping the registry/profile path — the
-    /// shortcut most core tests want.
     pub fn connection(&self) -> MockConnection {
         MockConnection::new(self.plan.clone(), self.counters.clone())
     }
@@ -275,8 +218,6 @@ fn mock_capabilities(default_fetch_rows: u32) -> Capabilities {
     }
 }
 
-/// One mock connection. `execute` either panics (isolation fixture) or hands
-/// back a [`MockCursor`] built from the same plan.
 #[derive(Debug)]
 pub struct MockConnection {
     plan: MockPlan,
@@ -306,7 +247,6 @@ impl MockConnection {
         }
     }
 
-    /// A standalone connection with fresh counters.
     pub fn standalone(plan: MockPlan) -> (Self, Arc<MockCounters>) {
         let counters = Arc::new(MockCounters::default());
         (Self::new(plan, counters.clone()), counters)
@@ -364,7 +304,6 @@ impl Connection for MockConnection {
     }
 }
 
-/// Cancel side of the mock, honest about its configured [`CancelKind`].
 #[derive(Debug)]
 struct MockCanceller {
     kind: CancelKind,
@@ -385,8 +324,6 @@ impl Canceller for MockCanceller {
     }
 }
 
-/// The hostile producer. Emits up to [`MockPlan::batches`] chunks (or forever),
-/// honouring the caller's row hint so adaptive sizing is observable.
 #[derive(Debug)]
 pub struct MockCursor {
     plan: MockPlan,
@@ -422,7 +359,6 @@ impl MockCursor {
         }
     }
 
-    /// A cursor with its own counters, for tests that drive the feeder alone.
     pub fn standalone(plan: MockPlan) -> (Self, Arc<MockCounters>) {
         let counters = Arc::new(MockCounters::default());
         (Self::new(plan, counters.clone()), counters)
@@ -526,7 +462,6 @@ impl Cursor for MockCursor {
     }
 }
 
-/// Minimal catalog: two tables under the root, cheap to enumerate.
 #[derive(Debug)]
 struct MockCatalog;
 

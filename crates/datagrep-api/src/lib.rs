@@ -1,21 +1,3 @@
-//! # datagrep-api — THE STABLE SEAM
-//!
-//! The driver contract for `datagrep`. Everything above this crate (core,
-//! frontends) and everything below it (drivers, the WASM host) meets here, and
-//! only here.
-//!
-//! Ground rules this crate encodes:
-//! - **Streaming-first.** A driver is a factory of pull-based batch cursors;
-//!   [`Connection::execute`] returns when the server accepts the request and
-//!   never buffers a result. Backpressure must reach the database socket.
-//! - **Capability flags, not driver checks.** Any `if driver_id == …` above
-//!   this crate is a missing [`Caps`] flag.
-//! - **Never lose bytes.** Unmappable values ride in [`Value::Unsupported`]
-//!   with their raw encoding; JSON stays raw text; decimals stay strings.
-//! - **`Absent` is distinct from `Null`** — load-bearing for sparse documents.
-//! - **~5 dependencies, no runtime.** No tokio, no Arrow, no reqwest: plugins
-//!   and the TUI must not inherit a runtime through this crate.
-
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
 
@@ -28,9 +10,6 @@ pub mod request;
 pub mod shape;
 pub mod value;
 
-/// Re-exported so driver crates can build `Value::Bytes` / `Value::Unsupported`
-/// without taking their own `bytes` dependency — losing raw bytes because a
-/// crate could not name the type would defeat the never-lose-bytes rule above.
 pub use bytes::Bytes;
 
 pub use caps::{Capabilities, Caps, LanguageId, ParamStyle, SqlDialect};

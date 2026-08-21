@@ -1,19 +1,3 @@
-//! A minimal ISO-8601 UTC timestamp parser for `ISODate("...")`. Hand-rolled
-//! rather than pulled in from a date/time crate — this crate's only
-//! dependencies are `datagrep-api` and `thiserror`, and parsing one fixed
-//! timestamp shape does not justify a third — so date-to-days math uses Howard
-//! Hinnant's well-known `days_from_civil` algorithm rather than a calendar
-//! library.
-//!
-//! Supported subset: `YYYY-MM-DD`, `YYYY-MM-DDTHH:MM:SS`,
-//! `YYYY-MM-DDTHH:MM:SS.fff`, all optionally suffixed with `Z` (a `T` may
-//! also be a plain space, matching what `mongosh`'s `ISODate` accepts).
-//! Explicit numeric offsets (`+08:00`) are not supported — this is a
-//! deliberate scope cut, not full RFC 3339.
-
-/// Days since the Unix epoch (1970-01-01) for a proleptic-Gregorian
-/// `(year, month, day)`, valid for the full `i64` year range. Howard
-/// Hinnant's `days_from_civil`: <http://howardhinnant.github.io/date_algorithms.html>.
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
@@ -24,8 +8,6 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// Parse an ISO-8601-ish UTC timestamp into microseconds since the Unix
-/// epoch. Returns `None` on anything outside the supported subset.
 pub fn parse_iso8601_utc_micros(s: &str) -> Option<i64> {
     let s = s.trim();
     let bytes = s.as_bytes();
@@ -81,8 +63,6 @@ pub fn parse_iso8601_utc_micros(s: &str) -> Option<i64> {
             micros = padded.parse().ok()?;
             rest = &frac[end..];
         }
-        // Trailing 'Z' or nothing; explicit offsets are out of scope (see
-        // module docs).
         if !rest.is_empty() && rest != "Z" {
             return None;
         }

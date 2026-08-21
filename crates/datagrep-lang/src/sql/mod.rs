@@ -1,9 +1,3 @@
-//! SQL [`Language`] impl, one per [`SqlDialect`]. Splitting, classification,
-//! and highlighting are dialect-parameterized functions in the sibling
-//! modules; this module is just the thin [`Language`] wrapper plus the
-//! per-dialect static instances the [`crate::language_for`] registry hands
-//! out.
-
 pub mod classifier;
 pub mod highlight;
 pub mod lexer;
@@ -103,8 +97,6 @@ mod tests {
             EditContext::Comment
         );
 
-        // `=` sits between two spaces: neither neighboring byte is
-        // identifier-like, so this is unambiguously plain statement text.
         let offset_at_operator = src.find(" = ").unwrap() + 1;
         assert_eq!(
             context_at(src, SqlDialect::Postgres, offset_at_operator),

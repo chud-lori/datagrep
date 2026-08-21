@@ -1,7 +1,3 @@
-//! What the core asks a driver to do. Two doors only: the engine's own text
-//! (never translated) or a structured [`Op`] each driver compiles natively or
-//! rejects with a capability error.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,23 +9,17 @@ use crate::error::DbError;
 use crate::shape::ObjectPath;
 use crate::value::{FieldPath, Value};
 
-/// A unit of work for [`Connection::execute`](crate::Connection::execute).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Request {
-    /// User-authored text in the connection's own language, with values bound
-    /// as parameters — never spliced into the text.
     Native {
         text: Arc<str>,
         params: Vec<Value>,
         opts: ExecOpts,
     },
-    /// A portable structured operation (browse/filter/sort — the real 80% of
-    /// cross-engine demand).
     Op(Op),
 }
 
 impl Request {
-    /// Convenience: native text with no params and default options.
     pub fn native(text: impl Into<Arc<str>>) -> Self {
         Request::Native {
             text: text.into(),
@@ -39,11 +29,8 @@ impl Request {
     }
 }
 
-/// Structured operations every driver compiles natively or rejects.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Op {
-    /// Browse: keyset pagination via `resume`, never OFFSET — OFFSET re-scans
-    /// everything it skips and drifts when rows change underneath it.
     Scan {
         path: ObjectPath,
         filter: Option<Predicate>,
@@ -52,14 +39,11 @@ pub enum Op {
         limit: Option<u64>,
         resume: Option<ResumeToken>,
     },
-    /// `exact: false` allows the cheap estimate; the UI then shows "≥ N"
-    /// (see `EXACT_COUNT_CHEAP`).
     Count {
         path: ObjectPath,
         filter: Option<Predicate>,
         exact: bool,
     },
-    /// Requires `EDITABLE_RESULTS`.
     Mutate(MutationBatch),
     Explain {
         inner: Box<Request>,
@@ -68,9 +52,6 @@ pub enum Op {
     Ddl(DdlOp),
 }
 
-/// A small filter AST drivers compile to their native form (SQL WHERE, Mongo
-/// filter document, …). Values are typed [`Value`]s, never spliced text —
-/// which is also what blocks `{"$ne": null}`-style NoSQL injection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Predicate {
     Eq {
@@ -101,16 +82,13 @@ pub enum Predicate {
         field: FieldPath,
         values: Vec<Value>,
     },
-    /// SQL LIKE / engine-native pattern match; the pattern is data.
     Like {
         field: FieldPath,
         pattern: Arc<str>,
     },
-    /// The field is present — meaningful where `Absent` exists (sparse docs).
     Exists {
         field: FieldPath,
     },
-    /// The field holds an explicit NULL (present, but null).
     IsNull {
         field: FieldPath,
     },
@@ -119,8 +97,6 @@ pub enum Predicate {
     Not(Box<Predicate>),
 }
 
-/// One sort criterion. `nulls_first` is explicit because engines disagree on
-/// the default and a silent difference reorders results.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SortKey {
     pub path: FieldPath,
@@ -128,94 +104,52 @@ pub struct SortKey {
     pub nulls_first: bool,
 }
 
-/// Per-request execution options. `timeout` should also be pushed server-side
-/// where the engine supports it, so even uncancellable work is bounded.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ExecOpts {
     pub timeout: Option<Duration>,
-    /// A hard row cap the driver enforces at the source when it can.
     pub row_limit: Option<u64>,
-    /// Caller asserts this request must not write; drivers that can verify it
-    /// server-side should — layer 1 of the read-only guardrails.
     pub read_only_assert: bool,
 }
 
-/// A batch of mutations applied together — atomically where the engine allows.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct MutationBatch {
     pub mutations: Vec<Mutation>,
 }
 
-/// One generated write. `key` is the full row identity ([`crate::Identity`])
-/// as **named** field/value pairs — the same shape as `sets` — so a driver
-/// never has to reverse-engineer which columns the values belong to (no
-/// `pg_index` lookups, no `PRAGMA table_info` positional conventions, no
-/// "assume `_id`"). Each mutation must affect exactly one row or the batch
-/// rolls back — a generated write that hits N rows is a data-loss bug.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Mutation {
     Update {
         path: ObjectPath,
-        /// Row identity: identity fields paired with this row's values.
         key: Vec<(FieldPath, Value)>,
         sets: Vec<(FieldPath, Value)>,
-        /// Precondition, **not** identity: "only apply if these fields still
-        /// hold these values" (check-and-set). ES compiles this to
-        /// `if_seq_no`/`if_primary_term`; SQL engines can compile it into
-        /// extra `WHERE` conjuncts. A driver that cannot honour a precondition
-        /// MUST reject a non-empty `expect` with [`crate::DbError::Unsupported`]
-        /// — silently dropping it would turn a guarded write into a clobber.
         #[serde(default)]
         expect: Vec<(FieldPath, Value)>,
     },
     Insert {
         path: ObjectPath,
-        /// The new row/document as a `Value` (typically `Value::Document`).
         doc: Value,
     },
     Delete {
         path: ObjectPath,
-        /// Row identity: identity fields paired with this row's values.
         key: Vec<(FieldPath, Value)>,
-        /// Precondition, same contract as [`Mutation::Update::expect`]:
-        /// non-empty means check-and-set or refuse, never drop.
         #[serde(default)]
         expect: Vec<(FieldPath, Value)>,
     },
 }
 
-/// DDL. Authoring anything with a column type, an index lifecycle state, or an
-/// alias action list stays `Native` — see the drivers for why each one cannot
-/// generalise.
-///
-/// `path` and `kind` are the pair [`crate::catalog::Catalog`] reported. A
-/// driver answers only for the kinds its own catalog produces: where an index
-/// and an alias share one namespace, nothing but the kind says which a name
-/// means.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DdlOp {
-    /// Engine-native DDL text, passed through verbatim.
     Native { text: Arc<str> },
-    /// Remove exactly one object. A driver whose names are patterns must
-    /// refuse anything that could expand to more than one.
     Drop {
         path: ObjectPath,
         kind: ObjectKind,
         if_exists: bool,
     },
-    /// Rename within the same parent: `from` and `to` may differ only in the
-    /// last part.
     Rename {
         from: ObjectPath,
         to: ObjectPath,
         kind: ObjectKind,
     },
-    /// A named index over whole fields of `path`, ascending. Expressions,
-    /// partial predicates and index methods are engine syntax — `Native`.
-    ///
-    /// For [`DdlOp::Drop`] and [`DdlOp::Rename`], such an index is addressed
-    /// as `path` extended by `name`, whichever namespace the engine files it
-    /// under.
     CreateIndex {
         path: ObjectPath,
         name: Arc<str>,
@@ -226,8 +160,6 @@ pub enum DdlOp {
 }
 
 impl DdlOp {
-    /// The bare new name for a [`DdlOp::Rename`], rejecting a `to` that moves
-    /// the object rather than renaming it.
     pub fn rename_target<'a>(
         from: &ObjectPath,
         to: &'a ObjectPath,
@@ -296,8 +228,6 @@ mod tests {
 
     #[test]
     fn mutation_key_carries_field_names_and_round_trips_through_serde() {
-        // The row identity names its fields, exactly like `sets` — a driver
-        // must never have to guess which column a key value belongs to.
         let op = Op::Mutate(MutationBatch {
             mutations: vec![
                 Mutation::Update {
@@ -331,9 +261,6 @@ mod tests {
 
     #[test]
     fn mutation_without_expect_still_deserializes() {
-        // `expect` is `#[serde(default)]`: a payload serialized before the
-        // field existed (or by a caller that never sets preconditions) must
-        // keep deserializing, as an empty precondition.
         let mutations = vec![
             Mutation::Update {
                 path: ObjectPath::new(vec![Arc::from("app"), Arc::from("users")]),
@@ -387,8 +314,6 @@ mod tests {
             let back: Op = serde_json::from_str(&json).unwrap();
             assert_eq!(back, Op::Ddl(op));
         }
-        // The variants are additive: a payload written before they existed
-        // still deserializes.
         let legacy = r#"{"Ddl":{"Native":{"text":"DROP TABLE t"}}}"#;
         let back: Op = serde_json::from_str(legacy).unwrap();
         assert_eq!(

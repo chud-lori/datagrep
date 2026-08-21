@@ -1,59 +1,12 @@
-//! Elasticsearch DSL / Kibana-console [`Language`] impl.
-//!
-//! A "statement" is one Kibana-console request: a request line
-//! (`GET /my-index/_search`) optionally followed by a JSON body — or, for
-//! `_bulk`/`_msearch`, several JSON objects in a row (NDJSON). Several requests
-//! live in one buffer and are executed one by one, exactly as Kibana's Dev
-//! Tools console does.
-//!
-//! The grammar rules here are ported from Kibana's own hand-written console
-//! parser (its `parser.test.ts` is the de-facto spec):
-//!
-//! - a request begins at a line whose first token is a method
-//!   (`GET|POST|PUT|DELETE|HEAD|PATCH`, case-insensitive); the boundary is the
-//!   **next method token, not a blank line**;
-//! - the method must be followed by whitespace, so `GETTER` is not a method;
-//! - a body is present only when the next non-space character is `{`, and
-//!   **several `{…}` objects in a row** are all part of the one request (this is
-//!   what makes `_bulk` — the single most-pasted ES request — split correctly);
-//! - comments come in three forms: `#…`, `//…` and `/* … */`;
-//! - triple-quoted strings `"""…"""` are scanned to their closing delimiter, so
-//!   an embedded `}` never fools the brace scanner;
-//! - on a parse failure the scanner re-anchors on the next method token, so one
-//!   broken body does not make the rest of the buffer unusable.
-//!
-//! # Block directives
-//!
-//! Like the other non-`--` languages (Redis, MongoShell), directive comments
-//! (`@limit`, `@timeout`, `@connection`, `@readonly`) are written with `#`
-//! immediately above a request — or with `//`, the console's own native
-//! comment form:
-//!
-//! ```text
-//! # @limit 200
-//! # @readonly
-//! GET /my-index/_search
-//! ```
-//!
-//! This is what closes the silent gap where Elasticsearch connections used to
-//! get no block directives at all (they resolved to the inert fallback
-//! language, which always returned `Directives::default()`).
-
 use datagrep_api::LanguageId;
 
 use crate::directives::{extract_directive_lines, parse_directives};
 use crate::{EditContext, Language, StatementClass, StatementSpan, Token, TokenKind};
 
-/// Directive comments above an ES request use `#`, matching the other
-/// non-SQL languages.
 const DIRECTIVE_MARKER: &str = "#";
 
-/// `//` is the Kibana console's native single-line comment, so `// @limit 5`
-/// must work as a directive too — refusing it would silently drop directives
-/// from any script written in the console's own idiom.
 const SLASH_DIRECTIVE_MARKER: &str = "//";
 
-/// The HTTP methods a Kibana-console request line can start with.
 const METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH"];
 
 #[derive(Debug)]
@@ -83,11 +36,6 @@ impl Language for EsDslLanguage {
     }
 }
 
-// --------------------------------------------------------------------------
-// split
-// --------------------------------------------------------------------------
-
-/// Cut `src` into one span per console request.
 fn split(src: &str) -> Vec<StatementSpan> {
     let bytes = src.as_bytes();
     let len = bytes.len();
@@ -100,8 +48,6 @@ fn split(src: &str) -> Vec<StatementSpan> {
             break;
         }
         let Some(method_end) = read_method(bytes, i) else {
-            // Not a request line: re-anchor on the next method token so one
-            // stray line does not swallow the rest of the buffer.
             i = next_line(bytes, i);
             continue;
         };
@@ -113,8 +59,6 @@ fn split(src: &str) -> Vec<StatementSpan> {
             end += 1;
         }
 
-        // Consume any body objects (`{…}` possibly repeated, NDJSON-style),
-        // each preceded only by whitespace/comments.
         loop {
             let peek = skip_ws_and_comments(bytes, end);
             if peek < len && bytes[peek] == b'{' {
@@ -139,11 +83,6 @@ fn emit_span(spans: &mut Vec<StatementSpan>, src: &str, start: usize, end: usize
     if start >= end {
         return;
     }
-    // Directive lines directly above the request line (contiguous `# @...` or
-    // `// @...` — `//` is ES's native console comment, so it works too). The
-    // backward walk is floored at the previous span's end so a `# @...`-shaped
-    // line that is really *inside* the previous request (e.g. in a
-    // triple-quoted string body) is never mistaken for a directive.
     let floor = spans.last().map(|s| s.range.end).unwrap_or(0);
     let scoped = &src[floor..];
     let scoped_start = start - floor;
@@ -158,9 +97,6 @@ fn emit_span(spans: &mut Vec<StatementSpan>, src: &str, start: usize, end: usize
     });
 }
 
-/// If `bytes[i..]` begins with a method keyword (case-insensitive) followed by
-/// ASCII whitespace, return the index just past the keyword. `GETTER` is not a
-/// method because the byte after `GET` is not whitespace.
 fn read_method(bytes: &[u8], i: usize) -> Option<usize> {
     for m in METHODS {
         let end = i + m.len();
@@ -174,8 +110,6 @@ fn read_method(bytes: &[u8], i: usize) -> Option<usize> {
     None
 }
 
-/// Advance past ASCII whitespace and the three comment forms (`#…`, `//…`,
-/// `/* … */`). Returns the index of the next significant byte, or `len`.
 fn skip_ws_and_comments(bytes: &[u8], mut i: usize) -> usize {
     let len = bytes.len();
     loop {
@@ -213,22 +147,6 @@ fn next_line(bytes: &[u8], i: usize) -> usize {
     (eol + 1).min(bytes.len())
 }
 
-/// Scan a balanced JSON object starting at `bytes[i] == '{'`. Respects
-/// double-quoted strings (with `\` escapes), triple-quoted `"""…"""` strings,
-/// nested `{}`/`[]`, and the three comment forms (`#…`, `//…`, `/* … */`) —
-/// a brace inside a comment must not count toward the depth. Returns the index
-/// just past the matching `}`.
-///
-/// Two recovery rules keep one broken body from swallowing the buffer:
-///
-/// - a line whose first token is a method keyword ends the (necessarily
-///   broken) body right there — Kibana's own re-anchor rule — so a single
-///   missing `}` leaves every later request executable;
-/// - an unterminated object runs to `len`.
-///
-/// Strings are matched before comments, so a `/` or `#` inside a string never
-/// starts a comment; a comment ends at its newline, and the newline itself is
-/// then inspected by the re-anchor rule like any other.
 fn scan_json_object(bytes: &[u8], start: usize) -> usize {
     let len = bytes.len();
     let mut i = start;
@@ -249,9 +167,6 @@ fn scan_json_object(bytes: &[u8], start: usize) -> usize {
             }
             b'\n' => {
                 i += 1;
-                // Re-anchor: a method keyword opening the next line means the
-                // user started a new request without closing this body. End
-                // the broken span here rather than swallowing what follows.
                 let line_start = i;
                 let mut j = i;
                 while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') {
@@ -278,10 +193,6 @@ fn scan_json_object(bytes: &[u8], start: usize) -> usize {
     len
 }
 
-/// Scan a JSON string starting at `bytes[i] == '"'`. Handles the triple-quoted
-/// `"""…"""` form (scanned to the next `"""`, no escapes) and the ordinary
-/// double-quoted form (with `\` escapes). Returns the index just past the
-/// closing delimiter, or `len` if unterminated.
 fn scan_string(bytes: &[u8], start: usize) -> usize {
     let len = bytes.len();
     if bytes.get(start + 1) == Some(&b'"') && bytes.get(start + 2) == Some(&b'"') {
@@ -306,16 +217,7 @@ fn scan_string(bytes: &[u8], start: usize) -> usize {
     len
 }
 
-// --------------------------------------------------------------------------
-// classify
-// --------------------------------------------------------------------------
-
-/// POST endpoints that only read — a request is a Read if any of these appears
-/// as a whole `/`-delimited path segment.
-///
-/// MUST stay in sync with the driver's read-only allow-list
-/// (`datagrep-drv-elasticsearch`'s `READ_ONLY_POST_ENDPOINTS`) until the two
-/// tables are unified here, per notes/elasticsearch-plan.md §6 ("classify").
+// Mirror of READ_ONLY_POST_ENDPOINTS in datagrep-drv-elasticsearch — keep the two tables in sync.
 const READ_ACTIONS: &[&str] = &[
     "_search",
     "_msearch",
@@ -335,7 +237,6 @@ const READ_ACTIONS: &[&str] = &[
     "_mtermvectors",
 ];
 
-/// Cluster-administration action segments.
 const ADMIN_ACTIONS: &[&str] = &[
     "_cluster",
     "_snapshot",
@@ -350,7 +251,6 @@ const ADMIN_ACTIONS: &[&str] = &[
     "_watcher",
 ];
 
-/// Index/mapping/alias administration (DDL) action segments.
 const DDL_ACTIONS: &[&str] = &[
     "_mapping",
     "_mappings",
@@ -372,7 +272,6 @@ const DDL_ACTIONS: &[&str] = &[
     "_cache",
 ];
 
-/// Document-write action segments.
 const WRITE_ACTIONS: &[&str] = &[
     "_doc",
     "_create",
@@ -414,9 +313,6 @@ fn classify(stmt: &str) -> StatementClass {
         return StatementClass::Write;
     }
 
-    // No recognised action segment. A bare index target under PUT/DELETE is
-    // index create/delete — DDL; anything else non-read we treat as a write so
-    // the read-only guard errs on the side of blocking it.
     if segments.is_empty() {
         return StatementClass::Unknown;
     }
@@ -427,8 +323,6 @@ fn classify(stmt: &str) -> StatementClass {
     }
 }
 
-/// Pull `(method, path)` out of a statement's first request line, skipping any
-/// leading comment lines. Returns `None` if the first token is not a method.
 fn parse_request_line(stmt: &str) -> Option<(&str, &str)> {
     for line in stmt.lines() {
         let line = line.trim();
@@ -451,10 +345,6 @@ fn parse_request_line(stmt: &str) -> Option<(&str, &str)> {
     }
     None
 }
-
-// --------------------------------------------------------------------------
-// context_at
-// --------------------------------------------------------------------------
 
 fn context_at(src: &str, offset: usize) -> EditContext {
     let bytes = src.as_bytes();
@@ -510,17 +400,11 @@ fn context_at(src: &str, offset: usize) -> EditContext {
     }
 }
 
-// --------------------------------------------------------------------------
-// highlight
-// --------------------------------------------------------------------------
-
 fn highlight(src: &str) -> Vec<Token> {
     let bytes = src.as_bytes();
     let len = bytes.len();
     let mut out = Vec::new();
     let mut i = 0usize;
-    // True at the start of a logical line (after a newline / buffer start,
-    // ignoring leading whitespace) — where a method keyword may appear.
     let mut at_line_start = true;
 
     while i < len {
@@ -707,8 +591,6 @@ mod tests {
         assert_eq!(texts(src), vec!["GET /i/_search", "DELETE /i/_doc/1"]);
     }
 
-    /// Regression: a `{` inside a `//` comment used to inflate the brace
-    /// depth, so the body never closed and the next request was swallowed.
     #[test]
     fn a_brace_in_a_line_comment_does_not_swallow_the_next_request() {
         let src = "POST /i/_search\n{\n // { note\n \"q\":1\n}\nGET /o/_search";
@@ -721,8 +603,6 @@ mod tests {
         );
     }
 
-    /// Regression: a `}` inside a `/* … */` comment used to close the body
-    /// early, truncating the first span.
     #[test]
     fn a_brace_in_a_block_comment_does_not_truncate_the_body() {
         let src = "GET /i/_search\n{ /* } */ \"q\":1 }\nGET /b/_search";
@@ -732,9 +612,6 @@ mod tests {
         );
     }
 
-    /// Regression: one missing `}` used to make every later request in the
-    /// buffer unexecutable. A method token at the start of a line re-anchors
-    /// (Kibana's recovery rule), ending the broken body there.
     #[test]
     fn an_unterminated_body_reanchors_on_the_next_method_line() {
         let src = "GET /a/_search\n{ \"q\":1\nGET /b/_search\n{}";
@@ -781,8 +658,6 @@ mod tests {
         assert!(split(src)[0].directives.is_err());
     }
 
-    /// `//` is the console's native comment form, so `// @limit` must work as
-    /// a directive marker alongside `#`.
     #[test]
     fn slash_slash_directives_are_accepted() {
         let src = "// @limit 25\n// @readonly\nGET /i/_search";
@@ -793,18 +668,12 @@ mod tests {
         assert!(d.readonly);
     }
 
-    /// Regression: a `# @…`-shaped line living *inside* the previous request's
-    /// body (here, a triple-quoted string that closes on the same line) must
-    /// not be extracted as a directive for the next request — the backward
-    /// walk stops at the previous span's end.
     #[test]
     fn a_directive_shaped_line_inside_the_previous_span_is_not_extracted() {
         let src = "POST /i/_doc\n{\"s\":\"\"\"\n# @limit 5\"\"\"}\nGET /b/_search";
         let spans = split(src);
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[1].text(src).trim(), "GET /b/_search");
-        // Without the floor, the walk grabbed `# @limit 5"""}` and produced a
-        // spurious directive error for the second request.
         assert_eq!(
             spans[1].directives.clone().unwrap(),
             crate::directives::Directives::default()
