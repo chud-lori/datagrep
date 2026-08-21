@@ -359,9 +359,21 @@ final class AppModel: ObservableObject {
         results.onNestedCell = { [weak self] row, col, window in
             guard let self else { return }
             self.detailTitle = "row \(row + 1) · column \(col + 1)"
-            self.detailBody =
+            let value =
                 Self.prettify(window.detailJSON(absoluteRow: UInt64(row), col: col))
                 ?? "(no detail available)"
+            // On a result with a projection root the columns are the document's
+            // own fields, so `_index`/`_id` are no longer among them — and the
+            // one place someone goes looking for "which document is this?" is
+            // the pane that shows them a value. The envelope leads, because it
+            // is the answer to that question.
+            if let envelope = window.envelope(absoluteRow: UInt64(row)),
+                let text = Self.prettifyObject(envelope), !envelope.isEmpty
+            {
+                self.detailBody = "// document\n\(text)\n\n// value\n\(value)"
+            } else {
+                self.detailBody = value
+            }
             // Clicking a chip is an unambiguous request for the cell, so the
             // inspector switches to it — the loaded schema stays put behind
             // the mode switch, one click away.
@@ -1579,6 +1591,16 @@ final class AppModel: ObservableObject {
 
     func runScrollBench() {
         ScrollBench.run(on: results, model: self)
+    }
+
+    /// The same pretty-printing as `prettify`, for an object that has already
+    /// been parsed (the row envelope).
+    static func prettifyObject(_ object: [String: Any]) -> String? {
+        guard JSONSerialization.isValidJSONObject(object),
+            let data = try? JSONSerialization.data(
+                withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+        else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     static func prettify(_ json: String?) -> String? {
