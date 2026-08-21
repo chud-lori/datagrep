@@ -182,8 +182,20 @@ pub enum Mutation {
     },
 }
 
-/// Placeholder DDL surface — structured variants land with the M3 write path;
-/// until then generated DDL travels as engine-native text.
+/// DDL. `Native` is not a placeholder: it is the right model for schema and
+/// index administration, which is the part of every engine that generalises
+/// worst. A structured verb only earns a variant when more than one driver can
+/// honour it *and* something in the workspace constructs it — an untyped
+/// passthrough is honest, whereas a general-looking variant five drivers
+/// refuse is a capability that does not exist.
+///
+/// Surveyed for M3 across all six drivers: only `Drop` and `Rename` have a
+/// meaning in more than one engine. `Create` is blocked on a type vocabulary
+/// the api does not have — [`crate::shape::FieldDef`] describes what a *result*
+/// held and is deliberately lossy, while authoring cannot be. And a `Drop`
+/// needs [`crate::catalog::ObjectKind`] alongside the path, because engines
+/// exist where an index and an alias share one namespace and only the kind
+/// says which is meant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DdlOp {
     /// Engine-native DDL text, passed through verbatim.
