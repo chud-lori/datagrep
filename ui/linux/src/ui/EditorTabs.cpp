@@ -1,5 +1,6 @@
 #include "EditorTabs.hpp"
 
+#include "ui/EngineIcon.hpp"
 #include "ui/SqlEditor.hpp"
 
 #include <QComboBox>
@@ -188,6 +189,12 @@ void EditorTabs::setWindowConnection(const QString& profile) {
         return;
     }
     windowConnection_ = profile;
+    // Follow-window tabs show the engine they now run against.
+    for (int i = 0; i < tabs_.size(); ++i) {
+        if (tabs_.at(i).record.connection.isEmpty()) {
+            updateTabChrome(i);
+        }
+    }
     persistSession();
 }
 
@@ -212,6 +219,10 @@ void EditorTabs::setConnections(const QVector<QPair<QString, QString>>& connecti
         if (!bound.isEmpty() && !known.contains(bound)) {
             performClose(i, /*keepFiles=*/true);
         }
+    }
+    // Drivers may only now be known (session restored before the first list).
+    for (int i = 0; i < tabs_.size(); ++i) {
+        updateTabChrome(i);
     }
     updateWelcomeState();
 }
@@ -381,6 +392,15 @@ QString EditorTabs::displayTitle(const Tab& tab) const {
                : QStringLiteral("Untitled");
 }
 
+QString EditorTabs::driverFor(const QString& connection) const {
+    for (const auto& c : connections_) {
+        if (c.first == connection) {
+            return c.second;
+        }
+    }
+    return QString();
+}
+
 void EditorTabs::updateTabChrome(int index) {
     if (index < 0 || index >= tabs_.size()) {
         return;
@@ -395,6 +415,14 @@ void EditorTabs::updateTabChrome(int index) {
         title += QStringLiteral(" •");
     }
     tabWidget_->setTabText(index, title);
+    // Same rule as macOS: the mark shows the EFFECTIVE engine — the binding
+    // when bound, the window connection otherwise — and hides when unknown.
+    const QString effective = tab.record.connection.isEmpty()
+                                  ? windowConnection_
+                                  : tab.record.connection;
+    const QString driver = driverFor(effective);
+    tabWidget_->setTabIcon(index,
+                           driver.isEmpty() ? QIcon() : dg::engineIcon(driver));
     QStringList tip;
     tip << (tab.record.isScratch()
                 ? QStringLiteral("Unsaved scratch tab — Ctrl+S names it")
@@ -575,10 +603,12 @@ void EditorTabs::syncBindCombo() {
     bindCombo_->clear();
     bindCombo_->addItem(QStringLiteral("Follow window connection"), QString());
     for (const auto& c : connections_) {
-        const QString label = c.second.isEmpty()
-                                  ? c.first
-                                  : QStringLiteral("%1 · %2").arg(c.first, c.second);
-        bindCombo_->addItem(label, c.first);
+        const QString label =
+            c.second.isEmpty()
+                ? c.first
+                : QStringLiteral("%1 · %2").arg(c.first,
+                                                dg::engineDisplayName(c.second));
+        bindCombo_->addItem(dg::engineIcon(c.second), label, c.first);
     }
     const Tab* active = activeTab();
     const QString bound = active != nullptr ? active->record.connection : QString();

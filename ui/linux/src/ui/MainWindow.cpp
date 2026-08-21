@@ -7,6 +7,7 @@
 #include "ui/ConnectionDialog.hpp"
 #include "ui/DetailPanel.hpp"
 #include "ui/EditorTabs.hpp"
+#include "ui/EngineIcon.hpp"
 #include "ui/HistoryPanel.hpp"
 #include "ui/ResultTableView.hpp"
 #include "ui/SchemaTree.hpp"
@@ -28,11 +29,8 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QMessageBox>
-#include <QPainter>
-#include <QPen>
-#include <QPixmap>
 #include <QPushButton>
-#include <QRectF>
+#include <QSize>
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -130,6 +128,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // --- sidebar: connection list + management over a lazy schema tree ------
     connections_ = new QListWidget(this);
     connections_->setAlternatingRowColors(true);
+    // Wider than square: [marker bar · engine mark] — see dg::engineIcon.
+    connections_->setIconSize(QSize(23, 16));
     connect(connections_, &QListWidget::itemSelectionChanged, this,
             &MainWindow::onConnectionSelected);
     // Double-clicking a connection edits it, matching the macOS sidebar.
@@ -356,7 +356,7 @@ void MainWindow::reloadProfiles() {
         // Tooltip carries the facts the row cannot spell out at a glance.
         QStringList tip;
         if (!driver.isEmpty()) {
-            tip << driver;
+            tip << dg::engineDisplayName(driver);
         }
         if (!env.isEmpty()) {
             tip << env;
@@ -365,20 +365,13 @@ void MainWindow::reloadProfiles() {
             tip << QStringLiteral("read-only");
         }
 
-        // A marked connection shows its colour as a swatch on the row itself, so
-        // the marker is visible while scanning the list, not only after
-        // selecting. The banner (updateMarkedBanner) is the loud half; this is
-        // the recognition cue.
-        if (const auto swatch = dg::connectionColor(safety.color)) {
-            QPixmap pm(12, 12);
-            pm.fill(Qt::transparent);
-            QPainter p(&pm);
-            p.setRenderHint(QPainter::Antialiasing);
-            p.setBrush(*swatch);
-            p.setPen(QPen(QColor(0, 0, 0, 64), 1));
-            p.drawEllipse(QRectF(0.5, 0.5, 11.0, 11.0));
-            p.end();
-            item->setIcon(QIcon(pm));
+        // Engine mark, with the marker colour as a bar down its leading edge —
+        // both visible while scanning the list, not only after selecting. The
+        // banner (updateMarkedBanner) is the loud half; this is the
+        // recognition cue.
+        const auto swatch = dg::connectionColor(safety.color);
+        item->setIcon(dg::engineIcon(driver, swatch.value_or(QColor())));
+        if (swatch) {
             tip << QStringLiteral("marked %1").arg(safety.color);
         }
         item->setToolTip(tip.join(QStringLiteral(" · ")));

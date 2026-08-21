@@ -1,6 +1,7 @@
 #include "ConnectionDialog.hpp"
 
 #include "ffi/DatagrepFfi.hpp"
+#include "ui/EngineIcon.hpp"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -63,26 +64,10 @@ const ConnectionDialog::Engine* ConnectionDialog::engineById(const QString& id) 
          false, QStringLiteral("Default index"), QStringLiteral("optional")},
     };
 
-    // Canonicalise the incoming id the same way EngineStyle.normalise does, so a
-    // profile's stored driver ("postgresql", "mariadb", "mongodb") still matches.
-    const QString s = id.toLower();
-    QString key = s;
-    if (s.startsWith(QStringLiteral("postgres")) || s == QStringLiteral("pg") ||
-        s == QStringLiteral("psql")) {
-        key = QStringLiteral("postgres");
-    } else if (s.startsWith(QStringLiteral("mysql")) ||
-               s.startsWith(QStringLiteral("maria"))) {
-        key = QStringLiteral("mysql");
-    } else if (s.startsWith(QStringLiteral("sqlite"))) {
-        key = QStringLiteral("sqlite");
-    } else if (s.startsWith(QStringLiteral("redis"))) {
-        key = QStringLiteral("redis");
-    } else if (s.startsWith(QStringLiteral("mongo"))) {
-        key = QStringLiteral("mongo");
-    } else if (s.startsWith(QStringLiteral("elastic")) ||
-               s.startsWith(QStringLiteral("opensearch"))) {
-        key = QStringLiteral("elasticsearch");
-    }
+    // The shared folding table, so a profile's stored driver ("postgresql",
+    // "mariadb", "mongodb") still matches — one definition of what an engine
+    // is, same as EngineStyle.canonicalID keeps on macOS.
+    const QString key = dg::canonicalDriverId(id);
     for (const Engine& e : engines) {
         if (e.id == key) {
             return &e;
@@ -372,12 +357,8 @@ void ConnectionDialog::buildUi() {
         QStringLiteral("postgres"),      QStringLiteral("mysql"),
         QStringLiteral("sqlite"),        QStringLiteral("redis"),
         QStringLiteral("mongo"),         QStringLiteral("elasticsearch")};
-    const QString names[] = {
-        QStringLiteral("PostgreSQL"),   QStringLiteral("MySQL"),
-        QStringLiteral("SQLite"),       QStringLiteral("Redis"),
-        QStringLiteral("MongoDB"),      QStringLiteral("Elasticsearch")};
-    for (int i = 0; i < 6; ++i) {
-        engineBox_->addItem(names[i], ids[i]);
+    for (const QString& id : ids) {
+        engineBox_->addItem(dg::engineIcon(id), dg::engineDisplayName(id), id);
     }
     connect(engineBox_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             &ConnectionDialog::onEngineChanged);

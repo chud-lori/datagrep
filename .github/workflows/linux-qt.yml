@@ -66,6 +66,10 @@ jobs:
             libgl1-mesa-dev \
             zlib1g-dev \
             libdbus-1-dev
+          # Qt6 Svg (engine brand marks). Debian-style name first; the
+          # pre-noble Ubuntu name second in case the runner image regresses.
+          sudo apt-get install -y qt6-svg-dev || \
+            sudo apt-get install -y libqt6svg6-dev
           # KSyntaxHighlighting is OPTIONAL: CMake finds it with find_package
           # and otherwise compiles the built-in fallback highlighter. The KF6
           # dev package is not in every runner image's archive (partial KF6 on
@@ -125,6 +129,7 @@ jobs:
             ca-certificates curl git \
             cmake ninja-build g++ pkg-config \
             qt6-base-dev qt6-base-dev-tools \
+            qt6-svg-dev \
             libgl1-mesa-dev \
             zlib1g-dev \
             libdbus-1-dev \

@@ -1,5 +1,7 @@
 #include "HistoryPanel.hpp"
 
+#include "ui/EngineIcon.hpp"
+
 #include <QBrush>
 #include <QClipboard>
 #include <QColor>
@@ -365,7 +367,10 @@ void HistoryPanel::refresh() {
                                              ? QStringLiteral("no connection")
                                              : e.connection);
             if (!e.engine.isEmpty()) {
-                item->setToolTip(ColConnection, e.engine);
+                // Engine kept per entry, so a deleted connection still shows
+                // what it was.
+                item->setIcon(ColConnection, dg::engineIcon(e.engine));
+                item->setToolTip(ColConnection, dg::engineDisplayName(e.engine));
             }
             item->setText(ColTime, dg::historyformat::time(e.startedAt()));
             item->setText(ColDuration, dg::historyformat::duration(e.durationMs));
@@ -425,8 +430,9 @@ void HistoryPanel::showDetail(const std::optional<dg::QueryHistoryEntry>& entry)
     if (!entry->connection.isEmpty()) {
         parts << (entry->engine.isEmpty()
                       ? entry->connection
-                      : QStringLiteral("%1 · %2").arg(entry->connection,
-                                                      entry->engine));
+                      : QStringLiteral("%1 · %2").arg(
+                            entry->connection,
+                            dg::engineDisplayName(entry->engine)));
     }
     parts << QStringLiteral("%1 %2").arg(
         dg::historyformat::dayTitle(entry->startedAt().date()),
