@@ -47,6 +47,16 @@ struct StagedEditsBar: View {
                 Button("Discard") { model.discardStagedEdits() }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                // A conflicted edit cannot simply be committed again — it would
+                // be refused by the same guard — so the way forward is offered
+                // where the refusal is visible, not only inside the report.
+                if edits.conflictCount > 0 {
+                    Button(conflictTitle) { model.reviewConflicts() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .tint(.orange)
+                        .disabled(model.isRereading)
+                }
                 Button(commitTitle) { model.commitStagedEdits() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
@@ -81,11 +91,20 @@ struct StagedEditsBar: View {
         if edits.deleteCount > 0 { parts.append("\(edits.deleteCount) to delete") }
         let applied = edits.documents.count - edits.pendingCount
         if applied > 0 { parts.append("\(applied) already written") }
+        if edits.conflictCount > 0 {
+            parts.append(
+                edits.conflictCount == 1
+                    ? "1 changed on the server" : "\(edits.conflictCount) changed on the server")
+        }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private var commitTitle: String {
         edits.pendingCount == 1 ? "Commit 1…" : "Commit \(edits.pendingCount)…"
+    }
+
+    private var conflictTitle: String {
+        edits.conflictCount == 1 ? "Resolve 1 Conflict…" : "Resolve \(edits.conflictCount) Conflicts…"
     }
 }
 
@@ -152,7 +171,7 @@ struct MutationReportSheet: View {
         }
         if report.conflicts > 0 {
             line +=
-                " A version conflict means the document changed on the server after you loaded it, so the write was refused rather than overwriting someone else's change. Re-run the statement to load it again; what you typed is still staged."
+                " A version conflict means the document changed on the server after you loaded it, so the write was refused rather than overwriting someone else's change. What you typed is still staged — resolve it below to see what changed."
         }
         return line
     }
@@ -185,14 +204,28 @@ struct MutationReportSheet: View {
 
     private var footer: some View {
         HStack {
-            Text(report.isClean ? "" : "Re-run the statement to see what the server holds now.")
+            Text(footerNote)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             Spacer()
+            // The only offer a conflict gets here is to go and look at it. What
+            // is deliberately absent is a "retry": re-sending the same write
+            // against a document that moved is the clobber the guard refused.
+            if report.conflicts > 0 {
+                Button("Resolve Conflicts…") { model.reviewConflicts() }
+                    .disabled(model.isRereading)
+            }
             Button("Done") { model.showMutationReport = false }
                 .keyboardShortcut(.defaultAction)
         }
         .padding(12)
+    }
+
+    private var footerNote: String {
+        if report.conflicts > 0 {
+            return "Reads each conflicted document back and shows what changed."
+        }
+        return report.isClean ? "" : "Re-run the statement to see what the server holds now."
     }
 }
 

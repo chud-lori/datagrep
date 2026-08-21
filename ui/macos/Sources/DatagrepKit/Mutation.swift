@@ -237,7 +237,11 @@ public struct DocumentMutation: Sendable {
 
     /// `(FieldPath, Value)` — a one-segment path paired with its value, which
     /// on the wire is `[[{"Field":"status"}], {"Str":"done"}]`.
-    private static func pair(_ field: String, _ value: MutationValue) -> [Any] {
+    ///
+    /// Shared with `DocumentAddress` below: a re-read addresses a document with
+    /// the very same key its write did, and two encoders for one wire shape is
+    /// two things to get wrong.
+    static func pair(_ field: String, _ value: MutationValue) -> [Any] {
         [[["Field": field]], value.abiJSON]
     }
 }
@@ -251,6 +255,106 @@ public enum MutationBatch {
             throw DatagrepError("the mutation batch could not be encoded as UTF-8")
         }
         return text
+    }
+}
+
+// MARK: - asking what the server holds now
+
+/// One document to re-read, addressed exactly as its write was.
+///
+/// This is the read half of a version conflict. Nothing about it retries a
+/// write: it fetches the current document so the three readings — loaded,
+/// server-now, typed — can be put side by side and a person can choose.
+public struct DocumentAddress: Sendable {
+    public var key: [(field: String, value: MutationValue)]
+
+    public init(key: [(field: String, value: MutationValue)]) {
+        self.key = key
+    }
+
+    fileprivate var abiJSON: [String: Any] {
+        ["key": key.map { DocumentMutation.pair($0.field, $0.value) }]
+    }
+}
+
+/// The address list `datagrep_reread_documents` parses.
+public enum DocumentAddressBatch {
+    public static func json(_ addresses: [DocumentAddress]) throws -> String {
+        let payload: [String: Any] = ["documents": addresses.map(\.abiJSON)]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw DatagrepError("the address list could not be encoded as UTF-8")
+        }
+        return text
+    }
+}
+
+/// One field of a document as the server holds it now.
+///
+/// `nested` rather than a flattened value: a field that has become an object or
+/// an array is not something the three-column view can compare against a typed
+/// cell, and saying which it is beats showing a blank the user would read as
+/// "empty".
+public enum ServerValue: Sendable, Equatable {
+    case value(MutationValue)
+    case nested(String)
+    /// The field is not on the document at all any more.
+    case missing
+
+    static func decode(_ any: Any?) -> ServerValue {
+        if any == nil { return .missing }
+        if let value = MutationValue.decode(any) { return .value(value) }
+        if any is [Any] { return .nested("an array") }
+        if any is [String: Any] { return .nested("an object") }
+        return .nested("a value this view cannot show")
+    }
+
+    /// What this reads as in the "on the server now" column.
+    public var display: String {
+        switch self {
+        case .value(let v): return v.display
+        case .nested(let what): return what
+        case .missing: return "—"
+        }
+    }
+
+    public var mutationValue: MutationValue? {
+        if case .value(let v) = self { return v }
+        return nil
+    }
+}
+
+/// What one re-read found. `found == false` with no `error` means the document
+/// is simply gone — someone deleted it, which is a resolution in itself and
+/// leaves nothing to rebase onto.
+public struct ServerDocument: Sendable {
+    public let found: Bool
+    public let error: String?
+    /// The fields outside the projected root: which document this is, and the
+    /// *fresh* guard values a rebase re-guards against.
+    public let envelope: [String: ServerValue]
+    /// The document itself, at its root.
+    public let fields: [String: ServerValue]
+
+    static func decode(_ d: [String: Any]) -> ServerDocument {
+        func map(_ any: Any?) -> [String: ServerValue] {
+            guard let object = any as? [String: Any] else { return [:] }
+            return object.mapValues(ServerValue.decode)
+        }
+        return ServerDocument(
+            found: d["found"] as? Bool ?? false,
+            error: d["error"] as? String,
+            envelope: map(d["envelope"]),
+            fields: map(d["fields"]))
+    }
+
+    static func decodeAll(_ text: String) throws -> [ServerDocument] {
+        guard let d = jsonObject(text) as? [String: Any],
+            let documents = d["documents"] as? [[String: Any]]
+        else {
+            throw DatagrepError("the re-read was not a document list: \(text)")
+        }
+        return documents.map(ServerDocument.decode)
     }
 }
 
@@ -361,5 +465,27 @@ extension DatagrepCoreHandle {
             }
         }
         return try MutationReport.decode(json)
+    }
+
+    /// Read what the server holds now for each address, in the order given.
+    ///
+    /// **This blocks**, like `mutate`, and must be called off the main queue.
+    /// The answers are matched to the addresses **by position** — the engine
+    /// returns exactly one entry per address — which is the same contract the
+    /// commit report follows, and for the same reason: matching by id would
+    /// need this layer to know which identity field *is* the id.
+    ///
+    /// A document that has been deleted comes back as `found == false`, not as
+    /// a throw. A throw means the whole read never ran.
+    public func reread(profile: String, addresses: [DocumentAddress]) throws -> [ServerDocument] {
+        let body = try DocumentAddressBatch.json(addresses)
+        let json = try profile.withCString { p in
+            try body.withCString { b in
+                try datagrepTry { errOut in
+                    takeOwnedString(datagrep_reread_documents(raw, p, b, errOut))
+                }
+            }
+        }
+        return try ServerDocument.decodeAll(json)
     }
 }

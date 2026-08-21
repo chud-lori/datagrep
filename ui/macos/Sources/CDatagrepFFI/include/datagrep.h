@@ -98,6 +98,20 @@ char   *datagrep_rows_envelope_json(DatagrepRows *, uint64_t row);
 char   *datagrep_mutate(DatagrepCore *, const char *profile, const char *mutation_json,
                         char **err_out);
 
+/* What the server holds NOW for documents already addressed — the read half of
+ * a version conflict, so a 409 becomes loaded / server-now / typed with a
+ * rebase or discard-mine, rather than a retry that clobbers. SYNCHRONOUS.
+ * `addresses_json` re-uses a mutation's own key:
+ *   {"documents":[{"key":[[[{"Field":"_id"}],{"Str":"abc"}]]}]}
+ * Returns
+ *   {"documents":[{"found":true,"envelope":{…fresh _seq_no/_primary_term…},
+ *                  "fields":{…the document…}},
+ *                 {"found":false},{"found":false,"error":str}]}
+ * one entry per address, IN THE ORDER SENT, or NULL with *err_out set when the
+ * batch as a whole could not run. */
+char   *datagrep_reread_documents(DatagrepCore *, const char *profile,
+                                  const char *addresses_json, char **err_out);
+
 #ifdef __cplusplus
 }
 #endif

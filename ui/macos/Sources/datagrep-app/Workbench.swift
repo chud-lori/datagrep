@@ -51,6 +51,15 @@ struct Workbench: View {
                 MutationReportSheet(model: model, report: report)
             }
         }
+        // What the server holds now, for the documents the guard refused to
+        // overwrite. Reached from the report or from the staged bar, and never
+        // up at the same time as the report — the re-read lands a runloop turn
+        // after the report sheet is told to close.
+        .sheet(isPresented: $model.showConflictReview) {
+            if let review = model.conflictReview {
+                ConflictReviewSheet(model: model, review: review)
+            }
+        }
         .animation(.smooth(duration: 0.25), value: model.sidebarShown)
         // Feed the live content width so the sidebar can auto-collapse before the
         // balanced split would clip it. The window's own contentMinSize is the
