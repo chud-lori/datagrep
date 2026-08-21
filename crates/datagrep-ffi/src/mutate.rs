@@ -262,6 +262,61 @@ mod tests {
         assert!(matches!(req, Request::Op(Op::Mutate(_))));
     }
 
+    /// **The bytes the macOS grid actually sends.**
+    ///
+    /// Captured verbatim from `datagrep-app --dump-mutation`, which prints what
+    /// that app's own encoder builds for one edited document and one deleted
+    /// one. The UI hand-encodes serde's externally-tagged spelling — there is no
+    /// Swift test target to pin it from that side, and a single wrong bracket
+    /// would surface as a parse failure with the user's edit already typed. So
+    /// it is pinned here, against the parser that would reject it, and taken all
+    /// the way through the driver's compiler: the guard survives as
+    /// `if_seq_no`/`if_primary_term`, routing survives, and the typed values
+    /// keep their JSON types instead of arriving as strings.
+    #[test]
+    fn the_json_the_macos_grid_sends_parses_and_compiles_to_a_guarded_write() {
+        // Regenerate with: cd ui/macos && swift build -c release &&
+        //                  ./.build/release/datagrep-app --dump-mutation
+        let json = r#"{"mutations":[{"Update":{"expect":[[[{"Field":"_seq_no"}],{"I64":41}],[[{"Field":"_primary_term"}],{"I64":3}]],"key":[[[{"Field":"_index"}],{"Str":"events"}],[[{"Field":"_id"}],{"Str":"abc"}],[[{"Field":"_routing"}],{"Str":"tenant-7"}]],"sets":[[[{"Field":"status"}],{"Str":"done"}],[[{"Field":"retries"}],{"I64":2}],[[{"Field":"score"}],{"F64":1.5}],[[{"Field":"archived"}],{"Bool":true}]],"path":[]}},{"Delete":{"expect":[[[{"Field":"_seq_no"}],{"I64":7}],[[{"Field":"_primary_term"}],{"I64":1}]],"path":[],"key":[[[{"Field":"_index"}],{"Str":"events"}],[[{"Field":"_id"}],{"Str":"gone"}]]}}]}"#;
+
+        let batch: MutationBatch = serde_json::from_str(json).expect("the grid's batch must parse");
+        assert_eq!(batch.mutations.len(), 2);
+
+        let update =
+            datagrep_drv_elasticsearch::mutate::compile_mutation(&batch.mutations[0], true)
+                .expect("the grid's update must compile");
+        assert_eq!(update.op, "update");
+        assert_eq!(update.path, "/events/_update/abc");
+        assert_eq!(update.routing.as_deref(), Some("tenant-7"));
+        // The compare-and-swap the whole design turns on.
+        assert!(update
+            .query
+            .iter()
+            .any(|(k, v)| *k == "if_seq_no" && v == "41"));
+        assert!(update
+            .query
+            .iter()
+            .any(|(k, v)| *k == "if_primary_term" && v == "3"));
+        // A pure set stays a partial merge, and every value keeps its type — a
+        // number retyped as a string is a mapping change, not an edit.
+        let body = update.body.as_ref().expect("an update has a body");
+        assert_eq!(body["doc"]["status"], serde_json::json!("done"));
+        assert_eq!(body["doc"]["retries"], serde_json::json!(2));
+        assert_eq!(body["doc"]["score"], serde_json::json!(1.5));
+        assert_eq!(body["doc"]["archived"], serde_json::json!(true));
+
+        let delete =
+            datagrep_drv_elasticsearch::mutate::compile_mutation(&batch.mutations[1], true)
+                .expect("the grid's delete must compile");
+        assert_eq!(delete.op, "delete");
+        assert_eq!(delete.path, "/events/_doc/gone");
+        assert!(delete.body.is_none());
+        assert!(delete
+            .query
+            .iter()
+            .any(|(k, v)| *k == "if_seq_no" && v == "7"));
+    }
+
     /// `expect` is `#[serde(default)]`, so an update/delete without a
     /// precondition still parses (the guard is then refused downstream, not
     /// here).

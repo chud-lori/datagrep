@@ -212,3 +212,48 @@ final class PendingEdits: ObservableObject {
         rowIndex[row] = doc.id
     }
 }
+
+// MARK: - the wire format, checkable without a cluster
+
+/// `--dump-mutation`: print the `MutationBatch` JSON this app's encoder builds
+/// for one representative edit, then exit.
+///
+/// The batch blob is hand-encoded against serde's externally-tagged spelling
+/// (`FieldPath` is `[{"Field":"_id"}]`, a `Value` is `{"Str":"x"}`), and a
+/// single wrong bracket there fails at the engine's parser with the whole edit
+/// already typed. There is no Swift test target to pin it from this side, so
+/// this prints exactly what would be sent, and the engine's own test parses that
+/// string back and compiles it —
+/// `the_json_the_macos_grid_sends_parses_and_compiles_to_a_guarded_write` in
+/// `crates/datagrep-ffi/src/mutate.rs`. Same family as `--diag` and `--window-size`: an affordance
+/// for looking at something that is otherwise only observable against a live
+/// server.
+enum MutationProbe {
+    static func runIfRequested() -> Bool {
+        guard ProcessInfo.processInfo.arguments.contains("--dump-mutation") else { return false }
+        let update = DocumentMutation(
+            path: [],
+            key: [
+                ("_index", .string("events")),
+                ("_id", .string("abc")),
+                ("_routing", .string("tenant-7")),
+            ],
+            expect: [("_seq_no", .int(41)), ("_primary_term", .int(3))],
+            sets: [
+                ("status", .string("done")),
+                ("retries", .int(2)),
+                ("score", .double(1.5)),
+                ("archived", .bool(true)),
+            ],
+            isDelete: false)
+        let delete = DocumentMutation(
+            path: [],
+            key: [("_index", .string("events")), ("_id", .string("gone"))],
+            expect: [("_seq_no", .int(7)), ("_primary_term", .int(1))],
+            sets: [],
+            isDelete: true)
+        let text = (try? MutationBatch.json([update, delete])) ?? "<encoding failed>"
+        FileHandle.standardOutput.write(Data((text + "\n").utf8))
+        return true
+    }
+}
