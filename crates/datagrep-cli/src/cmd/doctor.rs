@@ -1,7 +1,3 @@
-//! `datagrep doctor` (ticket item 6): resolved config paths, registered drivers
-//! with `Capabilities` decoded to human-readable names, whether a profile's
-//! secret resolves, and a connection round-trip time.
-
 use crate::cli::DoctorArgs;
 use crate::context::Context;
 use crate::exit::CliError;
@@ -23,10 +19,6 @@ pub async fn run(ctx: &Context, args: &DoctorArgs) -> Result<(), CliError> {
             None => println!("  {id}: (registered, but not constructible from datagrep-cli — bug)"),
         }
     }
-    // Cross-check against the build's own stable list (`known_driver_ids`):
-    // a mismatch here means `register_drivers` and `known_driver_ids` in
-    // `drivers.rs` drifted apart, which is exactly the kind of thing a
-    // health check exists to catch before a user does.
     for id in crate::drivers::known_driver_ids() {
         if !registered.iter().any(|r| r == id) {
             println!("  {id}: KNOWN but not registered — drivers.rs is out of sync");

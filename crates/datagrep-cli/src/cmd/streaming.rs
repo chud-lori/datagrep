@@ -1,22 +1,3 @@
-//! The window-by-window execution loop behind `query`.
-//!
-//! (`export` used to share this loop for lack of a store-free seam; it now
-//! rides [`datagrep_core::CoreApi::run_export`], the endpoint that streams
-//! driver chunks straight to the writer without touching the result store —
-//! see `cmd::export`.)
-//!
-//! Row buffering here is intentionally shaped like the engine's own pipeline:
-//! ask for one bounded [`FETCH_WINDOW`]-row slice, convert and hand
-//! it to the [`crate::format::RowSink`] immediately, discard it, ask for the
-//! next slice starting where the last one left off. Nothing here ever holds
-//! more than one window's rows, which is what the streaming-proof test in
-//! `query.rs` checks with the white-box counter below.
-//!
-//! Waiting for more data (`WindowStatus::Pending`/`Partial` with nothing new
-//! this round) is event-driven, not a sleep loop — no polling:
-//! [`datagrep_core::CoreApi::subscribe_events`] already exists for exactly this,
-//! so this function waits on it instead of re-polling `get_rows` in a spin.
-
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -30,16 +11,8 @@ use crate::exit::CliError;
 use crate::format::{Row, RowSink, Summary};
 use crate::value_text::{arrow_cell_to_value, CellText};
 
-/// Rows requested per `get_rows` call. Matches the order of magnitude of the
-/// engine's own hot-window/soft-cap sizing without trying to be
-/// adaptive the way the driver-side fetch sizing is — this is a display
-/// window, not a wire fetch.
 pub(crate) const FETCH_WINDOW: u64 = 5_000;
 
-/// White-box proof for the streaming test (ticket: "a documented white-box
-/// counter is fine"): the largest `Vec<Row>` this function ever built from a
-/// single store slice, in the current process. A 200k-row result through
-/// this loop should never push this past [`FETCH_WINDOW`].
 #[cfg(test)]
 pub(crate) static MAX_ROWS_PER_BATCH: AtomicUsize = AtomicUsize::new(0);
 
@@ -47,24 +20,10 @@ pub(crate) static MAX_ROWS_PER_BATCH: AtomicUsize = AtomicUsize::new(0);
 pub(crate) struct RunOutcome {
     pub rows_shown: u64,
     pub cancelled: bool,
-    /// Affected-row count from an `Ack`-shaped statement (INSERT/UPDATE/DDL),
-    /// read from the store snapshot (`StoreState::affected`).
     pub affected: Option<u64>,
-    /// True when the stream stopped at the soft row cap — the result on
-    /// screen is (or may be) incomplete. `query` turns this into a non-zero
-    /// exit and a stderr warning: silently truncated output is the one thing
-    /// a database client must never produce.
     pub capped: bool,
 }
 
-/// Drive one already-started query (`qid`) to completion, streaming rows into
-/// `sink` a bounded window at a time.
-///
-/// - `limit` stops early once `rows_shown` reaches it (client-side — see
-///   `query.rs`'s module docs on the `ExecOpts.row_limit` gap).
-/// - `deadline` stops early once passed (same gap, for `@timeout`/`--timeout`).
-/// - `on_progress(rows_shown, elapsed)` is called after every window; `query`
-///   ignores it (the hook predates `export`'s move to `CoreApi::run_export`).
 pub(crate) async fn stream_result(
     ctx: &Context,
     qid: QueryId,
@@ -89,10 +48,6 @@ async fn stream_result_inner(
 ) -> Result<RunOutcome, CliError> {
     let mut events = ctx.core.subscribe_events();
     let started_at = std::time::Instant::now();
-    // The shape the cursor declared at execute time: column names even for a
-    // zero-row result (the header row must not depend on data arriving), and
-    // which columns carry raw JSON (`json`/`jsonb`) so the JSON formats can
-    // pass them through as nested JSON instead of an escaped string.
     let (shape_cols, json_cols) = ctx
         .core
         .queries()
@@ -120,27 +75,18 @@ async fn stream_result_inner(
         }
 
         let window = ctx.core.get_rows(qid, next..next + FETCH_WINDOW).await?;
-        // What the *store* delivered this round — used below to decide
-        // whether to keep asking (never truncated by `--limit`).
         let delivered = window.rows() as u64;
         let mut hit_limit = false;
 
         for slice in &window.slices {
             if !started {
                 if columns.is_empty() {
-                    // `Shape::Unknown` narrowed by its first chunk: fall back
-                    // to the slice's own (possibly synthesized) column names.
                     columns = derive_columns(slice);
                 }
                 sink.start(&columns)?;
                 started = true;
             }
             let mut rows = slice_to_rows(slice, &json_cols);
-            // `--limit`/`@limit` must cap what actually reaches the sink, not
-            // just when we stop asking for more: a single window (up to
-            // `FETCH_WINDOW` rows) can already exceed a small `--limit`, so
-            // checking the total only *after* writing the whole window would
-            // let e.g. `--limit 3` print all 5000. Truncate per slice instead.
             if let Some(limit) = limit {
                 let remaining = limit.saturating_sub(rows_shown);
                 if (rows.len() as u64) > remaining {
@@ -194,17 +140,12 @@ async fn stream_result_inner(
         }
     }
 
-    // An Ack-shaped statement (INSERT/UPDATE/DDL) carries its affected-row
-    // count in the store snapshot (`StoreState::affected`) — read it before
-    // the caller closes the query.
     let state = ctx.core.queries().state(qid);
     let affected = state.as_ref().and_then(|s| s.affected);
     if !started {
         sink.start(&columns)?;
         if note.is_none() {
             if let Some(message) = state.as_ref().and_then(|s| s.ack_message.clone()) {
-                // The engine said something about the acknowledgement (e.g.
-                // which count strategy ran) — show it verbatim.
                 note = Some(message.to_string());
             } else if affected.is_none() {
                 note = Some("no rows returned by this statement".to_string());
@@ -225,8 +166,6 @@ async fn stream_result_inner(
     })
 }
 
-/// Column names — and which columns carry raw JSON — from the shape the
-/// cursor declared, before any row arrives.
 fn shape_columns(shape: &datagrep_api::shape::Shape) -> (Vec<String>, Vec<bool>) {
     use datagrep_api::shape::{LogicalType, Shape};
     match shape {
@@ -247,8 +186,6 @@ fn shape_columns(shape: &datagrep_api::shape::Shape) -> (Vec<String>, Vec<bool>)
     }
 }
 
-/// Wait for the next event about `qid` (or the deadline, or the broadcast
-/// channel closing) instead of busy-polling `get_rows`.
 async fn wait_for_progress(
     events: &mut broadcast::Receiver<QueryEvent>,
     qid: QueryId,
@@ -279,13 +216,6 @@ fn derive_columns(slice: &WindowSlice) -> Vec<String> {
             .iter()
             .map(|f| f.name().clone())
             .collect(),
-        // No driver in this build produces `Shape::Documents`/`Shape::Pairs`
-        // (only sqlite/postgres are registered — both `Shape::Table`); these
-        // arms exist so the match is total against the real `WindowSlice`,
-        // per `value_text.rs`'s module docs on the same requirement. The
-        // column names are a deliberately minimal placeholder, not a real
-        // `ViewProjection` — that's out of scope while nothing
-        // exercises this path.
         WindowSlice::Docs { docs, .. } => match docs.as_ref() {
             DocSegment::Values(_) => vec!["doc".to_string()],
             DocSegment::Pairs(_) => vec!["key".to_string(), "value".to_string()],
@@ -302,10 +232,6 @@ fn slice_to_rows(slice: &WindowSlice, json_cols: &[bool]) -> Vec<Row> {
                 (0..batch.num_columns())
                     .map(|c| {
                         let value = arrow_cell_to_value(batch.column(c).as_ref(), r);
-                        // The Arrow lane stores json/jsonb as plain Utf8 (its
-                        // raw text); the declared schema is what remembers the
-                        // column is JSON. Restore that identity here so the
-                        // JSON formats can nest it instead of string-escaping.
                         match value {
                             datagrep_api::Value::Str(s)
                                 if json_cols.get(c).copied().unwrap_or(false) =>
@@ -321,11 +247,6 @@ fn slice_to_rows(slice: &WindowSlice, json_cols: &[bool]) -> Vec<Row> {
         WindowSlice::Docs {
             docs, offset, len, ..
         } => match docs.as_ref() {
-            // A whole document renders as its JSON text (via `value_to_json`,
-            // preserving nesting/key order) rather than the flattened display
-            // text `CellText::from_value` gives a scalar cell — that's the
-            // difference between "the doc, structurally" and "the doc,
-            // stringified" for a value that can be arbitrarily nested.
             DocSegment::Values(values) => values[*offset..*offset + *len]
                 .iter()
                 .map(|v| vec![doc_cell(v)])
@@ -338,17 +259,11 @@ fn slice_to_rows(slice: &WindowSlice, json_cols: &[bool]) -> Vec<Row> {
     }
 }
 
-/// A document cell as its true JSON text, keeping `Null`/`Absent` as the
-/// sentinel `CellText` variants (so `--format table`'s NULL/`(absent)`
-/// distinction still holds for a whole-document row) rather than collapsing
-/// everything through the display-text path.
 fn doc_cell(v: &datagrep_api::Value) -> CellText {
     match v {
         datagrep_api::Value::Null => CellText::Null,
         datagrep_api::Value::Absent => CellText::Absent,
         other => match serde_json::to_string(&crate::value_text::value_to_json(other)) {
-            // `Json`, not `Text`: the JSON formats then emit the document as
-            // nested JSON rather than one big escaped string.
             Ok(json) => CellText::Json(json),
             Err(_) => CellText::Text(String::from("<unserializable document>")),
         },

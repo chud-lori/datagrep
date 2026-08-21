@@ -1,23 +1,3 @@
-//! `datagrep query` (ticket item 1): split input with `datagrep-lang`, honor
-//! `-- @limit/@timeout/@connection/@readonly` directives, run statements in
-//! order, stream every result through [`super::streaming::stream_result`].
-//!
-//! **CoreApi/driver gap:** `datagrep_api::request::ExecOpts` declares
-//! `row_limit`, `timeout`, and `read_only_assert` — but neither
-//! `datagrep-drv-postgres` nor `datagrep-drv-sqlite` ever reads them (`grep` across
-//! both crates for `row_limit`/`read_only_assert`/`ExecOpts` turns up
-//! nothing but the struct literal that builds the request), and
-//! `datagrep-core` never inspects them either. So `--limit`/`@limit` and
-//! `--timeout`/`@timeout` are enforced **here**, client-side, by
-//! [`super::streaming::stream_result`] counting rows / checking a deadline
-//! and calling `CoreApi::cancel` — not by the server stopping early. `opts`
-//! is still filled in honestly on the `Request` (a future driver that reads
-//! it gets real values), but today it's inert. `@readonly` is enforced
-//! purely client-side too, via `datagrep_lang::Language::classify` — it is a
-//! guardrail against fat fingers, not against an adversary. It is the second
-//! of three read-only layers; layers 1 (server-side) and 3 (`env=prod`
-//! policy) do not exist in this build's `CoreApi`.
-
 use std::io::Write;
 use std::sync::Arc;
 
@@ -141,8 +121,6 @@ pub async fn run(ctx: &Context, args: &QueryArgs) -> Result<(), CliError> {
                 text: stmt_text.to_string(),
                 started_at: datagrep_profiles::now_ms(),
                 duration_ms: Some(started_at.elapsed().as_millis() as i64),
-                // For an Ack-shaped statement the meaningful count is the
-                // affected rows, not the (always-zero) rows shown.
                 row_count: run
                     .as_ref()
                     .ok()
@@ -154,9 +132,6 @@ pub async fn run(ctx: &Context, args: &QueryArgs) -> Result<(), CliError> {
 
         let outcome = run?;
         if outcome.capped {
-            // Truncated output with exit 0 is the one thing a database client
-            // must never produce (TEST-REPORT F1): name the cap on stderr and
-            // fail loudly. `export` is the designated uncapped escape hatch.
             let cap = ctx.core.queries().policy().soft_row_cap;
             return Err(CliError::query(format!(
                 "statement {} stopped at the soft row cap ({cap} rows) after {} rows — \
@@ -176,17 +151,6 @@ pub async fn run(ctx: &Context, args: &QueryArgs) -> Result<(), CliError> {
         return Err(CliError::usage("no statements to run (empty input)"));
     }
 
-    // `--limit`/`@limit` stopping a statement early is success, by design —
-    // the same as a SQL `LIMIT` clause. It is surfaced in the footer's
-    // `Summary::note`, not as a nonzero exit. Only a real timeout is a
-    // reportable failure; see `stream_result`'s deadline branch, which
-    // returns its own message through `note`, not through `any_cancelled`
-    // alone. We still flag the invocation as "cancelled" only when a
-    // statement was stopped by something other than reaching the row cap it
-    // asked for, i.e. never here — `--limit` sets `cancelled` too (it uses
-    // the same local-stop mechanism as a real cancel), so distinguish deadline
-    // stops textually via the note already printed and keep the exit code 0
-    // for a `--limit` that did exactly what it was asked. See module docs.
     let _ = any_cancelled;
     Ok(())
 }
@@ -244,10 +208,6 @@ mod tests {
         store.create_profile(profile).await.expect("create profile");
     }
 
-    /// **Streaming proof**: a 200k-row SQLite `WITH RECURSIVE` query through
-    /// `--format ndjson` never buffers more than [`FETCH_WINDOW`] rows at
-    /// once in this process (the white-box counter `MAX_ROWS_PER_BATCH`),
-    /// even though the result is 200k rows.
     #[tokio::test]
     async fn streaming_never_buffers_more_than_one_window() {
         MAX_ROWS_PER_BATCH.store(0, Ordering::SeqCst);
@@ -285,8 +245,6 @@ mod tests {
         assert_eq!(out.iter().filter(|&&b| b == b'\n').count(), 200_000);
     }
 
-    /// A zero-row result still gets its CSV header — the columns are known
-    /// from the cursor's declared shape, not from data arriving.
     #[tokio::test]
     async fn zero_row_query_still_writes_the_csv_header() {
         let ctx = crate::context::test_ctx();
@@ -367,8 +325,6 @@ mod tests {
             format: OutputFormat::Ndjson,
             limit: None,
             timeout: None,
-            // Redirect to a file (rather than stdout) so this test's output
-            // doesn't spam the test runner's captured output.
             out: Some(dir.path().join("out.ndjson")),
         };
         run(&ctx, &args)

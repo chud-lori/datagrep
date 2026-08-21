@@ -1,15 +1,3 @@
-//! `datagrep` — the CLI face of the engine. One core, three faces (GUI, TUI,
-//! CLI): `datagrep query -f q.sql --format json` pipes straight into jq.
-//! Parses args, wires `tracing-subscriber` to stderr
-//! only under `--verbose`, dispatches to `cmd::*`, and maps [`CliError`] to
-//! the ticket's exit codes (0 ok, 1 query error, 2 usage error, 130
-//! cancelled).
-//!
-//! Nothing here connects to a database, opens the profile store, or inits
-//! TLS before a subcommand actually needs it — [`Context::new`] is
-//! documented cheap, so `datagrep --help` and `datagrep profiles list` stay near the
-//! ≤250ms cold-start target (P1).
-
 mod cli;
 mod cmd;
 mod context;
@@ -68,14 +56,6 @@ fn main() {
     }
 }
 
-/// Runs the command, racing it against Ctrl-C. The rule that the stop button
-/// always returns control instantly is about `CoreApi::cancel`
-/// inside a running query; the process-level analogue here is: cancel
-/// whatever query is in flight (if any) — reporting the real
-/// `CancelReport::message`, not a canned one — and unwind through the normal
-/// `Result` → exit-code path (never a raw `std::process::exit` bypassing it)
-/// so a Ctrl-C during `query`/`export`/`catalog`/`doctor` all get the same
-/// honest 130.
 async fn dispatch(ctx: &Context, command: Command) -> Result<(), CliError> {
     tokio::select! {
         result = run_command(ctx, command) => result,
@@ -85,9 +65,6 @@ async fn dispatch(ctx: &Context, command: Command) -> Result<(), CliError> {
 
 async fn wait_for_ctrl_c(ctx: &Context) -> String {
     if tokio::signal::ctrl_c().await.is_err() {
-        // The signal handler itself failed to install; nothing more to wait
-        // on, but this branch must still resolve for `select!` to make
-        // progress if the command hangs forever.
         std::future::pending::<()>().await;
     }
     match ctx.current_query() {

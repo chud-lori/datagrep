@@ -1,14 +1,5 @@
-//! Parse a `--timeout` value (`30s`, `500ms`, `5m`, `2h`). Mirrors the
-//! grammar `datagrep-lang::directives` uses for `-- @timeout` so `--timeout 30s`
-//! on the command line and `@timeout 30s` in a script mean the same thing —
-//! but that parser is private to `datagrep-lang`, so this is a small
-//! from-scratch reimplementation rather than a new public dependency edge.
-
 use std::time::Duration;
 
-/// Parse `30s` / `500ms` / `5m` / `2h`. No bare numbers — an ambiguous unit
-/// is a bug a user hits once and hates forever (same rationale as the
-/// `datagrep-lang` directive parser).
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let s = s.trim();
     if s.is_empty() {

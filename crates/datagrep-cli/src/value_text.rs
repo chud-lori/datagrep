@@ -1,24 +1,3 @@
-//! One value model for every output format.
-//!
-//! `RowWindow` hands back two different shapes (`datagrep_core::store::WindowSlice`):
-//! Arrow `RecordBatch` slices for `Shape::Table` (postgres/sqlite — this
-//! build's only drivers) and `datagrep_api::Value` rows for `Shape::Documents`/
-//! `Shape::Pairs` (no driver in this build produces those yet, but the type
-//! has to be handled to compile against the real `RowWindow`). Rather than
-//! writing separate table/json/csv logic for each, every cell is converted
-//! once to a `datagrep_api::Value` ([`arrow_cell_to_value`] for Arrow, a direct
-//! pass-through for docs) and every format renders from that one
-//! representation via [`CellText`] or [`value_to_json`].
-//!
-//! # NULL vs Absent vs empty string (ticket: "the grid must be truthful")
-//! [`CellText`] keeps the three states [`datagrep_core::convert::display_value`]
-//! collapses to `None`/`Some(String)`: a stored `Value::Null` is
-//! [`CellText::Null`], a genuinely missing field ([`Value::Absent`] — only
-//! reachable through the document lane, since Arrow's validity bitmap cannot
-//! represent it) is [`CellText::Absent`], and an empty string
-//! is [`CellText::Text(String::new())`], which prints as nothing between
-//! delimiters rather than as the word `NULL`.
-
 use std::sync::Arc;
 
 use arrow_array::types::Int32Type;
@@ -26,13 +5,6 @@ use arrow_array::{Array, DictionaryArray};
 use arrow_schema::{DataType, TimeUnit};
 use datagrep_api::{Bytes, TzSpec, Value};
 
-/// A cell's renderable state, truthful about the three-way distinction the
-/// ticket calls out — and about scalar *types*: booleans, integers, and
-/// floats keep their identity to the JSON formats (`{"id":1}`, never
-/// `{"id":"1"}`), and a `json`/`jsonb` cell keeps its raw text so the JSON
-/// formats can pass it through verbatim instead of double-encoding it.
-/// Decimals stay text deliberately: JSON numbers are f64, and a NUMERIC that
-/// round-trips through f64 comes back silently wrong.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CellText {
     Null,
@@ -41,7 +13,6 @@ pub enum CellText {
     I64(i64),
     U64(u64),
     F64(f64),
-    /// Raw JSON text from a `json`/`jsonb` column, verbatim from the server.
     Json(String),
     Text(String),
 }
@@ -62,9 +33,6 @@ impl CellText {
         }
     }
 
-    /// The cell as display text — what `table`/`csv`/`tsv` print. `None` for
-    /// NULL/Absent (those formats have their own rendering for that state).
-    /// Matches `datagrep_core::convert::display_value` for every variant.
     pub fn display_text(&self) -> Option<std::borrow::Cow<'_, str>> {
         use std::borrow::Cow;
         match self {
@@ -78,12 +46,6 @@ impl CellText {
     }
 }
 
-/// Convert one Arrow cell to a [`Value`], so table/json/csv/ndjson all render
-/// from the same representation regardless of which `WindowSlice` variant
-/// produced it. Total by construction: an Arrow type this build's converter
-/// never emits (see `datagrep_core::convert::ColKind`) becomes
-/// `Value::Unsupported` rather than panicking — the same "never lose bytes,
-/// never crash on a driver quirk" stance datagrep takes everywhere else.
 pub fn arrow_cell_to_value(array: &dyn Array, row: usize) -> Value {
     if array.is_null(row) {
         return Value::Null;
@@ -157,10 +119,6 @@ fn tz_spec(tz: Option<&str>) -> TzSpec {
     }
 }
 
-/// `Value` -> `serde_json::Value`, for `--format json`/`ndjson`. Lossless
-/// where JSON allows it; anything JSON has no native type for (bytes, UUID,
-/// decimal, timestamps, …) becomes its display text, same as the table
-/// format, rather than a JSON type we'd have to invent and document.
 pub fn value_to_json(v: &Value) -> serde_json::Value {
     use serde_json::Value as J;
     match v {
@@ -177,13 +135,9 @@ pub fn value_to_json(v: &Value) -> serde_json::Value {
                 .map(|(k, v)| (k.to_string(), value_to_json(v)))
                 .collect(),
         ),
-        // A json/jsonb value nests as real JSON (it *is* JSON); only text
-        // that fails to parse — a driver bug — falls back to a string.
         Value::Json(raw) => {
             serde_json::from_str(raw).unwrap_or_else(|_| J::String(raw.to_string()))
         }
-        // Decimal, Str, Bytes, dates/times, Uuid, Interval, Ref, Geo,
-        // Vector, Unsupported: all render as their truthful display text.
         other => match datagrep_core::convert::display_value(other) {
             Some(s) => J::String(s),
             None => J::Null,

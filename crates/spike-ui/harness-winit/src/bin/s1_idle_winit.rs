@@ -1,23 +1,3 @@
-//! S1 fallback rung -- bare `winit` 0.30 + `wgpu` 30, `ControlFlow::Wait`.
-//! Used because gpui 0.2.2 cannot build on this machine (see ../../harness
-//! and SPIKE-REPORT.md: `xcrun metal` requires full Xcode, only Command
-//! Line Tools is installed here). Per the task's own resolution ladder,
-//! this "still valuable, it measures the floor gpui sits on."
-//!
-//! One window, one static frame (a solid clear color -- no text-rendering
-//! crate is in scope for this fallback, see SPIKE-REPORT.md), no animation.
-//! `ControlFlow::Poll` is never used — it is banned outright, because it
-//! repaints on a treadmill whether or not anything changed.
-//! The only wakeups are winit's initial Resumed/RedrawRequested at startup
-//! and our OWN 10s stderr heartbeat (WaitUntil) -- the heartbeat never calls
-//! redraw() or touches the GPU, so it does not inflate the present counter;
-//! it is disclosed separately in the report as harness overhead, not app
-//! behavior under test.
-//!
-//! present/redraw counter: incremented immediately before
-//! `SurfaceTexture::present()` -- this IS the true present call (unlike the
-//! gpui S1, which could only proxy via an application-level render()).
-
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

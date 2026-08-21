@@ -1,18 +1,3 @@
-//! `datagrep catalog` (ticket item 4): list ONE level lazily — one
-//! `CoreApi::list_catalog` call, which on connect issues exactly one cheap
-//! query and expands on demand per node. This command never recurses; each
-//! invocation is one `children()` call for one path.
-//!
-//! `--describe` needs [`datagrep_api::Catalog::describe`], which `CoreApi` does
-//! not wrap the way it wraps `children` (as `list_catalog`) — no
-//! `describe_catalog`/`infer_shape`/`complete` façade exists. This reaches
-//! one level further into the public seam than `list_catalog`, via
-//! `CoreApi::session(...).acquire().await?.catalog()` — still entirely
-//! `CoreApi`/`datagrep-core` public API (`Session`, `ConnLease`, `Catalog` are all
-//! `datagrep-core`/`datagrep-api` types), never a driver crate directly, but it skips
-//! the panic-isolation wrapper `list_catalog` gets from `datagrep_core::api`'s
-//! internal `guarded(...)` helper. Noted as a gap CoreApi should close.
-
 use std::sync::Arc;
 
 use datagrep_api::catalog::ListOpts;
@@ -57,9 +42,6 @@ pub async fn run(ctx: &Context, args: &CatalogArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-/// `a.b.c` (dotted, matching how paths print) or space-separated — accept
-/// either since `--describe` is a single string argument, unlike the
-/// positional `path` segments `datagrep catalog` itself takes.
 fn parse_path(s: &str) -> ObjectPath {
     let parts: Vec<Arc<str>> = s
         .split(['.', ' '])

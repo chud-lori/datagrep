@@ -1,31 +1,3 @@
-//! `--format table` — aligned ASCII for humans.
-//!
-//! Three things the ticket calls out by name:
-//! - **NULL, empty string, and `Absent` render distinctly.** `NULL` prints as
-//!   the literal text `NULL` (dimmed on a color TTY); `Absent` prints as
-//!   `(absent)` (also dimmed); a genuine empty string prints as nothing
-//!   between delimiters. See [`crate::value_text::CellText`] for where the
-//!   three states come from.
-//! - **Cells are truncated to terminal width with an ellipsis.** Column
-//!   widths are computed once, from the *first* window of rows this sink
-//!   sees (module docs on [`super`]: buffering one bounded window, not the
-//!   whole result), then reused for every later window so the whole result
-//!   still reads as one aligned table. If the sum of natural widths would
-//!   overflow the terminal, every column is scaled down proportionally
-//!   (floor [`MIN_COL_WIDTH`]) rather than only the widest one, so no column
-//!   silently vanishes.
-//! - **A footer says rows shown vs total.** [`Summary::note`] carries the
-//!   honest reason when they differ (`--limit`, the soft row cap, a
-//!   cancellation) — this sink never invents one.
-//!
-//! Deviation, stated plainly: real terminal width comes from an `ioctl`
-//! (`TIOCGWINSZ`), which needs a crate this workspace's dependency list for
-//! `datagrep-cli` does not include. Width instead comes from `$COLUMNS` when set
-//! (most shells export it, and every test in this module sets it), else a
-//! fixed 120-column default. Widths are measured in `char`s, not display
-//! (grapheme) width, so wide CJK cells can still overflow their column by a
-//! little — a known, documented simplification, not an oversight.
-
 use std::io::{self, IsTerminal, Write};
 
 use super::{Row, RowSink, Summary};
@@ -33,11 +5,8 @@ use crate::value_text::CellText;
 
 const MAX_COL_WIDTH: usize = 40;
 const MIN_COL_WIDTH: usize = 3;
-/// `" | "` between every pair of columns.
 const COL_SEPARATOR_WIDTH: usize = 3;
 
-/// Color only when stdout is a real TTY and the user hasn't opted out
-/// (ticket: "Color only when stdout is a TTY; honor `NO_COLOR`").
 pub fn color_enabled() -> bool {
     std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
 }
@@ -54,8 +23,6 @@ fn char_len(s: &str) -> usize {
     s.chars().count()
 }
 
-/// Truncate to `width` chars, replacing the last char with `…` when it
-/// didn't fit — never silently dropping data with no indication.
 fn truncate_ellipsis(s: &str, width: usize) -> String {
     if char_len(s) <= width {
         return s.to_string();
@@ -68,9 +35,6 @@ fn truncate_ellipsis(s: &str, width: usize) -> String {
     out
 }
 
-/// A cell's plain (uncolored) display text plus which of the three states it
-/// is, so the writer can color `Null`/`Absent` without that color affecting
-/// column-width math (padding is always computed from the plain text).
 enum Rendered {
     Null,
     Absent,
@@ -109,8 +73,6 @@ pub struct TableSink<W: Write> {
     columns: Vec<String>,
     widths: Option<Vec<usize>>,
     color: bool,
-    /// Print a leading blank line before the header — used for statement 2+
-    /// of a multi-statement script so result sets don't run together.
     leading_blank: bool,
     header_written: bool,
 }
@@ -127,9 +89,6 @@ impl<W: Write> TableSink<W> {
         }
     }
 
-    /// Natural width per column from the header plus one window of data,
-    /// each column capped at [`MAX_COL_WIDTH`], then the whole row scaled
-    /// down proportionally if it would overflow the terminal.
     fn compute_widths(&self, rows: &[Row]) -> Vec<usize> {
         let mut widths: Vec<usize> = self
             .columns
@@ -155,9 +114,6 @@ impl<W: Write> TableSink<W> {
             let avail = term - overhead;
             let sum: usize = widths.iter().sum();
             for w in &mut widths {
-                // sum is the total of `widths`, so it is zero only when every
-                // column is zero-wide — unreachable here, because `total > term`
-                // could not have held. checked_div keeps that provable.
                 if let Some(scaled) = (*w * avail).checked_div(sum) {
                     *w = scaled.max(MIN_COL_WIDTH);
                 }
@@ -231,8 +187,6 @@ impl<W: Write + Send> RowSink for TableSink<W> {
             self.widths = Some(self.compute_widths(&[]));
             self.write_header()?;
         }
-        // An acknowledgement (INSERT/UPDATE/DDL) has no rows to show; the
-        // honest footer is its affected count, not "(0 rows shown)".
         if let (0, Some(n)) = (summary.rows_shown, summary.affected) {
             let plural = if n == 1 { "" } else { "s" };
             return match &summary.note {
@@ -261,9 +215,7 @@ mod tests {
     }
 
     fn render(rows: Vec<Row>, note: Option<&str>) -> String {
-        // SAFETY: test-only env mutation; nothing else in this process reads
-        // COLUMNS concurrently within a single `cargo test` process's default
-        // (non-parallel-within-module) execution of this function.
+        // SAFETY: test-only env mutation; nothing else reads COLUMNS concurrently.
         unsafe { std::env::set_var("COLUMNS", "80") };
         let mut out = Vec::new();
         {
@@ -306,8 +258,6 @@ mod tests {
         assert_eq!(lines.len(), 6, "unexpected layout:\n{text}");
         assert!(lines[2].contains("NULL"));
         assert!(lines[3].contains("(absent)"));
-        // The third row's "name" column is a real empty string: neither
-        // sentinel appears on that line.
         assert!(!lines[4].contains("NULL"));
         assert!(!lines[4].contains("(absent)"));
     }

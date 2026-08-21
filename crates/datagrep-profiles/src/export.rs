@@ -1,8 +1,3 @@
-//! Plain-text, git-committable connection profiles.
-//! `Folder`/`Profile`/`Tunnel` have no field that can hold a secret — only
-//! `secret_ref` — so exclusion is structural, not a filter we have to
-//! remember to apply.
-
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
@@ -16,8 +11,6 @@ fn default_version() -> u32 {
     EXPORT_VERSION
 }
 
-/// The full TOML document produced by [`crate::Store::export_profiles`] and
-/// consumed by [`crate::Store::import_profiles`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ExportBundle {
     #[serde(default = "default_version")]
@@ -40,18 +33,12 @@ impl ExportBundle {
     }
 }
 
-/// How [`crate::Store::import_profiles`] reconciles the TOML against what's
-/// already in the store, matched on `id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportStrategy {
-    /// Upsert everything in the TOML; rows not mentioned are left alone.
     Merge,
-    /// The TOML becomes the full contents of these three tables — anything
-    /// not in it is deleted.
     Replace,
 }
 
-/// What an import did, for the caller to report to the user.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ImportSummary {
     pub folders_upserted: usize,
@@ -68,10 +55,6 @@ pub(crate) fn apply_import(
     strategy: ImportStrategy,
 ) -> Result<ImportSummary, ProfilesError> {
     let tx = conn.transaction()?;
-    // Import order doesn't need to respect FK dependency order (a folder's
-    // parent, or a profile's tunnel, may appear later in the same file) —
-    // deferring FK checks to commit time means any order is safe as long as
-    // the file is internally consistent by the end.
     tx.pragma_update(None, "defer_foreign_keys", "ON")?;
 
     let mut summary = ImportSummary::default();
@@ -125,9 +108,6 @@ pub(crate) fn apply_import(
     }
 
     for p in bundle.profile {
-        // An imported TOML is still untrusted input until it clears the same
-        // secret-shape check a direct `create_profile`/`update_profile` call
-        // would.
         validate_no_secrets(&p.config)?;
         let config_json = serde_json::to_string(&p.config)?;
         tx.execute(

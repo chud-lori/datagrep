@@ -1,13 +1,3 @@
-//! The async facade over one dedicated worker thread: every `rusqlite` call
-//! in this crate is synchronous and runs on that thread, never on an async
-//! runtime's own worker. `Store` methods hand a closure to the thread and
-//! `.await` a oneshot reply.
-//!
-//! Construction is lazy so nothing touches disk on the startup path —
-//! `Store::open` just remembers where the database *would* live; the worker
-//! thread, the SQLite connection, and the migration/retention pass only
-//! happen on the first real call.
-
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -20,15 +10,8 @@ use crate::model::{now_ms, Folder, HistoryEntry, NewHistoryEntry, Profile, Saved
 use crate::queries;
 use crate::secrets::validate_no_secrets;
 
-/// One unit of work for the worker thread: runs with exclusive `&mut`
-/// access to the single live `Db`. Reports its result back to the async
-/// caller through a oneshot sender it captures itself, so the run loop
-/// doesn't need to know each job's return type.
 type Job = Box<dyn FnOnce(&mut Db) + Send>;
 
-/// The live worker thread plus the channel used to reach it. Held behind an
-/// `Arc` inside `Store`'s `OnceCell` so every clone of the handle shares one
-/// thread; dropping the last reference shuts the thread down.
 struct WorkerHandle {
     cmd_tx: Mutex<std::sync::mpsc::Sender<Job>>,
     join: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -46,10 +29,6 @@ impl WorkerHandle {
 
 impl Drop for WorkerHandle {
     fn drop(&mut self) {
-        // Close the command channel first so the worker thread's blocking
-        // `recv()` returns `Err` and its loop exits — only *then* is it safe
-        // to join, otherwise we'd deadlock waiting on a thread parked
-        // waiting for work that will never arrive.
         if let Ok(mut guard) = self.cmd_tx.lock() {
             let (dummy_tx, _dummy_rx) = std::sync::mpsc::channel::<Job>();
             drop(std::mem::replace(&mut *guard, dummy_tx));
@@ -62,8 +41,6 @@ impl Drop for WorkerHandle {
     }
 }
 
-/// Spawns the worker thread, opens (or creates) the database, migrates it,
-/// and runs the on-open retention trim — the entire "first real call" path.
 async fn spawn_worker(
     target: Target,
     retention: RetentionPolicy,
@@ -82,8 +59,6 @@ async fn spawn_worker(
                 }
             };
             if init_tx.send(Ok(())).is_err() {
-                // The caller stopped waiting (its future was dropped) —
-                // nothing left to serve.
                 return;
             }
             while let Ok(job) = cmd_rx.recv() {
@@ -110,9 +85,6 @@ async fn spawn_worker(
     }
 }
 
-/// Local persistence for `datagrep`: profiles, folders, tunnels, query
-/// history (+FTS5), saved queries, editor tabs, and small key/value state,
-/// in one SQLite file.
 pub struct Store {
     target: Target,
     retention: RetentionPolicy,
@@ -129,15 +101,10 @@ impl std::fmt::Debug for Store {
 }
 
 impl Store {
-    /// A store backed by a SQLite file at `path`. Nothing touches disk yet —
-    /// see module docs.
     pub fn open(path: impl AsRef<Path>) -> Store {
         Store::open_with_retention(path, RetentionPolicy::default())
     }
 
-    /// Like [`Store::open`], with a non-default retention policy. Mainly for
-    /// callers (and tests) that don't want to wait out the real 20k
-    /// rows/180 day default.
     pub fn open_with_retention(path: impl AsRef<Path>, retention: RetentionPolicy) -> Store {
         Store {
             target: Target::File(path.as_ref().to_path_buf()),
@@ -146,13 +113,10 @@ impl Store {
         }
     }
 
-    /// An in-memory store: same schema and migrations, gone when it drops.
-    /// Useful for tests and for short-lived embeddings.
     pub fn open_in_memory() -> Store {
         Store::open_in_memory_with_retention(RetentionPolicy::default())
     }
 
-    /// Like [`Store::open_in_memory`], with a non-default retention policy.
     pub fn open_in_memory_with_retention(retention: RetentionPolicy) -> Store {
         Store {
             target: Target::Memory,
@@ -169,9 +133,6 @@ impl Store {
         Ok(Arc::clone(handle))
     }
 
-    /// Runs `f` with exclusive access to the database on the worker thread
-    /// and returns its result. This is the only place SQL crosses from
-    /// async code onto the worker thread.
     async fn run<F, T>(&self, f: F) -> Result<T, ProfilesError>
     where
         F: FnOnce(&mut Db) -> Result<T, ProfilesError> + Send + 'static,
@@ -214,10 +175,6 @@ impl Store {
             .await
     }
 
-    // -- profile -----------------------------------------------------------
-    // Every write is validated to reject secret-shaped config keys *before*
-    // the worker thread (and therefore SQLite) ever sees it.
-
     pub async fn create_profile(&self, profile: Profile) -> Result<Profile, ProfilesError> {
         validate_no_secrets(&profile.config)?;
         self.run(move |db| queries::create_profile(&db.conn, profile))
@@ -233,7 +190,6 @@ impl Store {
             .await
     }
 
-    /// Lists profiles, optionally scoped to one folder (`None` = all).
     pub async fn list_profiles(
         &self,
         folder_id: Option<String>,
@@ -295,8 +251,6 @@ impl Store {
 
     // -- query_history -------------------------------------------------
 
-    /// Records one executed query, deduping against a same-hash entry for
-    /// the same profile within the last second.
     pub async fn record_history(
         &self,
         entry: NewHistoryEntry,
@@ -314,8 +268,6 @@ impl Store {
             .await
     }
 
-    /// Full-text search over recorded query text (FTS5 when available, a
-    /// `LIKE` scan otherwise — see `queries::search_history`).
     pub async fn search_history(
         &self,
         profile_id: Option<String>,
@@ -383,9 +335,6 @@ impl Store {
 
     // -- TOML export/import ---------------------------------------------
 
-    /// Git-committable TOML of folders, profiles, and tunnels. Secrets are
-    /// excluded by construction — `Profile`/`Tunnel` only ever carry
-    /// `secret_ref`, never a secret value.
     pub async fn export_profiles(&self) -> Result<String, ProfilesError> {
         self.run(|db| {
             let bundle = ExportBundle {
@@ -399,9 +348,6 @@ impl Store {
         .await
     }
 
-    /// Imports a TOML export produced by [`Store::export_profiles`], matched
-    /// on `id`. `strategy` controls whether existing rows not present in
-    /// `toml` are left alone (`Merge`) or removed (`Replace`).
     pub async fn import_profiles(
         &self,
         toml: String,

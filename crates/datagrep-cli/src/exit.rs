@@ -1,21 +1,9 @@
-//! Exit codes (ticket "Requirements"): `0` ok, `1` query error, `2` usage
-//! error, `130` cancelled. `CliError` is the one error type `main` matches on
-//! to pick a code — every command function returns `Result<(), CliError>`,
-//! never panics, and every variant carries a message naming what to fix.
-
 use std::fmt;
 
-/// The three non-zero outcomes a command can report, plus the process exit
-/// code each one maps to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitKind {
-    /// A query/connection/driver failure — the command ran, the database (or
-    /// the attempt to reach it) said no.
     QueryError,
-    /// Bad arguments, an unknown profile, a malformed file — the command
-    /// itself could not even be attempted as given.
     UsageError,
-    /// The user hit Ctrl-C.
     Cancelled,
 }
 
@@ -29,9 +17,6 @@ impl ExitKind {
     }
 }
 
-/// The one error type every `datagrep` subcommand returns. Never a panic, never a
-/// bare `anyhow`-style opaque blob: `message` always names what to fix, and
-/// `kind` picks the exit code.
 #[derive(Debug)]
 pub struct CliError {
     pub kind: ExitKind,
@@ -69,10 +54,6 @@ impl fmt::Display for CliError {
 
 impl std::error::Error for CliError {}
 
-/// Any driver/core failure becomes a `QueryError` by default — the common
-/// case for `datagrep_api::DbError` reaching a command function. Commands that
-/// need a different mapping (e.g. a connect failure they want to call a
-/// usage error) build a `CliError` by hand instead of relying on `?`.
 impl From<datagrep_api::DbError> for CliError {
     fn from(err: datagrep_api::DbError) -> Self {
         CliError::query(err.to_string())

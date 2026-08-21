@@ -1,8 +1,3 @@
-//! One module per `datagrep` subcommand (ticket: "FOLLOW WHAT cli.rs DECLARES").
-//! `streaming` is the window-by-window execution loop `query` drives;
-//! `export` streams through `CoreApi::run_export` (the store-free path)
-//! instead.
-
 pub mod catalog;
 pub mod doctor;
 pub mod export;
@@ -18,11 +13,6 @@ use crate::cli::OutputFormat;
 use crate::exit::CliError;
 use crate::format::{csv, json, table, RowSink};
 
-/// Build the streaming sink for one statement's result set. `leading_blank`
-/// only matters to [`table::TableSink`] (a separator between multiple
-/// result sets in a multi-statement script); the machine-readable formats
-/// concatenate seamlessly by design (repeated CSV/TSV headers are the normal
-/// way those formats show "a new result set started").
 pub(crate) fn build_sink<'w>(
     format: OutputFormat,
     out: &'w mut (dyn Write + Send),
@@ -41,8 +31,6 @@ pub(crate) fn build_sink<'w>(
     }
 }
 
-/// Read the statement source for `query`/`export`: exactly one of a file, an
-/// inline command, or (when neither is given) stdin.
 pub(crate) fn read_source(file: Option<&Path>, command: Option<&str>) -> Result<String, CliError> {
     match (file, command) {
         (Some(_), Some(_)) => Err(CliError::usage(

@@ -1,7 +1,3 @@
-//! `datagrep history` (ticket item 5): the FTS5-backed history already living in
-//! `datagrep-profiles`. `datagrep query` records one entry per statement it runs (see
-//! `query.rs`) so this command has something real to show end to end.
-
 use crate::context::Context;
 use crate::exit::CliError;
 

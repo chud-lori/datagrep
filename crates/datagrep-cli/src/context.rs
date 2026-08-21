@@ -1,14 +1,3 @@
-//! Shared runtime state for every subcommand: the engine, the local profile
-//! store, and the secret resolver.
-//!
-//! Constructing a [`Context`] touches no socket and opens no file:
-//! `CoreApi::new()` is plain data structures, `register_drivers` is a
-//! hashmap insert per driver (`datagrep_core::registry` docs: "nothing is
-//! constructed until first use"), and `datagrep_profiles::Store::open` is
-//! documented lazy — its worker thread and SQLite file only come alive on
-//! the first real call. This is what keeps `datagrep --help` / `datagrep profiles
-//! list` near-instant.
-
 use std::sync::{Arc, Mutex};
 
 use datagrep_api::ConfigValue;
@@ -22,10 +11,6 @@ pub struct Context {
     pub core: CoreApi,
     pub store: Store,
     pub secrets: SecretResolver,
-    /// The query currently streaming, if any — so a Ctrl-C handler running
-    /// concurrently (see `main.rs`) can cancel *that* query specifically and
-    /// report the real `CancelReport` rather than just killing the process
-    /// blind — the stop button has to tell the truth about what it did.
     current_query: Mutex<Option<datagrep_core::QueryId>>,
 }
 
@@ -34,14 +19,6 @@ impl Context {
         Self::with_store(Store::open(crate::paths::profiles_db_path()))
     }
 
-    /// A context over an explicit [`Store`] — what every test in this crate
-    /// uses (with [`Store::open_in_memory`]) instead of [`Context::new`],
-    /// which points at the developer's real `~/.config/datagrep/profiles.db`.
-    /// `cargo test` runs tests in parallel threads of one process, so two
-    /// tests both defaulting to that shared file race on the same on-disk
-    /// migration (`CREATE TABLE folder` colliding with itself) — an
-    /// in-memory store per `Context` sidesteps that entirely rather than
-    /// serializing tests or juggling a process-global `DATAGREP_CONFIG_DIR`.
     pub fn with_store(store: Store) -> Self {
         let core = CoreApi::new();
         crate::drivers::register_drivers(&core);
@@ -67,7 +44,6 @@ impl Context {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Find a saved profile by name.
     pub async fn find_profile(&self, name: &str) -> Result<datagrep_profiles::Profile, CliError> {
         let profiles = self.store.list_profiles(None).await?;
         profiles
@@ -80,24 +56,6 @@ impl Context {
             })
     }
 
-    /// Resolve a saved profile's secret (if any) and register it with
-    /// `CoreApi`, ready to connect.
-    ///
-    /// **CoreApi gap, worked around here** (see `README.md` "CoreApi gaps"):
-    /// `datagrep_core::session::Session::acquire` always builds
-    /// `ResolvedConfig::without_secrets(self.config.clone())` — there is no
-    /// seam for a frontend to hand a resolved secret to a running session.
-    /// Until that lands, this crate resolves the secret itself and folds it
-    /// back into the plaintext `ConnectionConfig` handed to
-    /// `CoreApi::add_profile_full`, which is the only way a driver in this
-    /// build ever sees it (both `datagrep-drv-postgres` and, if it grows a secret
-    /// field, `datagrep-drv-sqlite` fall back to reading the field straight out of
-    /// `ConnectionConfig.values` when `ResolvedConfig.secrets` is empty). The
-    /// on-disk profile never holds the secret (`datagrep_profiles::secrets`
-    /// rejects it structurally), but the resolved value does sit in an
-    /// un-zeroized `String` inside `ConnectionConfig.values` for the life of
-    /// this process's `CoreApi::Profile` — weaker than the `SecretString`
-    /// guarantee (zeroize-on-drop, redacted `Debug`) it started as.
     pub async fn open_profile(
         &self,
         name: &str,
@@ -140,14 +98,6 @@ impl Default for Context {
     }
 }
 
-/// A [`Context`] whose profile store **and** secret store are both in memory.
-///
-/// The secrets half is the point. [`SecretResolver::new`] talks to the OS
-/// credential store, which fails outright on a bare Linux CI runner — there is
-/// no Secret Service on the session bus — and, worse, quietly *succeeds* on a
-/// developer's Mac, leaving a junk credential in their login keychain on every
-/// run. Those accumulate silently; a real machine had 30+ before this existed.
-/// No test in this crate asserts anything about the OS store itself.
 #[cfg(test)]
 pub fn test_ctx() -> Context {
     let mut ctx = Context::with_store(Store::open_in_memory());
@@ -155,14 +105,6 @@ pub fn test_ctx() -> Context {
     ctx
 }
 
-/// [`test_ctx`] over a real file, for the one claim an in-memory store cannot
-/// support: that a password never lands on disk. Give it a path inside a
-/// `tempfile::tempdir()` and the whole directory — db, `-wal`, `-shm`, any
-/// export written beside them — becomes greppable.
-///
-/// Secrets stay in memory for exactly the reasons [`test_ctx`] gives; a test
-/// that reaches the OS keychain to prove something about disk would be trading
-/// one leak for another.
 #[cfg(test)]
 pub fn test_ctx_at(profiles_db: &std::path::Path) -> Context {
     let mut ctx = Context::with_store(Store::open(profiles_db));
