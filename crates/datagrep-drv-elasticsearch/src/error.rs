@@ -1,23 +1,8 @@
-//! Mapping the two error surfaces of a hand-rolled REST driver onto
-//! `datagrep-api`'s single [`DbError`]: transport failures from `reqwest`, and
-//! the structured JSON error envelope Elasticsearch/OpenSearch return with a
-//! non-2xx status.
-//!
-//! **Nothing here ever logs or embeds credentials.** `map_reqwest_error`
-//! deliberately formats the error without its URL (a `reqwest::Error`'s
-//! `Display` includes the request URL, and a URL can carry `user:pass@`), so a
-//! connect failure can never leak a password into a log line or a UI toast.
-
 use serde_json::Value as Json;
 
 use datagrep_api::error::DbError;
 
-/// Map a transport-level `reqwest` failure. Recoverability follows
-/// `DbError`'s own split: a timeout is recoverable, a broken connection is not.
 pub fn map_reqwest_error(err: reqwest::Error) -> DbError {
-    // `err.to_string()` on a reqwest error includes the URL, which may contain
-    // userinfo. Strip it by rebuilding the message from the error's own
-    // classification plus the innermost source, never the URL.
     let detail = innermost(&err);
     if err.is_timeout() {
         return DbError::Timeout;
@@ -34,9 +19,6 @@ pub fn map_reqwest_error(err: reqwest::Error) -> DbError {
     DbError::Io(std::io::Error::other(detail))
 }
 
-/// The deepest `source()` message, which is the useful part (`connection
-/// refused`, `certificate verify failed`) and, unlike the top-level
-/// `Display`, never contains the request URL.
 fn innermost(err: &(dyn std::error::Error + 'static)) -> String {
     let mut cur: &(dyn std::error::Error + 'static) = err;
     let mut last = String::new();
@@ -50,22 +32,12 @@ fn innermost(err: &(dyn std::error::Error + 'static)) -> String {
         }
     }
     if last.is_empty() {
-        // No source chain: fall back to a class label rather than the
-        // URL-bearing Display string.
         "http request failed".to_string()
     } else {
         last
     }
 }
 
-/// Turn a non-2xx Elasticsearch/OpenSearch response into a [`DbError`].
-///
-/// The engine's JSON envelope is
-/// `{"error": {"type": "...", "reason": "...", "root_cause": [...]}, "status": N}`;
-/// `error` is occasionally a bare string (older OpenSearch, some plugins), and
-/// on a proxy failure the body is not JSON at all. All three are handled, and
-/// the engine's own `type` is preserved verbatim as `DbError::Query::code`,
-/// so an error stays searchable against the engine's own documentation.
 pub fn map_status_error(status: u16, body: &str) -> DbError {
     let parsed: Option<Json> = serde_json::from_str(body).ok();
     let (code, message) = match parsed.as_ref().and_then(|j| j.get("error")) {
@@ -76,8 +48,6 @@ pub fn map_status_error(status: u16, body: &str) -> DbError {
                 .and_then(Json::as_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| truncate(body));
-            // A root cause is usually more specific than the outer reason
-            // (`index_not_found_exception` vs `search_phase_execution_exception`).
             let root = err
                 .get("root_cause")
                 .and_then(Json::as_array)
@@ -97,24 +67,16 @@ pub fn map_status_error(status: u16, body: &str) -> DbError {
     match status {
         401 | 403 => DbError::Auth(message),
         408 | 504 => DbError::Timeout,
-        // Optimistic-concurrency loss (`version_conflict_engine_exception`) or
-        // an `op_type=create` collision. Keyed off the HTTP status plus the
-        // structured `error.type` preserved in `code` — never off the reason
-        // prose, which varies by index mode.
         409 => DbError::Conflict { code, message },
         429 => DbError::ResourceExhausted(message),
         _ => DbError::Query {
             code,
             message,
-            // Elasticsearch reports no byte offset into the submitted body, so
-            // there is nothing honest to put here for an editor squiggle.
             position: None,
         },
     }
 }
 
-/// Bound a non-JSON error body (an HTML 502 from a load balancer, say) so a
-/// megabyte of proxy markup never ends up in an error string.
 fn truncate(body: &str) -> String {
     const MAX: usize = 512;
     let trimmed = body.trim();
@@ -190,8 +152,6 @@ mod tests {
             }
             other => panic!("expected Conflict, got {other:?}"),
         }
-        // A conflict is recoverable: the connection survives, the caller
-        // re-reads and decides.
         assert!(map_status_error(409, body).is_recoverable());
     }
 

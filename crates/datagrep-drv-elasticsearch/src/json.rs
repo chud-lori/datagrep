@@ -1,34 +1,8 @@
-//! An order-preserving JSON value, used for everything that becomes a
-//! [`datagrep_api::Value`].
-//!
-//! # Why this exists
-//!
-//! `datagrep-api`'s `Document` is explicit that **key order is data** — "for
-//! BSON, ES `_source`, Redis hashes" — and this driver's whole reason for
-//! existing is to be truthful about document shape. But `serde_json::Value`
-//! stores objects in a `BTreeMap` unless the crate-wide `preserve_order`
-//! feature is on, which would silently re-alphabetize every `_source` the grid
-//! and the detail pane show.
-//!
-//! Enabling that feature is not an option here: Cargo unifies features across
-//! the workspace, so switching it on for this driver switches it on for
-//! `datagrep-ffi`, `datagrep-core`, `datagrep-profiles` and every other crate
-//! that touches `serde_json` — changing the key order of JSON *they* emit.
-//! A driver must not reach across the workspace like that.
-//!
-//! So responses whose ordering is user-visible are parsed into this type
-//! instead: a `Vec<(String, OrderedJson)>` for objects, which also preserves
-//! duplicate keys exactly as `Document` does. Control-plane responses (`_cat`,
-//! `_stats`, `_tasks`) keep using `serde_json::Value`, because nothing about
-//! their key order is ever shown to anyone.
-
 use std::fmt;
 
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Number, Value as Json};
 
-/// A JSON value that remembers the order — and the duplicates — of its object
-/// keys.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OrderedJson {
     Null,
@@ -36,18 +10,14 @@ pub enum OrderedJson {
     Number(Number),
     String(String),
     Array(Vec<OrderedJson>),
-    /// Ordered, duplicate-preserving object fields.
     Object(Vec<(String, OrderedJson)>),
 }
 
 impl OrderedJson {
-    /// Parse JSON text, preserving object key order.
     pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(text)
     }
 
-    /// First occurrence of `key`, matching `serde_json::Value::get`'s
-    /// behaviour so call sites read the same.
     pub fn get(&self, key: &str) -> Option<&OrderedJson> {
         match self {
             OrderedJson::Object(fields) => fields.iter().find(|(k, _)| k == key).map(|(_, v)| v),
@@ -101,10 +71,6 @@ impl OrderedJson {
         matches!(self, OrderedJson::Object(_))
     }
 
-    /// Lower to a `serde_json::Value` — used where a value read out of a
-    /// response has to go back into a request body (the `search_after` sort
-    /// values, most importantly) or into a resume token. Object order is lost
-    /// in the conversion, which is why it is never used for `_source`.
     pub fn to_serde(&self) -> Json {
         match self {
             OrderedJson::Null => Json::Null,
@@ -121,9 +87,6 @@ impl OrderedJson {
         }
     }
 
-    /// Lift a `serde_json::Value` — for the paths where the order was never
-    /// available in the first place (a control-plane reply shown as one
-    /// document), so a single conversion routine serves both.
     pub fn from_serde(json: &Json) -> Self {
         match json {
             Json::Null => OrderedJson::Null,
@@ -185,8 +148,6 @@ impl<'de> Visitor<'de> for OrderedJsonVisitor {
     fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
         Ok(Number::from_f64(v)
             .map(OrderedJson::Number)
-            // Non-finite floats are not JSON; `serde_json` never produces one,
-            // and turning it into null loses nothing that was ever there.
             .unwrap_or(OrderedJson::Null))
     }
 
@@ -207,8 +168,6 @@ impl<'de> Visitor<'de> for OrderedJsonVisitor {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        // Push, never insert: duplicate keys are preserved in order, exactly
-        // as `datagrep_api::Document` does.
         let mut fields = Vec::with_capacity(map.size_hint().unwrap_or(0));
         while let Some((k, v)) = map.next_entry::<String, OrderedJson>()? {
             fields.push((k, v));
@@ -223,8 +182,6 @@ mod tests {
 
     #[test]
     fn object_key_order_survives_parsing() {
-        // Deliberately reverse-alphabetical: a BTreeMap-backed parser would
-        // hand these back as a, m, z.
         let parsed = OrderedJson::parse(r#"{"z":1,"m":2,"a":3}"#).unwrap();
         let keys: Vec<&str> = parsed
             .as_object()
@@ -234,18 +191,6 @@ mod tests {
             .collect();
         assert_eq!(keys, vec!["z", "m", "a"], "key order is data");
 
-        // There was a negative control here asserting that `serde_json` sorts
-        // these back to a, m, z. It was removed because it is not a property
-        // this crate controls: `bson` (pulled in by the mongo driver) turns on
-        // serde_json's `preserve_order` feature, and Cargo unifies features
-        // across the whole workspace — so serde_json preserves order in a
-        // `--workspace` build and sorts in a `-p` build. Asserting either way
-        // makes the test depend on which sibling drivers happen to be
-        // compiled in.
-        //
-        // `OrderedJson` still earns its place: relying on a transitive
-        // dependency's feature to keep `_source` key order would silently
-        // break the moment the mongo driver is feature-gated out.
     }
 
     #[test]
@@ -299,8 +244,6 @@ mod tests {
         let parsed = OrderedJson::parse(r#"{"z":[1,{"b":2}],"a":null}"#).unwrap();
         let lowered = parsed.to_serde();
         assert_eq!(lowered["z"][1]["b"], serde_json::json!(2));
-        // Lifting back gives an equal tree (serde's own order, which is all
-        // that was left after lowering).
         let lifted = OrderedJson::from_serde(&lowered);
         assert_eq!(lifted.get("z").unwrap().as_array().unwrap().len(), 2);
         assert_eq!(lifted.get("a"), Some(&OrderedJson::Null));

@@ -1,15 +1,3 @@
-//! Structured [`DdlOp`] for the two objects this catalog lists: an index
-//! (`ObjectKind::Collection`) and an alias (`ObjectKind::View`).
-//!
-//! The kind is load-bearing. Both share one namespace and the server refuses
-//! `DELETE /<alias>` — *"matches an alias, specify the corresponding concrete
-//! indices instead"* — so which one a name means is never inferred here.
-//!
-//! Creating an index, `_close`/`_open`, and adding an alias stay native: the
-//! first needs mappings, the second is a lifecycle state, and the third
-//! belongs in an atomic action list carrying a `filter` document and
-//! `routing`.
-
 use serde_json::{json, Value as Json};
 
 use datagrep_api::{DbError, DdlOp, ObjectKind, ObjectPath};
@@ -17,27 +5,19 @@ use datagrep_api::{DbError, DdlOp, ObjectKind, ObjectPath};
 #[derive(Debug, PartialEq)]
 pub struct EsDdl {
     pub kind: EsDdlKind,
-    /// Error type tolerated as success, when the caller passed `if_exists`.
     pub absent_code: Option<&'static str>,
     pub ack: &'static str,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum EsDdlKind {
-    /// `DELETE /<index>`, with `ignore_unavailable` carrying `if_exists`.
     DeleteIndex {
         index: String,
         ignore_unavailable: bool,
     },
-    /// One action list, applied atomically. `index: "*"` detaches the alias
-    /// everywhere in a single cluster-state update; one call per index would
-    /// be visible half-removed in between.
     Aliases { body: Json },
 }
 
-/// A name addressing exactly one object. Wildcards, comma lists, `_all` and
-/// date math all expand server-side; `action.destructive_requires_name` also
-/// catches most of it, but it is a setting a cluster can turn off.
 fn one_object(path: &ObjectPath) -> Result<&str, DbError> {
     let [name] = path.parts() else {
         return Err(DbError::Unsupported {
@@ -64,7 +44,6 @@ fn one_object(path: &ObjectPath) -> Result<&str, DbError> {
     Ok(name)
 }
 
-/// Plan a structured [`DdlOp`], or refuse it by name.
 pub fn plan(op: &DdlOp) -> Result<EsDdl, DbError> {
     match op {
         DdlOp::Drop {
@@ -149,8 +128,6 @@ mod tests {
             }
         );
 
-        // The alias goes through the action list, never `DELETE /<alias>` —
-        // the server refuses that and names the reason.
         let alias = plan(&drop_op("m3_live", ObjectKind::View, false)).unwrap();
         let EsDdlKind::Aliases { body } = &alias.kind else {
             panic!("expected an action list, got {:?}", alias.kind)
@@ -173,8 +150,6 @@ mod tests {
         ));
         assert_eq!(index.absent_code, None);
 
-        // The alias endpoint has no such parameter, so the miss is tolerated
-        // by error type instead.
         let alias = plan(&drop_op("m3_live", ObjectKind::View, true)).unwrap();
         assert_eq!(alias.absent_code, Some("aliases_not_found_exception"));
         assert_eq!(

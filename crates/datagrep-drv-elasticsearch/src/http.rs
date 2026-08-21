@@ -1,28 +1,3 @@
-//! The hand-rolled REST transport: one `reqwest::Client` per connection, plus
-//! the auth header, the product/version handshake, and the `X-Opaque-Id`
-//! tagging that makes a real server-side cancel possible (see
-//! [`crate::canceller`]).
-//!
-//! # Why hand-rolled
-//!
-//! The official `elasticsearch` crate has only ever published alpha releases,
-//! and — fatally for bounded memory — it has no streaming API at all: it reads
-//! the entire response body into memory before handing it back. A driver that
-//! buffers cannot make backpressure reach the socket. The `opensearch` crate
-//! is not a substitute (it forked at ES 7.10.2 and has diverged). So this
-//! module speaks the handful of endpoints we actually need over plain HTTP:
-//! `_search`, `_pit`, `_search/scroll`, `_count`, `_tasks`, `_async_search`,
-//! `_cat/indices`, `_mapping`, `_alias`, `_data_stream`, `_validate/query`,
-//! `_cluster/health`, `_cat/nodes`, `_cat/shards`, `_bulk`.
-//!
-//! # Credentials
-//!
-//! [`Auth`] is built once at connect time from already-resolved secrets and
-//! stored as a pre-encoded `Authorization` header value. It is `Debug`-redacted
-//! and never formatted into a log line, an error message, or a URL — see
-//! [`crate::error::map_reqwest_error`], which strips reqwest's URL-bearing
-//! `Display` for exactly this reason.
-
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,14 +10,8 @@ use datagrep_api::error::DbError;
 use crate::error::{map_reqwest_error, map_status_error};
 use crate::json::OrderedJson;
 
-/// Header Elasticsearch echoes into the tasks API, which is how a cancel finds
-/// the task belonging to *our* in-flight search.
 pub const OPAQUE_ID_HEADER: &str = "X-Opaque-Id";
 
-/// Which product answered the handshake. Recorded, never guessed: OpenSearch
-/// forked at ES 7.10.2 and its index format, security API and query syntax
-/// have diverged since, so features degrade off this rather than off a version
-/// number alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Product {
     Elasticsearch,
@@ -58,17 +27,9 @@ impl Product {
     }
 }
 
-/// How a scan pages through results. Chosen at connect time from the product
-/// and version, reported in `ServerInfo` and as a `Notice` on the first batch
-/// so the user is never left guessing which one ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageMode {
-    /// Point-in-time + `search_after`: the correct modern mechanism. Holds a
-    /// consistent view without pinning a scroll context per shard, and gives a
-    /// resume token that survives an idle disconnect.
     Pit,
-    /// `_scroll`: the fallback for OpenSearch and pre-7.10 Elasticsearch,
-    /// which have no `_pit` (or an incompatible one).
     Scroll,
 }
 
@@ -81,15 +42,11 @@ impl PageMode {
     }
 }
 
-/// A resolved credential, pre-encoded into its `Authorization` header value.
 #[derive(Clone)]
 pub enum Auth {
     None,
-    /// `Authorization: Basic base64(user:pass)`.
     Basic(Arc<str>),
-    /// `Authorization: ApiKey <id:api_key base64>` — Elasticsearch API keys.
     ApiKey(Arc<str>),
-    /// `Authorization: Bearer <token>` — service account / OAuth bearer tokens.
     Bearer(Arc<str>),
 }
 
@@ -103,9 +60,6 @@ impl Auth {
         ))
     }
 
-    /// An Elasticsearch API key. Accepts either the already-base64
-    /// `encoded` form the create-API-key response returns, or the raw
-    /// `id:api_key` pair, which is encoded here.
     pub fn api_key(value: &str) -> Self {
         let encoded = if value.contains(':') {
             base64::engine::general_purpose::STANDARD.encode(value)
@@ -128,8 +82,6 @@ impl Auth {
         }
     }
 
-    /// The scheme name, safe to show in `ServerInfo` — the credential itself
-    /// never is.
     pub fn scheme(&self) -> &'static str {
         match self {
             Auth::None => "none",
@@ -140,16 +92,12 @@ impl Auth {
     }
 }
 
-/// Redacted: the whole point of this type is that the credential never reaches
-/// a log, a panic message, or a crash dump.
 impl fmt::Debug for Auth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Auth::{}(\"••••\")", self.scheme())
     }
 }
 
-/// HTTP verb, kept as a tiny enum so the read-only classifier
-/// ([`crate::connection`]) can reason about a request without string matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Get,
@@ -191,24 +139,15 @@ impl Method {
         }
     }
 
-    /// Whether this verb can mutate cluster state at all. The read-only
-    /// classifier needs both this and the path: on Elasticsearch a `POST` is
-    /// as often a search as a write.
     pub fn is_read(self) -> bool {
         matches!(self, Method::Get | Method::Head)
     }
 }
 
-/// One connection's HTTP surface. Cheap to clone through the `Arc` the
-/// connection holds; the inner `reqwest::Client` already pools sockets.
 pub struct EsHttp {
     client: reqwest::Client,
-    /// Base URL with no trailing slash, e.g. `https://es.example.com:9200`.
     base: String,
     auth: Auth,
-    /// Applied per request via `reqwest`'s own timeout: every request carries
-    /// a deadline, so even one the server never answers is bounded rather than
-    /// hanging forever.
     request_timeout: Duration,
 }
 
@@ -237,8 +176,6 @@ impl EsHttp {
                 env!("CARGO_PKG_VERSION")
             ));
         if accept_invalid_certs {
-            // Opt-in only, and surfaced in `ServerInfo` so a connection that
-            // skipped verification always says so.
             builder = builder.danger_accept_invalid_certs(true);
         }
         let client = builder.build().map_err(|e| DbError::Tls(e.to_string()))?;
@@ -266,12 +203,6 @@ impl EsHttp {
         }
     }
 
-    /// Issue one request and parse a JSON response.
-    ///
-    /// `opaque_id` tags the request so [`crate::canceller::EsCanceller`] can
-    /// find the resulting task in `_tasks` and cancel it server-side.
-    /// `timeout` overrides the connection default for one call (used to give a
-    /// long-running search its own deadline).
     pub async fn request(
         &self,
         method: Method,
@@ -286,9 +217,6 @@ impl EsHttp {
             .map(|(json, _)| json)
     }
 
-    /// As [`EsHttp::request`], but also reports the response body's wire size
-    /// so a cursor can account bytes without re-serializing every document it
-    /// just parsed (`CursorStats::bytes`).
     pub async fn request_sized(
         &self,
         method: Method,
@@ -309,10 +237,6 @@ impl EsHttp {
         Ok((json, size))
     }
 
-    /// As [`EsHttp::request_sized`], but parsing into the **order-preserving**
-    /// [`OrderedJson`]. Used for every response whose object key order ends up
-    /// in front of a human — hits, and single reply documents — because
-    /// `serde_json::Value` would re-alphabetize them (see [`crate::json`]).
     pub async fn request_ordered(
         &self,
         method: Method,
@@ -333,13 +257,6 @@ impl EsHttp {
         Ok((json, size))
     }
 
-    /// Issue one `application/x-ndjson` request — the `_bulk` path — and parse
-    /// the JSON response. Unlike [`EsHttp::request`], the body is sent **raw**:
-    /// pre-framed NDJSON (one compact JSON per line, terminated by a trailing
-    /// `\n`), never re-serialized as a single JSON value. Bulk returns HTTP 200
-    /// even when individual items fail, so the caller inspects the parsed
-    /// response's per-item `status`/`error`; only a whole-request failure (a
-    /// 4xx/5xx on the `_bulk` call itself) surfaces here as an `Err`.
     pub async fn request_ndjson(
         &self,
         method: Method,
@@ -367,9 +284,6 @@ impl EsHttp {
             .map_err(|e| DbError::Protocol(format!("response was not valid JSON: {e}")))
     }
 
-    /// Issue the request and return the raw body plus its wire size. The one
-    /// place a request is actually built, so auth, tagging, timeouts and
-    /// error mapping cannot drift between the two parsing paths.
     async fn send(
         &self,
         method: Method,
@@ -397,8 +311,6 @@ impl EsHttp {
             req = req.json(body);
         }
 
-        // Deliberately logs the path only. A body can contain user data and a
-        // URL can contain userinfo; neither belongs in a log line.
         tracing::debug!(method = method.as_str(), path, "elasticsearch request");
 
         let resp = req.send().await.map_err(map_reqwest_error)?;
@@ -411,12 +323,6 @@ impl EsHttp {
         Ok((text, size))
     }
 
-    /// As [`EsHttp::send`], but for a body that is a pre-serialized raw string
-    /// with an explicit content type — the `_bulk` NDJSON path, whose body must
-    /// go over the wire verbatim (`application/x-ndjson`, not re-encoded as one
-    /// JSON value). Kept structurally identical to [`EsHttp::send`] so auth, the
-    /// `X-Opaque-Id` tag, the per-request timeout and error mapping never drift
-    /// between the two.
     #[allow(clippy::too_many_arguments)] // mirrors `send` plus an explicit content type
     async fn send_raw(
         &self,
@@ -458,35 +364,24 @@ impl EsHttp {
         Ok((text, size))
     }
 
-    /// `GET /` — the product handshake. Returns the parsed root document,
-    /// whose `version.distribution` is the only reliable way to tell
-    /// OpenSearch from Elasticsearch (OpenSearch also reports a `version.number`
-    /// in the 1.x/2.x range that would otherwise read as "ancient ES").
     pub async fn root_info(&self) -> Result<Json, DbError> {
         self.request(Method::Get, "/", &[], None, None, None).await
     }
 }
 
-/// What the `GET /` handshake told us.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootInfo {
     pub product: Product,
     pub version: String,
-    /// Display pairs for `ServerInfo::details` — shown, never branched on.
     pub details: Vec<(Arc<str>, Arc<str>)>,
 }
 
-/// Classify the `GET /` response into a product and version, plus the display
-/// pairs `ServerInfo` carries. Split out from the network call so it is unit
-/// testable against both engines' real root documents.
 pub fn classify_root(root: &Json) -> RootInfo {
     let version = root.get("version");
     let distribution = version
         .and_then(|v| v.get("distribution"))
         .and_then(Json::as_str);
     let product = match distribution {
-        // OpenSearch has reported `version.distribution = "opensearch"` since
-        // 1.0. Elasticsearch has no such field (it reports `build_flavor`).
         Some(d) if d.eq_ignore_ascii_case("opensearch") => Product::OpenSearch,
         _ => Product::Elasticsearch,
     };
@@ -517,8 +412,6 @@ pub fn classify_root(root: &Json) -> RootInfo {
     }
 }
 
-/// Parse `major.minor` out of a version string, tolerating suffixes
-/// (`8.15.0-SNAPSHOT`) and garbage (returns `(0, 0)`, i.e. "assume nothing").
 pub fn version_pair(version: &str) -> (u32, u32) {
     let mut it = version
         .split(|c: char| !c.is_ascii_digit())
@@ -528,15 +421,6 @@ pub fn version_pair(version: &str) -> (u32, u32) {
     (major, minor)
 }
 
-/// Which pagination mechanism this cluster gets, and why.
-///
-/// `_pit` landed in Elasticsearch 7.10, but the `_shard_doc` tiebreaker that
-/// makes `search_after` correct across shards only landed in 7.12 — so 7.10/
-/// 7.11 fall back rather than paginate on a tiebreaker that is not globally
-/// unique. OpenSearch is always `scroll`: its point-in-time API is a different
-/// endpoint shape (`/<index>/_search/point_in_time`) with different
-/// delete semantics and no `_shard_doc`, and the ticket's own instruction is
-/// to fall back and say which was used rather than guess.
 pub fn choose_page_mode(product: Product, version: &str) -> PageMode {
     let (major, minor) = version_pair(version);
     match product {
@@ -545,10 +429,6 @@ pub fn choose_page_mode(product: Product, version: &str) -> PageMode {
     }
 }
 
-/// Whether `_async_search` exists here. Elasticsearch 7.7+ (X-Pack, present in
-/// the default distribution); OpenSearch ships an *asynchronous search plugin*
-/// with a different endpoint (`/_plugins/_asynchronous_search`), so this
-/// driver does not claim it there.
 pub fn has_async_search(product: Product, version: &str) -> bool {
     let (major, minor) = version_pair(version);
     matches!(product, Product::Elasticsearch) && (major > 7 || (major == 7 && minor >= 7))
@@ -643,8 +523,6 @@ mod tests {
             choose_page_mode(Product::Elasticsearch, "7.12.0"),
             PageMode::Pit
         );
-        // 7.10 has _pit but not _shard_doc — falls back rather than paginate
-        // on a tiebreaker that is not globally unique.
         assert_eq!(
             choose_page_mode(Product::Elasticsearch, "7.10.2"),
             PageMode::Scroll

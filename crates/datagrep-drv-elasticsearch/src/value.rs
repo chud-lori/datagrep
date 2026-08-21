@@ -1,39 +1,3 @@
-//! `serde_json::Value` -> `datagrep_api::Value`, and the mapping-aware
-//! precision rules that keep a `long` or a `scaled_float` from silently
-//! becoming a lossy `f64`. Two standing rules: never lose bytes, and decimals
-//! stay strings.
-//!
-//! # `Absent` vs `Null` — by construction
-//!
-//! Nothing in this module ever *invents* a value. A hit's `_source` is
-//! converted by walking the JSON object's own keys, so a field the document
-//! does not carry is simply never emitted; `Document::get_path` then returns
-//! `None` and the core renders [`Value::Absent`]. A JSON `null` that really is
-//! in `_source` becomes [`Value::Null`]. The two can therefore never be
-//! confused — see `absent_is_never_synthesised_null` in the tests.
-//!
-//! # Numbers
-//!
-//! `serde_json` parses every integer that fits `i64`/`u64` exactly, so
-//! Elasticsearch `long` and `unsigned_long` (whose domains are exactly `i64`
-//! and `u64`) round-trip without loss through [`Value::I64`]/[`Value::U64`].
-//! Two cases still need care, and both are resolved by consulting the index
-//! mapping:
-//!
-//! - **`scaled_float`** is a fixed-point decimal stored as a scaled integer.
-//!   Rendering it as an `f64` produces the classic `123.45600000000002`. It
-//!   becomes [`Value::Decimal`] carrying Rust's shortest round-tripping
-//!   decimal text for the value the server sent.
-//! - **A `long`/`unsigned_long` that did *not* parse as an integer** — it
-//!   arrived in exponent form, or beyond `u64`, and `serde_json` fell back to
-//!   `f64`. That fallback has already lost digits relative to the declared
-//!   type, so it becomes [`Value::Decimal`] rather than an `f64` pretending to
-//!   be exact.
-//!
-//! Everything else numeric stays `I64`/`U64`/`F64`: for a field mapped
-//! `double`, an `f64` *is* the declared precision and promoting it to a string
-//! would be its own kind of lie.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -44,19 +8,12 @@ use datagrep_api::value::{Document, Value};
 
 use crate::json::OrderedJson;
 
-/// Elasticsearch field types this driver treats specially. Everything not
-/// listed maps structurally (string -> `Str`, object -> `Document`, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EsType {
-    /// Fixed-point decimal — must not round-trip through `f64`.
     ScaledFloat,
-    /// 64-bit signed / unsigned integers.
     Long,
     UnsignedLong,
-    /// Base64-encoded bytes in `_source`.
     Binary,
-    /// Anything else; carried so the field list and completions can show the
-    /// engine's own type name.
     Other,
 }
 
@@ -72,9 +29,6 @@ impl EsType {
     }
 }
 
-/// Dotted-path -> declared Elasticsearch type, flattened from one index's
-/// `_mapping`. Only ever fetched for the index actually being read, never the
-/// whole cluster's mappings.
 #[derive(Debug, Clone, Default)]
 pub struct FieldTypes {
     types: HashMap<String, (EsType, Arc<str>)>,
@@ -96,8 +50,6 @@ impl FieldTypes {
         self.types.get(path).map(|(t, _)| *t)
     }
 
-    /// The engine's own type name for a path, for the inspector and the field
-    /// list — always what the server said, never what we mapped it to.
     pub fn native(&self, path: &str) -> Option<Arc<str>> {
         self.types.get(path).map(|(_, n)| n.clone())
     }
@@ -110,15 +62,10 @@ impl FieldTypes {
         self.types.len()
     }
 
-    /// Every mapped path, in no particular order.
     pub fn paths(&self) -> impl Iterator<Item = (&str, EsType, &Arc<str>)> {
         self.types.iter().map(|(p, (t, n))| (p.as_str(), *t, n))
     }
 
-    /// Flatten an Elasticsearch `_mapping` response's `properties` object into
-    /// dotted paths. Handles nested `properties` (object/nested fields) and
-    /// records multi-fields (`fields`) under their `parent.sub` path, which is
-    /// exactly how they are addressed in a query.
     pub fn from_properties(properties: &Json) -> Self {
         let mut out = Self::new();
         flatten_properties(properties, "", &mut out);
@@ -152,12 +99,6 @@ fn flatten_properties(properties: &Json, prefix: &str, out: &mut FieldTypes) {
     }
 }
 
-/// Convert one JSON value to a [`Value`], consulting `types` for the declared
-/// Elasticsearch type at `path` (dotted, relative to the document root).
-///
-/// `path` is `""` for the root itself. `types` may be empty — with no mapping
-/// available every rule degrades to the structural mapping, which is lossless
-/// for everything except the two precision cases documented at module level.
 pub fn json_to_value(json: &OrderedJson, path: &str, types: &FieldTypes) -> Value {
     match json {
         OrderedJson::Null => Value::Null,
@@ -165,8 +106,6 @@ pub fn json_to_value(json: &OrderedJson, path: &str, types: &FieldTypes) -> Valu
         OrderedJson::Number(n) => number_to_value(n, path, types),
         OrderedJson::String(s) => string_to_value(s, path, types),
         OrderedJson::Array(items) => {
-            // Elasticsearch arrays are homogeneous by mapping and are not
-            // addressable by index, so every element shares the parent's path.
             let converted: Vec<Value> = items
                 .iter()
                 .map(|item| json_to_value(item, path, types))
@@ -174,8 +113,6 @@ pub fn json_to_value(json: &OrderedJson, path: &str, types: &FieldTypes) -> Valu
             Value::Array(Arc::from(converted))
         }
         OrderedJson::Object(fields) => {
-            // Key order — and duplicate keys — are data, which is why the
-            // input is `OrderedJson` and not `serde_json::Value`.
             let mut doc = Document::new();
             for (k, v) in fields {
                 let child = if path.is_empty() {
@@ -190,9 +127,6 @@ pub fn json_to_value(json: &OrderedJson, path: &str, types: &FieldTypes) -> Valu
     }
 }
 
-/// Convert a `serde_json::Value` — for the control-plane replies whose key
-/// order was already lost by the time they got here (a `_cluster/health`
-/// document, an `EXPLAIN` plan). Never used for `_source`.
 pub fn serde_to_value(json: &Json, path: &str, types: &FieldTypes) -> Value {
     json_to_value(&OrderedJson::from_serde(json), path, types)
 }
@@ -200,9 +134,6 @@ pub fn serde_to_value(json: &Json, path: &str, types: &FieldTypes) -> Value {
 fn number_to_value(n: &serde_json::Number, path: &str, types: &FieldTypes) -> Value {
     let declared = types.get(path);
 
-    // `scaled_float` is a decimal by definition: hand back the shortest
-    // decimal text that round-trips, never an f64 the grid would render as
-    // 123.45600000000002.
     if declared == Some(EsType::ScaledFloat) {
         return Value::Decimal(Arc::from(shortest_decimal(n).as_str()));
     }
@@ -214,17 +145,12 @@ fn number_to_value(n: &serde_json::Number, path: &str, types: &FieldTypes) -> Va
         return Value::U64(u);
     }
 
-    // Fell through to f64. For a field the mapping declares as a 64-bit
-    // integer that means digits were already lost relative to the declared
-    // type, so keep the text rather than the lossy float.
     if matches!(declared, Some(EsType::Long) | Some(EsType::UnsignedLong)) {
         return Value::Decimal(Arc::from(shortest_decimal(n).as_str()));
     }
 
     match n.as_f64() {
         Some(f) => Value::F64(f),
-        // Unreachable for values produced by `serde_json`'s own parser, but
-        // never lose the bytes if it ever happens.
         None => Value::Unsupported {
             type_name: Arc::from("number"),
             raw: datagrep_api::Bytes::from(n.to_string().into_bytes()),
@@ -233,19 +159,12 @@ fn number_to_value(n: &serde_json::Number, path: &str, types: &FieldTypes) -> Va
     }
 }
 
-/// `serde_json::Number`'s `Display` is the shortest representation that
-/// round-trips (it uses `ryu`/`itoa` under the hood), which is exactly the
-/// decimal text we want to preserve.
 fn shortest_decimal(n: &serde_json::Number) -> String {
     n.to_string()
 }
 
 fn string_to_value(s: &str, path: &str, types: &FieldTypes) -> Value {
     if types.get(path) == Some(EsType::Binary) {
-        // A `binary` field is base64 in `_source`. Decode to real bytes so the
-        // inspector shows a hex dump rather than an opaque base64 blob — and
-        // if the server sent something that is not base64 after all, keep the
-        // string exactly as received rather than losing it.
         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(s) {
             return Value::Bytes(datagrep_api::Bytes::from(bytes));
         }
@@ -253,16 +172,9 @@ fn string_to_value(s: &str, path: &str, types: &FieldTypes) -> Value {
     Value::Str(Arc::from(s))
 }
 
-/// Convert a [`Value`] back to JSON, for compiling typed parameter and
-/// predicate values into a query body. This is the only direction in which
-/// caller-supplied values enter a request, and it produces *data* — never a
-/// clause (see [`crate::filter`]).
 pub fn value_to_json(value: &Value) -> Json {
     match value {
         Value::Null => Json::Null,
-        // A filter that names a field the caller did not supply a value for is
-        // a caller bug; JSON has no "absent" literal, so it degrades to null
-        // rather than silently dropping the clause.
         Value::Absent => Json::Null,
         Value::Bool(b) => Json::Bool(*b),
         Value::I64(i) => Json::Number((*i).into()),
@@ -270,17 +182,12 @@ pub fn value_to_json(value: &Value) -> Json {
         Value::F64(f) => serde_json::Number::from_f64(*f)
             .map(Json::Number)
             .unwrap_or(Json::Null),
-        // Decimals stay textual: Elasticsearch parses a JSON string into a
-        // numeric field fine, and it is the only way to hand it digits an f64
-        // cannot hold.
         Value::Decimal(d) => Json::String(d.to_string()),
         Value::Str(s) => Json::String(s.to_string()),
         Value::Bytes(b) => Json::String(base64::engine::general_purpose::STANDARD.encode(b)),
         Value::Date(days) => Json::Number((*days).into()),
         Value::Time { nanos } => Json::Number((*nanos).into()),
         Value::Timestamp { micros, .. } => {
-            // Elasticsearch's `epoch_millis` is the only epoch format its date
-            // parser accepts numerically.
             Json::Number((*micros / 1_000).into())
         }
         Value::Interval {
@@ -291,8 +198,6 @@ pub fn value_to_json(value: &Value) -> Json {
             "months": months, "days": days, "nanos": nanos
         }),
         Value::Uuid(bytes) => Json::String(format_uuid(bytes)),
-        // Raw JSON text is re-parsed, not re-serialized, so key order and
-        // number precision survive.
         Value::Json(text) => serde_json::from_str(text).unwrap_or(Json::String(text.to_string())),
         Value::Array(items) => Json::Array(items.iter().map(value_to_json).collect()),
         Value::Document(doc) => {
@@ -320,8 +225,6 @@ pub fn value_to_json(value: &Value) -> Json {
 fn geometry_to_json(geo: &datagrep_api::value::Geometry) -> Json {
     use datagrep_api::value::Geometry;
     match geo {
-        // GeoJSON order is [lon, lat] — the same order Elasticsearch's
-        // `geo_shape`/`geo_point` array form expects.
         Geometry::Point { x, y } => serde_json::json!({
             "type": "Point", "coordinates": [x, y]
         }),
@@ -408,8 +311,6 @@ mod tests {
             Some(&Value::Decimal(Arc::from("123.456"))),
             "a scaled_float must keep its decimal text"
         );
-        // The same literal on a `double` field legitimately stays an f64:
-        // f64 *is* that field's declared precision.
         let json: Json = serde_json::from_str(r#"{"ratio": 123.456}"#).unwrap();
         let Value::Document(doc) = json_to_value(&OrderedJson::from_serde(&json), "", &m) else {
             panic!("expected document")
@@ -420,16 +321,12 @@ mod tests {
     #[test]
     fn long_beyond_f64_precision_stays_decimal_rather_than_losing_digits() {
         let m = mapping();
-        // Written in exponent form, so serde_json parses it as f64 — beyond
-        // what the declared `long` can survive as a float.
         let json: Json = serde_json::from_str(r#"{"id": 1.2345678901234567e19}"#).unwrap();
         let Value::Document(doc) = json_to_value(&OrderedJson::from_serde(&json), "", &m) else {
             panic!("expected document")
         };
         match doc.get("id") {
             Some(Value::Decimal(text)) => {
-                // The point is not the exact rendering but that the value did
-                // NOT land in an `F64` cell pretending to be an exact `long`.
                 assert!(
                     text.parse::<f64>().is_ok(),
                     "the decimal text must still be a number: {text}"
@@ -441,8 +338,6 @@ mod tests {
             }
             other => panic!("expected Decimal for a lossy long, got {other:?}"),
         }
-        // A `double` holding the same magnitude legitimately stays an f64:
-        // f64 *is* that field's declared precision.
         let json: Json = serde_json::from_str(r#"{"ratio": 1.2345678901234567e19}"#).unwrap();
         let Value::Document(doc) = json_to_value(&OrderedJson::from_serde(&json), "", &m) else {
             panic!("expected document")
@@ -492,10 +387,6 @@ mod tests {
         );
     }
 
-    /// The distinction this whole driver exists to keep truthful: a field
-    /// missing from `_source` resolves to `Absent`, a field holding JSON
-    /// `null` resolves to `Null`, and nothing here ever turns one into the
-    /// other.
     #[test]
     fn absent_is_never_synthesised_null() {
         let m = mapping();
@@ -518,8 +409,6 @@ mod tests {
     #[test]
     fn nested_objects_and_arrays_preserve_structure_and_key_order() {
         let m = mapping();
-        // Parsed with the order-preserving parser, and deliberately written
-        // reverse-alphabetically so a BTreeMap-backed parse would be caught.
         let json = OrderedJson::parse(
             r#"{"zebra":1,"address":{"city":"sg","geo":[1.5,2.5]},"tags":["a","b"]}"#,
         )

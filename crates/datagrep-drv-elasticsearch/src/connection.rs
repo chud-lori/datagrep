@@ -1,31 +1,3 @@
-//! [`EsConnection`] — the `Connection` impl. Compiles a [`Request`] into an
-//! Elasticsearch REST call and hands back a streaming cursor, without ever
-//! buffering a result.
-//!
-//! # What each `Request` becomes
-//!
-//! | Request | Elasticsearch |
-//! |---|---|
-//! | `Native` (console text / bare body) | the request as written; searches stream, everything else is one reply document |
-//! | `Op::Scan` | `_pit` + `_search` with `search_after` (or `_scroll`) |
-//! | `Op::Count { exact: true }` | `_count` — a real count, and it says so |
-//! | `Op::Count { exact: false }` | `_search?size=0`, whose `hits.total` is a **lower bound** |
-//! | `Op::Explain { analyze: false }` | `_validate/query?explain&rewrite` — the plan without running it |
-//! | `Op::Explain { analyze: true }` | `_search` with `"profile": true` — real per-shard timings |
-//! | `Op::Mutate` | guarded, serial, halt-and-report single-document `_update`/`_doc` writes (`EDITABLE_RESULTS` is on; `ATOMIC_BATCH` is off — no transaction) |
-//! | `Op::Ddl` | refused: `DDL` is off (index/mapping management is a native `PUT /<index>` request, not SQL DDL) |
-//!
-//! # Read-only enforcement is `Client`, and says so
-//!
-//! Elasticsearch has no per-session read-only mode. `set_read_only(true)`
-//! therefore returns [`Enforcement::Client`] and installs a classifier that
-//! refuses any request that is not a read: `GET`/`HEAD` always pass, `POST`
-//! passes only for the read endpoints (`_search`, `_count`, `_explain`,
-//! `_validate/query`, `_field_caps`, …), everything else is refused before it
-//! leaves the process. A cluster-level `index.blocks.read_only` would be a
-//! genuinely server-side control, but it applies to *every* client on the
-//! cluster, so setting it from a data browser would be indefensible.
-
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -59,17 +31,7 @@ use crate::mutate::{
 };
 use crate::value::{serde_to_value, FieldTypes};
 
-/// POST endpoints that only read. Used by the read-only guardrail; a path is a
-/// read if any of these appears as a `/`-delimited segment.
-///
-/// `_mapping` is deliberately absent: `POST /<index>/_mapping` *writes* the
-/// mapping. Reading a mapping is `GET`, which passes as a read on the method
-/// alone.
-///
-/// This table MUST stay in sync with `datagrep-lang`'s `esdsl::READ_ACTIONS`
-/// (the editor-side classifier) until the two are unified into one table in
-/// `datagrep-lang`, per the plan's recommendation
-/// (notes/elasticsearch-plan.md §6, "classify").
+// POST-but-read allow-list; _mapping is deliberately absent (POST /_mapping writes). Keep in sync with esdsl::READ_ACTIONS in datagrep-lang.
 const READ_ONLY_POST_ENDPOINTS: &[&str] = &[
     "_search",
     "_msearch",
@@ -101,8 +63,6 @@ pub struct EsConnection {
     mapping_cache: Arc<Mutex<HashMap<String, Arc<FieldTypes>>>>,
     read_only: AtomicBool,
     closed: AtomicBool,
-    /// Monotonic per-connection counter so every request's `X-Opaque-Id` is
-    /// unique even across concurrent cursors on one connection.
     request_seq: AtomicU64,
     opaque_root: Arc<str>,
 }
@@ -120,8 +80,6 @@ impl EsConnection {
     ) -> Self {
         let mapping_cache = Arc::new(Mutex::new(HashMap::new()));
         let catalog = Arc::new(EsCatalog::new(http.clone(), mapping_cache.clone()));
-        // The opaque id is what the tasks API matches on, so it identifies
-        // *this application and connection* — never anything user-supplied.
         let app = application_name.as_deref().unwrap_or("datagrep");
         let opaque_root: Arc<str> = Arc::from(
             format!(
@@ -162,8 +120,6 @@ impl EsConnection {
         Arc::from(format!("{}-{n}", self.opaque_root).as_str())
     }
 
-    /// The index expression a request targets, honouring the connection's
-    /// default and falling back to a stated cluster-wide `_all`.
     fn resolve_index(&self, explicit: Option<&str>) -> String {
         explicit
             .filter(|s| !s.is_empty())
@@ -176,7 +132,6 @@ impl EsConnection {
         opts.read_only_assert || self.read_only.load(Ordering::Acquire)
     }
 
-    /// `POST /<index>/_pit` — the one place a point-in-time is opened.
     async fn open_pit(
         &self,
         index: &str,
@@ -200,9 +155,6 @@ impl EsConnection {
             .ok_or_else(|| DbError::Protocol("_pit returned no point-in-time id".to_string()))
     }
 
-    /// Open the server-side scan context and build the streaming cursor. The
-    /// single place a `SearchCursor` is created, so PIT opening and mapping
-    /// loading are never duplicated.
     async fn open_scan(
         &self,
         spec: ScanSpec,
@@ -210,10 +162,6 @@ impl EsConnection {
     ) -> Result<Box<dyn Cursor>, DbError> {
         let ScanSpec { index, timeout, .. } = &spec;
         let (index, timeout) = (index.clone(), *timeout);
-        // The mapping drives the precision rules and the native type names on
-        // schema deltas. It is best-effort: a caller with read access to the
-        // documents but not to the mapping still gets a correct, if less
-        // precise, stream.
         let types = self
             .catalog
             .mapping(&index)
@@ -225,10 +173,6 @@ impl EsConnection {
 
         if let Some(token) = resume {
             let resume = crate::resume::EsResume::decode(token)?;
-            // A resumed `Pit` scan needs a *new* point-in-time: closing the
-            // original cursor released the old one, which is the whole point
-            // of a resume token. The position lives in the `search_after`
-            // values, not in the PIT — see `SearchCursor::from_resume`.
             let fresh_pit = match resume.mode {
                 crate::resume::ResumeMode::Pit => {
                     Some(self.open_pit(&resume.index, timeout).await?)
@@ -287,8 +231,6 @@ impl EsConnection {
                     position: None,
                 });
             }
-            // `sort` in the user's own body is honoured; the cursor appends
-            // the stable tiebreaker to it.
             let user_sort = body
                 .as_object_mut()
                 .and_then(|m| m.remove("sort"))
@@ -312,9 +254,6 @@ impl EsConnection {
                 .await;
         }
 
-        // Anything else — cluster health, a mapping read, `_cat`, an aggregation
-        // via `_search?size=0`, a scroll continuation — is one round trip whose
-        // reply is shown as a single document.
         let (response, _) = self
             .http
             .request_ordered(
@@ -334,9 +273,6 @@ impl EsConnection {
         ])))
     }
 
-    /// Takes the whole `Op::Scan` rather than its seven fields: the compiler
-    /// then keeps this in step with the `Op` definition, and there is one
-    /// place that knows how a scan is spelled.
     async fn execute_scan(&self, op: &Op, opts: &ExecOpts) -> Result<Box<dyn Cursor>, DbError> {
         let Op::Scan {
             path,
@@ -402,9 +338,6 @@ impl EsConnection {
         };
 
         if exact {
-            // `_count` really does count every match. `EXACT_COUNT_CHEAP` is
-            // false precisely because this is a second, potentially expensive
-            // request rather than something a search hands back for free.
             let body = query.map(|q| json!({ "query": q }));
             let response = self
                 .http
@@ -423,10 +356,6 @@ impl EsConnection {
             ));
         }
 
-        // The cheap estimate: a zero-size search whose `hits.total` stops
-        // counting at `track_total_hits` (10 000 by default). The UI shows
-        // "≥ N" — `track_total_hits` is deliberately NOT set here, because
-        // asking for it turns the cheap estimate into a full count.
         let mut body = serde_json::Map::new();
         body.insert("size".into(), json!(0));
         if let Some(q) = query {
@@ -483,8 +412,6 @@ impl EsConnection {
         let index = encode_index_expression(&index)?;
 
         let response = if analyze {
-            // `profile: true` actually runs the search and reports real
-            // per-shard, per-query-component timings — `EXPLAIN_ANALYZE`.
             let mut body = serde_json::Map::new();
             body.insert("profile".into(), json!(true));
             body.insert("size".into(), json!(0));
@@ -502,8 +429,6 @@ impl EsConnection {
                 )
                 .await?
         } else {
-            // `_validate/query?explain&rewrite` reports the rewritten Lucene
-            // query without executing it — the honest non-analyze EXPLAIN.
             let body = query.map(|q| json!({ "query": q }));
             self.http
                 .request(
@@ -527,16 +452,6 @@ impl EsConnection {
         )])))
     }
 
-    /// `Op::Mutate` — guarded, serial, halt-and-report single-document writes.
-    ///
-    /// The whole batch is compiled *before* a single write leaves the process
-    /// (a refused mutation therefore touches no document), the target indices
-    /// are checked for the TSDB sentinel-`_seq_no` hazard up front, and the
-    /// compiled writes are then issued one at a time. The first failure halts:
-    /// Elasticsearch has no transaction, so the applied prefix stays written
-    /// and the rest is deliberately never sent. See [`crate::mutate`] for the
-    /// model and the per-operation rules.
-    /// Drop an index or an alias — one request either way.
     async fn execute_ddl(&self, op: &DdlOp, opts: &ExecOpts) -> Result<Box<dyn Cursor>, DbError> {
         if self.read_only_active(opts) {
             return Err(DbError::Unsupported {
@@ -582,8 +497,6 @@ impl EsConnection {
         };
         match sent {
             Ok(_) => Ok(Box::new(AckCursor::new(None, Some(Arc::from(plan.ack))))),
-            // Presence-checked, not just compared: an error carrying no code
-            // would otherwise match a plan tolerating nothing.
             Err(DbError::Query { ref code, .. })
                 if plan.absent_code.is_some() && code.as_deref() == plan.absent_code =>
             {
@@ -601,10 +514,6 @@ impl EsConnection {
         batch: &MutationBatch,
         opts: &ExecOpts,
     ) -> Result<Box<dyn Cursor>, DbError> {
-        // Read-only mode refuses generated writes before anything is compiled
-        // or sent — the same client-side guarantee `execute_native` gives the
-        // console path. Elasticsearch has no server-side read-only session, so
-        // this is our enforcement (`Enforcement::Client`) and says so.
         if self.read_only_active(opts) {
             return Err(DbError::Unsupported {
                 feature: "generated writes: this connection is in read-only mode (enforced \
@@ -619,10 +528,6 @@ impl EsConnection {
             )));
         }
 
-        // Pre-flight: compile every mutation before anything is sent. A compile
-        // refusal (guard absent, an `Absent` set, an array-element edit, a
-        // sentinel guard, an unwritable envelope field) refuses the whole batch
-        // with the reason, having touched nothing.
         let include_source_on_error = supports_include_source_on_error(
             product_of(&self.server_info),
             &self.server_info.version,
@@ -633,22 +538,8 @@ impl EsConnection {
             .map(|m| compile_mutation(m, include_source_on_error))
             .collect::<Result<_, _>>()?;
 
-        // TSDB hazard (plan §3.2.3, the sharpest one): a time-series-mode index
-        // on ES >= 9.4 returns *sentinel* `_seq_no` values and rejects (or, for
-        // by-query ops, silently ignores) an `if_seq_no` guard. Index mode is a
-        // capability question that belongs in the per-index catalog, but the
-        // catalog does not carry it today — so the least-hacky truthful option
-        // is to read the target index's settings once, up front, and refuse the
-        // whole batch with the reason rather than discover it as a per-document
-        // 400. This is best-effort by design: see `refuse_tsdb_indices`.
         self.refuse_tsdb_indices(&writes, opts.timeout).await?;
 
-        // One mutation is cheaper as a single guarded round-trip than as a
-        // one-item `_bulk` (no NDJSON framing, no per-item envelope); more than
-        // one goes in a single `_bulk` request — N round-trips collapse to one,
-        // and one refresh-listener slot per shard instead of N. Both keep the
-        // guarded, per-document, halt-and-report contract; the single-document
-        // path is unchanged.
         if writes.len() == 1 {
             self.execute_mutate_serial(&writes, opts).await
         } else {
@@ -656,12 +547,6 @@ impl EsConnection {
         }
     }
 
-    /// Issue the compiled writes one at a time, stopping at the first failure —
-    /// the single-document commit path. `outcomes` ends up as long as `writes`
-    /// when everything applied, or exactly one longer than the applied prefix on
-    /// a halt: everything after the failure is deliberately never sent. A 409
-    /// arrives here as [`DbError::Conflict`] (recoverable); the report surfaces
-    /// it as a per-row conflict. See [`crate::mutate::batch_report`].
     async fn execute_mutate_serial(
         &self,
         writes: &[CompiledWrite],
@@ -697,30 +582,15 @@ impl EsConnection {
         Ok(Box::new(DocsCursor::new(docs).with_notices(notices)))
     }
 
-    /// Frame the whole batch into one `_bulk` NDJSON request and report per
-    /// item. Bulk is **not atomic** and returns HTTP 200 even when items fail,
-    /// so a whole-request `Err` only surfaces a transport/`_bulk`-level failure;
-    /// the real signal is each item's `status`/`error`, folded by
-    /// [`crate::mutate::bulk_report`]. The guard rides each action line;
-    /// `refresh=wait_for` and the response filter are `_bulk` URL params.
     async fn execute_mutate_bulk(
         &self,
         writes: &[CompiledWrite],
         opts: &ExecOpts,
     ) -> Result<Box<dyn Cursor>, DbError> {
-        // Frame first: an oversize body (over http.max_content_length) or an
-        // unguarded action line is refused here, having sent nothing.
         let body = compile_bulk_body(writes, MAX_BULK_BODY_BYTES)?;
 
         let mut query: Vec<(&str, String)> = vec![
-            // One refresh for the whole batch — wait_for, never true (see the
-            // mutate module doc); a shard that degrades it to an immediate
-            // refresh surfaces `forced_refresh` per item.
             ("refresh", "wait_for".to_string()),
-            // Keep the response small: only the per-item fields the report reads
-            // plus the top-level `errors` flag. Every item always carries
-            // `status`, so no item is filtered away and the one-item-per-action
-            // invariant `bulk_report` checks still holds.
             (
                 "filter_path",
                 "errors,items.*.status,items.*.error,items.*.result,items.*._id,\
@@ -753,18 +623,7 @@ impl EsConnection {
         Ok(Box::new(DocsCursor::new(docs).with_notices(notices)))
     }
 
-    /// Refuse a batch whose target index cannot honour the optimistic-
-    /// concurrency guard (a time-series index on ES >= 9.4, whose `_seq_no` is
-    /// a sentinel). Reads `GET /<index>/_settings?flat_settings=true` once per
-    /// distinct concrete index and classifies it with
-    /// [`guard_unsupported_reason`].
-    ///
-    /// **Best-effort on purpose.** If the settings are unreadable (no
-    /// permission, a transient error) the check is skipped rather than failing
-    /// the batch: the compiled write still carries `if_seq_no`, and a
-    /// sequence-numbers-disabled index rejects a guarded single-document write
-    /// at write time rather than applying it — so a missing settings read
-    /// downgrades to that per-document guard, it does not open a silent clobber.
+    // TSDB indices (ES >= 9.4) carry sentinel _seq_no and reject or ignore if_seq_no, so refuse up front; best-effort — unreadable settings skip the check and the per-document guard still refuses at write time.
     async fn refuse_tsdb_indices(
         &self,
         writes: &[CompiledWrite],
@@ -772,9 +631,7 @@ impl EsConnection {
     ) -> Result<(), DbError> {
         let mut checked: HashSet<&str> = HashSet::new();
         for write in writes {
-            // Inserts guard with `op_type=create`, not `if_seq_no`, so the TSDB
-            // sentinel-`_seq_no` hazard does not apply to them — a create works
-            // on a time-series index.
+            // Inserts guard with op_type=create, not if_seq_no, so the TSDB hazard does not apply.
             if write.op == "insert" {
                 continue;
             }
@@ -815,7 +672,6 @@ impl EsConnection {
         Ok(())
     }
 
-    /// Reduce an inner request to `(index, query)` for `EXPLAIN`.
     fn explainable(&self, inner: &Request) -> Result<(String, Option<Json>), DbError> {
         match inner {
             Request::Op(Op::Scan { path, filter, .. }) => {
@@ -862,9 +718,6 @@ fn op_name(op: &Op) -> &'static str {
     }
 }
 
-/// The read-only classifier — the second layer of the read-only guardrail,
-/// after the UI badge. Deliberately allow-list shaped: an endpoint nobody
-/// thought about is refused, not permitted.
 pub fn is_read_request(req: &ConsoleRequest) -> bool {
     if req.method.is_read() {
         return true;
@@ -915,6 +768,7 @@ impl Connection for EsConnection {
         match &req {
             Request::Native { text, params, opts } => self.execute_native(text, params, opts).await,
             Request::Op(op) => {
+                // Request::Op carries no ExecOpts, so driver defaults apply — no caller row limit or timeout on this path.
                 let opts = ExecOpts::default();
                 match op {
                     Op::Scan { .. } => self.execute_scan(op, &opts).await,
@@ -929,9 +783,6 @@ impl Connection for EsConnection {
                     Op::Explain { inner, analyze } => {
                         self.execute_explain(inner, *analyze, &opts).await
                     }
-                    // Guarded, serial, halt-and-report single-document writes.
-                    // `EDITABLE_RESULTS` is on; `ATOMIC_BATCH` stays off because
-                    // Elasticsearch has no multi-document transaction.
                     Op::Mutate(batch) => self.execute_mutate(batch, &opts).await,
                     Op::Ddl(ddl) => self.execute_ddl(ddl, &opts).await,
                 }
@@ -952,9 +803,6 @@ impl Connection for EsConnection {
     }
 
     async fn begin(&self, _opts: TxOpts) -> Result<Box<dyn Transaction>, DbError> {
-        // Not a downgrade and not a silent no-op: Elasticsearch has no
-        // multi-document transactions at all, and `Caps::TRANSACTIONS` is off
-        // so the UI never offers this.
         Err(DbError::Unsupported {
             feature: "transactions (Elasticsearch has no multi-document transactions)".into(),
         })
@@ -963,25 +811,17 @@ impl Connection for EsConnection {
     async fn set_read_only(&self, on: bool) -> Result<Enforcement, DbError> {
         self.check_open()?;
         self.read_only.store(on, Ordering::Release);
-        // Honest: this is our classifier, not the server's. A read-only
-        // badge that is only client-side has to say that it is, or it
-        // promises a guarantee nothing is enforcing.
         Ok(Enforcement::Client)
     }
 
     async fn close(&self) -> Result<(), DbError> {
         self.closed.store(true, Ordering::Release);
-        // Idempotent: any still-open PIT/scroll is released by its cursor's
-        // own `close()`/`Drop`, and the HTTP pool drains when this connection
-        // is dropped.
         self.mapping_cache.lock().await.clear();
         *self.inflight.lock().await = InFlight::default();
         Ok(())
     }
 }
 
-/// What product this connection reported, for the crate's own tests and for
-/// callers that want the enum rather than the display string.
 pub fn product_of(info: &ServerInfo) -> Product {
     if info
         .details
@@ -1048,10 +888,6 @@ mod tests {
         }
     }
 
-    /// Regression: `_mapping` used to sit in the POST allow-list, so a
-    /// `POST /<index>/_mapping` body — a mapping WRITE — sailed through
-    /// read-only mode. Reading a mapping is `GET`, which needs no allow-list
-    /// entry.
     #[test]
     fn post_mapping_is_a_write_and_is_refused_in_read_only_mode() {
         let req = console("POST /events/_mapping\n{\"properties\":{\"x\":{\"type\":\"keyword\"}}}");
@@ -1062,9 +898,6 @@ mod tests {
         assert!(is_read_request(&console("GET /events/_mapping")));
     }
 
-    /// Regression: `_mget`/`_termvectors`/`_mtermvectors` are genuine reads
-    /// (and classified `Read` by `datagrep-lang`'s EsDsl), but were missing
-    /// from the driver allow-list, so read-only mode wrongly refused them.
     #[test]
     fn mget_and_termvectors_are_reads_in_read_only_mode() {
         for text in [
@@ -1077,8 +910,6 @@ mod tests {
         }
     }
 
-    /// The allow-list must not be fooled by an endpoint name appearing as a
-    /// substring of an index name.
     #[test]
     fn the_allow_list_matches_whole_path_segments_only() {
         assert!(!is_read_request(&console(
@@ -1118,9 +949,6 @@ mod tests {
         assert_eq!(product_of(&es), Product::Elasticsearch);
     }
 
-    /// A non-dialing connection: `EsHttp::new` opens no socket, and the
-    /// read-only refusal fires before any request would be built, so this
-    /// exercises the guard without a cluster.
     fn offline_connection() -> EsConnection {
         let http = Arc::new(
             EsHttp::new(

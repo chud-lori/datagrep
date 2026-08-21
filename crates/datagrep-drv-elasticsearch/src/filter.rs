@@ -1,48 +1,3 @@
-//! `Predicate` -> Elasticsearch Query DSL: `Op::Scan`'s filter is compiled
-//! natively as JSON, never translated into query text, and under datagrep's
-//! injection rule a value can never become part of the query's structure.
-//!
-//! # The injection rule, concretely
-//!
-//! Elasticsearch's Query DSL is JSON, and several of its leaf queries accept
-//! **either** a bare value **or** an options object in the same position:
-//!
-//! ```json
-//! { "term": { "status": "active" } }                     // value form
-//! { "term": { "status": { "value": "active", "boost": 2 } } }  // options form
-//! ```
-//!
-//! That ambiguity is this engine's `{"$ne": null}`. If a caller-supplied
-//! `Value::Document` were emitted into the *value* position, its keys would be
-//! parsed as query **options** — `boost`, `case_insensitive`, and for `match`
-//! even `query` itself, which rewrites what is being searched for.
-//!
-//! So every comparison here compiles to the **explicit options form with the
-//! caller's value nested one level down under `"value"`** (or, for ranges,
-//! under `"gte"`/`"lt"`/…; for `terms`, as an element of a JSON **array**).
-//! Once the value sits inside `value`, Elasticsearch treats it as a term to
-//! match, never as structure — exactly the same defence the Mongo driver gets
-//! from always writing `{field: {$eq: v}}` instead of `{field: v}`.
-//!
-//! The `terms` query has one further trap: `{"terms": {"f": {...object...}}}`
-//! is a *terms lookup*, which fetches the term list from **another document in
-//! another index**. Emitting an array unconditionally (never an object) is
-//! what makes a caller-supplied value unable to turn a filter into a
-//! cross-index read.
-//!
-//! # Two honest limitations, stated rather than papered over
-//!
-//! 1. **Elasticsearch cannot distinguish a stored `null` from an absent
-//!    field.** A JSON `null` in `_source` is not indexed, so `exists` is false
-//!    for it, exactly as for a missing field. `Predicate::IsNull` therefore
-//!    compiles to "not exists" and the caller is told via a [`Notice`] on the
-//!    first batch. This is an engine limitation, not a mapping choice.
-//! 2. **Array index segments cannot be expressed.** `tags[0]` has no Query DSL
-//!    form: Elasticsearch flattens arrays at index time and a query against
-//!    `tags` matches *any* element. The index segment is dropped and the
-//!    caller is told, rather than the driver silently pretending it filtered
-//!    on position.
-
 use std::sync::Arc;
 
 use serde_json::{json, Value as Json};
@@ -54,18 +9,12 @@ use datagrep_api::value::{FieldPath, PathSeg, Value};
 
 use crate::value::value_to_json;
 
-/// Result of compiling a predicate: the query clause plus anything the caller
-/// must be told about how faithfully it was compiled.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledFilter {
     pub query: Json,
     pub notices: Vec<Notice>,
 }
 
-/// Render a [`FieldPath`] as an Elasticsearch field name.
-///
-/// Returns `(name, dropped_index)` — `dropped_index` is true when an array
-/// index segment had to be discarded (see the module doc).
 pub fn field_path_to_es(path: &FieldPath) -> (String, bool) {
     let mut out = String::new();
     let mut dropped = false;
@@ -139,7 +88,6 @@ impl Ctx {
     }
 }
 
-/// Compile a [`Predicate`] tree into a Query DSL clause.
 pub fn compile_predicate(pred: &Predicate) -> Result<CompiledFilter, DbError> {
     let mut ctx = Ctx {
         dropped_index_paths: Vec::new(),
@@ -165,8 +113,6 @@ fn compile(pred: &Predicate, ctx: &mut Ctx) -> Result<Json, DbError> {
         Predicate::Ge { field, value } => range_clause(ctx.field(field)?, "gte", value),
         Predicate::In { field, values } => {
             let f = ctx.field(field)?;
-            // ALWAYS an array. An object here would be a terms *lookup*, which
-            // reads from another index entirely (see the module doc).
             let arr: Vec<Json> = values.iter().map(value_to_json).collect();
             json!({ "terms": { f: Json::Array(arr) } })
         }
@@ -190,8 +136,6 @@ fn compile(pred: &Predicate, ctx: &mut Ctx) -> Result<Json, DbError> {
             json!({ "bool": { "must_not": [ { "exists": { "field": f } } ] } })
         }
         Predicate::And(parts) => {
-            // `filter` rather than `must`: conjunction in filter context skips
-            // scoring entirely, which is both faster and cacheable.
             json!({ "bool": { "filter": compile_many(parts, ctx)? } })
         }
         Predicate::Or(parts) => json!({
@@ -205,9 +149,6 @@ fn compile_many(parts: &[Predicate], ctx: &mut Ctx) -> Result<Vec<Json>, DbError
     parts.iter().map(|p| compile(p, ctx)).collect()
 }
 
-/// Equality. `Value::Null`/`Value::Absent` cannot be a term (Elasticsearch does
-/// not index nulls), so they degrade to the same "not exists" clause
-/// `IsNull` produces, with the same notice.
 fn term_clause(field: String, value: &Value, ctx: &mut Ctx) -> Result<Json, DbError> {
     if matches!(value, Value::Null | Value::Absent) {
         if !ctx.null_conflated_paths.contains(&field) {
@@ -215,8 +156,6 @@ fn term_clause(field: String, value: &Value, ctx: &mut Ctx) -> Result<Json, DbEr
         }
         return Ok(json!({ "bool": { "must_not": [ { "exists": { "field": field } } ] } }));
     }
-    // The explicit options form: the caller's value is nested under "value",
-    // where it can only ever be a term to match.
     Ok(json!({ "term": { field: { "value": value_to_json(value) } } }))
 }
 
@@ -224,8 +163,6 @@ fn range_clause(field: String, op: &str, value: &Value) -> Json {
     json!({ "range": { field: { op: value_to_json(value) } } })
 }
 
-/// SQL-style `%`/`_` wildcards -> Elasticsearch `*`/`?`, escaping the literal
-/// `*`, `?` and `\` in the pattern so only the two SQL wildcards carry meaning.
 fn like_to_wildcard(pattern: &str) -> String {
     let mut out = String::with_capacity(pattern.len() + 2);
     for c in pattern.chars() {
@@ -242,12 +179,6 @@ fn like_to_wildcard(pattern: &str) -> String {
     out
 }
 
-/// Compile a [`datagrep_api::request::SortKey`] list into an Elasticsearch
-/// `sort` array.
-///
-/// `nulls_first` maps to `missing` — Elasticsearch's own name for the same
-/// idea, and the reason `SortKey` carries the flag explicitly (engines
-/// disagree on the default and a silent difference reorders results).
 pub fn compile_sort(keys: &[datagrep_api::request::SortKey]) -> Result<Vec<Json>, DbError> {
     let mut out = Vec::with_capacity(keys.len());
     for key in keys {
@@ -288,13 +219,8 @@ mod tests {
         );
     }
 
-    /// The injection scenario in this engine's dialect: a caller-supplied
-    /// object must never land where Elasticsearch would read it as query
-    /// options/structure.
     #[test]
     fn object_shaped_parameter_value_cannot_inject_a_query_clause() {
-        // An attacker-shaped value trying to become `term` options (boost,
-        // case_insensitive) and, in a `match`, to replace the searched text.
         let malicious = Value::Document(Arc::new(Document::from_fields(vec![
             (Arc::from("value"), Value::Str(Arc::from("admin"))),
             (Arc::from("boost"), Value::I64(1000)),
@@ -305,8 +231,6 @@ mod tests {
             value: malicious,
         });
 
-        // The whole clause has exactly one top-level key, and the field's
-        // options object has exactly one key: "value".
         let obj = compiled.as_object().unwrap();
         assert_eq!(obj.keys().collect::<Vec<_>>(), vec!["term"]);
         let opts = compiled["term"]["role"].as_object().unwrap();
@@ -315,8 +239,6 @@ mod tests {
             vec!["value"],
             "only `value` may appear in options position"
         );
-        // The attacker's keys survive only nested one level deeper, as inert
-        // data being compared — never as options.
         assert_eq!(
             compiled,
             json!({ "term": { "role": { "value": {
@@ -325,8 +247,6 @@ mod tests {
         );
     }
 
-    /// `terms` with an object value is a *terms lookup* that reads from another
-    /// index. The compiler must only ever emit an array.
     #[test]
     fn in_always_emits_an_array_never_a_terms_lookup_object() {
         let lookup_attempt = Value::Document(Arc::new(Document::from_fields(vec![
@@ -375,8 +295,6 @@ mod tests {
             }),
             json!({ "range": { "age": { "lt": 1.5 } } })
         );
-        // A Decimal keeps its text so digits an f64 cannot hold survive into
-        // the query.
         assert_eq!(
             q(&Predicate::Gt {
                 field: FieldPath::field("id"),

@@ -1,32 +1,3 @@
-//! The streaming cursors. [`SearchCursor`] is the one that matters: a
-//! point-in-time + `search_after` scan (or a `_scroll` scan where PIT does not
-//! exist), pulling exactly one page per [`Cursor::next_batch`] call.
-//!
-//! # Why this is the whole point
-//!
-//! `next_batch` is pull-only: if nobody calls it, no page is requested, no
-//! bytes are read, and the server is never asked to produce more. That is the
-//! entire backpressure story — and it is precisely what the official
-//! `elasticsearch` crate cannot give us, because it materializes each response
-//! body in full before yielding anything.
-//!
-//! # Server-side context, released on every exit path
-//!
-//! A PIT (or scroll) pins segments on every shard it touches; leaking one
-//! costs the cluster real disk and file handles. The context is therefore
-//! released:
-//!
-//! - on natural exhaustion, immediately after the last page;
-//! - on [`Cursor::close`], which the core calls when it drops a result tab or
-//!   disconnects on idle;
-//! - on **any error**, including a cancelled search, before the error
-//!   propagates;
-//! - and, as a backstop, in `Drop`, which spawns a best-effort release onto
-//!   the current runtime for the case where a task was aborted outright.
-//!
-//! Every one of those paths funnels through the same `release_context`, which
-//! is idempotent.
-
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -47,49 +18,25 @@ use crate::json::OrderedJson;
 use crate::resume::{EsResume, ResumeMode};
 use crate::value::{json_to_value, FieldTypes};
 
-/// `index.max_result_window` defaults to 10 000 and bounds a single page's
-/// `size` even under `search_after`. Asking for more is a 400, so the hint is
-/// clamped rather than allowed to fail the request.
 pub const MAX_PAGE_SIZE: u32 = 10_000;
 
-/// How long the server is asked to hold a PIT/scroll context between pulls.
-/// Long enough to survive a user thinking about the grid, short enough that an
-/// abandoned context expires on its own if every release path somehow failed.
 pub const DEFAULT_KEEP_ALIVE: &str = "5m";
 
-/// How long each `_async_search` poll waits before returning control, so a
-/// cancel issued from another task is never blocked behind a long HTTP read.
 const ASYNC_POLL_WAIT: &str = "1s";
 
-/// Everything a scan needs that is independent of which pagination mechanism
-/// ends up being used.
 #[derive(Debug, Clone)]
 pub struct ScanSpec {
-    /// Index/alias/data-stream expression; empty means cluster-wide.
     pub index: String,
-    /// The search body minus `size`/`sort`/`pit`/`search_after`, which this
-    /// cursor owns.
     pub body: Json,
-    /// Compiled user sort keys; the stable tiebreaker is appended by the
-    /// cursor.
     pub user_sort: Vec<Json>,
-    /// Hard row cap from `Op::Scan { limit }` / `ExecOpts::row_limit`.
     pub limit: Option<u64>,
-    /// Notices produced while compiling the request (dropped array indexes,
-    /// null/absent conflation) — emitted with the first batch.
     pub notices: Vec<Notice>,
-    /// Per-request deadline, pushed to the server as the search body's
-    /// `timeout` as well as applied to the HTTP call.
     pub timeout: Option<Duration>,
 }
 
-/// The live server-side context this cursor must release.
 #[derive(Debug, Clone)]
 enum Context {
-    /// Point-in-time id. Elasticsearch may hand back a *new* id with each
-    /// page; the latest one is what has to be released.
     Pit(String),
-    /// Scroll id; `None` until the first page has been fetched.
     Scroll(Option<String>),
 }
 
@@ -98,15 +45,12 @@ pub struct SearchCursor {
     spec: ScanSpec,
     mode: PageMode,
     keep_alive: String,
-    /// `None` once released — the idempotence marker for every exit path.
     context: Option<Context>,
-    /// The `search_after` cursor: the last hit's `sort` values.
     last_sort: Vec<Json>,
     types: Arc<FieldTypes>,
     shape: Shape,
     seen_fields: HashSet<Arc<str>>,
     stats: CursorStats,
-    /// Remaining rows under the caller's limit.
     remaining: Option<u64>,
     delivered: u64,
     exhausted: bool,
@@ -114,15 +58,12 @@ pub struct SearchCursor {
     pending_notices: Vec<Notice>,
     inflight: InFlightSlot,
     async_search: bool,
-    /// Adaptive page-size ceiling: shrunk when a page overshot the caller's
-    /// byte budget, since Elasticsearch has no server-side response-size cap.
     byte_capped_size: Option<u32>,
     opaque_counter: u64,
     opaque_prefix: Arc<str>,
 }
 
 impl SearchCursor {
-    /// Build a cursor over an already-opened server context.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         http: Arc<EsHttp>,
@@ -156,12 +97,6 @@ impl SearchCursor {
             context: Some(context),
             last_sort: Vec::new(),
             types,
-            // `root_hint` points the grid at `_source`, so document fields
-            // render as top-level columns and the `_index`/`_id`/`_score`
-            // envelope stays available in the detail pane. `identity` names
-            // the envelope paths that identify a hit — `_routing` is part of
-            // identity whenever present (a custom-routed index needs it on
-            // every write, or the write lands on the wrong shard).
             shape: Shape::Documents {
                 root_hint: Some(FieldPath::field("_source")),
                 identity: Some(vec![
@@ -185,19 +120,6 @@ impl SearchCursor {
         }
     }
 
-    /// Rebuild a cursor from a [`ResumeToken`] — the idle-disconnect path:
-    /// the core closed everything, and the scan picks up from the PIT id plus
-    /// the last `search_after` values alone.
-    /// `fresh_pit` is a **newly opened** point-in-time for a `Pit`-mode resume.
-    ///
-    /// The token's own PIT id is deliberately not reused: the whole point of a
-    /// resume token is that the core could close the cursor and disconnect,
-    /// and closing a cursor releases its PIT (`DELETE /_pit`). Trying the dead
-    /// id would fail with `search_context_missing_exception` on every shard.
-    /// The *position* lives in the `search_after` sort values, which remain
-    /// valid against a new point-in-time, so the resume opens a fresh one and
-    /// says — via a `Notice` — that the snapshot changed and documents indexed
-    /// in the meantime may now be visible.
     #[allow(clippy::too_many_arguments)]
     pub fn from_resume(
         http: Arc<EsHttp>,
@@ -267,12 +189,6 @@ impl SearchCursor {
         cursor
     }
 
-    /// The tiebreaker that makes `search_after` totally ordered.
-    ///
-    /// `_shard_doc` exists only inside a PIT (Elasticsearch 7.12+) and is the
-    /// only globally unique, cheap sort key. Under scroll the position lives
-    /// in the scroll id, so `_doc` — Lucene's internal document order, the
-    /// cheapest possible sort — is used purely to avoid scoring.
     fn tiebreaker(&self) -> Json {
         match self.mode {
             PageMode::Pit => json!({ "_shard_doc": "asc" }),
@@ -291,23 +207,14 @@ impl SearchCursor {
         format!("{}-{}", self.opaque_prefix, self.opaque_counter)
     }
 
-    /// Build one page's request body.
     fn page_body(&self, size: u32) -> Json {
         let mut body = self.spec.body.clone();
         let map = body.as_object_mut().expect("search body is an object");
         map.insert("size".into(), json!(size));
         map.insert("sort".into(), Json::Array(self.full_sort()));
-        // Ask every hit to carry its `_seq_no`/`_primary_term`. They are the
-        // per-document compare-and-swap guard (`if_seq_no`/`if_primary_term`) a
-        // later mutation needs; without requesting them here there is nothing
-        // to guard a write with. `_routing` rides along in the hit envelope on
-        // its own when the index uses custom routing. Requested unconditionally
-        // because a read cursor cannot know whether the rows it streams will
-        // later be edited, and the cost is two integers per hit.
+        // Every hit carries _seq_no/_primary_term — the CAS guard (if_seq_no/if_primary_term) a later mutation needs.
         map.insert("seq_no_primary_term".into(), json!(true));
         if let Some(t) = self.spec.timeout {
-            // Push the deadline server-side too, so even an uncancellable
-            // shard is bounded.
             map.insert("timeout".into(), json!(format!("{}ms", t.as_millis())));
         }
         if !self.last_sort.is_empty() {
@@ -322,11 +229,8 @@ impl SearchCursor {
         body
     }
 
-    /// Issue one search and return `(response, wire_bytes)`.
     async fn run_search(&mut self, size: u32) -> Result<(OrderedJson, usize), DbError> {
         match (self.mode, self.context.as_ref()) {
-            // A scroll continuation is its own endpoint and carries no body
-            // beyond the scroll id.
             (PageMode::Scroll, Some(Context::Scroll(Some(id)))) => {
                 let body = json!({ "scroll": self.keep_alive, "scroll_id": id });
                 let opaque = self.next_opaque_id();
@@ -347,9 +251,6 @@ impl SearchCursor {
             }
             _ => {
                 let body = self.page_body(size);
-                // Under a PIT the index MUST NOT appear in the path: the PIT
-                // already names the indices it was opened over, and supplying
-                // both is a 400.
                 let path_index = match self.mode {
                     PageMode::Pit => String::new(),
                     PageMode::Scroll => {
@@ -387,10 +288,6 @@ impl SearchCursor {
         }
     }
 
-    /// Submit with `wait_for_completion_timeout=0` so the call returns a
-    /// handle to still-running work, then poll. A plain `_search` would give
-    /// us nothing to cancel; the handle plus the `X-Opaque-Id` tag are what
-    /// [`crate::canceller::EsCanceller`] cancels.
     async fn run_async_search(
         &mut self,
         path_index: &str,
@@ -402,9 +299,6 @@ impl SearchCursor {
 
         let mut submit_query: Vec<(&str, String)> = query.to_vec();
         submit_query.push(("wait_for_completion_timeout", "0".to_string()));
-        // Keep the (possibly already complete) result addressable so the
-        // canceller has something concrete to delete, and so a completed
-        // search can still be fetched by id.
         submit_query.push(("keep_on_completion", "true".to_string()));
 
         let (submitted, mut bytes) = self
@@ -437,12 +331,6 @@ impl SearchCursor {
                 .and_then(OrderedJson::as_bool)
                 .unwrap_or(false);
 
-            // The error is only authoritative once the search has STOPPED.
-            // A still-running async search can report a transient
-            // `status_exception: error while reducing partial results` in an
-            // intermediate response — that is a hiccup reducing the partial
-            // view, not the outcome of the search, and failing on it would
-            // turn a perfectly good query into a spurious error.
             if !running {
                 if let Some(err) = async_search_error(&current) {
                     self.finish_async(async_id.as_deref()).await;
@@ -451,10 +339,6 @@ impl SearchCursor {
                 let response = current
                     .get("response")
                     .cloned()
-                    // A response with no `response` key is either a plain
-                    // `_search` reply (async search unavailable behind a
-                    // proxy) or a protocol violation; using it as-is keeps the
-                    // former working.
                     .unwrap_or(current);
                 self.finish_async(async_id.as_deref()).await;
                 return Ok((response, bytes));
@@ -482,11 +366,6 @@ impl SearchCursor {
                 .await;
             let (next, n) = match polled {
                 Ok(v) => v,
-                // The async search vanished between two polls. In this driver
-                // the only thing that deletes a *running* async search is
-                // `EsCanceller::cancel`, so this is the user's stop button
-                // landing — a cancellation, not a failure, and the UI must not
-                // dress it as one.
                 Err(e) if is_async_search_gone(&e) => {
                     self.clear_inflight().await;
                     return Err(DbError::Cancelled);
@@ -501,9 +380,6 @@ impl SearchCursor {
         }
     }
 
-    /// Delete the stored async search (best effort) and clear the in-flight
-    /// slot. Leaving it behind would occupy the `.async-search` system index
-    /// until its expiry.
     async fn finish_async(&mut self, async_id: Option<&str>) {
         if let Some(id) = async_id {
             if let Err(e) = self
@@ -536,8 +412,6 @@ impl SearchCursor {
         *self.inflight.lock().await = InFlight::default();
     }
 
-    /// Release the PIT/scroll context. Idempotent, and safe to call from every
-    /// exit path including error and cancel.
     async fn release_context(&mut self) {
         let Some(context) = self.context.take() else {
             return;
@@ -558,14 +432,6 @@ impl SearchCursor {
         }
     }
 
-    /// Record any `_source` top-level field not yet seen on this cursor.
-    ///
-    /// Deliberately shallow and rooted at `_source`, matching this cursor's
-    /// `root_hint`: promoting *nested* paths into columns is datagrep-core's
-    /// `ViewProjection`/`FieldTrie` job, and the envelope
-    /// pseudo-fields (`_id`, `_index`, `_score`) are not announced as columns
-    /// because they live outside the hinted root — see the crate report's
-    /// `datagrep-api` gaps.
     fn track_schema(&mut self, source: &OrderedJson) -> Vec<SchemaDelta> {
         let Some(fields) = source.as_object() else {
             return Vec::new();
@@ -585,8 +451,6 @@ impl SearchCursor {
                     name,
                     logical,
                     flags: FieldFlags::empty(),
-                    // Always what the server's mapping said, never what we
-                    // mapped it to.
                     native_type: self.types.native(k),
                 },
             });
@@ -616,9 +480,6 @@ impl SearchCursor {
     }
 }
 
-/// Extract an error out of an `_async_search` envelope, distinguishing a
-/// cancellation from a genuine failure so the UI never dresses a user cancel
-/// up as an error: the user cancelled, which is not a failure.
 fn async_search_error(envelope: &OrderedJson) -> Option<DbError> {
     let error = envelope.get("error")?;
     let text = error
@@ -640,10 +501,6 @@ fn async_search_error(envelope: &OrderedJson) -> Option<DbError> {
     ))
 }
 
-/// Did a poll fail because the async search no longer exists?
-///
-/// Elasticsearch answers `DELETE`d or expired async searches with
-/// `resource_not_found_exception`, whose `reason` is the search id itself.
 fn is_async_search_gone(err: &DbError) -> bool {
     matches!(
         err,
@@ -651,15 +508,6 @@ fn is_async_search_gone(err: &DbError) -> bool {
     )
 }
 
-/// Inspect a search response's `_shards` block.
-///
-/// This matters more than it looks. A search that fails on **every** shard —
-/// an expired point-in-time, a mapping conflict, a cancelled task — still
-/// returns HTTP 200 with `hits.hits: []` and the failures tucked away under
-/// `_shards.failures`. Reading only `hits` would render that as "no results",
-/// which is the single most dangerous possible lie for a database client. So
-/// a total failure becomes an error, and a partial one becomes a `Notice`
-/// beside the rows that did come back.
 fn shard_failure(response: &OrderedJson) -> Option<(String, String)> {
     let shards = response.get("_shards")?;
     if shards
@@ -688,8 +536,6 @@ fn shard_failure(response: &OrderedJson) -> Option<(String, String)> {
     Some((ty, text))
 }
 
-/// Turn a shard failure into the right kind of `DbError` — a cancelled task is
-/// a cancellation, not a failure, and the UI must not dress it as one.
 fn shard_failure_error(ty: &str, reason: &str) -> DbError {
     if ty.contains("cancel") || reason.contains("cancel") {
         return DbError::Cancelled;
@@ -701,12 +547,6 @@ fn shard_failure_error(ty: &str, reason: &str) -> DbError {
     }
 }
 
-/// One hit -> one [`Value::Document`], preserving the envelope's key order and
-/// converting `_source` through the mapping-aware converter.
-///
-/// The driver-injected `sort` array is omitted: it is an artifact of *our*
-/// pagination, not of the user's document, and it is preserved losslessly in
-/// the resume token instead.
 pub fn hit_to_value(hit: &OrderedJson, types: &FieldTypes) -> Value {
     let mut doc = Document::new();
     if let Some(fields) = hit.as_object() {
@@ -758,8 +598,6 @@ impl Cursor for SearchCursor {
             }
         };
 
-        // Elasticsearch may hand back a rotated PIT id; the newest one is the
-        // one that must eventually be released.
         if let Some(pit) = response.get("pit_id").and_then(OrderedJson::as_str) {
             self.context = Some(Context::Pit(pit.to_string()));
         }
@@ -783,10 +621,6 @@ impl Cursor for SearchCursor {
             .map(<[OrderedJson]>::to_vec)
             .unwrap_or_default();
 
-        // A shard failure arrives as HTTP 200 with an empty `hits.hits`.
-        // Rendering that as "no results" would be the worst lie this driver
-        // could tell, so it is surfaced — fatally when nothing came back at
-        // all, as a notice beside the rows when the failure was partial.
         if let Some((ty, reason)) = shard_failure(&response) {
             if hits.is_empty() {
                 self.release_context().await;
@@ -810,9 +644,6 @@ impl Cursor for SearchCursor {
         let mut deltas = Vec::new();
         for hit in &hits {
             if let Some(sort) = hit.get("sort").and_then(OrderedJson::as_array) {
-                // Lowered to `serde_json::Value`: these go straight back into
-                // the next request's `search_after` and into the resume token,
-                // where ordering is meaningless.
                 self.last_sort = sort.iter().map(OrderedJson::to_serde).collect();
             }
             if let Some(source) = hit.get("_source") {
@@ -834,8 +665,6 @@ impl Cursor for SearchCursor {
             }
         }
 
-        // Adaptive byte ceiling: Elasticsearch cannot cap a response by size,
-        // so overshooting the caller's budget shrinks the next page instead.
         if bytes > hint.max_bytes as usize && returned > 1 {
             let scaled = (returned as u64 * hint.max_bytes as u64) / bytes.max(1) as u64;
             self.byte_capped_size = Some(scaled.clamp(1, MAX_PAGE_SIZE as u64) as u32);
@@ -891,9 +720,6 @@ impl Cursor for SearchCursor {
     }
 }
 
-/// Backstop for the one path `close()` cannot cover: a task aborted outright.
-/// Best effort by construction — if there is no runtime to spawn onto, the
-/// context still expires after `keep_alive`.
 impl Drop for SearchCursor {
     fn drop(&mut self) {
         let Some(context) = self.context.take() else {
@@ -921,8 +747,6 @@ impl Drop for SearchCursor {
     }
 }
 
-/// A cursor over an already-materialized set of documents, yielded exactly
-/// once: raw console-command replies, `EXPLAIN` output, catalog-ish results.
 pub struct DocsCursor {
     shape: Shape,
     docs: Vec<Value>,
@@ -935,8 +759,6 @@ impl DocsCursor {
         Self {
             shape: Shape::Documents {
                 root_hint: None,
-                // Console replies / EXPLAIN output are not hits — no identity,
-                // not editable.
                 identity: None,
             },
             docs,
@@ -987,8 +809,6 @@ impl Cursor for DocsCursor {
     }
 }
 
-/// A one-shot `Ack`-shaped cursor, whose `message` states which strategy
-/// actually ran — the honest half of `EXACT_COUNT_CHEAP` being false.
 pub struct AckCursor {
     shape: Shape,
     notices: Vec<Notice>,
@@ -1053,8 +873,6 @@ mod tests {
     }
 
     fn hit() -> OrderedJson {
-        // Written as text, not `json!`, precisely so the envelope's key order
-        // is the wire order rather than an alphabetized one.
         OrderedJson::parse(
             r#"{"_index":"events","_id":"abc","_score":null,
                 "_source":{"n":7,"price":1.5,"nested":{"a":1}},
@@ -1091,8 +909,6 @@ mod tests {
         };
         let n: FieldPath = "_source.n".parse().unwrap();
         assert_eq!(doc.get_path(&n), Some(&Value::I64(7)));
-        // The mapping is consulted relative to `_source`, so `price` resolves
-        // to the scaled_float rule, not to raw f64.
         let price: FieldPath = "_source.price".parse().unwrap();
         assert_eq!(
             doc.get_path(&price),
@@ -1107,10 +923,6 @@ mod tests {
 
     #[test]
     fn the_cas_guard_and_routing_ride_through_the_hit_envelope() {
-        // With `seq_no_primary_term` requested, a hit carries `_seq_no` and
-        // `_primary_term`; a custom-routed document also carries `_routing`.
-        // All three must survive into the emitted document so a later mutation
-        // can use them as its precondition/identity — the whole point of P0-1.
         let hit = OrderedJson::parse(
             r#"{"_index":"events","_id":"abc","_routing":"tenant-7","_score":null,
                 "_seq_no":41,"_primary_term":3,
@@ -1171,10 +983,6 @@ mod tests {
         );
     }
 
-    /// A still-running async search may report a transient reduce error in an
-    /// intermediate poll; only the final state decides the outcome. Failing on
-    /// the intermediate one turns a good query into a spurious error — which
-    /// is exactly what it did before this was fixed.
     #[test]
     fn a_transient_error_on_a_still_running_async_search_is_not_final() {
         let intermediate = OrderedJson::from_serde(&json!({
@@ -1187,8 +995,6 @@ mod tests {
         }));
         // The helper still classifies it…
         assert!(async_search_error(&intermediate).is_some());
-        // …but the poll loop must only consult it once `is_running` is false,
-        // which is the invariant asserted here.
         assert_eq!(
             intermediate
                 .get("is_running")
@@ -1232,8 +1038,6 @@ mod tests {
             shard_failure_error("task_cancelled_exception", "task cancelled"),
             DbError::Cancelled
         ));
-        // A deleted async search — the only thing that deletes a running one
-        // is our own canceller — reads as gone, and nothing else does.
         assert!(is_async_search_gone(&DbError::Query {
             code: Some("resource_not_found_exception".into()),
             message: "Fk1...".into(),
@@ -1270,8 +1074,6 @@ mod tests {
         assert!(c.next_batch(hint).await.unwrap().is_none());
     }
 
-    /// A cursor built purely to exercise the pure, non-networked parts of the
-    /// page-building logic.
     fn offline_cursor(mode: PageMode) -> SearchCursor {
         let http = Arc::new(
             EsHttp::new(
@@ -1346,9 +1148,6 @@ mod tests {
 
     #[test]
     fn every_page_requests_the_seq_no_primary_term_guard() {
-        // Both pagination mechanisms must ask for the per-document CAS guard;
-        // without it a later mutation has no `if_seq_no`/`if_primary_term` to
-        // send and would have to write blind.
         for mode in [PageMode::Pit, PageMode::Scroll] {
             let cursor = offline_cursor(mode);
             assert_eq!(

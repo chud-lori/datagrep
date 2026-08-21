@@ -1,7 +1,3 @@
-//! [`ElasticsearchDriver`]: the `Driver` impl — capabilities, the connection
-//! form, URL parsing, and the handshake that decides which of this engine's
-//! two families we are actually talking to.
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,58 +17,22 @@ use crate::http::{
     choose_page_mode, classify_root, has_async_search, Auth, EsHttp, PageMode, Product,
 };
 
-/// The stable registry id. Deliberately `elasticsearch` for both products:
-/// nothing above `datagrep-api` may branch on a driver id, and the OpenSearch
-/// difference is carried by `ServerInfo` plus degraded capabilities, which is
-/// what those mechanisms are for.
 pub const DRIVER_ID: &str = "elasticsearch";
 
-/// Baseline capability flags, before the handshake narrows them.
-///
-/// The four that are deliberately **absent**, each for a stated reason:
-///
-/// - `TRANSACTIONS` — Elasticsearch has no multi-document transactions.
-/// - `DDL` — index and mapping management is not SQL DDL; pretending it is
-///   would put a `CREATE TABLE`-shaped control in front of something else.
-/// - `EXACT_COUNT_CHEAP` — `hits.total` stops counting at `track_total_hits`
-///   (10 000 by default), so the UI must show "≥ N". An exact count is a
-///   separate `_count` request, which is a real scan.
-/// - `RANDOM_ACCESS_PAGE` — deep `from`+`size` paging costs
-///   `from + size` per shard and 400s past `index.max_result_window`. Keyset
-///   (`search_after`) only.
-/// - `SCHEMA_DECLARED` — mappings exist, but dynamic mapping means they are
-///   not exhaustive: a document can carry a field the mapping has never seen.
-///   The catalog uses sampling, and says so.
-///
-/// `EDITABLE_RESULTS` **is** on: hits carry a real `_index`/`_id` (+ `_routing`)
-/// identity and a per-hit `_seq_no`/`_primary_term` guard, so `Op::Mutate`
-/// generates guarded single-document update/delete (see [`crate::mutate`]).
-/// `ATOMIC_BATCH` stays off — Elasticsearch has no multi-document transaction,
-/// so a batch is serial and halt-and-report, not atomic.
+// Deliberately absent: TRANSACTIONS, ATOMIC_BATCH (bulk is not atomic), EXACT_COUNT_CHEAP (hits.total caps at track_total_hits), RANDOM_ACCESS_PAGE (deep from+size 400s), SCHEMA_DECLARED (dynamic mapping).
 const BASE_CAPS: Caps = Caps::EXPLAIN
     .union(Caps::SERVER_CANCEL)
     .union(Caps::EXPRESSION_FILTER)
     .union(Caps::KEY_ENUMERATION)
     // `profile: true` runs the search and reports real per-shard timings.
     .union(Caps::EXPLAIN_ANALYZE)
-    // Guarded single-document `Op::Mutate` (update/delete) with
-    // `if_seq_no`/`if_primary_term`; `ATOMIC_BATCH` deliberately stays off.
     .union(Caps::EDITABLE_RESULTS)
-    // The cursor streams page by page and never materializes a result set, so
-    // "export all" genuinely is not "load all".
     .union(Caps::EXPORT_STREAMING)
-    // `Op::Ddl` drops an index or an alias — the two objects this catalog
-    // lists. Creating one, its lifecycle state and alias action lists stay
-    // native; see [`crate::ddl`].
     .union(Caps::DDL);
 
-/// Capabilities for a connection, narrowed by what the handshake found.
 pub fn es_capabilities(product: Product, page_mode: PageMode) -> Capabilities {
     let mut flags = BASE_CAPS;
     if matches!(product, Product::OpenSearch) || page_mode == PageMode::Scroll {
-        // Without `_async_search` there is no handle to a still-running search,
-        // so a cancel degrades to abandoning the channel. The flag comes off
-        // rather than the UI being told a stop button will reach the server.
         flags.remove(Caps::SERVER_CANCEL);
     }
     Capabilities {
@@ -80,21 +40,14 @@ pub fn es_capabilities(product: Product, page_mode: PageMode) -> Capabilities {
         // `http.max_content_length` defaults to 100 MB.
         max_statement_bytes: Some(100 * 1024 * 1024),
         default_fetch_rows: 500,
-        // `$1`-numbered placeholders, bound into the *parsed* body — see
-        // `console::bind_params`.
         param_style: ParamStyle::DollarNumbered,
         language: LanguageId::EsDsl,
-        // Elasticsearch has no quoted-identifier syntax; index and field names
-        // are never re-quoted into generated text. Kept as the least
-        // surprising placeholder since the field is not optional.
         identifier_quote: '"',
         // index|alias|datastream -> field.
         catalog_levels: 2,
     }
 }
 
-/// The Elasticsearch / OpenSearch driver adapter. Stateless — all per-server
-/// state lives in the [`EsConnection`]s it creates.
 #[derive(Debug, Default)]
 pub struct ElasticsearchDriver;
 
@@ -115,9 +68,6 @@ impl Driver for ElasticsearchDriver {
     }
 
     fn capabilities(&self) -> Capabilities {
-        // Pre-handshake we do not know the product, so the honest baseline is
-        // the weaker one: no server cancel until an async-search-capable
-        // Elasticsearch has actually answered.
         es_capabilities(Product::OpenSearch, PageMode::Scroll)
     }
 
@@ -258,9 +208,6 @@ impl Driver for ElasticsearchDriver {
             return Err(DbError::Cancelled);
         }
 
-        // Exactly one cheap request on connect — no eager catalog crawl.
-        // `GET /` is a few hundred bytes and is the only reliable way to tell
-        // the two products apart.
         let root = tokio::time::timeout(timeout, http.root_info())
             .await
             .map_err(|_| DbError::Timeout)??;
@@ -349,9 +296,6 @@ fn num_field(cfg: &ResolvedConfig, key: &str) -> Result<Option<f64>, DbError> {
     }
 }
 
-/// A secret, preferring the resolved keychain value and falling back to a
-/// value that is still in the config (which happens between `parse_url` and
-/// the caller routing it into the keychain).
 fn secret(cfg: &ResolvedConfig, key: &str) -> Option<String> {
     cfg.secrets
         .get(key)
@@ -377,9 +321,6 @@ pub fn build_base_url(cfg: &ResolvedConfig) -> Result<String, DbError> {
     Ok(url)
 }
 
-/// Build the credential from the resolved config. The `auth` selector is
-/// authoritative; when it is absent the first credential actually present
-/// wins, so a pasted URL with a password just works.
 pub fn build_auth(cfg: &ResolvedConfig) -> Result<Auth, DbError> {
     let mode = str_field(cfg, "auth")?.unwrap_or_default();
     match mode.as_str() {
@@ -422,9 +363,6 @@ pub fn build_auth(cfg: &ResolvedConfig) -> Result<Auth, DbError> {
     }
 }
 
-/// Split a pasted `http(s)://[user:pass@]host[:port][/index]` URL into config
-/// fields. Hand-rolled and network-free: `parse_url` is synchronous and must
-/// never resolve anything.
 fn parse_es_url(url: &str) -> Result<ConnectionConfig, ConfigError> {
     let (tls, rest) = if let Some(r) = url.strip_prefix("https://") {
         (true, r)
@@ -499,9 +437,6 @@ fn parse_es_url(url: &str) -> Result<ConnectionConfig, ConfigError> {
             Some((u, p)) => {
                 values.insert("user".to_string(), ConfigValue::Str(percent_decode(u)));
                 if !p.is_empty() {
-                    // The caller routes this into the keychain and zeroizes
-                    // the source string, so the password never settles into a
-                    // stored `ConnectionConfig`.
                     values.insert("password".to_string(), ConfigValue::Str(percent_decode(p)));
                 }
             }
@@ -515,8 +450,6 @@ fn parse_es_url(url: &str) -> Result<ConnectionConfig, ConfigError> {
     }
 
     if let Some(path) = path.map(|p| p.trim_matches('/')).filter(|p| !p.is_empty()) {
-        // A single trailing segment is the default index; anything deeper is a
-        // reverse-proxy path prefix.
         if path.contains('/') {
             values.insert(
                 "path_prefix".to_string(),
@@ -565,11 +498,6 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            // Read the pair out of the byte slice rather than by slicing the
-            // `&str`. `i + 1..i + 3` lands inside a multi-byte character
-            // whenever a `%` is followed by non-ASCII, and slicing a `str` off
-            // a char boundary panics — from a *pasted connection URL*, which is
-            // untrusted text that reaches here before anything dials.
             let pair = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
             if let Some(hex) = pair.and_then(|p| u8::from_str_radix(p, 16).ok()) {
                 out.push(hex);
@@ -812,8 +740,6 @@ mod tests {
             "basic"
         );
         assert_eq!(build_auth(&resolved(&[])).unwrap().scheme(), "none");
-        // A selected mode with no credential is a per-field error, not a
-        // silent downgrade to anonymous.
         assert!(build_auth(&resolved(&[("auth", ConfigValue::Str("api_key".into()))])).is_err());
     }
 
@@ -829,8 +755,6 @@ mod tests {
             datagrep_api::config::SecretString::new("from-keychain".into()),
         );
         let auth = build_auth(&cfg).unwrap();
-        // Only the header value can prove which one was used, and it is not
-        // exposed — so assert through the encoding directly.
         let expected = Auth::basic("elastic", "from-keychain");
         assert_eq!(format!("{auth:?}"), format!("{expected:?}"));
         assert_eq!(auth.scheme(), "basic");
@@ -865,12 +789,6 @@ mod tests {
         ));
     }
 
-    /// `percent_decode` indexed the `&str` by byte offset, so a `%` followed by
-    /// a multi-byte character sliced off a char boundary and panicked. The
-    /// input is a *pasted connection URL* — untrusted text that reaches
-    /// `parse_url` before anything dials — so this was one paste from taking
-    /// the process down. Decoding now reads the byte pair directly and leaves a
-    /// `%` that is not followed by two hex ASCII digits alone.
     #[test]
     fn a_percent_escape_before_a_multibyte_char_does_not_panic() {
         for tail in [
