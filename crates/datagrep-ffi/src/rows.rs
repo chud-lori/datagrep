@@ -85,6 +85,11 @@ pub struct DatagrepRows {
     sources: Vec<RowSource>,
     /// Column names — the document lane projects by name, so it needs them.
     columns: Vec<String>,
+    /// The field the columns are projected from, when the driver declared one
+    /// (`Shape::Documents::root_hint`). Everything *outside* it is the row's
+    /// envelope: metadata that identifies and guards the document rather than
+    /// being part of it — see [`datagrep_rows_envelope_json`].
+    root: Option<String>,
 }
 
 impl std::fmt::Debug for DatagrepRows {
@@ -137,6 +142,7 @@ pub unsafe extern "C" fn datagrep_query_rows(
         // the query is what makes that ordering matter.
         let q = unsafe { query_ref(q) }?;
         let skeleton_cols = q.column_count();
+        let root = q.projection_root();
 
         // Not accepted by the server yet (or already failed to start): there
         // is nothing to materialise, and blocking here would be exactly the
@@ -158,6 +164,7 @@ pub unsafe extern "C" fn datagrep_query_rows(
         Ok(Box::into_raw(Box::new(DatagrepRows::build(
             window,
             skeleton_cols,
+            root,
         ))))
     })
 }
@@ -175,18 +182,24 @@ impl DatagrepRows {
             cells: Vec::new(),
             sources: Vec::new(),
             columns: Vec::new(),
+            root: None,
         }
     }
 
     /// Format one window, once.
-    fn build(window: RowWindow, fallback_cols: u32) -> Self {
+    fn build(window: RowWindow, fallback_cols: u32, root: Option<String>) -> Self {
         // `Pending` means none of it arrived; `Partial` means the tail did
         // not. Both mean "the feeder was resumed, ask again" — and both mean
         // the caller should draw skeletons for what `datagrep_rows_count` does not
         // cover, so both set the flag.
         let pending = matches!(window.status, WindowStatus::Pending | WindowStatus::Partial);
 
-        let columns = project_columns(&window.slices);
+        // Window-local, like the column union itself: a window in which no row
+        // carries the root field is projected unrooted, so hits fetched with
+        // `_source: false` still show the fields they DO have instead of a
+        // fabricated column of absences.
+        let root = effective_root(&window.slices, root);
+        let columns = project_columns(&window.slices, root.as_deref());
         let cols = if columns.is_empty() {
             fallback_cols
         } else {
@@ -205,6 +218,7 @@ impl DatagrepRows {
             cells: Vec::with_capacity(rows * cols as usize),
             sources: Vec::with_capacity(rows),
             columns,
+            root,
         };
         out.fill();
         out
@@ -257,7 +271,7 @@ impl DatagrepRows {
                             });
                             for c in 0..cols {
                                 let name = self.columns.get(c).map(String::as_str);
-                                let cell = doc_field(row, name, cols);
+                                let cell = doc_field(row, name, cols, self.root.as_deref());
                                 let meta = match cell {
                                     // The whole point: a field that is not in
                                     // this document is ABSENT, never NULL.
@@ -305,6 +319,36 @@ impl DatagrepRows {
         self.sources = sources;
     }
 
+    /// The row's fields that are *outside* the projected root — the envelope.
+    ///
+    /// For an Elasticsearch hit that is `_index`/`_id`/`_routing` plus the
+    /// `_seq_no`/`_primary_term` pair a guarded write compares against: the
+    /// facts that say *which* document a row is and *which version* of it was
+    /// loaded, none of which belong in a column of the user's own document.
+    /// `None` when this result has no root, because then there is nothing
+    /// outside it and an envelope would be an invention.
+    fn envelope(&self, row: u64) -> Option<serde_json::Value> {
+        let root = self.root.as_deref()?;
+        let src = *self.sources.get(row as usize)?;
+        let WindowSlice::Docs { docs, .. } = self.slices.get(src.slice as usize)? else {
+            return None;
+        };
+        let DocSegment::Values(values) = docs.as_ref() else {
+            return None;
+        };
+        let Value::Document(doc) = values.get(src.offset as usize)? else {
+            return None;
+        };
+        let mut fields = serde_json::Map::new();
+        for (name, value) in doc.iter() {
+            if name.as_ref() == root {
+                continue;
+            }
+            fields.insert(name.to_string(), crate::cells::value_to_json(value));
+        }
+        Some(serde_json::Value::Object(fields))
+    }
+
     fn cell_meta(&self, row: u64, col: u32) -> Option<CellMeta> {
         if row >= self.rows || col >= self.cols {
             return None;
@@ -333,7 +377,7 @@ impl DatagrepRows {
                     let row = values.get(src.offset as usize)?;
                     let name = self.columns.get(col as usize).map(String::as_str);
                     Some(
-                        doc_field(row, name, self.cols as usize)
+                        doc_field(row, name, self.cols as usize, self.root.as_deref())
                             .cloned()
                             .unwrap_or(Value::Absent),
                     )
@@ -396,11 +440,53 @@ fn finish(arena: &mut String, start: usize, rendered: Rendered<'_>) -> CellMeta 
     }
 }
 
+/// The document a row's columns are projected from.
+///
+/// With no root hint that is the row itself. With one — `_source` for an
+/// Elasticsearch hit — it is that field, so the grid shows the document the
+/// user wrote rather than the envelope the server wrapped it in. A row that
+/// does not carry the root field at all projects nothing, which renders as
+/// ABSENT cells: the honest answer for a hit fetched with `_source: false`.
+fn row_root<'a>(row: &'a Value, root: Option<&str>) -> Option<&'a Value> {
+    match root {
+        None => Some(row),
+        Some(name) => match row {
+            Value::Document(doc) => doc.get(name),
+            _ => None,
+        },
+    }
+}
+
+/// The declared root, or `None` when no row of this window carries it.
+fn effective_root(slices: &[WindowSlice], root: Option<String>) -> Option<String> {
+    let name = root.as_deref()?;
+    let carried = slices.iter().any(|slice| match slice {
+        WindowSlice::Docs {
+            docs, offset, len, ..
+        } => match docs.as_ref() {
+            DocSegment::Values(values) => values
+                .iter()
+                .skip(*offset)
+                .take(*len)
+                .any(|value| row_root(value, Some(name)).is_some()),
+            DocSegment::Pairs(_) => false,
+        },
+        WindowSlice::Table { .. } => false,
+    });
+    carried.then_some(root).flatten()
+}
+
 /// Field `name` of a document row, or `None` when it is **not present**.
 ///
 /// A non-document value in a `Shape::Documents` stream (a bare scalar, an
 /// array) is the whole row and occupies the single projected column.
-fn doc_field<'a>(row: &'a Value, name: Option<&str>, cols: usize) -> Option<&'a Value> {
+fn doc_field<'a>(
+    row: &'a Value,
+    name: Option<&str>,
+    cols: usize,
+    root: Option<&str>,
+) -> Option<&'a Value> {
+    let row = row_root(row, root)?;
     match (row, name) {
         (Value::Document(doc), Some(name)) => doc.get(name),
         // Single synthetic "value" column over a non-document row.
@@ -413,12 +499,13 @@ fn doc_field<'a>(row: &'a Value, name: Option<&str>, cols: usize) -> Option<&'a 
 ///
 /// - **Table**: the Arrow schema, verbatim.
 /// - **Documents**: the ordered union of top-level field names seen *in this
-///   window*. A `ViewProjection` at its simplest honest form. It is
-///   window-local on purpose — a document store has no global column list, and
-///   inventing one would mean scanning rows nobody asked for, which is exactly
-///   the eager-materialisation this whole design is built against.
+///   window*, taken from the driver's `root_hint` when it declared one. A
+///   `ViewProjection` at its simplest honest form. It is window-local on
+///   purpose — a document store has no global column list, and inventing one
+///   would mean scanning rows nobody asked for, which is exactly the
+///   eager-materialisation this whole design is built against.
 /// - **Pairs**: `key`, `value` (Redis `SCAN`/`HGETALL`).
-fn project_columns(slices: &[WindowSlice]) -> Vec<String> {
+fn project_columns(slices: &[WindowSlice], root: Option<&str>) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for slice in slices {
         match slice {
@@ -434,7 +521,7 @@ fn project_columns(slices: &[WindowSlice]) -> Vec<String> {
                 DocSegment::Pairs(_) => return vec!["key".to_string(), "value".to_string()],
                 DocSegment::Values(values) => {
                     for value in values.iter() {
-                        if let Value::Document(doc) = value {
+                        if let Some(Value::Document(doc)) = row_root(value, root) {
                             for (key, _) in doc.iter() {
                                 if !names.iter().any(|n| n == key.as_ref()) {
                                     names.push(key.to_string());
@@ -456,13 +543,16 @@ fn project_columns(slices: &[WindowSlice]) -> Vec<String> {
 /// Column names of a whole `DocSegment` — used by
 /// [`crate::query::datagrep_query_status_json`] to report a document result's
 /// columns before any window has been asked for.
-pub(crate) fn doc_columns(segment: &Arc<DocSegment>) -> Vec<String> {
-    project_columns(&[WindowSlice::Docs {
-        first_row: 0,
-        docs: segment.clone(),
-        offset: 0,
-        len: segment.len(),
-    }])
+pub(crate) fn doc_columns(segment: &Arc<DocSegment>, root: Option<&str>) -> Vec<String> {
+    project_columns(
+        &[WindowSlice::Docs {
+            first_row: 0,
+            docs: segment.clone(),
+            offset: 0,
+            len: segment.len(),
+        }],
+        root,
+    )
 }
 
 // ---- accessors ---------------------------------------------------------
@@ -612,6 +702,38 @@ pub unsafe extern "C" fn datagrep_rows_cell_detail_json(
     })
 }
 
+/// The hit envelope for one row as JSON — the identity and guard fields that
+/// live outside the projected columns. Caller frees with
+/// `datagrep_string_free`.
+///
+/// Returns NULL for a row outside the window, and for any result whose driver
+/// declared no projection root (there is then nothing outside the row).
+///
+/// # Safety
+/// `r` must come from `datagrep_query_rows` and not yet be freed.
+#[no_mangle]
+pub unsafe extern "C" fn datagrep_rows_envelope_json(
+    r: *mut DatagrepRows,
+    row: u64,
+) -> *mut c_char {
+    guard_quiet(std::ptr::null_mut(), || {
+        // SAFETY: `r` is NULL or a live window from `datagrep_query_rows`, per
+        // the contract; `rows_ref` maps NULL to `None`.
+        let Some(rows) = (unsafe { rows_ref(r) }) else {
+            return std::ptr::null_mut();
+        };
+        // `envelope` indexes every container with `.get`, so a row outside the
+        // window is `None` rather than a panic.
+        let Some(envelope) = rows.envelope(row) else {
+            return std::ptr::null_mut();
+        };
+        match serde_json::to_string(&envelope) {
+            Ok(text) => to_c_string(text),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
+}
+
 /// Release the window and every pointer borrowed from it.
 ///
 /// # Safety
@@ -644,6 +766,12 @@ mod tests {
     }
 
     fn docs_window(values: Vec<Value>) -> DatagrepRows {
+        rooted_window(values, None)
+    }
+
+    /// A document window projected from `root`, the way a driver that declared
+    /// a `root_hint` is rendered.
+    fn rooted_window(values: Vec<Value>, root: Option<&str>) -> DatagrepRows {
         let len = values.len();
         let segment = Arc::new(DocSegment::Values(values));
         DatagrepRows::build(
@@ -658,6 +786,7 @@ mod tests {
                 }],
             },
             0,
+            root.map(str::to_string),
         )
     }
 
@@ -765,6 +894,7 @@ mod tests {
                 slices: Vec::new(),
             },
             3,
+            None,
         );
         assert!(rows.pending, "Pending must map to pending == true");
         assert_eq!(rows.rows, 0);
@@ -785,6 +915,7 @@ mod tests {
                 }],
             },
             0,
+            None,
         );
         assert!(rows.pending);
         assert_eq!(rows.rows, 1, "the rows that do exist are delivered");
@@ -808,9 +939,85 @@ mod tests {
                 }],
             },
             0,
+            None,
         );
         assert_eq!(rows.columns, vec!["key", "value"]);
         assert_eq!(text(&rows, 0, 0), "k");
         assert_eq!(text(&rows, 0, 1), "v");
+    }
+
+    /// A hit with a `root_hint` shows the DOCUMENT, not the wrapper the server
+    /// put it in: an ES result whose columns were `_index`/`_id`/`_source` had
+    /// nothing in it a user could edit, because every field they wrote was
+    /// buried in one nested cell.
+    #[test]
+    fn a_root_hint_projects_the_document_and_not_its_envelope() {
+        let hit = doc(vec![
+            ("_index", Value::Str(Arc::from("events"))),
+            ("_id", Value::Str(Arc::from("abc"))),
+            ("_seq_no", Value::I64(41)),
+            ("_primary_term", Value::I64(3)),
+            (
+                "_source",
+                doc(vec![
+                    ("status", Value::Str(Arc::from("open"))),
+                    ("n", Value::I64(7)),
+                ]),
+            ),
+        ]);
+        let rows = rooted_window(vec![hit], Some("_source"));
+        assert_eq!(rows.columns, vec!["status", "n"]);
+        assert_eq!(text(&rows, 0, 0), "open");
+        assert_eq!(text(&rows, 0, 1), "7");
+    }
+
+    /// The guard fields a write compares against are not columns, so they have
+    /// to be reachable some other way — otherwise an edit could only be sent
+    /// unguarded, which the driver refuses outright.
+    #[test]
+    fn the_envelope_carries_the_identity_and_the_cas_guard() {
+        let hit = doc(vec![
+            ("_index", Value::Str(Arc::from("events"))),
+            ("_id", Value::Str(Arc::from("abc"))),
+            ("_routing", Value::Str(Arc::from("tenant-7"))),
+            ("_seq_no", Value::I64(41)),
+            ("_primary_term", Value::I64(3)),
+            (
+                "_source",
+                doc(vec![("status", Value::Str(Arc::from("open")))]),
+            ),
+        ]);
+        let rows = rooted_window(vec![hit], Some("_source"));
+        let envelope = rows.envelope(0).expect("a rooted row has an envelope");
+        assert_eq!(envelope["_id"], serde_json::json!("abc"));
+        assert_eq!(envelope["_seq_no"], serde_json::json!(41));
+        assert_eq!(envelope["_primary_term"], serde_json::json!(3));
+        assert_eq!(envelope["_routing"], serde_json::json!("tenant-7"));
+        assert!(
+            envelope.get("_source").is_none(),
+            "the document itself is not part of its own envelope"
+        );
+        // Without a root there is nothing outside the row, and inventing an
+        // envelope would be inventing metadata.
+        let plain = docs_window(vec![doc(vec![("a", Value::I64(1))])]);
+        assert!(plain.envelope(0).is_none());
+    }
+
+    /// `_source: false` is a legal way to ask for hits, and the window it
+    /// produces carries no root at all. Projecting from a root nothing has
+    /// would show a grid of absences; the honest answer is the fields the rows
+    /// really do carry.
+    #[test]
+    fn a_window_with_no_root_anywhere_is_projected_unrooted() {
+        let bare = doc(vec![
+            ("_index", Value::Str(Arc::from("events"))),
+            ("_id", Value::Str(Arc::from("abc"))),
+        ]);
+        let rows = rooted_window(vec![bare], Some("_source"));
+        assert_eq!(rows.columns, vec!["_index", "_id"]);
+        assert_eq!(text(&rows, 0, 1), "abc");
+        // And with no root there is no envelope, so nothing offers to edit a
+        // document this window never saw.
+        assert!(rows.envelope(0).is_none());
     }
 }

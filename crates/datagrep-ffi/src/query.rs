@@ -47,6 +47,9 @@ use std::ffi::{c_char, c_void};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use datagrep_api::caps::Caps;
+use datagrep_api::shape::Shape;
+use datagrep_api::value::PathSeg;
 use datagrep_api::{ExecOpts, LanguageId};
 use datagrep_core::query::CancelReport;
 use datagrep_core::store::{ChunkBody, StorePhase, StoreState};
@@ -127,6 +130,15 @@ struct QueryInner {
     /// The profile's driver id, learned with `read_only` — needed to say
     /// whether the `datagrep-lang` client-side guard covers this engine.
     driver_id: String,
+    /// The field this result's columns are projected from, when the driver
+    /// declared one (`Shape::Documents::root_hint` — `_source` for an ES hit).
+    /// `None` means the row itself is the projected document.
+    root: Option<String>,
+    /// The field names that identify one row of this result
+    /// (`Shape::Documents::identity` — `_index`/`_id`/`_routing` for an ES hit).
+    /// Empty means the stream carries no usable identity, and no edit can be
+    /// built from it: we never guess what to mutate.
+    identity: Vec<String>,
     /// The user pressed stop, possibly before the query was even accepted.
     cancel_requested: bool,
     /// Latest known report — pending at first, resolved once the server
@@ -186,6 +198,13 @@ impl DatagrepQuery {
     /// for a window that has not arrived yet.
     pub(crate) fn column_count(&self) -> u32 {
         self.shared.lock().columns.len() as u32
+    }
+
+    /// The projection root this result's driver declared, if any. A window
+    /// projects the fields *inside* it and keeps the rest of the row as the
+    /// envelope — see [`crate::rows::datagrep_rows_envelope_json`].
+    pub(crate) fn projection_root(&self) -> Option<String> {
+        self.shared.lock().root.clone()
     }
 }
 
@@ -313,10 +332,22 @@ async fn drive(shared: Arc<QueryShared>, profile: String, sql: String) {
         Err(e) => return shared.fail(e),
     };
 
+    // The result's shape is fixed the moment the cursor exists, so the editing
+    // facts are read once here rather than re-derived on every status call.
+    let (root, identity) = shared
+        .core
+        .api
+        .queries()
+        .store(qid)
+        .map(|store| editing_facts(store.shape()))
+        .unwrap_or_default();
+
     // If stop was pressed while the server was still accepting, honour it now.
     let cancel_now = {
         let mut inner = shared.lock();
         inner.qid = Some(qid);
+        inner.root = root;
+        inner.identity = identity;
         inner.cancel_requested
     };
     shared.notify();
@@ -400,8 +431,82 @@ fn absorb(shared: &Arc<QueryShared>, state: &StoreState) {
     inner.phase = Some(state.phase.clone());
     inner.affected = state.affected;
     if inner.columns.is_empty() {
-        inner.columns = columns_of(state);
+        let root = inner.root.clone();
+        inner.columns = columns_of(state, root.as_deref());
     }
+}
+
+/// What a result's declared [`Shape`] says about editing it: the projection
+/// root, and the field names that identify one row.
+///
+/// Only a document stream answers both — a `Shape::Table`'s identity is column
+/// *indices* into a schema, which addresses a row for a SQL `UPDATE … WHERE`
+/// rather than for the named key a [`datagrep_api::request::Mutation`] carries.
+/// Wiring that up is the tabular half of the editing work and is not pretended
+/// to here: an unknown shape reports no identity, and no identity means the UI
+/// offers no edit.
+fn editing_facts(shape: &Shape) -> (Option<String>, Vec<String>) {
+    let Shape::Documents {
+        root_hint,
+        identity,
+    } = shape
+    else {
+        return (None, Vec::new());
+    };
+    // A root hint that is anything other than one plain field name is not
+    // something this projection can honour, and honouring it half way would put
+    // the wrong values in the grid.
+    let root = root_hint.as_ref().and_then(|p| match p.segments() {
+        [PathSeg::Field(name)] => Some(name.to_string()),
+        _ => None,
+    });
+    // Same rule for identity: every field of it must be addressable by name at
+    // the top of the row, because that is the form a mutation key takes.
+    let identity = identity
+        .as_ref()
+        .map(|paths| {
+            paths
+                .iter()
+                .map(|p| match p.segments() {
+                    [PathSeg::Field(name)] => Some(name.to_string()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    (root, identity)
+}
+
+/// The `"editable"` half of the status JSON: what the UI needs before it may
+/// offer an edit at all, or `null`.
+///
+/// Both halves have to agree. The connection must report `EDITABLE_RESULTS`,
+/// and *this* result must carry an identity — a connection whose rows generally
+/// have keys still returns aggregate results that have none. `caps` is `None`
+/// until a connection has actually answered, and that is reported as "not
+/// editable" rather than assumed either way.
+fn editable_json(
+    root: Option<&str>,
+    identity: &[String],
+    driver_id: &str,
+    caps: Option<Caps>,
+) -> serde_json::Value {
+    let Some(caps) = caps else {
+        return serde_json::Value::Null;
+    };
+    if !caps.contains(Caps::EDITABLE_RESULTS) || identity.is_empty() {
+        return serde_json::Value::Null;
+    }
+    json!({
+        "identity": identity,
+        "guard": guard_fields(driver_id),
+        "root": root,
+        // Off means a failing batch can leave a prefix applied. The commit
+        // confirmation has to say so BEFORE the click, so it is reported here
+        // rather than inferred from the driver id.
+        "atomic_batch": caps.contains(Caps::ATOMIC_BATCH),
+    })
 }
 
 /// Columns, dug out of the first chunk that reveals any.
@@ -409,7 +514,7 @@ fn absorb(shared: &Arc<QueryShared>, state: &StoreState) {
 /// **CoreApi gap #4 in `datagrep-cli`'s list, hit again here.** There is no way to
 /// learn a result's columns before its first chunk lands, so this is where
 /// they come from.
-fn columns_of(state: &StoreState) -> Vec<(String, String)> {
+fn columns_of(state: &StoreState, root: Option<&str>) -> Vec<(String, String)> {
     for chunk in &state.chunks {
         match &chunk.body {
             ChunkBody::Table(batch) => {
@@ -421,7 +526,7 @@ fn columns_of(state: &StoreState) -> Vec<(String, String)> {
                     .collect();
             }
             ChunkBody::Docs(segment) => {
-                return crate::rows::doc_columns(segment)
+                return crate::rows::doc_columns(segment, root)
                     .into_iter()
                     .map(|name| (name, "document-field".to_string()))
                     .collect();
@@ -551,6 +656,24 @@ pub fn language_for_driver(id: &str) -> Option<LanguageId> {
         // fallback: no splitting, no highlighting. Honest, not a pretence.
         "elasticsearch" => Some(LanguageId::EsDsl),
         _ => None,
+    }
+}
+
+/// The envelope fields a generated write for this engine compares against —
+/// its `Mutation::expect` precondition.
+///
+/// One line per driver, the same shape as [`language_for_driver`] above, and
+/// here for the same reason: a frontend must not carry engine knowledge, and
+/// the guard is engine knowledge. Elasticsearch's precondition is exactly
+/// `_seq_no` + `_primary_term` (`if_seq_no`/`if_primary_term`), and its driver
+/// refuses an update or delete that arrives without them rather than sending a
+/// blind clobber — so a UI that did not know to send them could not edit at
+/// all. An engine not listed here gets an empty precondition and its driver
+/// decides whether that is acceptable.
+fn guard_fields(driver_id: &str) -> Vec<String> {
+    match driver_id {
+        "elasticsearch" => vec!["_seq_no".to_string(), "_primary_term".to_string()],
+        _ => Vec::new(),
     }
 }
 
@@ -780,6 +903,14 @@ pub unsafe extern "C" fn datagrep_query_status_json(
                     .map(|(name, ty)| json!({"name": name, "type": ty}))
                     .collect::<Vec<_>>(),
                 "total_known": total_known,
+                // What may be edited in this result, or null. Additive to the
+                // frozen header's documented shape, like `affected_rows`.
+                "editable": editable_json(
+                    inner.root.as_deref(),
+                    &inner.identity,
+                    &inner.driver_id,
+                    q.shared.core.caps_for(&q.shared.profile),
+                ),
             });
             drop(inner);
 
@@ -826,6 +957,69 @@ pub unsafe extern "C" fn datagrep_query_on_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_document_shape_reports_its_root_and_identity() {
+        use datagrep_api::value::FieldPath;
+        let shape = Shape::Documents {
+            root_hint: Some(FieldPath::field("_source")),
+            identity: Some(vec![
+                FieldPath::field("_index"),
+                FieldPath::field("_id"),
+                FieldPath::field("_routing"),
+            ]),
+        };
+        let (root, identity) = editing_facts(&shape);
+        assert_eq!(root.as_deref(), Some("_source"));
+        assert_eq!(identity, vec!["_index", "_id", "_routing"]);
+
+        // A stream that declares no identity is not editable, and a tabular
+        // result is not offered either — its identity is column indices, which
+        // no mutation key can be built from.
+        let anonymous = Shape::Documents {
+            root_hint: None,
+            identity: None,
+        };
+        assert_eq!(editing_facts(&anonymous), (None, Vec::new()));
+        assert_eq!(editing_facts(&Shape::Unknown), (None, Vec::new()));
+    }
+
+    #[test]
+    fn editing_is_offered_only_when_the_connection_and_the_result_both_allow_it() {
+        let identity = vec!["_index".to_string(), "_id".to_string()];
+        let editable = Caps::EDITABLE_RESULTS;
+
+        let json = editable_json(Some("_source"), &identity, "elasticsearch", Some(editable));
+        assert_eq!(json["identity"][1], serde_json::json!("_id"));
+        assert_eq!(json["root"], serde_json::json!("_source"));
+        assert_eq!(
+            json["guard"],
+            serde_json::json!(["_seq_no", "_primary_term"]),
+            "an edit that cannot name the guard could only be sent unguarded"
+        );
+        assert_eq!(
+            json["atomic_batch"],
+            serde_json::json!(false),
+            "a batch is only atomic when the connection says so"
+        );
+        assert_eq!(
+            editable_json(
+                Some("_source"),
+                &identity,
+                "elasticsearch",
+                Some(editable | Caps::ATOMIC_BATCH)
+            )["atomic_batch"],
+            serde_json::json!(true)
+        );
+
+        // Either half missing means no editing at all — including "we have not
+        // connected yet", which must never be read as a yes.
+        assert!(editable_json(Some("_source"), &[], "elasticsearch", Some(editable)).is_null());
+        assert!(
+            editable_json(Some("_source"), &identity, "elasticsearch", Some(Caps::DDL)).is_null()
+        );
+        assert!(editable_json(Some("_source"), &identity, "elasticsearch", None).is_null());
+    }
 
     #[test]
     fn a_script_splits_into_statements_via_datagrep_lang() {

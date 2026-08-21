@@ -54,7 +54,12 @@ void      datagrep_query_free(DatagrepQuery *);
 void      datagrep_query_cancel(DatagrepQuery *, char **outcome_json_out);
 /* {"state":"streaming"|"parked"|"capped"|"done"|"cancelled"|"failed",
  *  "rows_loaded":u64,"elapsed_ms":u64,"error":str|null,
- *  "columns":[{"name","type"}],"total_known":bool} */
+ *  "columns":[{"name","type"}],"total_known":bool,
+ *  "editable":null|{"identity":[str,..],"guard":[str,..],"root":str|null,
+ *                   "atomic_batch":bool}}
+ * "editable" is non-null only when the connection reports EDITABLE_RESULTS and
+ * this result declared a row identity; `atomic_batch` false means a failing
+ * batch can leave a prefix applied. */
 char *datagrep_query_status_json(DatagrepQuery *, char **err_out);
 
 typedef void (*DatagrepProgressFn)(void *ctx);
@@ -71,6 +76,23 @@ const char *datagrep_rows_cell(DatagrepRows *, uint64_t row, uint32_t col, size_
 /* 0 value  1 NULL  2 ABSENT  3 nested */
 uint8_t datagrep_rows_cell_kind(DatagrepRows *, uint64_t row, uint32_t col);
 char   *datagrep_rows_cell_detail_json(DatagrepRows *, uint64_t row, uint32_t col);
+/* The row's fields outside the projected root — for an ES hit the
+ * `_index`/`_id`/`_routing` identity and the `_seq_no`/`_primary_term` guard a
+ * write compares against. NULL when the result has no root. */
+char   *datagrep_rows_envelope_json(DatagrepRows *, uint64_t row);
+
+/* Commit one guarded MutationBatch. SYNCHRONOUS — it blocks until the write
+ * lands, unlike datagrep_query_run. `mutation_json` is serde-encoded:
+ * FieldPath is [{"Field":"_id"}], Value is {"Str":"x"}/{"I64":42}. Returns the
+ * batch report
+ *   {"rows":[{"op","_index","_id","outcome","conflict"?,"_seq_no"?,…}],
+ *    "notices":[{"severity","code","message"}],
+ *    "summary":{"applied","failed","not_attempted","conflicts"}}
+ * or NULL with *err_out set (parse failure, read-only refusal, whole-batch
+ * refusal). A per-row version conflict is a row with conflict=true, NOT an
+ * error: the call still returns a report. */
+char   *datagrep_mutate(DatagrepCore *, const char *profile, const char *mutation_json,
+                        char **err_out);
 
 #ifdef __cplusplus
 }

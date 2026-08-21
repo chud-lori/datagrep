@@ -776,3 +776,28 @@ char *datagrep_rows_cell_detail_json(DatagrepRows *r, uint64_t row, uint32_t col
     }
     return s.buf;
 }
+
+/* ------------------------------------------------------------------ writes */
+
+/* The stub generates a synthetic table, not documents: its rows have no
+ * envelope, and there is no server behind them to write to. Both calls say so
+ * the same way the real engine says "this result is not editable" — a NULL
+ * envelope, and a refusal carrying a reason — rather than by being absent from
+ * the link, which would be a build failure instead of a message. The UI gates
+ * editing on the status JSON's "editable" block, which this stub never emits,
+ * so neither is reached in a stub build. */
+
+char *datagrep_rows_envelope_json(DatagrepRows *r, uint64_t row) {
+    (void)r;
+    (void)row;
+    return NULL;
+}
+
+char *datagrep_mutate(DatagrepCore *c, const char *profile, const char *mutation_json,
+                      char **err_out) {
+    (void)c;
+    (void)profile;
+    (void)mutation_json;
+    set_err(err_out, "this build has no datagrep engine linked in, so nothing can be written");
+    return NULL;
+}

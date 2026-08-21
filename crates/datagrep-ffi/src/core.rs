@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::ffi::c_char;
 use std::sync::{Arc, Mutex};
 
+use datagrep_api::caps::Caps;
 use datagrep_api::{ConfigValue, Enforcement};
 use datagrep_core::{CoreApi, ProfileId, QueryId};
 use datagrep_profiles::Store;
@@ -71,6 +72,15 @@ pub(crate) struct CoreInner {
     /// is worse than no version at all — it is the number a user would quote
     /// when asking whether a feature exists on their server.
     server: Mutex<HashMap<String, (String, String)>>,
+    /// Saved-profile name → the [`Caps`] its connection reported after the
+    /// handshake.
+    ///
+    /// Recorded rather than asked for on demand because reading capabilities
+    /// means acquiring a lease, and the one place that already holds a lease is
+    /// the request path. The editing surface is gated on these flags
+    /// (`EDITABLE_RESULTS`, `ATOMIC_BATCH`), and a UI that guesses them would be
+    /// promising the user a transaction the engine does not have.
+    caps: Mutex<HashMap<String, Caps>>,
 }
 
 impl std::fmt::Debug for CoreInner {
@@ -124,6 +134,7 @@ impl DatagrepCore {
             registered: Mutex::new(HashMap::new()),
             enforcement: Mutex::new(HashMap::new()),
             server: Mutex::new(HashMap::new()),
+            caps: Mutex::new(HashMap::new()),
         })))
     }
 }
@@ -224,12 +235,23 @@ impl CoreInner {
         read_only: bool,
         req: datagrep_api::Request,
     ) -> Result<QueryId, String> {
-        if !read_only {
-            return self.api.run_query(id, req).await.map_err(|e| e.to_string());
-        }
+        // The lease is taken here on BOTH paths — the read-only one needs it to
+        // put the guard on the exact socket, and the writeable one needs it so
+        // the connection's capabilities are recorded. `CoreApi::run_query` does
+        // exactly this acquire internally; doing it here costs nothing extra and
+        // is the only moment a live connection is in reach.
         let session = self.api.session(id).map_err(|e| e.to_string())?;
         let lease = session.acquire().await.map_err(|e| e.to_string())?;
         self.record_server_info(name, lease.server_info());
+        self.record_caps(name, lease.capabilities().flags);
+        if !read_only {
+            return self
+                .api
+                .queries()
+                .run(lease, req)
+                .await
+                .map_err(|e| e.to_string());
+        }
         match lease.set_read_only(true).await {
             Ok(enforcement) => {
                 self.lock_enforcement()
@@ -272,6 +294,18 @@ impl CoreInner {
     /// all since the process started.
     pub(crate) fn server_info_for(&self, name: &str) -> Option<(String, String)> {
         self.lock_server().get(name).cloned()
+    }
+
+    /// What this profile's connection reported it can do, if it has connected
+    /// at all since the process started. `None` means "not asked yet", which
+    /// every caller must treat as "cannot claim it" rather than as a `false`.
+    pub(crate) fn caps_for(&self, name: &str) -> Option<Caps> {
+        self.lock_caps().get(name).copied()
+    }
+
+    /// Remember the capabilities a live connection just reported.
+    pub(crate) fn record_caps(&self, name: &str, caps: Caps) {
+        self.lock_caps().insert(name.to_string(), caps);
     }
 
     /// Remember a handshake result so the badge can name the engine and its
@@ -318,6 +352,7 @@ impl CoreInner {
         let stale = self.lock_registered().remove(name);
         self.lock_enforcement().remove(name);
         self.lock_server().remove(name);
+        self.lock_caps().remove(name);
         if let Some(id) = stale {
             let api = self.api.clone();
             if let Ok(rt) = runtime() {
@@ -340,6 +375,12 @@ impl CoreInner {
 
     fn lock_enforcement(&self) -> std::sync::MutexGuard<'_, HashMap<String, Enforcement>> {
         self.enforcement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_caps(&self) -> std::sync::MutexGuard<'_, HashMap<String, Caps>> {
+        self.caps
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }

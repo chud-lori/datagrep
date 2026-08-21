@@ -124,7 +124,26 @@ void datagrep_query_cancel(DatagrepQuery*, char** outcome_json_out);
 //  "error":string|null,
 //  "read_only": null | {"enforcement":"server"|"client"|"none",
 //                       "server_confirmed":bool},   // see datagrep_connection_info_json
-//  "columns":[{"name":..,"type":..}],"total_known":bool}
+//  "columns":[{"name":..,"type":..}],"total_known":bool,
+//  "editable": null                       // this result cannot be edited
+//            | {"identity":[str,..],      // fields naming ONE row, e.g.
+//                                         // ["_index","_id","_routing"]
+//               "guard":[str,..],         // fields a write must compare
+//                                         // against, e.g. ["_seq_no",
+//                                         // "_primary_term"] — send them as
+//                                         // `expect`, loaded values and all
+//               "root":str|null,          // the field the columns are
+//                                         // projected from ("_source"); the
+//                                         // rest of the row is the envelope
+//               "atomic_batch":bool}}     // false = a failing batch can leave
+//                                         // a prefix applied, and the commit
+//                                         // confirmation must say so
+// "editable" is non-null only when the connection reports EDITABLE_RESULTS AND
+// this result declared a row identity: an aggregate has no identity even on a
+// connection whose rows usually do, and a profile that has not connected yet
+// reports null rather than a guess. It is what a grid must consult before it
+// offers an edit — the mutation it would build is addressed by exactly these
+// identity fields.
 // A statement that a read-only profile refuses (Write/Ddl/Admin, classified
 // client-side before dispatch) surfaces as state="failed" with an error
 // naming the profile — it never reaches the server.
@@ -200,5 +219,18 @@ uint8_t datagrep_rows_cell_kind(DatagrepRows*, uint64_t row, uint32_t col);
 
 // Full raw value of one cell as JSON, for the detail pane. Caller frees.
 char* datagrep_rows_cell_detail_json(DatagrepRows*, uint64_t row, uint32_t col);
+
+// The row's fields OUTSIDE the projected root — its envelope — as one JSON
+// object. Caller frees. NULL for a row outside the window, and for any result
+// whose driver declared no root (there is then nothing outside the row).
+//
+// This is where the facts a guarded write needs live, because none of them
+// belong in a column of the user's own document: for an Elasticsearch hit,
+// `_index`/`_id`/`_routing` (which document) and `_seq_no`/`_primary_term`
+// (which version of it was loaded — the compare-and-swap `datagrep_mutate`
+// sends as `expect`). Read it for the row being edited, at the moment the edit
+// is staged: it is the loaded version, not the current one, that a guard has
+// to carry.
+char* datagrep_rows_envelope_json(DatagrepRows*, uint64_t row);
 
 #endif
