@@ -8,8 +8,10 @@
 #ifndef DATAGREP_MAIN_WINDOW_HPP
 #define DATAGREP_MAIN_WINDOW_HPP
 
+#include "model/ConnectionSafety.hpp"
 #include "model/QueryStatus.hpp"
 
+#include <QHash>
 #include <QMainWindow>
 
 #include <memory>
@@ -22,6 +24,7 @@ class ResultTableView;
 class SqlEditor;
 class SchemaTree;
 class StatusBar;
+class QLabel;
 class QListWidget;
 class QPushButton;
 
@@ -46,6 +49,11 @@ private slots:
 private:
     QString selectedProfile() const;
 
+    // Show the filled marker band for the selected connection, or hide it. Runs
+    // on every selection change and after every profile reload, so the banner
+    // can never describe a connection other than the one queries would hit.
+    void updateMarkedBanner();
+
     std::unique_ptr<dg::Core> core_;
 
     QListWidget* connections_;
@@ -53,10 +61,16 @@ private:
     QPushButton* editButton_;
     QPushButton* removeButton_;
     SchemaTree* schema_;
+    QLabel* markedBanner_;
     SqlEditor* editor_;
     ResultTableView* grid_;
     ResultModel* model_;
     StatusBar* status_;
+
+    // The safety facts per profile, rebuilt on every reloadProfiles(). The list
+    // rows, the banner and the run path all read THIS map, so they can never
+    // disagree about how careful a connection wants us to be.
+    QHash<QString, dg::ConnectionSafety> safetyByProfile_;
 };
 
 #endif  // DATAGREP_MAIN_WINDOW_HPP
