@@ -1,23 +1,20 @@
 // SqlHighlighter.hpp — a minimal SQL QSyntaxHighlighter for the editor.
 //
-// This is the "basic highlighter is fine for now" placeholder. It is a plain
-// QSyntaxHighlighter (no external dependency) so the skeleton builds with only
-// Qt6 present.
+// This is the compile-time FALLBACK highlighter. It is a plain QSyntaxHighlighter
+// (no external dependency) so ui/linux builds and highlights with only Qt6
+// present.
 //
-// UPGRADE SEAM — the editor deliberately talks to its highlighter only through
-// QSyntaxHighlighter, so this class can be swapped without touching SqlEditor:
+// The preferred path is KSyntaxHighlighting (KF6, MIT-licensed): it ships a
+// KSyntaxHighlighting::SyntaxHighlighter (a QSyntaxHighlighter subclass) plus a
+// maintained SQL syntax definition and light/dark themes. When CMake finds
+// KF6SyntaxHighlighting it defines HAVE_KSYNTAXHIGHLIGHTING and SqlEditor drives
+// that engine directly (see SqlEditor.cpp); this class is compiled and attached
+// only when the package is absent. The editor talks to whichever highlighter it
+// uses through the QSyntaxHighlighter base alone, so the two are interchangeable.
 //
-//   * Preferred: KSyntaxHighlighting (KF6, MIT-licensed). It ships a
-//     KSyntaxHighlighting::SyntaxHighlighter (a QSyntaxHighlighter subclass) plus
-//     a maintained SQL syntax definition and theme support. Add
-//     `find_package(KF6SyntaxHighlighting)` and construct it against a
-//     QPlainTextEdit document — a near drop-in for this class.
-//
-//   * QScintilla (ScintillaEdit) gives a full editor widget with folding and
-//     autocomplete, but it is GPLv3 / commercial only. Adopting it would impose
-//     GPLv3 on the whole UI binary, so it is intentionally NOT wired here; if the
-//     project accepts that licensing, replace the QPlainTextEdit in SqlEditor
-//     with a QsciScintilla and drop this highlighter entirely.
+// (QScintilla was considered for a full editor widget with folding/autocomplete
+// but is GPLv3 / commercial only, which would impose GPLv3 on the whole UI
+// binary, so it is intentionally NOT wired here.)
 
 #ifndef DATAGREP_SQL_HIGHLIGHTER_HPP
 #define DATAGREP_SQL_HIGHLIGHTER_HPP

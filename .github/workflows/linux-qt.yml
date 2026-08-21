@@ -49,6 +49,10 @@ jobs:
       # GL headers Qt6Gui's CMake config insists on even for a widgets app.
       # libdbus-1-dev is a link dependency of the Rust staticlib (keyring's
       # Secret Service backend), named explicitly on the final link line.
+      # libkf6syntaxhighlighting-dev provides KF6::SyntaxHighlighting (the
+      # KSyntaxHighlighting engine + bundled SQL definition and themes) that the
+      # SQL editor uses; without it CMake silently falls back to the built-in
+      # basic highlighter, so this is what exercises the real highlighting path.
       #
       # apt is deliberately NOT cached: these packages install in well under a
       # minute from the runner-local mirror, and apt cache actions are the
@@ -62,6 +66,13 @@ jobs:
             libgl1-mesa-dev \
             zlib1g-dev \
             libdbus-1-dev
+          # KSyntaxHighlighting is OPTIONAL: CMake finds it with find_package
+          # and otherwise compiles the built-in fallback highlighter. The KF6
+          # dev package is not in every runner image's archive (partial KF6 on
+          # 24.04), so install it best-effort — its absence must not fail the
+          # build, it just exercises the fallback path.
+          sudo apt-get install -y libkf6syntaxhighlighting-dev || \
+            echo "KF6SyntaxHighlighting unavailable — building the fallback highlighter"
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable

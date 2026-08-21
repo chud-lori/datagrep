@@ -86,6 +86,36 @@ pkg_check_modules(DBUS REQUIRED dbus-1)
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
 
 # ---------------------------------------------------------------------------
+# Optional: KSyntaxHighlighting (KF6, MIT) for real SQL syntax highlighting.
+#
+# When present it replaces the hand-rolled SqlHighlighter with the maintained
+# KSyntaxHighlighting::SyntaxHighlighter + bundled "SQL" definition and themes
+# (see src/ui/SqlEditor.cpp). It is deliberately OPTIONAL: if the package is not
+# installed the build falls back to the built-in basic highlighter instead of
+# failing. HAVE_KSYNTAXHIGHLIGHTING is defined on the target only when found, and
+# SqlEditor.cpp keys the whole KSyntax path off that macro.
+#
+# Install on Debian/Ubuntu with: libkf6syntaxhighlighting-dev
+# Turn the attempt off entirely with -DDATAGREP_USE_KSYNTAXHIGHLIGHTING=OFF.
+# ---------------------------------------------------------------------------
+option(DATAGREP_USE_KSYNTAXHIGHLIGHTING
+       "Use KF6::SyntaxHighlighting for SQL highlighting when available" ON)
+
+set(DATAGREP_HAVE_KSYNTAXHIGHLIGHTING OFF)
+if(DATAGREP_USE_KSYNTAXHIGHLIGHTING)
+    find_package(KF6SyntaxHighlighting QUIET)
+    if(KF6SyntaxHighlighting_FOUND)
+        set(DATAGREP_HAVE_KSYNTAXHIGHLIGHTING ON)
+        message(STATUS
+            "KF6SyntaxHighlighting found — real SQL syntax highlighting enabled")
+    else()
+        message(STATUS
+            "KF6SyntaxHighlighting not found — falling back to the built-in "
+            "basic SQL highlighter")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # The application.
 # ---------------------------------------------------------------------------
 add_executable(datagrep
@@ -110,6 +140,14 @@ target_include_directories(datagrep PRIVATE
 
 if(DATAGREP_BUILD_RUST)
     add_dependencies(datagrep datagrep_ffi_build)
+endif()
+
+# When KSyntaxHighlighting was located, link it and flip on the code path that
+# uses it. Absent the package, neither the define nor the link exists and
+# SqlEditor.cpp compiles its built-in fallback highlighter.
+if(DATAGREP_HAVE_KSYNTAXHIGHLIGHTING)
+    target_link_libraries(datagrep PRIVATE KF6::SyntaxHighlighting)
+    target_compile_definitions(datagrep PRIVATE HAVE_KSYNTAXHIGHLIGHTING)
 endif()
 
 target_link_libraries(datagrep PRIVATE
