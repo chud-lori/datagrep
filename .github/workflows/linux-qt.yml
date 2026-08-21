@@ -97,3 +97,57 @@ jobs:
 
       - name: Build UI
         run: cmake --build ui/linux/build
+
+  # The job above has never once compiled the KF6 editor path: the ubuntu-24.04
+  # runner archive carries only partial KF6, its best-effort install of
+  # libkf6syntaxhighlighting-dev always fails, and CMake falls back to the
+  # built-in highlighter. That leaves everything behind HAVE_KSYNTAXHIGHLIGHTING
+  # in SqlEditor read-verified only. This leg runs in a Debian trixie container,
+  # whose archive does carry the KF6 dev package, and configures with
+  # -DDATAGREP_REQUIRE_KSYNTAXHIGHLIGHTING=ON so a missing package fails the
+  # configure instead of silently downgrading to the fallback. Between the two
+  # jobs, BOTH editor code paths get a compiler on every change.
+  build-kf6:
+    name: cmake build (debian, KF6 highlighter)
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      # Container images start bare: ca-certificates/curl/git are for checkout
+      # and the rustup bootstrap, the rest mirrors the job above plus the KF6
+      # dev package — installed WITHOUT a fallback, because compiling the KF6
+      # path is this job's entire reason to exist.
+      - name: System dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y \
+            ca-certificates curl git \
+            cmake ninja-build g++ pkg-config \
+            qt6-base-dev qt6-base-dev-tools \
+            libgl1-mesa-dev \
+            zlib1g-dev \
+            libdbus-1-dev \
+            libkf6syntaxhighlighting-dev
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build FFI static library
+        run: cargo build -p datagrep-ffi --release
+
+      - name: Configure UI (CMake)
+        run: >
+          cmake -S ui/linux -B ui/linux/build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DDATAGREP_BUILD_RUST=OFF
+          -DDATAGREP_REQUIRE_KSYNTAXHIGHLIGHTING=ON
+
+      - name: Build UI
+        run: cmake --build ui/linux/build

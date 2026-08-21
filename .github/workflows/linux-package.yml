@@ -5,7 +5,14 @@ name: Linux packages
 # Deliberately NOT on every push — compile verification of ui/linux is
 # linux-qt.yml's job. This workflow runs on release tags and on demand, builds
 # the same thing that workflow builds (Rust FFI archive, then the CMake app),
-# and then packages the resulting binary:
+# and then packages the resulting binary. It ALSO runs on pull requests that
+# touch the packaging inputs themselves (packaging/** or this workflow) — a
+# tag-only script is a script that first executes on release day, so packaging
+# changes get exercised end to end on the PR that makes them, while every other
+# PR stays free of packaging jobs. The steps are identical either way; a PR run
+# simply uploads its artifacts under the same name for inspection.
+#
+# Packaged as:
 #   * .deb / .rpm  via fpm from a staged FHS tree   (packaging/build-packages.sh)
 #   * AppImage     via linuxdeploy + the qt plugin  (packaging/build-appimage.sh)
 #
@@ -15,6 +22,10 @@ name: Linux packages
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/linux-package.yml"
   workflow_dispatch:
 
 concurrency:
