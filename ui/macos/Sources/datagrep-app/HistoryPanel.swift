@@ -13,8 +13,8 @@ import SwiftUI
 /// * **Retention is stated and editable, never a silent cap.** Other clients stop
 ///   at 100 entries without saying so ([#1551]). The footer says exactly what is
 ///   being kept and lets you change it.
-/// * **Not scoped to whatever you are connected to.** HeidiSQL's users asked for
-///   precisely this ([#1142]) — connection is a filter you may apply, not one
+/// * **Not scoped to whatever you are connected to.** Users of other clients
+///   asked for precisely this — connection is a filter you may apply, not one
 ///   applied for you.
 /// * **Failures are kept, with their error.** The query you want back is usually
 ///   the one that broke.

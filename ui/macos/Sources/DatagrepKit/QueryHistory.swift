@@ -71,7 +71,7 @@ public struct QueryHistoryEntry: Codable, Sendable, Identifiable, Equatable {
     public var connection: String
     /// Driver id (`postgres`, `mysql`, …) for the engine glyph. Kept on the
     /// entry rather than looked up later: the profile may be gone by the time
-    /// anyone reads this back, and HeidiSQL's [#1142] is precisely the complaint
+    /// anyone reads this back, and the filed complaint elsewhere is precisely
     /// that history is useless once it depends on a connection still existing.
     public var engine: String
     public var startedAtMs: Int64
@@ -238,8 +238,9 @@ public enum HistoryDateRange: String, Codable, Sendable, CaseIterable, Identifia
 public struct HistoryFilter: Sendable, Equatable {
     public var text: String
     /// `nil` = every connection. History is *not* scoped to whatever you happen
-    /// to be connected to right now — that is the HeidiSQL complaint ([#1142]);
-    /// the connection is a filter you may apply, never one applied for you.
+    /// to be connected to right now — that is the complaint filed against other
+    /// clients; the connection is a filter you may apply, never one applied for
+    /// you.
     public var connection: String?
     public var range: HistoryDateRange
     public var outcome: QueryOutcome?
@@ -600,7 +601,7 @@ public final class QueryHistoryStore: @unchecked Sendable {
     /// Connection names that actually appear in history, for the filter menu.
     /// Taken from the entries and not from the live profile list on purpose: a
     /// connection you deleted still has a past, and hiding it would be exactly
-    /// the coupling HeidiSQL's users complained about.
+    /// the coupling users complained about elsewhere.
     public static func connections(in entries: [QueryHistoryEntry]) -> [String] {
         Array(Set(entries.map(\.connection))).filter { !$0.isEmpty }.sorted()
     }

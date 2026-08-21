@@ -6,9 +6,9 @@
 // animates and nothing polls: every value changes only when the model hands it
 // a fresh dg::QueryStatus (fed by datagrep_query_status_json) or the user acts.
 //
-// The one rule this widget exists to enforce is the RedisInsight lesson the
-// macOS bar spells out: a partial result must never print a row count that
-// looks final. So:
+// The one rule this widget exists to enforce is the lesson the macOS bar
+// spells out, learned from clients that get it wrong: a partial result must
+// never print a row count that looks final. So:
 //
 //   * a server-capped result says "first N rows", not "N rows";
 //   * an @limit-truncated result says "first N rows (@limit)";
