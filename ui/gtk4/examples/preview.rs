@@ -1,5 +1,5 @@
 // Verification harness: seeds a profile, runs a statement, snapshots the window to PNG.
-use std::rc::Rc;
+use std::sync::Arc;
 
 use adw::prelude::*;
 use datagrep_gtk::ffi::Core;
@@ -11,7 +11,7 @@ fn main() {
         .application_id("io.github.chud_lori.datagrep.Preview")
         .build();
     app.connect_activate(move |app| {
-        let core = Rc::new(Core::open(&format!("{dir}/profiles.sqlite")).expect("core"));
+        let core = Arc::new(Core::open(&format!("{dir}/profiles.sqlite")).expect("core"));
         let _ = core.profiles_add("demo", &format!("sqlite://{dir}/demo.sqlite"));
         let window = Window::new(app, core);
         window.present();

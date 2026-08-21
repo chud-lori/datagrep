@@ -45,15 +45,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             pkg-config libdbus-1-dev \
-            libgtk-4-dev libadwaita-1-dev
+            libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev
 
       # The floor is a build failure rather than a paragraph — README.md says why.
       - name: Assert the GTK4 / libadwaita floor
         run: |
           pkg-config --print-errors --atleast-version=4.12 gtk4
-          pkg-config --print-errors --atleast-version=1.4 libadwaita-1
-          echo "gtk4        $(pkg-config --modversion gtk4)"
-          echo "libadwaita  $(pkg-config --modversion libadwaita-1)"
+          pkg-config --print-errors --atleast-version=1.5 libadwaita-1
+          pkg-config --print-errors --atleast-version=5.4 gtksourceview-5
+          echo "gtk4           $(pkg-config --modversion gtk4)"
+          echo "libadwaita     $(pkg-config --modversion libadwaita-1)"
+          echo "gtksourceview  $(pkg-config --modversion gtksourceview-5)"
 
       - name: Install Rust (stable, rustfmt + clippy)
         uses: dtolnay/rust-toolchain@stable
