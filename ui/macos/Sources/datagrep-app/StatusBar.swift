@@ -65,8 +65,8 @@ struct StatusBar: View {
     }
 
     /// A partial result must not print a row count that looks final (the
-    /// RedisInsight lesson: silently incomplete views read as "the data does
-    /// not exist"). Three honest forms:
+    /// lesson other clients teach: silently incomplete views read as "the data
+    /// does not exist"). Three honest forms:
     ///   capped / limit-hit  ->  "first N rows"
     ///   total unknown       ->  "≥ N rows"
     ///   complete            ->  "N rows"

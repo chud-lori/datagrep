@@ -303,7 +303,19 @@ final class AppModel: ObservableObject {
     }
     var canSortInEngine: Bool { EngineStyle.supportsSubqueryOrderBy(activeDriver) }
 
-    var isProd: Bool { activeSafety.isMarked }
+    /// True when the user has put a colour on this connection.
+    ///
+    /// Named `isMarked`, not `isProd`: the dev/staging/prod enum was removed on
+    /// purpose, and the colour is the user's own "this one matters" marker —
+    /// datagrep does not decide what red means. The old name kept implying it
+    /// did, which is how every marked connection ended up painted red no matter
+    /// which colour was actually chosen.
+    var isMarked: Bool { activeSafety.isMarked }
+
+    /// The colour the user marked this connection with, if any. The single
+    /// source for every surface that signals it — badge fill, window tint, edge
+    /// stripe — so they can never disagree with the sidebar band.
+    var markColor: Color? { ConnectionColor.color(activeSafety.color) }
     var isRunning: Bool { state.map { !$0.isTerminal } ?? false }
 
     // MARK: - safety, resolved once
@@ -552,6 +564,11 @@ final class AppModel: ObservableObject {
             // changes which editors are showing.
             editor.refreshConnections()
             editor.setScope(activeProfile.isEmpty ? nil : activeProfile)
+            // This path assigns `activeProfile` directly rather than going
+            // through `selectProfile`, so it has to ask for the badge itself —
+            // otherwise the connection the app opens on is the one connection
+            // whose engine and database never appear.
+            refreshConnectionInfo()
         } catch {
             message = "could not list profiles: \(error)"
             isError = true
@@ -905,6 +922,11 @@ final class AppModel: ObservableObject {
     /// editor — binding a tab to a connection — where re-scoping from here
     /// would fight the move the editor has just made.
     func selectProfile(_ name: String, scopeEditors: Bool = true) {
+        // Clicking any node in the sidebar re-selects that node's profile, so
+        // this used to re-run for every table click: the badge dropped its
+        // database and version for a frame, changed width, and shifted the
+        // whole toolbar with it. Selecting what is already selected is a no-op.
+        guard activeProfile != name else { return }
         activeProfile = name
         if scopeEditors { editor.setScope(name.isEmpty ? nil : name) }
         connectionInfo = nil

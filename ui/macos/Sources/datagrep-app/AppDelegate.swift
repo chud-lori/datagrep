@@ -481,7 +481,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         add(queryMenu, "Focus Editor", #selector(focusEditor(_:)), "l")
         add(queryMenu, "Toggle Cell Detail", #selector(toggleDetail(_:)), "i")
         queryMenu.addItem(.separator())
-        add(queryMenu, "Report Footprint", #selector(reportFootprint(_:)), "m")
+        // NO key equivalent. ⌘M is Minimize, a system-standard binding, and
+        // the Query menu is searched before the Window menu — so a debug
+        // diagnostic was answering ⌘M and the window never minimised.
+        add(queryMenu, "Report Footprint", #selector(reportFootprint(_:)), "")
         add(queryMenu, "Run Scroll Benchmark", #selector(runScrollBench(_:)), "B")
         queryItem.submenu = queryMenu
         main.addItem(queryItem)

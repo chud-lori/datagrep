@@ -26,13 +26,12 @@
 //! `describe(ObjectPath::root())` reports cluster health through the existing
 //! `ObjectDetail::extra` — not a new screen: `_cluster/health`, `_cat/nodes`
 //! and `_cat/shards`, three bounded `GET`s. Two rules, both learned from
-//! Elasticvue's tracker:
+//! failures filed against other Elasticsearch clients:
 //!
 //! - **each source degrades independently** — a cluster where `_cat/shards`
 //!   is forbidden still shows health and nodes, with the failed source marked
-//!   under its own `*_error` key (Elasticvue's cars10/elasticvue#358 is the
-//!   cautionary `Promise.all` tale: one failing alias call blanked the whole
-//!   index listing);
+//!   under its own `*_error` key (the cautionary `Promise.all` tale: one
+//!   failing alias call blanked another client's whole index listing);
 //! - **cat APIs are human-formatted by default** ("3.5mb", "12.1h") and
 //!   Elastic says they are "not intended for use by applications" — so every
 //!   `_cat` call here passes `format=json`, `bytes=b` and `time=ms`, and the
@@ -65,9 +64,8 @@ const MAX_SAMPLE_SIZE: u32 = 10_000;
 /// a small limit, never a client-side filter over everything.
 const COMPLETE_LIMIT: usize = 50;
 /// Cap on the `problem_shards` array the root-level describe reports: enough
-/// to see what is broken, never 18 071 rows (the scale that took out
-/// Elasticvue's shard view, cars10/elasticvue#354). Full per-state counts are
-/// always in `shard_states`.
+/// to see what is broken, never 18 071 rows (the scale that took out another
+/// client's shard view). Full per-state counts are always in `shard_states`.
 const PROBLEM_SHARD_CAP: usize = 50;
 /// Columns requested from `_cat/nodes` — exactly the ones the root describe
 /// surfaces, nothing speculative.
@@ -1496,8 +1494,8 @@ mod tests {
     }
 
     /// The P1-4 constraint: one endpoint failing (permissions, an older
-    /// server) must not blank the others — Elasticvue's cars10/elasticvue#358
-    /// `Promise.all` failure is the counterexample this guards against.
+    /// server) must not blank the others — the `Promise.all` failure filed
+    /// against another client is the counterexample this guards against.
     #[test]
     fn health_sources_degrade_independently() {
         let mut extra: Vec<(Arc<str>, Arc<str>)> = Vec::new();

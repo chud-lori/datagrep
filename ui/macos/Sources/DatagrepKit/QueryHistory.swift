@@ -5,10 +5,10 @@ import Foundation
 /// This is deliberately **not** `SavedQueries.swift`. Saved queries are things a
 /// person chose to keep and gave a name to; history is a record of what happened,
 /// which nobody curates and which must never need curating to stay useful. The
-/// UX study is explicit that conflating the two (as several competitors do) is
-/// the mistake, and that TablePlus's clean split is the right shape — so these
-/// are two stores, two directories, two panels, and they never write to each
-/// other's files.
+/// UX study is explicit that conflating the two — as several other clients do —
+/// is the mistake, and that a clean split is the right shape, so these are two
+/// stores, two directories, two panels, and they never write to each other's
+/// files.
 ///
 /// ## Why this lives in Swift and not in the engine
 ///
@@ -71,7 +71,7 @@ public struct QueryHistoryEntry: Codable, Sendable, Identifiable, Equatable {
     public var connection: String
     /// Driver id (`postgres`, `mysql`, …) for the engine glyph. Kept on the
     /// entry rather than looked up later: the profile may be gone by the time
-    /// anyone reads this back, and HeidiSQL's [#1142] is precisely the complaint
+    /// anyone reads this back, and the filed complaint elsewhere is precisely
     /// that history is useless once it depends on a connection still existing.
     public var engine: String
     public var startedAtMs: Int64
@@ -173,9 +173,9 @@ public struct QueryHistoryEntry: Codable, Sendable, Identifiable, Equatable {
 }
 
 /// How much history to keep. **User-configurable, and stated in the UI** — the
-/// study names DBeaver (no retention control at all, [#22238]) and Sequel Ace
-/// (a silent hard cap of 100 entries, [#1551]) as the two documented ways to get
-/// this wrong. The defaults are generous on purpose: 10 000 entries or 180 days,
+/// study documents two ways to get this wrong: offering no retention control at
+/// all, and enforcing a silent hard cap of 100 entries that the user cannot see
+/// or change. The defaults are generous on purpose: 10 000 entries or 180 days,
 /// whichever bites first.
 public struct HistoryRetention: Codable, Sendable, Equatable {
     public var maxEntries: Int
@@ -207,7 +207,8 @@ public struct HistoryRetention: Codable, Sendable, Equatable {
 }
 
 /// Date window for the filter bar. The four coarse buckets people actually
-/// think in — DBeaver's filed complaint is that it has no date filtering at all.
+/// think in. The study's filed complaint against other clients is that they
+/// offer no date filtering at all.
 public enum HistoryDateRange: String, Codable, Sendable, CaseIterable, Identifiable {
     case day, week, month, all
     public var id: String { rawValue }
@@ -237,8 +238,9 @@ public enum HistoryDateRange: String, Codable, Sendable, CaseIterable, Identifia
 public struct HistoryFilter: Sendable, Equatable {
     public var text: String
     /// `nil` = every connection. History is *not* scoped to whatever you happen
-    /// to be connected to right now — that is the HeidiSQL complaint ([#1142]);
-    /// the connection is a filter you may apply, never one applied for you.
+    /// to be connected to right now — that is the complaint filed against other
+    /// clients; the connection is a filter you may apply, never one applied for
+    /// you.
     public var connection: String?
     public var range: HistoryDateRange
     public var outcome: QueryOutcome?
@@ -599,7 +601,7 @@ public final class QueryHistoryStore: @unchecked Sendable {
     /// Connection names that actually appear in history, for the filter menu.
     /// Taken from the entries and not from the live profile list on purpose: a
     /// connection you deleted still has a past, and hiding it would be exactly
-    /// the coupling HeidiSQL's users complained about.
+    /// the coupling users complained about elsewhere.
     public static func connections(in entries: [QueryHistoryEntry]) -> [String] {
         Array(Set(entries.map(\.connection))).filter { !$0.isEmpty }.sorted()
     }

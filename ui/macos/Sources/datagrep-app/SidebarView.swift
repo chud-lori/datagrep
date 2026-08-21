@@ -12,62 +12,48 @@ struct SidebarView: View {
                 ForEach(model.roots) { node in
                     NodeRow(node: node, model: model, filter: model.searchText, depth: 0)
                 }
-                if model.roots.isEmpty {
-                    Button {
-                        model.showNewConnection = true
-                    } label: {
-                        Label("Add a connection…", systemImage: "plus.circle")
-                            .font(.callout)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Color.accentColor)
-                    .padding(.vertical, 4)
-                }
             } header: {
-                // The + is on the header rather than under the list because
-                // the "Add a connection…" row below only appears while there
-                // are none — which means the moment you have one connection,
-                // the sidebar becomes the one list in the app you cannot add
-                // to from the list itself. New Connection… does live in the
-                // File menu and inside the toolbar's connection menu, but that
-                // menu is labelled with the current connection, so it reads as
-                // a switcher and the add hides inside it.
-                HStack(spacing: 4) {
-                    Text("Connections")
-                        .font(.caption2)
-                        .fontWeight(.semibold)
-                        .textCase(.uppercase)
-                        .foregroundStyle(.secondary)
-                        .tracking(0.6)
-                    Spacer(minLength: 0)
-                    // Deliberately NOT `.secondary` like the header text
-                    // beside it. A + drawn in the same grey as a label reads
-                    // as decoration, and the whole point of this control is
-                    // that the one list you could not add to now looks like it
-                    // takes additions. Accent glyph on a faint chip: a target
-                    // with an edge, which the accent tint also turns red on a
-                    // production connection along with the rest of the window.
-                    Button {
-                        model.showNewConnection = true
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(Color.accentColor)
-                            .frame(width: 18, height: 18)
-                            .background(
-                                Color.primary.opacity(0.09),
-                                in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("New connection (⌘N)")
-                    .accessibilityLabel("New Connection")
-                }
+                Text("Connections")
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .textCase(.uppercase)
+                    .foregroundStyle(.secondary)
+                    .tracking(0.6)
             }
         }
         .listStyle(.sidebar)
-        // A band, not a tint. Sequel Ace shrinking the same signal to a dot
-        // produced sustained backlash, so a marked connection gets full width.
+        // The add lives in a bottom bar, which is where the platform's own
+        // apps put "add to the thing this sidebar lists".
+        //
+        // Two earlier attempts put a bare + on the section header and both were
+        // rejected as decoration. They shared three properties this does not:
+        // inside the scrolling list, wordless, and immediately beside a
+        // secondary-grey label to be mistaken for. A footer sits outside the
+        // scroll area behind a divider, so it reads as chrome, and it can say
+        // what it does. It also survives when the toolbar overflows, which was
+        // measured to happen to every toolbar item at ordinary window widths.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                Divider()
+                HStack(spacing: 0) {
+                    Button {
+                        model.showNewConnection = true
+                    } label: {
+                        Label("New Connection", systemImage: "plus")
+                            .font(.callout)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("New connection  ⌘N")
+                    Spacer(minLength: 0)
+                }
+            }
+            .background(.bar)
+        }
+        // A band, not a tint. Shrinking the same signal to a dot produced
+        // sustained backlash elsewhere, so a marked connection gets full width.
         .safeAreaInset(edge: .top, spacing: 0) {
             if let color = model.activeSafety.color, !model.activeProfile.isEmpty {
                 MarkedBanner(name: model.activeProfile, color: color)
@@ -275,7 +261,8 @@ private struct NodeLabel: View {
         .contentShape(Rectangle())
         .onHover { h in withAnimation(.smooth(duration: 0.12)) { hovering = h } }
         .onTapGesture { model.select(node) }
-        // Double-click a connection: a new editor for it, DBeaver-style. The
+        // Double-click a connection: a new editor for it, the way every other
+        // client in the study does. The
         // previewable branch is unchanged — a profile row is never previewable
         // (its kind is `profile`), so these two have never overlapped.
         .onTapGesture(count: 2) {
