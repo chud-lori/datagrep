@@ -202,6 +202,13 @@ final class AppModel: ObservableObject {
     /// AppKit-side edit.
     @Published var stagingGeneration = 0
 
+    /// The conflicted documents of the last commit, read back from the server,
+    /// and whether their three-column view is up. `isRereading` is what keeps
+    /// the window honest while `datagrep_reread_documents` blocks.
+    @Published var conflictReview: ConflictReview?
+    @Published var showConflictReview = false
+    @Published var isRereading = false
+
     /// The inspector's two modes. Cell detail and schema hold their own state;
     /// flipping between them is a view change, never a load.
     @Published var inspectorMode: InspectorMode = .cell
@@ -1550,6 +1557,109 @@ final class AppModel: ObservableObject {
             parts.append("\(report.notAttempted) never attempted, still staged")
         }
         return parts.joined(separator: " · ")
+    }
+
+    // MARK: - resolving a version conflict
+
+    /// Ask the server what it holds now for every conflicted document, then
+    /// show the three-column view.
+    ///
+    /// This is the whole answer to "a 409 is a UI state, not a toast": the
+    /// commit already refused to overwrite, and this is what turns that refusal
+    /// into a decision the user can make. It is a read — nothing is re-sent,
+    /// and no retry is offered anywhere in the flow.
+    func reviewConflicts() {
+        guard let core, !isRereading, !isCommitting else { return }
+        let conflicted = edits.conflicted
+        guard !conflicted.isEmpty else { return }
+        let profile = activeProfile
+        guard !profile.isEmpty else { return }
+        guard let editable = results.editable else {
+            message =
+                "this result no longer says how its documents are identified, so datagrep cannot read them back — re-run the statement"
+            isError = true
+            return
+        }
+        let addresses = conflicted.map(\.address)
+        isRereading = true
+        // The report sheet is what this was reached from; two sheets are never
+        // up at once, and the review is presented a runloop turn later, after
+        // the read lands.
+        showMutationReport = false
+        message = "reading what the server holds now…"
+        isError = false
+
+        queryQueue.async { [weak self] in
+            var server: [ServerDocument]?
+            var failure: String?
+            do { server = try core.reread(profile: profile, addresses: addresses) } catch {
+                failure = "\(error)"
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isRereading = false
+                guard let server else {
+                    self.message = failure ?? "the re-read failed without a message"
+                    self.isError = true
+                    return
+                }
+                // Matched by position, exactly like the commit report. A list
+                // that does not line up one-for-one is not guessed at: showing
+                // one document's server values against another's edits is how
+                // somebody overwrites the wrong thing.
+                guard server.count == conflicted.count else {
+                    self.message =
+                        "the engine answered for \(server.count) of \(conflicted.count) documents, so datagrep cannot say which answer belongs to which — re-run the statement"
+                    self.isError = true
+                    return
+                }
+                self.conflictReview = ConflictReview(
+                    conflicted: conflicted, server: server, editable: editable)
+                self.showConflictReview = true
+                self.message = "\(conflicted.count) conflict(s) to resolve"
+                self.isError = false
+            }
+        }
+    }
+
+    /// Re-apply one document's edits onto the version just shown.
+    ///
+    /// Staged again, not written: the rebase re-guards the edit against the
+    /// `_seq_no` the user has just looked at, and the commit button is still
+    /// the only thing that writes. A rebase that wrote immediately would be the
+    /// silent retry this whole flow exists to avoid.
+    func rebaseConflicted(_ document: ConflictDocument) {
+        guard let guardValues = document.rebaseGuard else {
+            message =
+                "the server did not return a version for this document, so the edit could only be re-sent unguarded — which would overwrite whatever is there now"
+            isError = true
+            return
+        }
+        let row = edits.rebase(id: document.id, onto: guardValues)
+        resolved(document, repainting: row)
+        message =
+            "re-applied onto the current version — still staged, and still not written. Commit to write it."
+        isError = false
+    }
+
+    /// Drop one document's edits — "discard mine". The server's version is
+    /// left exactly as it is, which is what discarding means.
+    func discardConflicted(_ document: ConflictDocument) {
+        let row = edits.discard(id: document.id)
+        resolved(document, repainting: row)
+        message = "edit discarded — the server's version is untouched"
+        isError = false
+    }
+
+    /// Take one document out of the review and redraw its row. The sheet closes
+    /// when the last one is resolved: an empty conflict view is nothing to read.
+    private func resolved(_ document: ConflictDocument, repainting row: Int?) {
+        if let row { results.refreshStagedRows([row]) }
+        stagingGeneration &+= 1
+        resultGeneration &+= 1
+        let remaining = conflictReview?.removing(document.id)
+        conflictReview = remaining
+        if remaining?.isEmpty ?? true { showConflictReview = false }
     }
 
     /// Throw away every staged edit. Asks first — this is the only way typed

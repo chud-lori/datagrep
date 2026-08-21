@@ -22,31 +22,62 @@ enum StagedState: Equatable {
     var isDone: Bool { self == .applied }
 }
 
+/// One field's staged write, with the value it was typed over.
+///
+/// The loaded value is kept rather than re-read from the grid later, because it
+/// is half of what a version conflict has to show: "the value you loaded" is
+/// the value that was on screen at the moment of the edit, and the grid can be
+/// re-queried out from under it. It is also what says whether a conflict
+/// actually touched this field or only the document around it.
+struct StagedField {
+    let field: String
+    var value: MutationValue
+    /// What the cell held when it was typed into, or `nil` when the field was
+    /// not on the row at all — absent and null are different facts.
+    var loaded: MutationValue?
+}
+
 /// One document's staged changes, addressed the way the engine addresses it.
 ///
 /// The address is captured when the edit is staged, never at commit time: the
 /// `expect` values are the version that was on screen when the user typed, and
 /// refreshing them just before the write would compare the server against
-/// itself.
+/// itself. The one exception is an explicit rebase, where re-guarding against
+/// the version the user has just been shown is the whole point.
 struct StagedDocument: Identifiable {
     /// Identity values joined — stable across a re-render, unlike a row index.
     let id: String
     let key: [(field: String, value: MutationValue)]
-    let expect: [(field: String, value: MutationValue)]
+    private(set) var expect: [(field: String, value: MutationValue)]
     /// The grid row this was staged from. Display only: rows are re-numbered
     /// by the next query, and the address above is what a write uses.
     let row: Int
 
     /// Field name → what was typed. Ordered by first edit so the review list
     /// reads in the order the user worked.
-    var sets: [(field: String, value: MutationValue)] = []
+    var sets: [StagedField] = []
     var isDelete = false
     var state: StagedState = .pending
 
     var isPending: Bool { !state.isDone }
 
+    var isConflicted: Bool {
+        if case .conflicted = state { return true }
+        return false
+    }
+
     func value(of field: String) -> MutationValue? {
         sets.first { $0.field == field }?.value
+    }
+
+    /// Re-guard this document against a version the user has been shown.
+    ///
+    /// Only ever called from the conflict view, and only with guard values that
+    /// came from a re-read the user has just looked at — which is what makes it
+    /// a rebase rather than the silent retry the guard exists to prevent.
+    mutating func rebase(onto expect: [(field: String, value: MutationValue)]) {
+        self.expect = expect
+        state = .pending
     }
 
     var mutation: DocumentMutation {
@@ -58,9 +89,12 @@ struct StagedDocument: Identifiable {
             path: [],
             key: key,
             expect: expect,
-            sets: sets,
+            sets: sets.map { (field: $0.field, value: $0.value) },
             isDelete: isDelete)
     }
+
+    /// The address a re-read uses — the same key the write is addressed by.
+    var address: DocumentAddress { DocumentAddress(key: key) }
 }
 
 /// Every edit typed into the grid and not yet committed.
@@ -87,6 +121,11 @@ final class PendingEdits: ObservableObject {
     var deleteCount: Int { pending.filter(\.isDelete).count }
     var updateCount: Int { pending.filter { !$0.isDelete }.count }
 
+    /// Documents whose last commit was refused by the guard. They are still
+    /// staged, and they are the ones the conflict view resolves.
+    var conflicted: [StagedDocument] { documents.filter(\.isConflicted) }
+    var conflictCount: Int { conflicted.count }
+
     func document(atRow row: Int) -> StagedDocument? {
         guard let id = rowIndex[row] else { return nil }
         return documents.first { $0.id == id }
@@ -105,13 +144,16 @@ final class PendingEdits: ObservableObject {
         id: String, row: Int,
         key: [(field: String, value: MutationValue)],
         expect: [(field: String, value: MutationValue)],
-        field: String, value: MutationValue
+        field: String, value: MutationValue, loaded: MutationValue?
     ) {
         var doc = existing(id: id, row: row, key: key, expect: expect)
         if let at = doc.sets.firstIndex(where: { $0.field == field }) {
-            doc.sets[at] = (field, value)
+            // Retyping a field keeps the value it was *first* typed over: that
+            // is the version the guard was taken against, and the one a
+            // conflict has to be explained against.
+            doc.sets[at].value = value
         } else {
-            doc.sets.append((field, value))
+            doc.sets.append(StagedField(field: field, value: value, loaded: loaded))
         }
         // A row edited again after a failed commit is pending again; leaving it
         // marked failed would report a stale verdict on a value nobody has
@@ -157,6 +199,33 @@ final class PendingEdits: ObservableObject {
     func discardAll() {
         documents.removeAll()
         rowIndex.removeAll()
+    }
+
+    // MARK: - resolving a version conflict
+
+    /// Re-apply one document's staged edits onto the version the server holds
+    /// now, given the guard values from a re-read the user has just been shown.
+    ///
+    /// The typed values are untouched — a rebase is "write what I typed, onto
+    /// what is there now", which is only a defensible offer *because* the three
+    /// readings were on screen when it was chosen. Returns the grid row to
+    /// repaint, or nil when the document is no longer staged.
+    @discardableResult
+    func rebase(id: String, onto expect: [(field: String, value: MutationValue)]) -> Int? {
+        guard let at = documents.firstIndex(where: { $0.id == id }) else { return nil }
+        documents[at].rebase(onto: expect)
+        return documents[at].row
+    }
+
+    /// Drop one whole document's staged edits — "discard mine". Returns the
+    /// grid row to repaint, or nil when it was not staged.
+    @discardableResult
+    func discard(id: String) -> Int? {
+        guard let at = documents.firstIndex(where: { $0.id == id }) else { return nil }
+        let row = documents[at].row
+        documents.remove(at: at)
+        rowIndex[row] = nil
+        return row
     }
 
     /// Fold a commit report back into the staging list.
@@ -215,8 +284,9 @@ final class PendingEdits: ObservableObject {
 
 // MARK: - the wire format, checkable without a cluster
 
-/// `--dump-mutation`: print the `MutationBatch` JSON this app's encoder builds
-/// for one representative edit, then exit.
+/// `--dump-mutation` / `--dump-reread`: print the JSON this app's encoders build
+/// for one representative edit and for the re-read that resolves its conflict,
+/// then exit.
 ///
 /// The batch blob is hand-encoded against serde's externally-tagged spelling
 /// (`FieldPath` is `[{"Field":"_id"}]`, a `Value` is `{"Str":"x"}`), and a
@@ -230,7 +300,18 @@ final class PendingEdits: ObservableObject {
 /// server.
 enum MutationProbe {
     static func runIfRequested() -> Bool {
-        guard ProcessInfo.processInfo.arguments.contains("--dump-mutation") else { return false }
+        if ProcessInfo.processInfo.arguments.contains("--dump-mutation") {
+            dumpMutation()
+            return true
+        }
+        if ProcessInfo.processInfo.arguments.contains("--dump-reread") {
+            dumpReread()
+            return true
+        }
+        return false
+    }
+
+    private static func dumpMutation() {
         let update = DocumentMutation(
             path: [],
             key: [
@@ -254,6 +335,23 @@ enum MutationProbe {
             isDelete: true)
         let text = (try? MutationBatch.json([update, delete])) ?? "<encoding failed>"
         FileHandle.standardOutput.write(Data((text + "\n").utf8))
-        return true
+    }
+
+    /// `--dump-reread`: the address list the conflict view sends to ask what the
+    /// server holds now. Pinned by `the_json_the_macos_grid_sends_parses_into_addresses`
+    /// in `crates/datagrep-ffi/src/reread.rs` for the same reason as the batch
+    /// above — and the keys are the same two keys, because a re-read addresses a
+    /// document exactly as its write did.
+    private static func dumpReread() {
+        let addresses = [
+            DocumentAddress(key: [
+                ("_index", .string("events")),
+                ("_id", .string("abc")),
+                ("_routing", .string("tenant-7")),
+            ]),
+            DocumentAddress(key: [("_index", .string("events")), ("_id", .string("gone"))]),
+        ]
+        let text = (try? DocumentAddressBatch.json(addresses)) ?? "<encoding failed>"
+        FileHandle.standardOutput.write(Data((text + "\n").utf8))
     }
 }

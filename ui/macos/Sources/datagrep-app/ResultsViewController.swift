@@ -1032,7 +1032,7 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
             guard let address = address(row: row, window: window, editable: editable) else { return }
             edits.stage(
                 id: address.id, row: row, key: address.key, expect: address.expect,
-                field: field, value: value)
+                field: field, value: value, loaded: loaded)
             repaint(row)
             onStagingChanged?()
         }
