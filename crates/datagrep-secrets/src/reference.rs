@@ -1,43 +1,21 @@
-//! [`SecretRef`] — the parsed form of a profile's secret reference string.
-//!
-//! References are **not** secrets: they name where a secret lives, and are
-//! deliberately safe to store in git-committable profiles and to show in
-//! UI/errors. The referenced *value* only ever exists as a
-//! [`datagrep_api::SecretString`].
-
 use std::fmt;
 use std::str::FromStr;
 
 use crate::SecretError;
 
-/// A parsed secret reference.
-///
-/// String forms: `keychain:<service>:<account>` · `env:<VAR>` ·
-/// `exec:<command line>` · `prompt:`. `Display` round-trips through
-/// [`SecretRef::from_str`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SecretRef {
-    /// OS keychain entry, addressed as service + account (keyring crate terms).
     Keychain { service: String, account: String },
-    /// Process environment variable. Read-only.
     Env { var: String },
-    /// Shell command line run via `sh -c`; trimmed stdout is the secret.
-    /// Read-only. Covers `op read …`, `aws rds generate-db-auth-token …`, etc.
     Exec { command: String },
-    /// Ask the user. Resolution always returns [`SecretError::NeedsPrompt`];
-    /// prompting is the frontend's job (this crate never reads a TTY).
     Prompt,
 }
 
 impl SecretRef {
-    /// Whether [`store`](crate::SecretResolver::store) /
-    /// [`delete`](crate::SecretResolver::delete) can work on this ref.
-    /// Only keychain refs are writable; env/exec/prompt are read-only sources.
     pub fn is_writable(&self) -> bool {
         matches!(self, SecretRef::Keychain { .. })
     }
 
-    /// Short scheme name, for tracing and error text. Never secret material.
     pub fn scheme(&self) -> &'static str {
         match self {
             SecretRef::Keychain { .. } => "keychain",

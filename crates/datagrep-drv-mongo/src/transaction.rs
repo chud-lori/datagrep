@@ -1,28 +1,3 @@
-//! [`MongoTransaction`]: an explicit, `begin()`-opened transaction behind
-//! `datagrep-api`'s `Transaction` trait. Every operation it runs — and every
-//! cursor it hands out — is pinned to the one `ClientSession` the transaction
-//! was opened on; a statement that escaped to another session would silently
-//! run outside the transaction.
-//!
-//! **Why no actor task, unlike `datagrep-drv-postgres`'s `actor.rs`.** The
-//! ticket suggested reusing the Postgres actor-task pattern "if the
-//! mongodb driver's `Cursor` needs it" — it turns out it doesn't.
-//! `tokio_postgres::Transaction<'a>` *borrows* `&'a mut Client`, which is
-//! incompatible with a `'static` `Box<dyn Cursor>` and forces the whole
-//! transaction to live inside one task. `mongodb::ClientSession` is owned
-//! (not borrowed from `Client`), so it can simply live behind an
-//! `Arc<tokio::sync::Mutex<ClientSession>>` shared between this type and
-//! every [`crate::cursor::MongoCursor::session`] it hands out, each of which
-//! reacquires the lock only for the moment of an `advance()` call. No task,
-//! no channel, no borrow-checker fight.
-//!
-//! **v1 scope.** Only `Op::Mutate` (the primary reason to open a
-//! transaction: atomic multi-document writes) and a `find`/insert/update/
-//! delete subset of `Request::Native` shell text run inside an explicit
-//! transaction; `aggregate`, raw commands, and `EXPLAIN` are refused with
-//! `DbError::Unsupported` rather than silently running outside it — see the
-//! crate report's deviations.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -258,8 +233,6 @@ impl MongoTransaction {
     }
 }
 
-/// See [`crate::connection::id_filter_from_key`]: the row identity is named
-/// pairs, compiled directly — no `_id` guessing.
 fn id_filter(key: &[(FieldPath, Value)]) -> Result<BsonDocument, DbError> {
     crate::connection::id_filter_from_key(key)
 }
@@ -303,8 +276,6 @@ mod tests {
 
     #[test]
     fn id_filter_compiles_named_keys_and_refuses_an_empty_identity() {
-        // Empty identity: refused, never guessed at — an empty filter would
-        // match every document in the collection.
         assert!(id_filter(&[]).is_err());
         // The named field is what reaches the filter — no `_id` assumption.
         let f = id_filter(&[(FieldPath::field("_id"), Value::I64(1))]).unwrap();

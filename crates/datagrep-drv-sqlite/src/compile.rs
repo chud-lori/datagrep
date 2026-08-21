@@ -1,12 +1,3 @@
-//! Compiles the portable [`Op`] surface to SQLite text + bound parameters.
-//! **No user-authored text is ever translated** — this module only ever
-//! touches the structured `Op::*` path; `Request::Native` is passed
-//! straight through to rusqlite untouched (`connection.rs`).
-//!
-//! Every value in a compiled predicate/limit/order is bound as a `?`
-//! parameter (never interpolated into the SQL string) — the load-bearing
-//! property tested by `tests/scan_compile.rs`.
-
 use datagrep_api::{
     DbError, DdlOp, FieldPath, ObjectKind, ObjectPath, PathSeg, Predicate, ResumeToken, SortKey,
     Value,
@@ -14,17 +5,12 @@ use datagrep_api::{
 
 use crate::quote_ident;
 
-/// One compiled statement: SQL text plus its positional `?` parameters, in
-/// the order they appear in the text.
 #[derive(Debug)]
 pub(crate) struct Compiled {
     pub sql: String,
     pub params: Vec<Value>,
 }
 
-/// `db.table` / `table` → `"db"."table"` / `"table"`. Every part is quoted
-/// independently so a malicious/odd table name can never break out of its
-/// slot — identifiers go through `quote_ident`, never spliced raw.
 pub(crate) fn compile_object_path(path: &ObjectPath) -> Result<String, DbError> {
     quote_parts(path.parts())
 }
@@ -47,11 +33,6 @@ fn quote_parts(parts: &[std::sync::Arc<str>]) -> Result<String, DbError> {
     Ok(out)
 }
 
-/// `datagrep-api`'s [`FieldPath`] allows nested/indexed paths (`a.b[3]`) for
-/// document stores; a SQLite `Table` row is flat, so only a single field
-/// segment compiles. Anything deeper is reported as a genuine capability
-/// gap rather than silently best-effort flattened — never guess past what
-/// is true.
 pub(crate) fn field_ident(path: &FieldPath) -> Result<String, DbError> {
     match path.segments() {
         [PathSeg::Field(name)] => quote_ident(name),
@@ -64,10 +45,6 @@ pub(crate) fn field_ident(path: &FieldPath) -> Result<String, DbError> {
     }
 }
 
-/// The plain field name of a single-segment `FieldPath`, or `None` for
-/// anything nested/indexed. Used to match an `Op::Scan` sort key against a
-/// prepared statement's output columns (`connection.rs`'s resume-token
-/// bookkeeping) without re-quoting it.
 pub(crate) fn field_name(path: &FieldPath) -> Option<&str> {
     match path.segments() {
         [PathSeg::Field(name)] => Some(name),
@@ -75,11 +52,6 @@ pub(crate) fn field_name(path: &FieldPath) -> Option<&str> {
     }
 }
 
-/// Compile a structured [`DdlOp`]. Names are identifiers, never values, so
-/// nothing here binds a parameter.
-///
-/// Trap: `CREATE INDEX` qualifies the *index* and leaves the table bare —
-/// `CREATE INDEX main.i ON t(a)`, where `main.t` is a syntax error.
 pub(crate) fn compile_ddl(op: &DdlOp) -> Result<String, DbError> {
     match op {
         DdlOp::Native { text } => Ok(text.to_string()),
@@ -167,8 +139,6 @@ pub(crate) fn compile_ddl(op: &DdlOp) -> Result<String, DbError> {
     }
 }
 
-/// An index lives in the schema beside its table, not under it, so the table
-/// component of an index path comes back out.
 fn index_ref(path: &ObjectPath) -> Result<String, DbError> {
     let parts = path.parts();
     let Some(split) = parts.len().checked_sub(2) else {
@@ -216,8 +186,6 @@ fn compile_predicate(pred: &Predicate, params: &mut Vec<Value>) -> Result<String
         Predicate::In { field, values } => {
             let f = field_ident(field)?;
             if values.is_empty() {
-                // `x IN ()` is a syntax error in SQLite; the honest
-                // translation of "member of the empty set" is `FALSE`.
                 "0".to_string()
             } else {
                 let placeholders: Vec<String> =
@@ -231,12 +199,6 @@ fn compile_predicate(pred: &Predicate, params: &mut Vec<Value>) -> Result<String
             bind(params, Value::Str(pattern.clone()))
         ),
         Predicate::Exists { field } => {
-            // A declared SQL column is always present on every row (no
-            // sparse columns exist in a `Table` shape) — `Absent` simply
-            // doesn't happen here. We still reference the column, rather
-            // than compiling a bare `1`, so a typo'd field name surfaces as
-            // the "no such column" error SQLite would give anyway, instead
-            // of silently compiling to always-true.
             let f = field_ident(field)?;
             format!("({f} IS NULL OR {f} IS NOT NULL)")
         }
@@ -278,11 +240,6 @@ fn compile_sort_key(sk: &SortKey) -> Result<String, DbError> {
     Ok(format!("{field} {dir} {nulls}"))
 }
 
-/// Compile `Op::Scan`. Keyset resume (`resume`) is supported only for the
-/// single-sort-key case — see [`crate::scan::encode_resume`] for why: a
-/// correct multi-column keyset predicate needs per-column direction-aware
-/// row-value comparison, which is deliberately out of scope here (documented
-/// gap, not a silent wrong answer).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_scan(
     path: &ObjectPath,
@@ -335,11 +292,6 @@ pub(crate) fn compile_scan(
     Ok(Compiled { sql, params })
 }
 
-/// Compile `Op::Count`. SQLite has no cheap approximate row count (no
-/// equivalent of Postgres `reltuples`/`information_schema` estimates worth
-/// trusting), so `exact: false` and `exact: true` compile identically — an
-/// honest consequence of `Caps::EXACT_COUNT_CHEAP` being set for this
-/// driver: `COUNT(*)` really is the cheap path here.
 pub(crate) fn compile_count(
     path: &ObjectPath,
     filter: &Option<Predicate>,

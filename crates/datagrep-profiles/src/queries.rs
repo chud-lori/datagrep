@@ -1,6 +1,3 @@
-//! All SQL for the store's tables. Every function here runs synchronously on
-//! the worker thread (see `store.rs`) — nothing in this module is async.
-
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::db::{hash_text, Db};
@@ -8,10 +5,6 @@ use crate::error::ProfilesError;
 use crate::model::{
     Folder, HistoryEntry, HistoryStatus, NewHistoryEntry, Profile, SavedQuery, Tunnel,
 };
-
-// ---------------------------------------------------------------------
-// folder
-// ---------------------------------------------------------------------
 
 fn folder_from_row(row: &Row<'_>) -> rusqlite::Result<Folder> {
     Ok(Folder {
@@ -76,13 +69,6 @@ pub(crate) fn delete_folder(conn: &Connection, id: &str) -> Result<(), ProfilesE
     Ok(())
 }
 
-// ---------------------------------------------------------------------
-// profile
-// ---------------------------------------------------------------------
-
-/// Raw columns before `config_json` is decoded — lets us keep the
-/// SQLite row-mapping closure infallible (`rusqlite::Result`) and do the
-/// fallible JSON/enum parsing afterwards as a `ProfilesError`.
 struct ProfileRow {
     id: String,
     folder_id: Option<String>,
@@ -248,10 +234,6 @@ pub(crate) fn touch_profile_last_used(
     Ok(())
 }
 
-// ---------------------------------------------------------------------
-// tunnel
-// ---------------------------------------------------------------------
-
 fn tunnel_from_row(row: &Row<'_>) -> rusqlite::Result<Tunnel> {
     Ok(Tunnel {
         id: row.get("id")?,
@@ -325,10 +307,6 @@ pub(crate) fn delete_tunnel(conn: &Connection, id: &str) -> Result<(), ProfilesE
     Ok(())
 }
 
-// ---------------------------------------------------------------------
-// query_history
-// ---------------------------------------------------------------------
-
 fn history_from_row(row: &Row<'_>) -> rusqlite::Result<HistoryEntry> {
     let status: String = row.get("status")?;
     let status = HistoryStatus::parse(&status).unwrap_or(HistoryStatus::Error);
@@ -345,10 +323,6 @@ fn history_from_row(row: &Row<'_>) -> rusqlite::Result<HistoryEntry> {
     })
 }
 
-/// Records one executed query. Dedupe rule: if the same
-/// `(profile_id, text_hash)` was recorded within the last second, the
-/// existing row is updated in place instead of a new one being inserted —
-/// this absorbs rapid re-runs/retries without flooding history.
 const DEDUPE_WINDOW_MS: i64 = 1_000;
 
 pub(crate) fn record_history(
@@ -440,10 +414,6 @@ pub(crate) fn recent_history(
     Ok(rows)
 }
 
-/// Full-text search over recorded query text. Uses the FTS5 index when this
-/// SQLite build has it; otherwise falls back to a `LIKE` scan (design: "no
-/// plugin host" is one thing, silently losing search on a build quirk is
-/// another — degrade, don't fail).
 pub(crate) fn search_history(
     db: &Db,
     profile_id: Option<&str>,
@@ -455,8 +425,6 @@ pub(crate) fn search_history(
     }
 
     if db.fts5_available {
-        // Quote as an FTS5 phrase so punctuation/operators in the searched
-        // text (`(`, `:`, `-`, ...) can't be parsed as query syntax.
         let phrase = format!("\"{}\"", query.replace('"', "\"\""));
         let mut rows = Vec::new();
         match profile_id {
@@ -515,10 +483,6 @@ fn escape_like(s: &str) -> String {
         .replace('%', "\\%")
         .replace('_', "\\_")
 }
-
-// ---------------------------------------------------------------------
-// saved_query
-// ---------------------------------------------------------------------
 
 fn saved_query_from_row(row: &Row<'_>) -> rusqlite::Result<SavedQuery> {
     Ok(SavedQuery {
@@ -597,10 +561,6 @@ pub(crate) fn delete_saved_query(conn: &Connection, id: &str) -> Result<(), Prof
     Ok(())
 }
 
-// ---------------------------------------------------------------------
-// kv
-// ---------------------------------------------------------------------
-
 pub(crate) fn kv_get(conn: &Connection, key: &str) -> Result<Option<String>, ProfilesError> {
     conn.query_row(
         "SELECT value FROM kv WHERE \"key\" = ?1",
@@ -627,11 +587,6 @@ pub(crate) fn kv_delete(conn: &Connection, key: &str) -> Result<(), ProfilesErro
 
 #[cfg(test)]
 mod tests {
-    //! White-box tests that need to reach into `Db` directly — in
-    //! particular, forcing `fts5_available = false` to deterministically
-    //! exercise the `LIKE` fallback regardless of whether *this* build's
-    //! bundled SQLite has FTS5 compiled in (it does — see Cargo.toml — but
-    //! the fallback still needs its own proof independent of that fact).
     use super::*;
     use crate::db::{open_and_prepare, RetentionPolicy, Target};
 
@@ -639,10 +594,6 @@ mod tests {
         open_and_prepare(&Target::Memory, RetentionPolicy::default()).expect("open in-memory db")
     }
 
-    /// `query_history.profile_id` has a `REFERENCES profile(id)` — history
-    /// belongs to a profile, and deleting a profile cascades its history — so
-    /// tests that record history need a real profile row to satisfy the
-    /// foreign key.
     fn ensure_profile(conn: &Connection, id: &str) {
         create_profile(
             conn,
@@ -684,10 +635,6 @@ mod tests {
 
     #[test]
     fn bundled_sqlite_has_fts5_compiled_in() {
-        // Guards the assumption documented in Cargo.toml: if a future
-        // rusqlite/libsqlite3-sys bump ever drops FTS5 from the bundled
-        // build, this fails loudly instead of the fallback silently
-        // papering over lost search quality.
         let db = open_memory();
         assert!(
             db.fts5_available,

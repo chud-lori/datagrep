@@ -1,6 +1,3 @@
-//! Structured DDL (`Op::Ddl`) against a real SQLite, addressed by the path
-//! and kind the catalog reports.
-
 mod common;
 
 use std::sync::Arc;
@@ -20,7 +17,6 @@ fn p(parts: &[&str]) -> ObjectPath {
     ObjectPath::new(parts.iter().map(|s| Arc::from(*s)).collect())
 }
 
-/// `sqlite_master` count for a name, through the same seam a user would use.
 async fn count_named(conn: &dyn Connection, name: &str) -> i64 {
     let mut cur = conn
         .execute(Request::Native {
@@ -77,8 +73,6 @@ async fn structured_ddl_round_trips_through_the_catalog() {
         .clone();
     assert_eq!(widgets.kind, ObjectKind::Table);
 
-    // `CREATE INDEX main.i ON t(...)` — the index name is schema-qualified
-    // and the table is not, which is the reverse of every other statement.
     ddl(
         conn.as_ref(),
         DdlOp::CreateIndex {
@@ -105,8 +99,6 @@ async fn structured_ddl_round_trips_through_the_catalog() {
     .await
     .expect("create index is idempotent with the guard");
 
-    // An index is addressed as its table's path plus the index name, even
-    // though SQLite stores it beside the table rather than under it.
     ddl(
         conn.as_ref(),
         DdlOp::Drop {
@@ -178,8 +170,6 @@ async fn structured_ddl_round_trips_through_the_catalog() {
     );
 }
 
-/// An index path trimmed to `table.index` (no schema) still addresses the
-/// index, which is stored beside the table rather than under it.
 #[tokio::test]
 async fn an_unqualified_index_path_still_resolves() {
     let conn = common::connect_memory().await;
@@ -214,8 +204,6 @@ async fn an_unqualified_index_path_still_resolves() {
     assert_eq!(count_named(conn.as_ref(), "t_a").await, 0);
 }
 
-/// SQLite renames tables and nothing else: `ALTER VIEW` and `ALTER INDEX` are
-/// syntax errors, and `ALTER TABLE <view> RENAME` is refused by the engine.
 #[tokio::test]
 async fn only_a_table_can_be_renamed() {
     let conn = common::connect_memory().await;
@@ -245,8 +233,6 @@ async fn only_a_table_can_be_renamed() {
     assert_eq!(count_named(conn.as_ref(), "v").await, 1);
 }
 
-/// A name that tries to close its own quoting must reach the engine as one
-/// name and take nothing else with it.
 #[tokio::test]
 async fn a_hostile_name_survives_a_structured_drop() {
     let conn = common::connect_memory().await;
@@ -276,7 +262,6 @@ async fn a_hostile_name_survives_a_structured_drop() {
     );
 }
 
-/// A read-only connection refuses generated DDL, like any other write.
 #[tokio::test]
 async fn read_only_refuses_structured_ddl() {
     let conn = common::connect_memory().await;

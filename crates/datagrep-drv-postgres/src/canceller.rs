@@ -1,8 +1,3 @@
-//! [`PgCanceller`]: out-of-band cancellation on a second socket. Postgres's
-//! CancelRequest is racy by protocol design — the server sends no ack — so the
-//! honest outcome is always [`CancelOutcome::Requested`], never
-//! `ServerCancelled`.
-
 use std::sync::Arc;
 
 use tracing::Instrument as _;
@@ -13,12 +8,6 @@ use datagrep_api::error::DbError;
 use crate::error::map_pg_error;
 use crate::pool::PgPool;
 
-/// Cancels every physical session the logical connection owns. One logical
-/// connection can hold several sockets (see `pool.rs`) — a cursor pins one
-/// while the next query runs on another — so cancelling only the first would
-/// silently miss whichever session the user's slow query actually landed on.
-/// Cancelling an idle backend is a no-op server-side, so the broad sweep is
-/// safe.
 pub struct PgCanceller {
     pool: Arc<PgPool>,
 }
@@ -46,19 +35,11 @@ impl Canceller for PgCanceller {
                         Err(e) => last_err = Some(map_pg_error(e)),
                     }
                 }
-                // Only fail if we had sessions to cancel and could not reach a
-                // single one — one stale token (a session whose backend has
-                // already gone away) must not turn a successful cancel into
-                // an error the UI shows.
                 if sent == 0 {
                     if let Some(e) = last_err {
                         return Err(e);
                     }
                 }
-                // Postgres's CancelRequest has no reply message at all;
-                // reaching this point only means the cancel socket connected
-                // and wrote the request, not that the server acted on it
-                // before the original query finished on its own.
                 Ok(CancelOutcome::Requested)
             }
             .instrument(tracing::info_span!("pg_cancel_query")),

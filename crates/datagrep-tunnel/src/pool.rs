@@ -1,8 +1,3 @@
-//! [`TunnelPool`] — one SSH connection per `(host, port, user)`, shared by
-//! refcounted checkout, torn down after the last checkout drops plus an
-//! idle grace period — the same connection-lifecycle stance datagrep takes
-//! for database connections, applied at the tunnel layer.
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -16,10 +11,6 @@ use crate::error::TunnelError;
 use crate::host_key::HostKeyPolicy;
 use crate::tunnel::SshTunnel;
 
-/// How long a tunnel with zero checked-out clones is kept alive before the
-/// pool drops its own reference. Event-driven (a single timer armed only
-/// when the count reaches zero — see [`Checkout::drop`]), not a recurring
-/// poll: an idle app should be an idle CPU.
 const IDLE_GRACE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -31,17 +22,10 @@ struct TunnelKey {
 
 struct Entry<P: HostKeyPolicy + 'static> {
     tunnel: SshTunnel<P>,
-    /// Number of live [`Checkout`]s referencing this entry. The pool's own
-    /// map entry is not counted — reaching zero means "nobody outside the
-    /// pool holds this tunnel right now".
     refs: Arc<AtomicUsize>,
-    /// Bumped on every new checkout; a pending eviction task compares its
-    /// captured generation against the current one so a reconnect during
-    /// the grace window cancels the stale eviction instead of racing it.
     generation: Arc<AtomicUsize>,
 }
 
-/// Shared pool of [`SshTunnel`]s, keyed by `(host, port, user)`.
 pub struct TunnelPool<P: HostKeyPolicy + 'static> {
     entries: Arc<Mutex<HashMap<TunnelKey, Entry<P>>>>,
 }
@@ -65,10 +49,6 @@ impl<P: HostKeyPolicy + 'static> TunnelPool<P> {
         }
     }
 
-    /// Get a connected, checked-out tunnel for `(host, port, user)`,
-    /// connecting fresh if none is pooled (or the pooled one died — see
-    /// [`SshTunnel::connect`]'s keepalive-none note: death is detected
-    /// lazily, so a stale entry is replaced on next use, not proactively).
     pub async fn checkout(
         &self,
         host: impl Into<String>,
@@ -87,24 +67,11 @@ impl<P: HostKeyPolicy + 'static> TunnelPool<P> {
             return Ok(checkout);
         }
 
-        // Connect *without* holding the pool lock — a handshake is a
-        // network round trip (real SSH tests take tens to hundreds of ms;
-        // a hung server can take far longer) and a `tokio::sync::Mutex`
-        // held across that would stall every other host's checkout, not
-        // just this one. Two callers racing to connect the same
-        // `(host, port, user)` for the first time both pay the connect
-        // cost. That is the same tradeoff datagrep makes for DB connections:
-        // there is no idle floor to keep, because a reconnect costs tens of
-        // milliseconds and nobody notices. So the loser's redundant
-        // connection is cheap, not incorrect — it's simply dropped, per the
-        // double-checked insert below.
         let tunnel =
             SshTunnel::connect(key.host.clone(), key.port, key.user.clone(), auth, policy).await?;
 
         let mut entries = self.entries.lock().await;
         if let Some(entry) = entries.get(&key) {
-            // Someone else won the race and inserted first; use theirs and
-            // let `tunnel` (ours) drop, closing the redundant connection.
             entry.refs.fetch_add(1, Ordering::SeqCst);
             entry.generation.fetch_add(1, Ordering::SeqCst);
             return Ok(Checkout {
@@ -148,8 +115,6 @@ impl<P: HostKeyPolicy + 'static> TunnelPool<P> {
         })
     }
 
-    /// Number of distinct `(host, port, user)` tunnels currently pooled
-    /// (checked out or idle-within-grace). For tests/diagnostics.
     pub async fn len(&self) -> usize {
         self.entries.lock().await.len()
     }
@@ -159,9 +124,6 @@ impl<P: HostKeyPolicy + 'static> TunnelPool<P> {
     }
 }
 
-/// A refcounted checkout from a [`TunnelPool`]. Derefs to the underlying
-/// [`SshTunnel`] to open channels; dropping it releases the pool's
-/// reference, arming the idle-grace eviction once the count reaches zero.
 pub struct Checkout<P: HostKeyPolicy + 'static> {
     tunnel: SshTunnel<P>,
     refs: Arc<AtomicUsize>,
@@ -223,8 +185,6 @@ impl<P: HostKeyPolicy + 'static> Drop for Checkout<P> {
         let key = self.key.clone();
         let refs = self.refs.clone();
         let generation = self.generation.clone();
-        // Single one-shot timer, armed only on the transition to zero —
-        // not a recurring poll that would wake an otherwise idle app.
         tokio::spawn(async move {
             tokio::time::sleep(IDLE_GRACE).await;
             if refs.load(Ordering::SeqCst) != 0 {
@@ -238,11 +198,6 @@ impl<P: HostKeyPolicy + 'static> Drop for Checkout<P> {
                 if entry.refs.load(Ordering::SeqCst) == 0
                     && entry.generation.load(Ordering::SeqCst) == expected_generation
                 {
-                    // Removing the last strong reference to `SshTunnel`'s
-                    // `Arc<client::Handle<_>>` drops the `Handle`, which
-                    // drops its sender to the session's background task,
-                    // which ends the task and closes the socket — no
-                    // explicit "close" call needed.
                     entries.remove(&key);
                 }
             }

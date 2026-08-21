@@ -1,34 +1,9 @@
-//! Value mapping between rusqlite's storage classes and `datagrep-api::Value`,
-//! plus identifier quoting: identifiers go through `quote_ident` for this
-//! dialect, never spliced raw.
-//!
-//! **SQLite type affinity, stated honestly.** SQLite columns are dynamically
-//! typed: a column declared `INTEGER` can still hold a `TEXT` value, because
-//! `decl_type` only ever *suggests* an affinity ([sqlite.org/datatype3]). We
-//! never coerce a cell's storage class to match its declared type — the one
-//! exception is `BOOLEAN`-declared columns holding `0`/`1`, which is a common
-//! application convention layered on top of SQLite's untyped `INTEGER`
-//! storage, not a real distinct storage class; `Date`/`Time`/`Timestamp`
-//! declared columns keep their raw storage-class `Value` (`Str` or `I64`) and
-//! only get a [`LogicalType`] hint on the schema side. Never lie about a
-//! value.
-//!
-//! [sqlite.org/datatype3]: https://www.sqlite.org/datatype3.html
-
 use std::sync::Arc;
 
 use bytes::Bytes;
 use datagrep_api::{DbError, LogicalType, Value};
 use rusqlite::types::{ToSql, ToSqlOutput, ValueRef};
 
-/// Double-quote identifier quoting (SQLite/standard SQL style), with embedded
-/// `"` doubled and embedded NUL rejected outright.
-///
-/// NUL rejection matters specifically for the catalog (`catalog.rs`): SQLite
-/// identifiers are C strings under the hood, so a NUL byte would silently
-/// truncate whatever we build a `PRAGMA table_info("...")` statement from.
-/// `PRAGMA` statements cannot bind parameters and must be assembled as
-/// text, so the identifier itself is the only place to catch this.
 pub fn quote_ident(name: &str) -> Result<String, DbError> {
     if name.is_empty() {
         return Err(DbError::Query {
@@ -56,11 +31,6 @@ pub fn quote_ident(name: &str) -> Result<String, DbError> {
     Ok(out)
 }
 
-/// Map one SQLite storage-class value to a `datagrep-api` [`Value`].
-///
-/// `decl_type` is the column's declared type text (`stmt.column_decl_type`),
-/// used only for the `BOOLEAN` convention described on the module doc — every
-/// other case maps the storage class as-is, never the declared type.
 pub(crate) fn sqlite_value_to_datagrep(v: ValueRef<'_>, decl_type: Option<&str>) -> Value {
     match v {
         ValueRef::Null => Value::Null,
@@ -74,9 +44,6 @@ pub(crate) fn sqlite_value_to_datagrep(v: ValueRef<'_>, decl_type: Option<&str>)
         ValueRef::Real(f) => Value::F64(f),
         ValueRef::Text(bytes) => match std::str::from_utf8(bytes) {
             Ok(s) => Value::Str(Arc::from(s)),
-            // SQLite's TEXT storage class is documented as UTF-8/16, but
-            // nothing stops a BLOB written through a TEXT-affinity column
-            // via an extension or a corrupt file. Never lose the bytes.
             Err(_) => Value::Unsupported {
                 type_name: Arc::from("sqlite-text-invalid-utf8"),
                 raw: Bytes::copy_from_slice(bytes),
@@ -91,16 +58,6 @@ fn is_boolean_decl(decl_type: Option<&str>) -> bool {
     matches!(decl_type, Some(t) if t.eq_ignore_ascii_case("boolean") || t.eq_ignore_ascii_case("bool"))
 }
 
-/// The [`LogicalType`] a declared column type implies, for [`RowSchema`]
-/// construction (`datagrep_api::RowSchema`) — never for coercing the runtime
-/// value, which stays exactly what `sqlite_value_to_datagrep` says it is.
-///
-/// Checks the `BOOLEAN`/`DATE`/`TIME`/`DATETIME`/`TIMESTAMP` conventions
-/// first (common application usage, not part of SQLite's own algorithm),
-/// then falls back to SQLite's own column-affinity rules
-/// (<https://www.sqlite.org/datatype3.html#determination_of_column_affinity>).
-/// NUMERIC affinity is genuinely ambiguous (a column can hold INTEGER, REAL,
-/// or TEXT) so it maps to `Unknown` rather than guessing.
 pub(crate) fn logical_type_for_decl(decl_type: Option<&str>) -> LogicalType {
     let Some(decl) = decl_type else {
         // No declared type at all => BLOB affinity, per SQLite's own rule.
@@ -127,9 +84,6 @@ pub(crate) fn logical_type_for_decl(decl_type: Option<&str>) -> LogicalType {
     }
 }
 
-/// Adapter so a borrowed `&datagrep_api::Value` can be bound as a rusqlite
-/// parameter without cloning `datagrep-api`'s type into a local one. Values are
-/// always bound this way — never spliced into SQL text.
 pub(crate) struct SqlParam<'a>(pub &'a Value);
 
 impl ToSql for SqlParam<'_> {
@@ -253,8 +207,6 @@ mod tests {
 
     #[test]
     fn date_time_decl_types_keep_storage_repr() {
-        // Date/time decl types only steer the *schema's* LogicalType hint;
-        // the actual cell value is never rewritten away from its storage class.
         assert_eq!(logical_type_for_decl(Some("DATE")), LogicalType::Date);
         assert_eq!(
             sqlite_value_to_datagrep(ValueRef::Text(b"2026-08-02"), Some("DATE")),

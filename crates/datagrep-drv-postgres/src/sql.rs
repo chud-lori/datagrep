@@ -1,10 +1,3 @@
-//! SQL generation: identifier quoting and the `Op` → SQL compiler.
-//!
-//! The injection rules for this driver: values are ALWAYS bound as `$n`
-//! parameters — never spliced as text — and identifiers always
-//! go through [`quote_ident`]. Nothing in this module ever interpolates a
-//! `Value` into the SQL string itself.
-
 use std::fmt::Write as _;
 #[cfg(test)]
 use std::sync::Arc;
@@ -13,9 +6,6 @@ use datagrep_api::{
     DbError, DdlOp, FieldPath, ObjectKind, ObjectPath, PathSeg, Predicate, SortKey, Value,
 };
 
-/// Quote a Postgres identifier. Embedded `"` are doubled;
-/// embedded NUL is rejected outright — Postgres identifiers cannot contain
-/// NUL and silently truncating at the NUL would let a name lie about itself.
 pub fn quote_ident(ident: &str) -> Result<String, DbError> {
     if ident.contains('\0') {
         return Err(DbError::Unsupported {
@@ -34,11 +24,6 @@ pub fn quote_ident(ident: &str) -> Result<String, DbError> {
     Ok(out)
 }
 
-/// Render an [`ObjectPath`] (`db.schema.table`) as a dot-joined, individually
-/// quoted Postgres relation reference. The leading component is dropped when
-/// it names the connection's own database — Postgres has no cross-database
-/// qualified names, only `schema.table` — but callers that already trimmed
-/// the path (catalog code does) can pass a 1–2 element path directly.
 pub fn quote_object_path(path: &ObjectPath) -> Result<String, DbError> {
     quote_parts(path.parts())
 }
@@ -59,15 +44,6 @@ fn quote_parts(parts: &[std::sync::Arc<str>]) -> Result<String, DbError> {
     Ok(out)
 }
 
-/// Render a [`FieldPath`] as a value-producing SQL expression against a
-/// quoted base column.
-///
-/// A bare single-segment path (`status`) is just the quoted column. A deeper
-/// path (`address.city`, `tags[0]`) is rendered as a `jsonb` path-extraction
-/// expression (`"address"#>>'{city}'`) — the honest approximation for nested
-/// data stored in a `jsonb`/`json` column; it will simply not match rows if
-/// the column isn't JSON, which Postgres reports as a normal type error
-/// rather than something silently wrong.
 pub fn field_path_expr(path: &FieldPath) -> Result<String, DbError> {
     let segs = path.segments();
     let (head, rest) = segs.split_first().ok_or_else(|| DbError::Unsupported {
@@ -105,14 +81,9 @@ pub fn field_path_expr(path: &FieldPath) -> Result<String, DbError> {
         }
     }
     steps.push('}');
-    // The path literal is a fixed set of already-validated identifier/index
-    // tokens, never user-controlled free text spliced in — it is not a
-    // parameter binding site the way a *value* would be.
     Ok(format!("{base}#>>'{steps}'"))
 }
 
-/// Accumulates `$n` parameters while compiling a predicate/scan tree, so every
-/// `Value` in the request ends up bound, never spliced.
 #[derive(Default)]
 pub struct ParamBuilder {
     pub params: Vec<Value>,
@@ -125,9 +96,6 @@ impl ParamBuilder {
     }
 }
 
-/// Compile a [`Predicate`] to a SQL boolean expression, appending bound
-/// parameters to `pb`. Returns just the expression text — callers wrap in
-/// `WHERE`.
 pub fn compile_predicate(pred: &Predicate, pb: &mut ParamBuilder) -> Result<String, DbError> {
     Ok(match pred {
         Predicate::Eq { field, value } => cmp(field, "=", value, pb)?,
@@ -138,8 +106,6 @@ pub fn compile_predicate(pred: &Predicate, pb: &mut ParamBuilder) -> Result<Stri
         Predicate::Ge { field, value } => cmp(field, ">=", value, pb)?,
         Predicate::In { field, values } => {
             if values.is_empty() {
-                // An empty IN-list matches nothing; write it as a tautological
-                // false rather than emitting invalid `IN ()` SQL.
                 return Ok("false".to_string());
             }
             let expr = field_path_expr(field)?;
@@ -155,9 +121,6 @@ pub fn compile_predicate(pred: &Predicate, pb: &mut ParamBuilder) -> Result<Stri
             format!("{expr} LIKE {ph}")
         }
         Predicate::Exists { field } => {
-            // Only meaningful for jsonb paths (top-level SQL columns always
-            // "exist" once the row exists); render the deepest jsonb `?` /
-            // path-presence test when nested, else a trivial true.
             let segs = field.segments();
             if segs.len() <= 1 {
                 "true".to_string()
@@ -198,7 +161,6 @@ fn join_bool(parts: &[Predicate], op: &str, pb: &mut ParamBuilder) -> Result<Str
     Ok(rendered.join(&format!(" {op} ")))
 }
 
-/// Compile `ORDER BY` for a [`SortKey`] list.
 pub fn compile_order(order: &[SortKey]) -> Result<String, DbError> {
     let mut parts = Vec::with_capacity(order.len());
     for k in order {
@@ -214,7 +176,6 @@ pub fn compile_order(order: &[SortKey]) -> Result<String, DbError> {
     Ok(parts.join(", "))
 }
 
-/// Compile a projection list, or `*` when unset.
 pub fn compile_project(project: &Option<Vec<FieldPath>>) -> Result<String, DbError> {
     match project {
         None => Ok("*".to_string()),
@@ -229,11 +190,6 @@ pub fn compile_project(project: &Option<Vec<FieldPath>>) -> Result<String, DbErr
     }
 }
 
-/// Compile `Op::Scan` to `(sql, params)`. Keyset pagination via `resume` is
-/// not implemented in v1 (see `cursor.rs`'s `resume_token` doc) — `resume` is
-/// accepted but ignored, which is honest here because the only producer of a
-/// `ResumeToken` in this driver (`PgCursor::resume_token`) always returns
-/// `None`, so no caller can actually construct one to pass back in.
 pub fn compile_scan(
     path: &ObjectPath,
     filter: &Option<Predicate>,
@@ -258,7 +214,6 @@ pub fn compile_scan(
     Ok((sql, pb.params))
 }
 
-/// Compile `Op::Count`.
 pub fn compile_count(
     path: &ObjectPath,
     filter: &Option<Predicate>,
@@ -266,10 +221,6 @@ pub fn compile_count(
 ) -> Result<(String, Vec<Value>), DbError> {
     let mut pb = ParamBuilder::default();
     let table = quote_object_path(path)?;
-    // `exact: false` still runs a real COUNT(*) in v1 — Postgres has no O(1)
-    // exact-count shortcut, but reltuples (the cheap estimate the catalog
-    // uses for `describe`) is not wired through `Op::Count`; see the gap
-    // noted in the crate's top-level docs.
     let _ = exact;
     let mut sql = format!("SELECT COUNT(*) AS count FROM {table}");
     if let Some(pred) = filter {
@@ -279,9 +230,6 @@ pub fn compile_count(
     Ok((sql, pb.params))
 }
 
-/// Trap: `View` covers both the `v` and `m` relkinds, and `DROP VIEW` on a
-/// materialized view fails even with `IF EXISTS`. The server's message names
-/// the statement to use, so it is surfaced rather than guessed at.
 fn relation_keyword(kind: ObjectKind) -> Result<&'static str, DbError> {
     match kind {
         ObjectKind::Table => Ok("TABLE"),
@@ -294,8 +242,6 @@ fn relation_keyword(kind: ObjectKind) -> Result<&'static str, DbError> {
     }
 }
 
-/// Compile a structured [`DdlOp`]. Names are identifiers, never values, so
-/// nothing here binds a parameter — every one goes through [`quote_ident`].
 pub fn compile_ddl(op: &DdlOp) -> Result<String, DbError> {
     match op {
         DdlOp::Native { text } => Ok(text.to_string()),
@@ -343,9 +289,6 @@ pub fn compile_ddl(op: &DdlOp) -> Result<String, DbError> {
     }
 }
 
-/// An index is a sibling of its table in the schema, not a child: passing the
-/// table through would make `schema.table.index`, which Postgres rejects as
-/// "improper relation name (too many dotted names)".
 fn object_ref(path: &ObjectPath, kind: ObjectKind) -> Result<String, DbError> {
     let parts = path.parts();
     if kind != ObjectKind::Index {
@@ -368,8 +311,6 @@ fn object_ref(path: &ObjectPath, kind: ObjectKind) -> Result<String, DbError> {
     Ok(out)
 }
 
-/// Whole columns only: a nested path would silently become a `jsonb`
-/// extraction, which is an expression index with quite different rules.
 fn index_column(path: &FieldPath) -> Result<String, DbError> {
     match path.segments() {
         [PathSeg::Field(name)] => quote_ident(name),
@@ -381,7 +322,6 @@ fn index_column(path: &FieldPath) -> Result<String, DbError> {
     }
 }
 
-/// Wrap an inner request's compiled SQL in `EXPLAIN [ANALYZE]`.
 pub fn wrap_explain(inner_sql: &str, analyze: bool) -> String {
     if analyze {
         format!("EXPLAIN (ANALYZE, VERBOSE, FORMAT TEXT) {inner_sql}")
@@ -390,18 +330,11 @@ pub fn wrap_explain(inner_sql: &str, analyze: bool) -> String {
     }
 }
 
-/// A single generated mutation statement plus its bound params.
 pub struct MutationSql {
     pub sql: String,
     pub params: Vec<Value>,
 }
 
-/// Compile one `Mutation` into `UPDATE ... SET ... WHERE <pk> = $n [...] `,
-/// `INSERT INTO ... VALUES (...)`, or `DELETE FROM ... WHERE <pk> = $n [...]`.
-///
-/// The row identity arrives as named `(FieldPath, Value)` pairs on the
-/// mutation itself (the same shape as `sets`), so the WHERE clause compiles
-/// directly — no `pg_index` lookup, no positional convention.
 pub fn compile_mutation(m: &datagrep_api::Mutation) -> Result<MutationSql, DbError> {
     use datagrep_api::Mutation;
     let mut pb = ParamBuilder::default();
@@ -474,9 +407,6 @@ pub fn compile_mutation(m: &datagrep_api::Mutation) -> Result<MutationSql, DbErr
     }
 }
 
-/// A non-empty `expect` precondition must be honoured or refused, never
-/// dropped — dropping it would turn a guarded write into a clobber. This
-/// driver does not compile preconditions yet, so it refuses.
 fn refuse_expect(expect: &[(FieldPath, Value)]) -> Result<(), DbError> {
     if expect.is_empty() {
         return Ok(());
@@ -486,8 +416,6 @@ fn refuse_expect(expect: &[(FieldPath, Value)]) -> Result<(), DbError> {
     })
 }
 
-/// The named row identity as `"col" = $n AND …`. An empty key is refused —
-/// we never guess which row to affect.
 fn key_where(key: &[(FieldPath, Value)], pb: &mut ParamBuilder) -> Result<String, DbError> {
     if key.is_empty() {
         return Err(DbError::Unsupported {
@@ -541,8 +469,6 @@ mod tests {
 
     #[test]
     fn ddl_quotes_every_name_it_splices() {
-        // Object names reach the statement as identifiers, so a name that
-        // tries to close its own quoting must not be able to.
         let sql = compile_ddl(&DdlOp::Drop {
             path: path(&["app", "users\"; DROP TABLE secrets; --"]),
             kind: ObjectKind::Table,
@@ -571,8 +497,6 @@ mod tests {
         .unwrap();
         assert_eq!(sql, "ALTER TABLE \"app\".\"users\" RENAME TO \"people\"");
 
-        // A Postgres index is a sibling of its table in the schema, so the
-        // table component comes back out of the index path.
         let sql = compile_ddl(&DdlOp::Drop {
             path: path(&["db", "app", "users", "users_email"]),
             kind: ObjectKind::Index,
@@ -758,8 +682,6 @@ mod tests {
 
     #[test]
     fn non_empty_expect_is_refused_not_dropped() {
-        // This driver does not compile `expect` preconditions yet; a caller
-        // asking for check-and-set must get Unsupported, never a plain write.
         let expect = vec![(FieldPath::field("version"), Value::I64(3))];
         let update = datagrep_api::Mutation::Update {
             path: ObjectPath::new(vec![Arc::from("t")]),

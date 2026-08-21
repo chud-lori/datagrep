@@ -1,14 +1,3 @@
-//! Redis [`Language`] impl: a line splitter plus a
-//! redis-cli-compatible argument tokenizer, and
-//! classification via a fixed read/write/admin command table.
-//!
-//! A "statement" is one command. Redis-cli itself keeps reading lines while
-//! a quote is unterminated (so a quoted argument may legitimately contain a
-//! literal newline), so the splitter tracks quote state *across* lines
-//! rather than treating every `\n` as an unconditional boundary — that is
-//! what makes multi-line pipelines and quoted args containing raw newlines
-//! work the same way they would when pasted into the real `redis-cli`.
-
 use std::ops::Range;
 
 use datagrep_api::LanguageId;
@@ -45,7 +34,6 @@ impl Language for RedisLanguage {
     }
 }
 
-/// One quoted-or-bare argument, as produced by [`tokenize_args`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arg {
     pub value: String,
@@ -53,16 +41,10 @@ pub struct Arg {
     pub quoted: bool,
 }
 
-/// Error tokenizing a redis-cli command line — an unterminated quote.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("unterminated {0} quote starting at byte {1}")]
 pub struct RedisTokenError(&'static str, usize);
 
-/// redis-cli-compatible argument tokenizer: bare (whitespace-separated)
-/// words, `"double quoted"` args with backslash escapes (`\n \r \t \b \a
-/// \\ \" \xHH`), and `'single quoted'` args where only `\\` and `\'` are
-/// special (everything else inside single quotes is literal — this matches
-/// real `redis-cli` behavior, not JSON/shell conventions).
 pub fn tokenize_args(line: &str) -> Result<Vec<Arg>, RedisTokenError> {
     let bytes = line.as_bytes();
     let len = bytes.len();
@@ -78,8 +60,6 @@ pub fn tokenize_args(line: &str) -> Result<Vec<Arg>, RedisTokenError> {
         let mut value = String::new();
         let mut quoted = false;
 
-        // A single argument may be built from adjacent quoted/bare runs
-        // (e.g. `"a"'b'c`), same as a POSIX-ish shell; stop at whitespace.
         while i < len && !bytes[i].is_ascii_whitespace() {
             match bytes[i] {
                 b'"' => {
@@ -161,11 +141,6 @@ fn utf8_len(b: u8) -> usize {
     }
 }
 
-/// Decode a `\X` escape after a backslash inside a double-quoted arg.
-/// Returns the decoded char and how many bytes after the backslash were
-/// consumed. `\xHH` consumes two hex digits when present; any unrecognized
-/// escape falls back to the literal character (never a hard error — a
-/// stray backslash in a real command shouldn't corrupt the whole line).
 fn decode_double_escape(rest: &[u8]) -> (char, usize) {
     match rest.first() {
         Some(b'n') => ('\n', 1),
@@ -187,9 +162,6 @@ fn decode_double_escape(rest: &[u8]) -> (char, usize) {
     }
 }
 
-/// The numeric value of an ASCII hex digit, or 0 for anything else. Callers
-/// only reach this after checking `is_ascii_hexdigit`, so the fallback is
-/// unreachable in practice — it exists so this never needs `.unwrap()`.
 fn hex_nibble(b: u8) -> u8 {
     match b {
         b'0'..=b'9' => b - b'0',
@@ -199,9 +171,6 @@ fn hex_nibble(b: u8) -> u8 {
     }
 }
 
-/// Split `src` into one span per command. A command line that starts with
-/// `#` (after leading whitespace) and is not a directive is treated as a
-/// plain comment and produces no span.
 fn split(src: &str) -> Vec<StatementSpan> {
     let bytes = src.as_bytes();
     let len = bytes.len();

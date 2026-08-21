@@ -1,23 +1,6 @@
-//! RESP → [`datagrep_api::Value`] mapping. Redis values are binary-safe, so
-//! every string-shaped reply is checked for valid UTF-8 before it is
-//! allowed to become `Value::Str`; anything else keeps
-//! its raw bytes in `Value::Bytes` rather than lossily re-encoding it
-//! (`datagrep-api`'s "never lose bytes" rule).
-//!
-//! A RESP `Nil` always maps to `Value::Null` here — the `Value::Null` vs
-//! `Value::Absent` distinction (a *missing key*, as opposed to a key that
-//! exists and holds a null) is not something the wire protocol itself
-//! encodes: Redis has no notion of a stored NULL, so `Nil` is heavily
-//! overloaded ("no such key", "no such field", "no such element"). Callers
-//! that know *why* they got a `Nil` (e.g. `connection.rs`'s single-key
-//! fetch, which runs `TYPE` first) are responsible for re-mapping to
-//! `Value::Absent` when that's the honest reading; this function only
-//! speaks the wire-level truth.
-
 use datagrep_api::value::{Document, Value};
 use datagrep_api::Bytes;
 
-/// Map one RESP reply to a `datagrep_api::Value`, recursively.
 pub fn from_resp(v: redis::Value) -> Value {
     match v {
         redis::Value::Nil => Value::Null,
@@ -30,14 +13,6 @@ pub fn from_resp(v: redis::Value) -> Value {
         }
         redis::Value::Map(pairs) => Value::Document(std::sync::Arc::new(map_to_document(pairs))),
         redis::Value::Attribute { data, attributes } => {
-            // Attributes are server-side metadata about the reply (e.g.
-            // RESP3 expiry hints); datagrep-api's Value model has nowhere
-            // faithful to carry a second, parallel key/value list attached
-            // to an arbitrary value, so we surface the data and drop the
-            // attribute list rather than inventing a lossy shape for it.
-            // The bytes are not lost in the sense that matters (the actual
-            // reply payload survives); the metadata is display-only in the
-            // real redis-cli too.
             tracing::debug!(
                 attribute_count = attributes.len(),
                 "dropping RESP3 attribute metadata (unsupported by datagrep_api::Value)"
@@ -61,12 +36,6 @@ pub fn from_resp(v: redis::Value) -> Value {
             raw: Bytes::from(e.to_string().into_bytes()),
             display: e.to_string().into(),
         },
-        // `redis::Value` is `#[non_exhaustive]` (types.rs) — every variant
-        // that exists today is matched above, but the crate reserves the
-        // right to add more, and this arm is what keeps that forward
-        // compatible rather than a build break at the next `redis` bump.
-        // Never a panic, never a dropped reply: `Value` has a manual
-        // `Debug` impl, so the raw bytes still make it into `Unsupported`.
         other => {
             let variant_debug = format!("{other:?}");
             tracing::warn!(
@@ -83,10 +52,6 @@ pub fn from_resp(v: redis::Value) -> Value {
     }
 }
 
-/// `BulkString` is Redis's one binary-safe scalar reply type — decode as
-/// UTF-8 text when possible (the overwhelmingly common case: keys, hash
-/// fields, JSON blobs), otherwise keep the raw bytes rather than losing or
-/// mangling them.
 fn bytes_to_value(bytes: Vec<u8>) -> Value {
     match String::from_utf8(bytes) {
         Ok(s) => Value::Str(s.into()),
@@ -94,17 +59,6 @@ fn bytes_to_value(bytes: Vec<u8>) -> Value {
     }
 }
 
-/// Build a `Document` from a RESP `Map`, preserving key order — for a Redis
-/// hash the order the server returned fields in is itself data, and
-/// re-sorting it would silently change what the user sees. Map keys are
-/// themselves `Value`s; in every real-world reply (`CONFIG GET`, `XINFO`,
-/// `CLIENT INFO`, `HRANDFIELD WITHVALUES` when RESP3-mapped, …) they are
-/// strings, so the common path is a direct string key. A key that maps to
-/// anything other than `Value::Str` is not something the seam's `Document` can
-/// represent as a field name — it is turned into a display string via
-/// `Debug` on the *pre-mapped* RESP value instead of being dropped, so the
-/// data is still visible even though the round-trip is lossy for that edge
-/// case.
 fn map_to_document(pairs: Vec<(redis::Value, redis::Value)>) -> Document {
     let mut doc = Document::new();
     for (k, v) in pairs {

@@ -1,25 +1,3 @@
-//! The MongoShell parser — a parser, not a JS engine. Parses exactly two
-//! surfaces:
-//!
-//! 1. `db.<collection>.<method>(<args>).<modifier>(<args>)...` — a method
-//!    chain, where `<collection>` may also be `getCollection("name")` for
-//!    names that aren't valid bare identifiers.
-//! 2. `{ <raw command document> }` — e.g. `{ find: "users", filter: {...} }`.
-//!
-//! Argument values are JSON5-ish: unquoted object keys, single- *or*
-//! double-quoted strings, trailing commas — plus the extended-JSON
-//! constructors `ObjectId(...)`, `ISODate(...)`, `NumberLong(...)`,
-//! `NumberDecimal(...)`, `NumberInt(...)`.
-//!
-//! Anything that is actually JavaScript — a bare variable, `for`/`while`/
-//! `function`, `new X(...)`, arithmetic between values — is rejected with
-//! [`MongoError::UnsupportedJs`]: datagrep supports query expressions, not
-//! arbitrary JavaScript, and the rejection points the user at a raw command
-//! document as the escape hatch. This is enforced structurally rather than
-//! by a JS-keyword blocklist: the grammar below simply has no production for
-//! any of those, so anything that isn't a recognized value/statement shape
-//! falls through to the same rejection.
-
 use std::sync::Arc;
 
 use datagrep_api::{Document, Value};
@@ -27,16 +5,12 @@ use datagrep_api::{Document, Value};
 use super::date::parse_iso8601_utc_micros;
 use super::error::MongoError;
 
-/// The two shapes this crate's MongoShell surface accepts.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParsedMongo {
     Chain(MongoStatement),
-    /// A raw command document, e.g. `{ find: "users", filter: {...} }`.
-    /// Always a `Value::Document`.
     RawCommand(Value),
 }
 
-/// `db.<collection>.<method>(<args>).<modifier>(<args>)...`
 #[derive(Debug, Clone, PartialEq)]
 pub struct MongoStatement {
     pub collection: String,
@@ -74,8 +48,6 @@ struct Parser<'s> {
     pos: usize,
 }
 
-/// Byte classes that mean "this is JavaScript, not a query expression" when
-/// they show up where a value or the next chain link was expected.
 fn is_js_operator_byte(b: u8) -> bool {
     matches!(
         b,
@@ -117,8 +89,6 @@ impl<'s> Parser<'s> {
         self.src[self.pos..end].to_string()
     }
 
-    /// Skip whitespace, `//` and `#` line comments, and `/* */` block
-    /// comments (non-nested — this is JS-surface syntax, not SQL).
     fn skip_trivia(&mut self) {
         loop {
             match self.peek() {
@@ -173,8 +143,6 @@ impl<'s> Parser<'s> {
         }
     }
 
-    /// A bare identifier: `[A-Za-z_$][A-Za-z0-9_$]*` (plus unicode
-    /// continuation bytes, permissively).
     fn parse_ident(&mut self) -> Result<&'s str, MongoError> {
         self.skip_trivia();
         let start = self.pos;
@@ -188,15 +156,9 @@ impl<'s> Parser<'s> {
         Ok(&self.src[start..self.pos])
     }
 
-    /// `db.<collection>.<method>(<args>)(.<modifier>(<args>))*`
     fn parse_chain(&mut self) -> Result<MongoStatement, MongoError> {
         let head = self.parse_ident()?;
         if head != "db" {
-            // Anything that doesn't start with `db.` or `{` is outside this
-            // crate's supported grammar (query-expression chain, or a raw
-            // command document) — by construction, that's arbitrary
-            // JavaScript (a bare statement, `for(...)`, `function ...`, a
-            // variable reference used as a whole statement, etc).
             return Err(MongoError::UnsupportedJs);
         }
         self.expect_byte(b'.', "'.' after db")?;
@@ -243,8 +205,6 @@ impl<'s> Parser<'s> {
         Ok((name, args))
     }
 
-    /// Comma-separated values up to (not including) `end`, trailing comma
-    /// allowed.
     fn parse_value_list(&mut self, end: u8) -> Result<Vec<Value>, MongoError> {
         let mut out = Vec::new();
         self.skip_trivia();
@@ -289,9 +249,6 @@ impl<'s> Parser<'s> {
         }
     }
 
-    /// A value that starts with an identifier: `true`, `false`, `null`, or
-    /// an extended-JSON constructor call. Any other identifier here is a
-    /// variable reference — arbitrary JavaScript.
     fn parse_ident_value(&mut self) -> Result<Value, MongoError> {
         let start = self.pos;
         let ident = self.parse_ident()?;
@@ -320,16 +277,6 @@ impl<'s> Parser<'s> {
         Ok((s, at))
     }
 
-    /// `ObjectId("<24 hex chars>")`.
-    ///
-    /// Produced as `Value::Str` holding the lowercase 24-char hex form, not as
-    /// `Value::Unsupported { raw, .. }`. `Unsupported` is the more literal fit
-    /// for a 12-byte BSON ObjectId, but its `raw` field is `bytes::Bytes`, a
-    /// type datagrep-api does not re-export — using it would mean taking a
-    /// direct dependency on the `bytes` crate, and this crate deliberately
-    /// depends on nothing but datagrep-api and thiserror. Hex encoding is
-    /// bijective, so the string form loses no information; it just isn't the
-    /// raw 12 bytes.
     fn parse_object_id(&mut self) -> Result<Value, MongoError> {
         let (hex, at) = self.parse_ctor_string_arg()?;
         if hex.len() != 24 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -357,7 +304,6 @@ impl<'s> Parser<'s> {
         })
     }
 
-    /// `NumberLong("123")` or `NumberLong(123)`.
     fn parse_number_long(&mut self) -> Result<Value, MongoError> {
         self.expect_byte(b'(', "'(' to start a constructor argument")?;
         self.skip_trivia();
@@ -394,9 +340,6 @@ impl<'s> Parser<'s> {
         Ok(Value::I64(n as i64))
     }
 
-    /// `NumberDecimal("1.23")` → `Value::Decimal`, text preserved exactly
-    /// (datagrep-api: "decimals stay strings" — never round-tripped through
-    /// `f64`).
     fn parse_number_decimal(&mut self) -> Result<Value, MongoError> {
         self.expect_byte(b'(', "'(' to start a constructor argument")?;
         self.skip_trivia();
@@ -414,8 +357,6 @@ impl<'s> Parser<'s> {
         Ok(Value::Decimal(Arc::from(text.trim())))
     }
 
-    /// The constructors accept either a quoted string or a bare number as
-    /// their single argument; this reads whichever is present as raw text.
     fn parse_ctor_inner_number_or_string(&mut self) -> Result<(String, usize), MongoError> {
         let at = self.pos;
         match self.peek() {
@@ -493,8 +434,6 @@ impl<'s> Parser<'s> {
         }
     }
 
-    /// A single- or double-quoted JS-style string, with `\n \r \t \\ \" \'
-    /// \/ \b \f \uXXXX` escapes.
     fn parse_string(&mut self) -> Result<String, MongoError> {
         self.skip_trivia();
         let quote = match self.peek() {
@@ -567,10 +506,6 @@ impl<'s> Parser<'s> {
                                     at: self.pos,
                                     reason: "expected 4 hex digits after \\u",
                                 })?;
-                            // `hex` was already validated as 4 ASCII hex
-                            // digits above, so this can't actually fail;
-                            // `unwrap_or` keeps it that way without asserting
-                            // it via `.unwrap()`.
                             let code = u32::from_str_radix(hex, 16).unwrap_or(0xFFFD);
                             out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
                             self.pos += 4;
@@ -629,7 +564,6 @@ impl<'s> Parser<'s> {
         Ok(Value::Document(Arc::new(Document::from_fields(fields))))
     }
 
-    /// JSON5 object keys: an unquoted identifier, or a quoted string.
     fn parse_object_key(&mut self) -> Result<String, MongoError> {
         match self.peek() {
             Some(b'"') | Some(b'\'') => self.parse_string(),

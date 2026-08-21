@@ -1,7 +1,3 @@
-//! Black-box tests against `datagrep-profiles`'s public API only. White-box
-//! tests that need to force `fts5_available` or otherwise reach into `Db`
-//! live in `src/queries.rs`.
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -10,10 +6,6 @@ use datagrep_profiles::{
     new_id, now_ms, Folder, HistoryStatus, ImportStrategy, NewHistoryEntry, ProfilesError,
     RetentionPolicy, SavedQuery, Store, Tunnel,
 };
-
-// ---------------------------------------------------------------------
-// fixtures
-// ---------------------------------------------------------------------
 
 fn sample_config() -> ConnectionConfig {
     let mut values = BTreeMap::new();
@@ -74,10 +66,6 @@ fn sample_tunnel(id: &str) -> Tunnel {
     }
 }
 
-// ---------------------------------------------------------------------
-// lazy open
-// ---------------------------------------------------------------------
-
 #[tokio::test]
 async fn store_open_does_not_touch_disk_until_first_call() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -98,10 +86,6 @@ async fn store_open_does_not_touch_disk_until_first_call() {
         "the first real call should have created the database file"
     );
 }
-
-// ---------------------------------------------------------------------
-// migrations
-// ---------------------------------------------------------------------
 
 #[tokio::test]
 async fn migration_brings_empty_db_to_current_version() {
@@ -187,15 +171,9 @@ async fn reopen_is_idempotent_and_does_not_reapply_migrations() {
         .unwrap();
     assert_eq!(version, 2, "version must not change on a no-op reopen");
 
-    // Nothing left to migrate on the second open, so `backup_before_migrate`
-    // must not have run again — the .bak from the first open is untouched.
     let bak_len_after_second_open = std::fs::metadata(&bak).unwrap().len();
     assert_eq!(bak_len_after_first_open, bak_len_after_second_open);
 }
-
-// ---------------------------------------------------------------------
-// profile CRUD + secret hygiene
-// ---------------------------------------------------------------------
 
 #[tokio::test]
 async fn profile_crud_round_trips_connection_config_fidelity() {
@@ -275,10 +253,6 @@ async fn secret_shaped_config_key_is_rejected() {
     assert!(matches!(err, ProfilesError::SecretShapedKey { .. }));
 }
 
-// ---------------------------------------------------------------------
-// tunnels / saved queries — lighter CRUD coverage
-// ---------------------------------------------------------------------
-
 #[tokio::test]
 async fn tunnel_crud_round_trip() {
     let store = Store::open_in_memory();
@@ -319,10 +293,6 @@ async fn saved_query_crud_round_trip() {
     store.delete_saved_query(created.id.clone()).await.unwrap();
     assert!(store.list_saved_queries().await.unwrap().is_empty());
 }
-
-// ---------------------------------------------------------------------
-// query_history
-// ---------------------------------------------------------------------
 
 #[tokio::test]
 async fn history_dedupe_window_updates_instead_of_inserting() {
@@ -448,8 +418,6 @@ async fn retention_trims_rows_older_than_max_age_on_reopen() {
             .unwrap();
     }
 
-    // Retention only runs on open — there is no timer, so reopening is what
-    // trims.
     let store = Store::open(&path);
     let remaining = store.recent_history(Some("p1".into()), 100).await.unwrap();
     assert_eq!(
@@ -505,10 +473,6 @@ async fn retention_trims_to_max_row_count_on_reopen() {
     assert_eq!(remaining[1].text, "query 3");
 }
 
-// ---------------------------------------------------------------------
-// kv
-// ---------------------------------------------------------------------
-
 #[tokio::test]
 async fn kv_get_set_delete() {
     let store = Store::open_in_memory();
@@ -526,10 +490,6 @@ async fn kv_get_set_delete() {
     store.kv_delete("theme").await.unwrap();
     assert_eq!(store.kv_get("theme").await.unwrap(), None);
 }
-
-// ---------------------------------------------------------------------
-// TOML export / import
-// ---------------------------------------------------------------------
 
 #[tokio::test]
 async fn toml_export_then_import_round_trips_profiles() {
@@ -615,10 +575,6 @@ Str = "hunter2"
     assert!(matches!(err, ProfilesError::SecretShapedKey { .. }));
 }
 
-// ---------------------------------------------------------------------
-// concurrency + worker lifecycle
-// ---------------------------------------------------------------------
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_history_writes_do_not_leak_sqlite_busy() {
     let store = Arc::new(Store::open_in_memory());
@@ -660,11 +616,6 @@ async fn worker_thread_joins_cleanly_on_drop() {
     let store = Store::open(dir.path().join("datagrep.db"));
     store.create_folder(sample_folder("f1")).await.unwrap();
 
-    // `WorkerHandle::drop` closes the command channel and then *joins* the
-    // worker thread synchronously. If shutdown were broken (e.g. the
-    // channel weren't closed before joining) this would deadlock forever
-    // instead of returning — run it on a blocking task under a timeout so a
-    // regression fails the test instead of hanging the suite.
     let dropped = tokio::task::spawn_blocking(move || drop(store));
     tokio::time::timeout(std::time::Duration::from_secs(5), dropped)
         .await
@@ -672,18 +623,6 @@ async fn worker_thread_joins_cleanly_on_drop() {
         .expect("drop task panicked");
 }
 
-/// A v1 database carrying a real profile must come through `migrate_v2` with
-/// every other column intact — not just without `env`.
-///
-/// The column had a CHECK constraint, so dropping it means rebuilding the
-/// table, and a rebuild that forgets a column is silent: `secret_ref` in
-/// particular would orphan a keychain entry and break a working connection
-/// while every other test still passed.
-///
-/// The fixture is built by making a current database and then regressing it —
-/// re-adding `env` and winding `user_version` back to 1 — rather than
-/// hand-writing the old schema, so it keeps every other table the open-time
-/// retention pass expects.
 #[tokio::test]
 async fn migrating_off_env_keeps_every_other_column() {
     let dir = tempfile::tempdir().unwrap();

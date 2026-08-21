@@ -1,16 +1,9 @@
-//! Worker-thread lifecycle — one dedicated thread per connection, cleanly
-//! joined on close, no leak — and the `PRAGMA query_only` server-side
-//! read-only guardrail.
-
 mod common;
 
 use std::time::Duration;
 
 use datagrep_api::{DbError, Enforcement, Request};
 
-/// `Result::expect_err`/`unwrap_err` require `T: Debug`, but `T` here is
-/// `Box<dyn Cursor>`, which isn't `Debug` — trait objects crossing the seam
-/// deliberately don't carry it. This is the non-generic equivalent.
 fn expect_err<T>(result: Result<T, DbError>, msg: &str) -> DbError {
     match result {
         Ok(_) => panic!("{msg}"),
@@ -25,9 +18,6 @@ async fn worker_thread_shuts_down_cleanly_on_close() {
         .await
         .expect("warm-up query failed");
 
-    // `SqliteConnection::close` joins the worker thread internally via
-    // `spawn_blocking`; bounding it with a timeout turns "the thread never
-    // exits" (a leak) into a failing test instead of a hang.
     let closed = tokio::time::timeout(Duration::from_secs(5), conn.close()).await;
     assert!(
         closed.is_ok(),
@@ -93,8 +83,6 @@ async fn read_only_pragma_enforces_server_side_and_reads_still_work() {
 
 #[tokio::test]
 async fn read_only_connection_config_starts_enforced() {
-    // A distinct on-disk file, since a read-only connection to a
-    // not-yet-created `:memory:` database can't bootstrap the schema.
     let dir = std::env::temp_dir().join(format!("datagrep-sqlite-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir failed");
     let path = dir.join("ro.db");

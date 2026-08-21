@@ -1,8 +1,3 @@
-//! Type-aware value fetch (`Op::Scan` on a single key), `Op::Count`,
-//! `Op::Mutate`, and `Request::Native`
-//! dispatch — including a hand-typed `SCAN` line routing through the same
-//! paging cursor the structured path uses.
-
 mod common;
 
 use std::sync::Arc;

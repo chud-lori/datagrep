@@ -1,8 +1,3 @@
-//! `RedisCatalog` against a real server: the
-//! `db-index -> keyspace-prefix -> key` hierarchy, `ScanOnly{requires_prefix:
-//! true}` actually being enforced (no silent full-keyspace walk), and
-//! `describe()` on a real key.
-
 mod common;
 
 use std::sync::Arc;
@@ -50,8 +45,6 @@ async fn children_walks_db_index_then_prefix_then_key() {
         .iter()
         .any(|n| n.kind == ObjectKind::Database && &*n.path.parts()[0] == "0"));
 
-    // Listing prefixes REQUIRES an explicit prefix (even Some("")) — refuses
-    // to walk the whole keyspace unasked (Enumeration::ScanOnly{requires_prefix:true}).
     let no_prefix = catalog
         .children(&ObjectPath::new(vec![Arc::from("0")]), ListOpts::default())
         .await;

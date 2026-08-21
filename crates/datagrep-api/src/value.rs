@@ -1,7 +1,3 @@
-//! The universal value model. The honest common denominator across
-//! engines is an ordered, resumable, chunked stream of `Value`s — rectangularity
-//! is a view the core computes, never part of the driver contract.
-
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
@@ -12,75 +8,48 @@ use serde::{Deserialize, Serialize};
 
 use crate::shape::{LogicalType, ObjectPath};
 
-/// Timezone qualifier for [`Value::Timestamp`] — always explicit, never a
-/// silently dropped tz. A wrong instant is worse than a crash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TzSpec {
-    /// No timezone semantics at all (e.g. SQL `timestamp without time zone`).
     Naive,
-    /// Instant in UTC.
     Utc,
-    /// IANA zone name; kept as text so we never re-interpret the server's zone.
     Named(Arc<str>),
-    /// Fixed offset east of UTC, in minutes.
     Offset(i16),
 }
 
-/// One value from any engine. Streaming-first: cheap to clone (`Arc`-backed
-/// leaves), and it never loses bytes — anything unmappable rides in
-/// [`Value::Unsupported`] with its raw encoding intact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
-    /// An explicit database NULL.
     Null,
-    /// Field NOT PRESENT — distinct from `Null`; load-bearing for sparse
-    /// documents (Mongo/DynamoDB/ES). This is what makes a Mongo grid truthful
-    /// rather than a wall of fake empties.
     Absent,
     Bool(bool),
     I64(i64),
-    /// Separate from `I64` so unsigned 64-bit values never overflow negative.
     U64(u64),
     F64(f64),
-    /// String-backed: NUMERIC/DECIMAL128 never round-trips through f64.
     Decimal(Arc<str>),
     Str(Arc<str>),
     Bytes(Bytes),
-    /// Days since the Unix epoch (may be negative).
     Date(i32),
-    /// Time of day as nanoseconds since midnight.
     Time {
         nanos: i64,
     },
-    /// Microseconds since the Unix epoch, with an always-explicit timezone.
     Timestamp {
         micros: i64,
         tz: TzSpec,
     },
-    /// Calendar-aware interval; months/days/nanos kept separate because they do
-    /// not convert into each other without a calendar.
     Interval {
         months: i32,
         days: i32,
         nanos: i64,
     },
     Uuid([u8; 16]),
-    /// Raw JSON text — never re-serialized, so key order and number precision
-    /// survive round-trips through us.
     Json(Arc<str>),
     Array(Arc<[Value]>),
-    /// Ordered map — key order is data for BSON, ES `_source`, Redis hashes.
     Document(Arc<Document>),
-    /// A reference to another object's row/document (Neo4j node id, Mongo DBRef,
-    /// a resolved FK). Powers "jump to referenced row" uniformly across engines.
     Ref {
         target: ObjectPath,
         key: Arc<[Value]>,
     },
     Geo(Arc<Geometry>),
     Vector(Arc<[f32]>),
-    /// The escape hatch that keeps the enum honest. NEVER lose bytes: the raw
-    /// encoding is preserved so the user can always audit what we did.
     Unsupported {
         type_name: Arc<str>,
         raw: Bytes,
@@ -89,8 +58,6 @@ pub enum Value {
 }
 
 impl Value {
-    /// The [`LogicalType`] this value inhabits, or `None` for [`Value::Absent`]
-    /// — absence is not a type, and schema inference must not count it as one.
     pub fn logical_type(&self) -> Option<LogicalType> {
         Some(match self {
             Value::Null => LogicalType::Null,
@@ -118,42 +85,26 @@ impl Value {
     }
 }
 
-/// Minimal geometry model — enough for a truthful cell without dragging in a
-/// GIS stack; anything richer stays byte-exact in `Raw`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Geometry {
-    Point {
-        x: f64,
-        y: f64,
-    },
+    Point { x: f64, y: f64 },
     LineString(Vec<(f64, f64)>),
     Polygon(Vec<Vec<(f64, f64)>>),
-    /// Unparsed well-known-binary — never lose bytes.
-    Raw {
-        wkb: Bytes,
-    },
+    Raw { wkb: Bytes },
 }
 
-/// Insertion-ordered map with duplicate keys preserved in iteration order —
-/// key order is data (BSON, ES `_source`, Redis hashes). Lookup by name hits a
-/// small index (first occurrence wins); duplicates remain visible to iteration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(from = "Vec<(Arc<str>, Value)>", into = "Vec<(Arc<str>, Value)>")]
 pub struct Document {
     fields: Vec<(Arc<str>, Value)>,
-    /// Key -> index of first occurrence. Rebuilt on construction; not part of
-    /// equality (it is derived state).
     index: HashMap<Arc<str>, usize>,
 }
 
 impl Document {
-    /// Empty document.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Build from ordered fields; duplicates are kept, first occurrence wins
-    /// for keyed lookup.
     pub fn from_fields(fields: Vec<(Arc<str>, Value)>) -> Self {
         let mut index = HashMap::with_capacity(fields.len());
         for (i, (k, _)) in fields.iter().enumerate() {
@@ -162,21 +113,16 @@ impl Document {
         Self { fields, index }
     }
 
-    /// Append a field, preserving any earlier occurrence of the same key.
     pub fn push(&mut self, key: impl Into<Arc<str>>, value: Value) {
         let key = key.into();
         self.index.entry(key.clone()).or_insert(self.fields.len());
         self.fields.push((key, value));
     }
 
-    /// First occurrence of `key`, or `None` when the field is absent (the
-    /// caller maps that to [`Value::Absent`]).
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.index.get(key).map(|&i| &self.fields[i].1)
     }
 
-    /// Resolve a nested path. `None` means "not present" — distinct from a
-    /// stored `Value::Null` at that path.
     pub fn get_path(&self, path: &FieldPath) -> Option<&Value> {
         let mut cur: Option<&Value> = None;
         for seg in path.segments() {
@@ -198,7 +144,6 @@ impl Document {
         cur
     }
 
-    /// Fields in insertion order, duplicates included.
     pub fn iter(&self) -> impl Iterator<Item = (&Arc<str>, &Value)> {
         self.fields.iter().map(|(k, v)| (k, v))
     }
@@ -212,7 +157,6 @@ impl Document {
     }
 }
 
-/// Equality is on the ordered fields only — the lookup index is derived state.
 impl PartialEq for Document {
     fn eq(&self, other: &Self) -> bool {
         self.fields == other.fields
@@ -231,18 +175,12 @@ impl From<Document> for Vec<(Arc<str>, Value)> {
     }
 }
 
-/// One step of a [`FieldPath`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PathSeg {
-    /// Named field of a document.
     Field(Arc<str>),
-    /// Zero-based array index.
     Index(u64),
 }
 
-/// A path into nested documents/arrays (`address.city`, `tags[3]`, `a.b[3].c`).
-/// The unit of projection: view columns, predicates, and mutations all address
-/// data by path, never by flattened fake column names.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FieldPath(Vec<PathSeg>);
 
@@ -251,7 +189,6 @@ impl FieldPath {
         Self(segments)
     }
 
-    /// Convenience: a single named field.
     pub fn field(name: impl Into<Arc<str>>) -> Self {
         Self(vec![PathSeg::Field(name.into())])
     }
@@ -261,8 +198,6 @@ impl FieldPath {
     }
 }
 
-/// Error from [`FieldPath::from_str`]; carries the byte offset so an editor can
-/// point at the problem.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("invalid field path at byte {at}: {reason}")]
 pub struct PathParseError {
@@ -273,8 +208,6 @@ pub struct PathParseError {
 impl FromStr for FieldPath {
     type Err = PathParseError;
 
-    /// Parses `a.b[3].c` style paths. Field names may not contain `.`, `[` or
-    /// `]` — quoting is out of scope for this minimal grammar.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let err = |at, reason| PathParseError { at, reason };
         if s.is_empty() {

@@ -1,7 +1,3 @@
-//! MongoShell [`Language`] impl: the editor surface is
-//! `db.<collection>.<method>(...)` chains and raw command documents,
-//! hand-parsed by [`parser`] — explicitly **not** an embedded JS engine.
-
 pub mod date;
 pub mod error;
 pub mod parser;
@@ -43,12 +39,6 @@ impl Language for MongoLanguage {
     }
 }
 
-/// Lexical state used by [`split`], [`context_at`], and [`highlight`] to
-/// stay out of strings/comments/nested-bracket regions. Not shared as a
-/// single chunk pass like [`crate::sql::lexer`] — this language's three
-/// consumers need different enough output shapes (depth-aware terminator
-/// search vs. a flat token stream) that a shared struct would cost more
-/// than it saves for ~150 lines of scanning logic each.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Code,
@@ -58,12 +48,6 @@ enum Mode {
     BlockComment,
 }
 
-/// Split on top-level `;` (bracket/paren/brace-depth and quote/comment
-/// aware) — the same terminator convention as the SQL splitter, so a script
-/// containing several `db....` statements behaves predictably. A whole
-/// buffer with no top-level `;` is one statement (this also covers a
-/// `.find({...})\n  .limit(5)\n  .sort({...})` chain formatted across
-/// multiple lines with no semicolon — the common `mongosh` style).
 fn split(src: &str) -> Vec<StatementSpan> {
     let bytes = src.as_bytes();
     let len = bytes.len();
@@ -173,11 +157,6 @@ fn classify(stmt: &str) -> StatementClass {
     }
 }
 
-/// find/aggregate/count/distinct → Read; insert*/update*/delete* → Write;
-/// drop* → Ddl (design requirement 6, verbatim). Checked in this order
-/// (write/ddl prefixes first) so e.g. a hypothetical `dropIndex`-style name
-/// starting with a Read-ish prefix can't shadow a destructive one — though
-/// with the fixed prefixes above none currently collide.
 fn classify_method(method: &str) -> StatementClass {
     let starts = |p: &str| {
         method

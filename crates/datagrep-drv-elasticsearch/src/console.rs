@@ -1,30 +1,3 @@
-//! The connection's native language (`LanguageId::EsDsl`).
-//!
-//! `datagrep-lang` has no Elasticsearch/Kibana-console language — its
-//! `Language` implementations are SQL, MongoShell and RedisCli — so this
-//! module accepts the two forms an Elasticsearch user actually types, and the
-//! crate report records the gap:
-//!
-//! ```text
-//! GET /my-index/_search          <- Kibana console: verb, path, optional body
-//! { "query": { "match_all": {} } }
-//! ```
-//!
-//! ```text
-//! { "query": { "match_all": {} } }   <- a bare search body against the
-//!                                       connection's default index
-//! ```
-//!
-//! # Parameters are bound into the parsed document, never spliced
-//!
-//! `Request::Native { params }` values are substituted **after** the body has
-//! been parsed into JSON, by replacing any string that is exactly `"$1"`,
-//! `"$2"`, … with the typed value. Because the substitution happens on the
-//! tree rather than on the text, a parameter can never introduce a key, a
-//! clause, or a nesting level — datagrep's NoSQL-injection rule in this
-//! engine's dialect. A parameter is also never substituted into the request
-//! *path*, so it can never retarget the request at another endpoint.
-
 use serde_json::Value as Json;
 
 use datagrep_api::error::DbError;
@@ -33,26 +6,20 @@ use datagrep_api::value::Value;
 use crate::http::Method;
 use crate::value::value_to_json;
 
-/// One parsed console request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConsoleRequest {
     pub method: Method,
-    /// Always begins with `/`.
     pub path: String,
     pub query: Vec<(String, String)>,
     pub body: Option<Json>,
 }
 
 impl ConsoleRequest {
-    /// Whether this request is a search whose results should stream through a
-    /// [`crate::cursor::SearchCursor`] rather than come back as a single
-    /// reply document.
     pub fn is_search(&self) -> bool {
         let last = self.path.rsplit('/').next().unwrap_or_default();
         matches!(last, "_search") && !self.path.contains("/_search/scroll")
     }
 
-    /// The index expression in a `/<index>/_search`-shaped path, if any.
     pub fn search_index(&self) -> Option<&str> {
         let trimmed = self.path.trim_start_matches('/');
         let (index, rest) = trimmed.rsplit_once('/')?;
@@ -63,7 +30,6 @@ impl ConsoleRequest {
     }
 }
 
-/// Parse console text into a request, binding `params` into the body.
 pub fn parse(
     text: &str,
     default_index: Option<&str>,
@@ -135,8 +101,6 @@ pub fn parse(
             serde_json::from_str::<Json>(text).map_err(|e| DbError::Query {
                 code: None,
                 message: format!("request body is not valid JSON: {e}"),
-                // `serde_json` reports a 1-based line/column; the byte offset of
-                // the body inside the original text is the honest anchor we have.
                 position: Some(cleaned.len().saturating_sub(text.len()) as u32),
             })?,
         ),
@@ -176,9 +140,6 @@ fn split_query(target: &str) -> (&str, Vec<(String, String)>) {
     (path, pairs)
 }
 
-/// Drop whole-line `#` comments (Kibana console's own convention). A line
-/// whose first non-space character is `#` can never be part of a valid JSON
-/// body, so this cannot corrupt one.
 fn strip_comment_lines(text: &str) -> String {
     text.lines()
         .filter(|line| !line.trim_start().starts_with('#'))
@@ -186,9 +147,6 @@ fn strip_comment_lines(text: &str) -> String {
         .join("\n")
 }
 
-/// Replace `"$1"`, `"$2"`, … in the *parsed* document with typed parameter
-/// values. Returns an error for an out-of-range index rather than leaving a
-/// literal `"$3"` in the query, which would silently search for that string.
 pub fn bind_params(body: &mut Json, params: &[Value]) -> Result<(), DbError> {
     match body {
         Json::String(s) => {
@@ -221,9 +179,6 @@ pub fn bind_params(body: &mut Json, params: &[Value]) -> Result<(), DbError> {
     }
 }
 
-/// `"$12"` -> `Some(12)`; anything else -> `None`. Deliberately strict: only a
-/// string that is *entirely* a placeholder is substituted, so a document
-/// legitimately containing `"cost: $5"` is left alone.
 fn placeholder_index(s: &str) -> Option<usize> {
     let digits = s.strip_prefix('$')?;
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -322,13 +277,8 @@ mod tests {
         }
     }
 
-    /// Injection, this engine's version: a parameter is substituted into the
-    /// parsed tree as a typed value, so it can never become a clause.
     #[test]
     fn a_parameter_can_never_inject_a_query_clause() {
-        // The attacker supplies a value that, if string-spliced, would close
-        // the term and open a `match_all` — and, as a document, would be a
-        // whole query clause.
         let hostile_text = Value::Str(Arc::from(r#"x"}},{"match_all":{}},{"term":{"y":{"value":"#));
         let mut req = parse(
             r#"GET /i/_search
@@ -456,8 +406,6 @@ mod tests {
 
     #[test]
     fn placeholders_are_never_taken_from_the_path() {
-        // `$1` in a path is not a placeholder — it stays literal, so a
-        // parameter can never retarget the request at another endpoint.
         let req = parse(
             "GET /$1/_search\n{}",
             None,

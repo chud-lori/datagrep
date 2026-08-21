@@ -1,10 +1,3 @@
-//! Minimal standard-alphabet base64 (RFC 4648 section 4, with padding).
-//!
-//! Used only to render/parse the known-hosts file's `host:port base64-key`
-//! entries. Not a dependency-worthy amount of code, and this crate keeps its
-//! dependency list deliberately small (see crate root docs), so this stays
-//! hand-rolled rather than pulling in a `base64` crate.
-
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 pub(crate) fn encode(bytes: &[u8]) -> String {

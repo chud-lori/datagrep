@@ -1,12 +1,3 @@
-//! [`PgTransaction`]: the explicit, interactive transaction returned by
-//! [`crate::connection::PgConnection::begin`] — pinned to one physical
-//! session for its whole life — a pool that silently moved a BEGIN to a
-//! different socket would be a correctness bug, not a performance detail.
-//! That falls out for free here because the backing actor holds the pooled
-//! session for exactly that long (see `actor.rs`). Other work on the same
-//! logical connection takes a *different* session from
-//! [`crate::pool::PgPool`] rather than queueing behind this transaction.
-
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 
@@ -64,9 +55,6 @@ impl Transaction for PgTransaction {
             .map_err(|_| DbError::Closed)?;
         match reply_rx.await.map_err(|_| DbError::Closed)?? {
             ExecOutcome::Ack { affected } => Ok(Box::new(AckCursor::new(affected))),
-            // `Borrowed`: draining this cursor closes its portal but must
-            // never end the caller's transaction — only `commit`/`rollback`
-            // below may do that, and only they release the pinned session.
             ExecOutcome::Cursor { portal_id, schema } => Ok(Box::new(PgCursor::new(
                 self.cmd_tx.clone(),
                 portal_id,

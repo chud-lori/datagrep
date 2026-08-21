@@ -1,24 +1,3 @@
-//! S1 — zero-idle proof. Gate: >2 presents/60s idle = FAIL,
-//! >20ms CPU/60s idle = FAIL.
-//!
-//! Deliberately uses ONLY the bare `gpui` crate — no `gpui-component` — so
-//! this measures gpui's own idle floor, uncontaminated by the component
-//! library's init/theme/global state. One window, static text, no animation,
-//! no timers driving redraws (the only timer here is the stderr heartbeat,
-//! which does not touch the view or call `cx.notify()`).
-//!
-//! Present/redraw counter: `Render::render` is only invoked by gpui when the
-//! compositor actually needs a new frame from this view (retained mode is
-//! chosen over immediate mode precisely so idle costs nothing). We increment
-//! an `AtomicU64`
-//! on every call as a present proxy. This is an application-level proxy, not
-//! a wgpu swapchain-present callback — gpui 0.2.2's public API does not
-//! expose one — so it is a lower bound on true presents, not an exact count;
-//! stated plainly in SPIKE-REPORT.md.
-//!
-//! Driving script wraps this binary and samples `ps -o utime,stime,rss` and
-//! (if available) `footprint` before/after the 60s idle window.
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -51,10 +30,6 @@ fn main() {
     let app = Application::new();
 
     app.run(move |cx: &mut App| {
-        // WindowBounds::centered(..) matches the pattern verified against the
-        // real gpui-component 0.5.1-era examples (table_in_scrollable) --
-        // see SPIKE-REPORT.md for why this file could not actually be
-        // compiled on this machine to confirm it end-to-end.
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(480.), px(220.)), cx)),
             ..Default::default()

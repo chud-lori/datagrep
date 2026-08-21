@@ -1,8 +1,3 @@
-//! [`MySqlCatalog`]: lazy browsing — one cheap bounded query per level, never
-//! a crawl of the whole catalog. MySQL's namespace is honestly two levels
-//! (`database` → `table`) plus columns; there is no schema tier and this
-//! catalog does not fake one.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -51,9 +46,6 @@ fn next_token(items_len: usize, limit: u32, last: Option<&str>) -> Option<Resume
 #[async_trait]
 impl Catalog for MySqlCatalog {
     fn levels(&self) -> Vec<LevelDef> {
-        // Two organizational levels + columns — MySQL has no database/schema
-        // split (`SCHEMA` is a synonym for `DATABASE`), and this driver
-        // reports the true two-level shape rather than imitating Postgres.
         vec![
             LevelDef {
                 name: Arc::from("database"),
@@ -149,8 +141,6 @@ impl Catalog for MySqlCatalog {
         if prefix.is_empty() {
             return Ok(Vec::new());
         }
-        // Scope: an explicit catalog scope wins; otherwise the connection's
-        // current database (server-side DATABASE()).
         let scope_db: Option<String> = ctx
             .scope
             .as_ref()
@@ -161,9 +151,6 @@ impl Catalog for MySqlCatalog {
         let conn = guard.as_mut().ok_or(DbError::Closed)?;
 
         let mut out = Vec::new();
-        // Server-side prefix query, LIMIT 50: matching happens on the server
-        // against a bounded slice, so completion never needs a full schema
-        // resident in memory.
         let tables: Vec<(String, String)> = conn
             .exec(
                 "SELECT table_name, table_type FROM information_schema.tables \
@@ -208,8 +195,6 @@ impl Catalog for MySqlCatalog {
     }
 }
 
-/// Scan backwards from the caret over identifier characters to find the
-/// token being typed.
 fn prefix_at_caret(text: &str, offset: usize) -> String {
     let bytes = text.as_bytes();
     let end = offset.min(bytes.len());
@@ -217,11 +202,6 @@ fn prefix_at_caret(text: &str, offset: usize) -> String {
     while start > 0 && matches!(bytes[start - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_') {
         start -= 1;
     }
-    // Rebuild from the bytes, not by slicing the `str`: the caret `offset` is
-    // an editor position, and both it and the backwards scan can stop inside
-    // a multi-byte character (type after any non-ASCII text and they do).
-    // Slicing a `str` off a char boundary panics; an empty prefix is the
-    // right answer for a caret that is not on one.
     std::str::from_utf8(&bytes[start..end])
         .unwrap_or("")
         .to_string()
@@ -279,8 +259,6 @@ impl MySqlCatalog {
             .into_iter()
             .map(|(name, table_type)| ObjectNode {
                 path: ObjectPath::new(vec![db.clone(), Arc::from(name)]),
-                // information_schema.tables.table_type: BASE TABLE, VIEW,
-                // SYSTEM VIEW (information_schema itself).
                 kind: if table_type.contains("VIEW") {
                     ObjectKind::View
                 } else {
@@ -301,8 +279,6 @@ impl MySqlCatalog {
         opts: ListOpts,
     ) -> Result<Page<ObjectNode>, DbError> {
         let prefix = opts.prefix.as_deref().unwrap_or("").to_string();
-        // Columns page in declared (ordinal) order; the resume token is the
-        // last ordinal position.
         let after: u64 = resume_str(&opts.resume).parse().unwrap_or(0);
         let mut guard = self.conn.lock().await;
         let conn = guard.as_mut().ok_or(DbError::Closed)?;
@@ -345,8 +321,6 @@ impl MySqlCatalog {
         let mut guard = self.conn.lock().await;
         let conn = guard.as_mut().ok_or(DbError::Closed)?;
 
-        // Table-level facts (cheap estimates — table_rows is the storage
-        // engine's estimate, surfaced as such).
         type TableFacts = (String, Option<String>, Option<u64>, Option<u64>, String);
         let fact_row: Option<TableFacts> = conn
             .exec_first(
@@ -460,9 +434,6 @@ impl MySqlCatalog {
     }
 }
 
-/// Render `information_schema.statistics` rows (already ordered by
-/// index_name, seq_in_index) as the cross-driver `indexes` JSON array:
-/// `[{"name": …, "columns": […], "unique": bool, "primary": bool}, …]`.
 fn indexes_json(rows: &[(String, i64, String)]) -> String {
     let mut out = String::from("[");
     let mut current: Option<(&str, bool, Vec<&str>)> = None;

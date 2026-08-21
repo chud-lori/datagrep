@@ -1,5 +1,3 @@
-//! [`PostgresDriver`]: the `Driver` impl.
-
 use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,15 +19,6 @@ use crate::connection::PgConnection;
 use crate::error::TlsMode;
 use crate::pool::PgPool;
 
-/// Capability flags this driver's baseline (pre-handshake) [`Capabilities`]
-/// reports. Note: six capabilities Postgres genuinely has
-/// (`NESTED_TRANSACTIONS`, `EXPLAIN_ANALYZE`, `MULTI_STATEMENT`,
-/// `POSITIONAL_PARAMS`, `EXPORT_STREAMING`, `EXPRESSION_FILTER`) have no bit
-/// on `datagrep_api::Caps` (`crates/datagrep-api/src/caps.rs` defines only the
-/// ten below). Since `datagrep-api` is the frozen seam this driver must not
-/// modify, we set every flag that *does* exist and applies to Postgres, and
-/// leave the gap documented rather than inventing bits that wouldn't compile
-/// against the real `Caps` type.
 pub const PG_CAPS: Caps = Caps::TRANSACTIONS
     .union(Caps::DDL)
     .union(Caps::EXPLAIN)
@@ -40,15 +29,8 @@ pub const PG_CAPS: Caps = Caps::TRANSACTIONS
     .union(Caps::SCHEMA_DECLARED)
     .union(Caps::KEY_ENUMERATION)
     .union(Caps::READ_ONLY_SESSION)
-    // `execute_mutate` wraps the batch in a real transaction and rolls back
-    // on any failure — all-or-nothing, honestly claimable.
     .union(Caps::ATOMIC_BATCH);
 
-/// Baseline capabilities shared by [`Driver::capabilities`] (pre-handshake)
-/// and [`PgConnection::capabilities`](crate::connection::PgConnection)
-/// (post-handshake) — Postgres has no version-dependent flags worth gating
-/// on in v1, so the two are identical, but they're kept as one function to
-/// avoid the two literals drifting apart.
 pub fn pg_capabilities() -> Capabilities {
     Capabilities {
         flags: PG_CAPS,
@@ -61,8 +43,6 @@ pub fn pg_capabilities() -> Capabilities {
     }
 }
 
-/// The Postgres driver adapter. Stateless — all per-server state lives in the
-/// [`PgConnection`]s it creates.
 #[derive(Debug, Default)]
 pub struct PostgresDriver;
 
@@ -149,10 +129,6 @@ impl Driver for PostgresDriver {
     }
 
     fn parse_url(&self, url: &str) -> Result<ConnectionConfig, ConfigError> {
-        // Delegates to tokio-postgres's own libpq/URL parser (it accepts both
-        // `postgres://user@host:port/db` and `key=value` DSNs) rather than
-        // hand-rolling a second parser that could disagree with the one we
-        // actually connect with.
         let cfg = tokio_postgres::Config::from_str(url).map_err(|e| ConfigError::InvalidUrl {
             reason: e.to_string(),
         })?;
@@ -174,19 +150,6 @@ impl Driver for PostgresDriver {
         if let Some(&port) = cfg.get_ports().first() {
             values.insert("port".to_string(), ConfigValue::Num(port as f64));
         }
-        // `sslmode` used to be dropped on the floor here, so
-        // `postgres://…?sslmode=require` produced `tls=disable` and then
-        // connected in plaintext without a word. That is the exact shape of a
-        // silent downgrade: the user stated a requirement and got the opposite,
-        // with nothing on screen to say so. Carry the mode through instead —
-        // `connect` refuses anything but `disable` while TLS is unimplemented,
-        // so a `require` URL now fails loudly rather than succeeding wrongly.
-        //
-        // `prefer` maps to `disable` and that is not a downgrade: `prefer`
-        // states no requirement, and it is what libpq itself does when TLS is
-        // unavailable. The catch-all leans the other way — `SslMode` is
-        // `#[non_exhaustive]`, and a mode this build has not heard of must fail
-        // closed, not open.
         let tls = match cfg.get_ssl_mode() {
             SslMode::Disable | SslMode::Prefer => TlsMode::Disable,
             SslMode::Require => TlsMode::Require,
@@ -232,8 +195,6 @@ impl Driver for PostgresDriver {
             })
         })?;
         if !matches!(tls_mode, TlsMode::Disable) {
-            // TLS is not implemented yet: fail fast and honestly rather than
-            // silently connecting in plaintext under a "require" label.
             return Err(DbError::Tls(format!(
                 "TLS not yet implemented (mode {tls_str:?}); use tls=disable for now"
             )));
@@ -256,12 +217,6 @@ impl Driver for PostgresDriver {
             .map_err(|_| DbError::Timeout)?
             .map_err(|e| DbError::Connect(e.to_string()))?;
 
-        // A driver panic is caught at the task boundary and becomes
-        // `DbError::DriverPanic`; here that boundary is this spawned
-        // connection-driving task. If it errors (socket drop, protocol
-        // violation) there is nothing to report it *to* by this point since
-        // `connect` has already returned — matching how tokio-postgres's own
-        // examples run the connection future, we trace and drop it.
         tokio::spawn(async move {
             if let Err(e) = connection.await {
                 tracing::warn!(error = %e, "postgres connection task ended with an error");
@@ -274,12 +229,6 @@ impl Driver for PostgresDriver {
             details: Vec::new(),
         };
 
-        // The config is kept alongside the primary session so the connection
-        // can dial an *additional* identical session on demand: a cursor or
-        // an interactive transaction pins the socket it runs on, and catalog
-        // browsing or the next query must not queue behind it (see
-        // `pool.rs`). Same host/user/database/application_name, so a pooled
-        // session is indistinguishable from the first one.
         let pool = PgPool::with_primary(pg_cfg, timeout, client);
         Ok(Box::new(PgConnection::new(pool, server_info)))
     }
@@ -344,9 +293,6 @@ mod tests {
             cfg.values.get("password"),
             Some(&ConfigValue::Str("hunter2".into()))
         );
-        // tokio-postgres's `Config` fills in the standard default (5432) even
-        // when the URL didn't specify one — same default `config_schema()`
-        // advertises, so this is a faithful "unspecified" reading, not a lie.
         assert_eq!(cfg.values.get("port"), Some(&ConfigValue::Num(5432.0)));
     }
 

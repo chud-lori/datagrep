@@ -1,20 +1,8 @@
-//! Syntax highlighting tokens, built on the same [`super::lexer::lex_chunks`]
-//! pass as the splitter and classifier. `Quoted` chunks map straight to
-//! [`TokenKind::String`] (string literals, including dollar-quoted) or
-//! [`TokenKind::Ident`] (quoted identifiers); `Comment` chunks map to
-//! [`TokenKind::Comment`]; `Code` chunks get a second, cheap pass that only
-//! needs to tell keywords from identifiers from numbers from punctuation —
-//! it never needs to resolve grammar, so it doesn't try to.
-
 use datagrep_api::SqlDialect;
 
 use super::lexer::{lex_chunks, Chunk, QuoteKind};
 use crate::{Token, TokenKind};
 
-/// Not an exhaustive SQL grammar — a highlighter word list, deliberately
-/// generous across dialects (a MySQL-only keyword lighting up in a Postgres
-/// buffer is a cosmetic non-issue; failing to highlight a common keyword is
-/// the annoying failure mode, so this errs toward inclusion).
 const KEYWORDS: &[&str] = &[
     "SELECT",
     "INSERT",

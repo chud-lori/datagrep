@@ -1,13 +1,3 @@
-//! Integration tests against a real `mongod` (ticket's "Tests" section).
-//! All `#[ignore]`d by default — run with `cargo test -p datagrep-drv-mongo --test
-//! integration -- --ignored` against a server reachable at `DATAGREP_TEST_MONGO`
-//! (default `mongodb://localhost:27017`; see `tests/README.md`).
-//!
-//! Setup (seeding collections) goes straight through the `mongodb` crate —
-//! that's normal test fixture code, not the thing under test. Everything
-//! *asserted on* goes through `datagrep_api::Connection`/`Catalog`/`Canceller`,
-//! the actual seam this crate implements.
-
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -30,7 +20,6 @@ fn test_uri() -> String {
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// A fresh, collision-free database name per test.
 fn unique_db(label: &str) -> String {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let ts = SystemTime::now()
@@ -57,8 +46,6 @@ async fn connect(database: &str) -> Arc<dyn Connection> {
     Arc::from(conn)
 }
 
-/// Seed fixture data directly through the `mongodb` crate — setup, not the
-/// thing under test.
 async fn raw_client() -> mongodb::Client {
     mongodb::Client::with_uri_str(&test_uri())
         .await
@@ -80,10 +67,6 @@ fn scan(collection: &str) -> Request {
         resume: None,
     })
 }
-
-// ---------------------------------------------------------------------
-// 1. Stream 100k docs, asserting incremental batches.
-// ---------------------------------------------------------------------
 
 #[tokio::test]
 #[ignore]
@@ -136,10 +119,6 @@ async fn streams_100k_documents_in_incremental_batches() {
     drop_db(&db).await;
 }
 
-// ---------------------------------------------------------------------
-// 2. A heterogeneous collection producing SchemaDelta events.
-// ---------------------------------------------------------------------
-
 #[tokio::test]
 #[ignore]
 async fn heterogeneous_collection_emits_schema_delta_add_column_events() {
@@ -171,9 +150,6 @@ async fn heterogeneous_collection_emits_schema_delta_add_column_events() {
         }
     }
 
-    // `_id` is always present and first; `a`, `b`, `c` follow as they're
-    // first observed. Each field must be reported exactly once — the grid
-    // grows a column, it does not re-announce one.
     assert_eq!(
         added.iter().filter(|n| n.as_str() == "a").count(),
         1,
@@ -189,10 +165,6 @@ async fn heterogeneous_collection_emits_schema_delta_add_column_events() {
 
     drop_db(&db).await;
 }
-
-// ---------------------------------------------------------------------
-// 3. Nested documents preserved exactly (not just "close enough").
-// ---------------------------------------------------------------------
 
 #[tokio::test]
 #[ignore]
@@ -270,11 +242,6 @@ async fn nested_documents_round_trip_exactly() {
     drop_db(&db).await;
 }
 
-// ---------------------------------------------------------------------
-// 4. Cancel mid-long-query: the stop button returns control promptly,
-//    regardless of whether the server actually honors killOp.
-// ---------------------------------------------------------------------
-
 #[tokio::test]
 #[ignore]
 async fn cancel_mid_long_query_returns_control_promptly() {
@@ -290,9 +257,6 @@ async fn cancel_mid_long_query_returns_control_promptly() {
     let conn = connect(&db).await;
     let canceller = conn.canceller();
 
-    // `$where` + `sleep()` is a reliable way to make a `find` visibly slow
-    // on a self-hosted `mongod` without depending on data volume or a
-    // missing index.
     let slow = conn.clone();
     let handle = tokio::spawn(async move {
         slow.execute(Request::native(
@@ -307,23 +271,14 @@ async fn cancel_mid_long_query_returns_control_promptly() {
     let outcome = canceller.cancel().await;
     let cancel_elapsed = start.elapsed();
 
-    // The stop button always returns control instantly: the *cancel call
-    // itself* must not block for anywhere near the query's full runtime,
-    // independent of whether the server actually kills it.
     assert!(
         cancel_elapsed < Duration::from_secs(3),
         "cancel() took {cancel_elapsed:?}, expected near-instant return"
     );
     println!("cancel outcome: {outcome:?} (kind: {:?})", canceller.kind());
 
-    // Don't block the test on the abandoned query's own completion — that's
-    // exactly what a real core does after calling cancel(). Just make sure
-    // the background task eventually finishes one way or another so the
-    // test process doesn't leak it.
     let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
 
-    // The connection must still be usable afterward — cancelling one query
-    // must never poison the connection.
     let mut cursor = conn
         .execute(scan("items"))
         .await
@@ -332,10 +287,6 @@ async fn cancel_mid_long_query_returns_control_promptly() {
 
     drop_db(&db).await;
 }
-
-// ---------------------------------------------------------------------
-// 5. Catalog listing + field inference.
-// ---------------------------------------------------------------------
 
 #[tokio::test]
 #[ignore]
@@ -419,18 +370,12 @@ async fn catalog_lists_and_infers() {
     drop_db(&db).await;
 }
 
-// ---------------------------------------------------------------------
-// Structured DDL (`Op::Ddl`)
-// ---------------------------------------------------------------------
-
 async fn ddl(conn: &dyn Connection, op: DdlOp) -> Result<(), datagrep_api::DbError> {
     let mut cur = conn.execute(Request::Op(Op::Ddl(op))).await?;
     while cur.next_batch(FetchHint::default()).await?.is_some() {}
     Ok(())
 }
 
-/// Drop, rename and index creation as command documents, against the paths
-/// and kinds the catalog reports for them.
 #[tokio::test]
 #[ignore]
 async fn structured_ddl_round_trips_through_the_catalog() {
@@ -542,10 +487,6 @@ async fn structured_ddl_round_trips_through_the_catalog() {
     drop_db(&db).await;
 }
 
-/// Two preconditions this engine cannot express are refused rather than
-/// quietly meaning something else: `dropDatabase` succeeds on a database that
-/// never existed, and `createIndexes` is a no-op when the same index is
-/// already there.
 #[tokio::test]
 #[ignore]
 async fn preconditions_the_engine_cannot_express_are_refused() {
@@ -590,8 +531,6 @@ async fn preconditions_the_engine_cannot_express_are_refused() {
         );
     }
 
-    // The server's own answer, which is what makes the refusals above right:
-    // dropping something that was never there is a success.
     let raw = raw_client().await;
     let ok = raw
         .database(&db)

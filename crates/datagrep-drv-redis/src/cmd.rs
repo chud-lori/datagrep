@@ -1,18 +1,9 @@
-//! Small, dependency-free helpers shared by `connection.rs` and
-//! `catalog.rs`: building a `redis::Cmd` from tokenized arguments,
-//! compiling a [`Predicate`] to a `SCAN`-style glob for `Op::Scan`, and
-//! recognizing the handful of commands that block the connection (the
-//! `Canceller` needs to know before one is dispatched).
-
 use std::sync::Arc;
 
 use datagrep_api::request::Predicate;
 use datagrep_api::value::Value;
 use datagrep_api::DbError;
 
-/// Build a `redis::Cmd` from already-tokenized redis-cli-style arguments
-/// (`datagrep_lang::redis::tokenize_args`'s output). Arguments are sent as raw
-/// bytes — Redis commands are binary-safe and we must not reinterpret them.
 pub fn cmd_from_args<I, S>(args: I) -> redis::Cmd
 where
     I: IntoIterator<Item = S>,
@@ -25,14 +16,6 @@ where
     cmd
 }
 
-/// Commands that block the connection waiting on the server; cancelling one
-/// needs a real `CLIENT KILL ID` from a second connection, since simply
-/// abandoning it client-side would leave the socket hung until the server's
-/// own timeout.
-/// Matched case-insensitively against the first token only — `WAIT`/`WAITAOF`
-/// block unconditionally; the `B`-prefixed list commands and `XREAD`/
-/// `XREADGROUP` only block when a `BLOCK` option is present, which
-/// `is_blocking_invocation` checks separately.
 const UNCONDITIONALLY_BLOCKING: &[&str] = &["WAIT", "WAITAOF"];
 
 const ALWAYS_BLOCKING_COMMANDS: &[&str] = &[
@@ -49,10 +32,6 @@ const ALWAYS_BLOCKING_COMMANDS: &[&str] = &[
     "SSUBSCRIBE",
 ];
 
-/// Whether dispatching `args` (already tokenized, `args[0]` the command
-/// name) will block the connection until the server has something to say —
-/// the signal `connection.rs` uses to arm the canceller's `CLIENT KILL`
-/// path instead of the default `ClientAbandon` one.
 pub fn is_blocking_invocation(args: &[String]) -> bool {
     let Some(cmd) = args.first() else {
         return false;
@@ -68,17 +47,6 @@ pub fn is_blocking_invocation(args: &[String]) -> bool {
     false
 }
 
-/// Compile a portable [`Predicate`] from `Op::Scan` into a Redis `MATCH`
-/// glob. `Shape::Pairs` has no real field names —
-/// the only addressable "column" of a Redis key listing is the key name
-/// itself, so this only understands predicates against a field literally
-/// named `key`, matching `datagrep_api::value::FieldPath::field("key")`.
-///
-/// Returns `Err(DbError::Unsupported)` — never a silently dropped filter —
-/// for anything this narrow glob model cannot express: comparisons other
-/// than equality/prefix-like patterns, multi-field/boolean combinations,
-/// `Exists`/`IsNull` (Redis pairs have no notion of a present-but-null
-/// field), etc.
 pub fn compile_glob(predicate: &Predicate) -> Result<String, DbError> {
     match predicate {
         Predicate::Eq {
@@ -103,8 +71,6 @@ fn is_key_field(field: &datagrep_api::value::FieldPath) -> bool {
     )
 }
 
-/// Escape Redis glob metacharacters (`* ? [ ]` and `\` itself) so an exact
-/// string can be used as a literal `MATCH` pattern.
 pub fn escape_glob_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -116,16 +82,10 @@ pub fn escape_glob_literal(s: &str) -> String {
     out
 }
 
-/// Split a stored keyspace prefix (`"user:"`) into a `MATCH` glob covering
-/// everything under it.
 pub fn prefix_glob(prefix: &str) -> String {
     format!("{}*", escape_glob_literal(prefix))
 }
 
-/// Derive top-level colon-delimited prefixes from a *sample* of key names —
-/// the catalog builds its tree by splitting sampled keys on `:`, never by
-/// walking the whole keyspace. Prefixes are returned with their trailing
-/// `:` kept, insertion-ordered by first appearance, deduplicated.
 pub fn derive_prefixes(sampled_keys: &[String]) -> Vec<Arc<str>> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();

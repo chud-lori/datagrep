@@ -1,26 +1,8 @@
-//! `json` (one array, streamed comma-joined — never built as an in-memory
-//! `Vec<Value>` and serialized at the end) and `ndjson` (one object per
-//! line). Both write one row at a time and retain nothing between calls.
-//!
-//! A `Null` cell serializes as JSON `null`; an `Absent` cell **omits the
-//! key** — the JSON-native way to say "this field truly is not here",
-//! distinct from "here, and null". A field absent from a document is a
-//! different fact from a field that is null, and JSON is the one output
-//! format that can carry that split without inventing a sentinel.
-
 use std::io::{self, Write};
 
 use super::{Row, RowSink, Summary};
 use crate::value_text::CellText;
 
-/// Serialize one row as a JSON object, streamed straight to the writer.
-///
-/// Types are real JSON types: booleans are `true`/`false`, integers and
-/// (finite) floats are numbers — `{"id":1}`, never `{"id":"1"}` — so the
-/// README's `--format json | jq` filters (`.id > 40`, `select(.b)`) work. A
-/// `json`/`jsonb` cell is spliced in **verbatim** (validated first): nested
-/// JSON stays nested, key order and number formatting untouched, never
-/// double-encoded as an escaped string.
 fn write_row_object<W: Write>(out: &mut W, columns: &[String], row: &Row) -> io::Result<()> {
     out.write_all(b"{")?;
     let mut first = true;
@@ -45,14 +27,9 @@ fn write_cell<W: Write>(out: &mut W, cell: &CellText) -> io::Result<()> {
         CellText::Bool(b) => out.write_all(if *b { b"true" } else { b"false" }),
         CellText::I64(n) => write!(out, "{n}"),
         CellText::U64(n) => write!(out, "{n}"),
-        // JSON has no NaN/Infinity; a non-finite float becomes its display
-        // text as a string rather than lying with `null`.
         CellText::F64(n) if n.is_finite() => Ok(serde_json::to_writer(&mut *out, n)?),
         CellText::F64(n) => Ok(serde_json::to_writer(&mut *out, &n.to_string())?),
         CellText::Json(raw) => {
-            // Verbatim passthrough, gated on the text actually being JSON
-            // (it always is for a server-side json/jsonb column; anything
-            // else would corrupt the output stream).
             if serde_json::from_str::<serde_json::Value>(raw).is_ok() {
                 out.write_all(raw.as_bytes())
             } else {
@@ -174,10 +151,6 @@ mod tests {
         );
     }
 
-    /// The README's `| jq` pitch: scalars keep their JSON types — an int is
-    /// `1` (not `"1"`), a bool is `true`, a float is `3.5` — and a
-    /// `json`/`jsonb` cell arrives as nested JSON, verbatim, never as an
-    /// escaped string.
     #[test]
     fn scalars_keep_their_json_types_and_json_cells_nest_verbatim() {
         let mut out = Vec::new();
@@ -211,8 +184,6 @@ mod tests {
         assert_eq!(parsed["js"]["k"], serde_json::json!(1));
     }
 
-    /// A json cell whose text somehow is not valid JSON (driver bug) must not
-    /// corrupt the output stream — it degrades to a truthful string.
     #[test]
     fn invalid_json_cell_degrades_to_a_string() {
         let mut out = Vec::new();

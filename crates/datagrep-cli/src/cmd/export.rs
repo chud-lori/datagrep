@@ -1,17 +1,3 @@
-//! `datagrep export` (ticket item 2): stream one statement's result straight to a
-//! file, rows/sec progress to **stderr** so stdout stays pipeable (the ticket
-//! is explicit stdout must stay clean — export doesn't even use it).
-//!
-//! Rides [`datagrep_core::CoreApi::run_export`], the store-free streaming
-//! endpoint: export streams driver→Arrow→writer→disk with a fixed buffer,
-//! never touching grid state, because "export all" is not "load all". Each
-//! driver chunk is converted, written to the [`crate::format::RowSink`], and
-//! dropped before the next chunk is pulled; nothing is ever admitted to a
-//! result store, so the process's resident result bytes stay at zero however
-//! many rows go by — which is exactly what the streaming test below asserts
-//! against `CoreApi::result_bytes`, the white-box counter for the resident
-//! result budget.
-
 use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 use std::time::Instant;
@@ -90,8 +76,6 @@ pub async fn run(ctx: &Context, args: &ExportArgs) -> Result<(), CliError> {
         statement_index += 1;
 
         if timed_out {
-            // A partial export must never exit 0 (TEST-REPORT F1: silent
-            // truncation of an export is the worst failure mode there is).
             out.flush()?;
             return Err(CliError::query(format!(
                 "export stopped by --timeout after {rows_this_statement} rows — {} is INCOMPLETE",
@@ -108,8 +92,6 @@ pub async fn run(ctx: &Context, args: &ExportArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-/// A sink error carries the writer's own I/O failure through `DbError::Io`;
-/// everything else is a genuine query error.
 fn map_export_err(err: DbError) -> CliError {
     match err {
         DbError::Io(io) => CliError::query(format!("could not write the export file: {io}")),
@@ -117,27 +99,17 @@ fn map_export_err(err: DbError) -> CliError {
     }
 }
 
-/// Adapter: `datagrep_core::ExportSink` (driver chunks in) → `format::RowSink`
-/// (formatted rows out). Holds exactly one chunk's rows at a time — they are
-/// converted, written, and dropped before the core pulls the next chunk.
 struct ExportRowSink<'w> {
     inner: Box<dyn RowSink + 'w>,
     deadline: Option<Instant>,
-    /// Explicit `--limit N`: hand the writer exactly N rows, then stop. The
-    /// boundary is exact — the final chunk is truncated, never "N-ish".
     limit: Option<u64>,
     stderr_is_tty: bool,
     started_at: std::time::Instant,
-    /// Last progress line emitted, for throttling (a 7s export must not spam
-    /// hundreds of stderr lines into a pipe).
     last_progress: Option<std::time::Instant>,
     started: bool,
     columns: Vec<String>,
-    /// Set once the shape is known to be an acknowledgement (no rows).
     ack: Option<(Option<u64>, Option<String>)>,
     rows_written: u64,
-    /// The deadline stopped this export early: the file is incomplete and the
-    /// caller must exit non-zero.
     timed_out: bool,
     note: Option<String>,
 }
@@ -170,9 +142,6 @@ impl<'w> ExportRowSink<'w> {
             return Ok(());
         }
         if self.columns.is_empty() && width_hint > 0 {
-            // A shape that never declared columns (`Shape::Unknown` narrowed
-            // by its first chunk): synthesize stable placeholder names, the
-            // same convention as the store's `synthesized_schema`.
             self.columns = (0..width_hint).map(|i| format!("col{i}")).collect();
         }
         self.inner.start(&self.columns)?;
@@ -181,8 +150,6 @@ impl<'w> ExportRowSink<'w> {
     }
 
     fn progress(&mut self) {
-        // Throttle: ~10/s on a TTY (smooth `\r` refresh), ~1/s into a pipe
-        // (each line persists — hundreds of them is spam, not progress).
         let min_interval = if self.stderr_is_tty {
             std::time::Duration::from_millis(100)
         } else {
@@ -205,8 +172,6 @@ impl<'w> ExportRowSink<'w> {
         }
     }
 
-    /// Write the footer once the export is over. An Ack-shaped statement's
-    /// affected count and message were captured from the shape in `begin`.
     fn finish(&mut self) -> Result<(), CliError> {
         self.ensure_started(0)?;
         let affected = self.ack.as_ref().and_then(|(n, _)| *n);
@@ -237,8 +202,6 @@ impl ExportSink for ExportRowSink<'_> {
             Shape::Ack { affected, message } => {
                 self.ack = Some((*affected, message.as_ref().map(|m| m.to_string())));
             }
-            // Graph results have no CLI rendering yet; Unknown narrows with
-            // the first chunk (`ensure_started`'s width hint).
             Shape::Graph(_) | Shape::Unknown => {}
         }
         Ok(())
@@ -266,9 +229,6 @@ impl ExportSink for ExportRowSink<'_> {
                 .collect(),
             Payload::Graph(_) | Payload::Empty => Vec::new(),
         };
-        // `--limit N` is exact: truncate the chunk that crosses the boundary
-        // so exactly N rows reach the file — never "N plus whatever batch was
-        // in flight".
         let mut hit_limit = false;
         if let Some(limit) = self.limit {
             let remaining = limit.saturating_sub(self.rows_written);
@@ -295,16 +255,11 @@ impl ExportSink for ExportRowSink<'_> {
     }
 }
 
-/// A document cell as its true JSON text — same rendering as the `query`
-/// path (`streaming::doc_cell`), duplicated here because that one is shaped
-/// around `WindowSlice` offsets while this one takes the raw driver value.
 fn doc_cell(v: &Value) -> CellText {
     match v {
         Value::Null => CellText::Null,
         Value::Absent => CellText::Absent,
         other => match serde_json::to_string(&crate::value_text::value_to_json(other)) {
-            // `Json`, not `Text`: the JSON formats then emit the document as
-            // nested JSON rather than one big escaped string.
             Ok(json) => CellText::Json(json),
             Err(_) => CellText::Text(String::from("<unserializable document>")),
         },
@@ -374,11 +329,6 @@ mod tests {
         assert!(contents.contains("2,y"));
     }
 
-    /// **Gap 3 proof at the CLI seam**: a ~200k-row export goes through
-    /// `CoreApi::run_export` and never touches the result store — the
-    /// process-wide resident result byte counter (`CoreApi::result_bytes`,
-    /// the resident result budget) stays at zero for the whole export, and
-    /// every row still reaches the file.
     #[tokio::test]
     async fn export_of_200k_rows_never_grows_the_result_store() {
         let ctx = crate::context::test_ctx();
@@ -415,9 +365,6 @@ mod tests {
         );
     }
 
-    /// **The F1 regression test**: an export larger than the grid's 500k soft
-    /// row cap delivers **every row, exactly** — the cap belongs to the
-    /// result store, and export never touches the store.
     #[tokio::test]
     async fn export_beyond_the_soft_row_cap_delivers_every_row() {
         let ctx = crate::context::test_ctx();
@@ -449,8 +396,6 @@ mod tests {
         );
     }
 
-    /// `--limit N` is exact: exactly N rows reach the file, not "N plus
-    /// whatever batch was in flight".
     #[tokio::test]
     async fn export_limit_yields_exactly_n_rows() {
         let ctx = crate::context::test_ctx();
@@ -484,8 +429,6 @@ mod tests {
         );
     }
 
-    /// A zero-row result still gets its CSV header: an empty file with no
-    /// columns is indistinguishable from a broken export.
     #[tokio::test]
     async fn zero_row_export_still_writes_the_csv_header() {
         let ctx = crate::context::test_ctx();

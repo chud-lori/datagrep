@@ -1,47 +1,3 @@
-//! `Op::Mutate` -> guarded single-document Elasticsearch writes.
-//!
-//! Everything in this module is pure — compiling a [`Mutation`] into the HTTP
-//! request it becomes, and folding per-write outcomes into the batch report —
-//! so the whole write path is unit-testable without a cluster. The network
-//! side (issuing the requests serially, the TSDB gate) lives in
-//! [`crate::connection`].
-//!
-//! # The model: guarded, serial, halt-and-report
-//!
-//! Elasticsearch has no multi-document transactions, so a batch cannot be
-//! atomic and this driver does not pretend otherwise (`Caps::ATOMIC_BATCH` is
-//! off). What the engine *does* have — and SQL does not — is a real
-//! per-document compare-and-swap: `if_seq_no`/`if_primary_term`. Every
-//! generated write therefore:
-//!
-//! - **carries the guard, or is refused.** A mutation whose `expect` does not
-//!   name `_seq_no` and `_primary_term` is never sent unguarded — the same
-//!   rule as "an empty identity is refused, never guessed at".
-//! - **is applied one at a time, and the first failure halts the batch.** Not
-//!   roll back (impossible), not continue (an unbounded unreviewed partial
-//!   write). The report names *applied*, *failed* and *not attempted* per
-//!   mutation, as one document each (`Shape::Documents`), plus a summary
-//!   `Notice` — so a partial batch is a readable prefix, never a mystery.
-//! - **uses `refresh=wait_for`, never `refresh=true`.** A forced refresh per
-//!   save is paid three times over by the cluster; `wait_for` is bounded by
-//!   the request's own deadline (`EsHttp` always applies a timeout, so an
-//!   index with `refresh_interval: -1` cannot hang a write forever), and a
-//!   silent degradation to an immediate refresh (`forced_refresh: true` in
-//!   the response) is surfaced as a `Notice`.
-//!
-//! # The TSDB caveat, because a returned `_seq_no` can be a lie
-//!
-//! Elasticsearch >= 9.4 disables sequence numbers by default for
-//! time-series-mode indices: searches return **sentinel** `_seq_no` values
-//! and `if_seq_no` writes error out. A guard built from a sentinel protects
-//! nothing, so [`guard_unsupported_reason`] classifies an index's settings
-//! and the connection refuses the batch up front with the reason, rather
-//! than discovering it as a per-document 400. Two further layers keep this
-//! from ever silently clobbering: negative/zero guard values are refused at
-//! compile time as sentinels, and even if detection is impossible (settings
-//! unreadable) the write still carries `if_seq_no`, which such an index
-//! rejects rather than applies.
-
 use std::sync::Arc;
 
 use serde_json::{json, Map, Value as Json};
@@ -55,10 +11,6 @@ use datagrep_api::value::{Document, FieldPath, PathSeg, Value};
 use crate::http::{version_pair, Method, Product};
 use crate::value::value_to_json;
 
-/// Hit-envelope fields that are never writable. Generated writes send back
-/// `_source` fields only — echoing envelope metadata into a document is the
-/// exact class of bug that has kept another client's update button broken on
-/// ES 8 since 2022 (`Field [_ignored] is a metadata field…`).
 const ENVELOPE_FIELDS: &[&str] = &[
     "_index",
     "_id",
@@ -71,43 +23,22 @@ const ENVELOPE_FIELDS: &[&str] = &[
     "_ignored",
 ];
 
-/// One compiled write: the exact HTTP request a mutation becomes, plus the
-/// identity fields the report echoes back.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledWrite {
-    /// `"update"`, `"delete"` or `"insert"` — for the report.
     pub op: &'static str,
-    /// Raw (unencoded) index name, for the per-index TSDB gate.
     pub index: String,
     pub id: String,
     pub routing: Option<String>,
     pub method: Method,
-    /// URL path with the index and id percent-encoded.
     pub path: String,
-    /// Query parameters, guard included.
     pub query: Vec<(&'static str, String)>,
-    /// The request body: a `{"doc": …}` partial merge or a `{"script": …}`
-    /// (an update, depending on whether it removes a field), the bare
-    /// `_source` object (an insert), or `None` (a delete).
     pub body: Option<Json>,
 }
 
-/// Whether generated writes may send `include_source_on_error=false`.
-///
-/// ES >= 8.18 defaults `include_source_on_error` to **true**, so a
-/// parse-failure error body can echo the whole document into an error
-/// message; this driver goes to real trouble never to leak user data that
-/// way, so the flag is turned off. It cannot be sent unconditionally:
-/// older Elasticsearch and OpenSearch reject unrecognized parameters with a
-/// 400, which would break every write there.
 pub fn supports_include_source_on_error(product: Product, version: &str) -> bool {
     matches!(product, Product::Elasticsearch) && version_pair(version) >= (8, 18)
 }
 
-/// Compile one [`Mutation`] into the guarded request it becomes, or refuse
-/// with the reason. Refusals here are *pre-flight*: the connection compiles
-/// the whole batch before sending anything, so a refused mutation means no
-/// document was touched.
 pub fn compile_mutation(
     mutation: &Mutation,
     include_source_on_error: bool,
@@ -118,11 +49,6 @@ pub fn compile_mutation(
         } => {
             let identity = identity_from_key(key)?;
             let guard = guard_from_expect(expect)?;
-            // A pure-set update stays a `{"doc": …}` partial merge (cheaper, and
-            // it keeps `_update`'s recursive-merge semantics). It escalates to a
-            // single `{"script": …}` only when a field removal (`Value::Absent`)
-            // is present — because ES ignores `doc` outright when a script is
-            // also given, so set + remove must live in one script.
             let body = sets_to_update_body(sets)?;
             let mut query = guard_query(&guard, identity.routing.as_deref());
             if include_source_on_error {
@@ -167,29 +93,12 @@ pub fn compile_mutation(
     }
 }
 
-/// Compile a [`Mutation::Insert`] into the create request it becomes.
-///
-/// The insert guard is `op_type=create`, **not** `if_seq_no`: a document that
-/// does not exist yet has no sequence number to compare, and `op_type=create`
-/// already 409s on an existing id instead of silently overwriting it (the exact
-/// blind `PUT` this driver refuses to emit). So an insert carries no `expect`.
-///
-/// - **user-supplied id** (`_id` in the document envelope) →
-///   `PUT /<index>/_doc/<id>?op_type=create`.
-/// - **no id** → `POST /<index>/_doc`, and the server generates one.
-///
-/// The body is the new document's `_source` only: the envelope metadata
-/// (`_index`/`_id`/`_routing`/`_seq_no`/…) is stripped, never written back into
-/// the document — echoing it is the class of bug that has kept another client's
-/// insert path broken on ES 8 since 2022 (`Field [_ignored] is a metadata field…`).
+// Insert guards with op_type=create (409 on an existing id), not if_seq_no; the body is _source only — echoing envelope metadata breaks on ES 8.
 fn compile_insert(
     path: &ObjectPath,
     doc: &Value,
     include_source_on_error: bool,
 ) -> Result<CompiledWrite, DbError> {
-    // The target index is the object path the grid is bound to — an insert has
-    // no `key` to carry `_index`, the same way Mongo/SQL inserts take the
-    // collection/table from the path.
     let index = path
         .parts()
         .first()
@@ -222,10 +131,6 @@ fn compile_insert(
                 let s = scalar_to_string(value).ok_or_else(|| DbError::Unsupported {
                     feature: format!("insert `_id` must be a string (got {value:?})"),
                 })?;
-                // An empty id is no id: fall through to a server-generated
-                // `POST /<index>/_doc` rather than `PUT /<index>/_doc/`, which
-                // 400s server-side mid-batch. Mirrors `identity_from_key`'s
-                // empty-id filter.
                 if s.is_empty() {
                     continue;
                 }
@@ -238,8 +143,6 @@ fn compile_insert(
                 let s = scalar_to_string(value).ok_or_else(|| DbError::Unsupported {
                     feature: format!("insert `_routing` must be a string (got {value:?})"),
                 })?;
-                // An empty routing string is no routing, not a `routing=` with
-                // an empty value.
                 if s.is_empty() {
                     continue;
                 }
@@ -249,9 +152,6 @@ fn compile_insert(
             other if ENVELOPE_FIELDS.contains(&other) => continue,
             _ => {
                 if contains_absent(value) {
-                    // In a brand-new document an `Absent` field is meaningless —
-                    // `value_to_json` would degrade it to a JSON null, silently
-                    // inserting a null-valued field rather than omitting it.
                     return Err(DbError::Unsupported {
                         feature: format!(
                             "inserting field `{name}` with an absent value: a new document either \
@@ -275,8 +175,6 @@ fn compile_insert(
     let (method, request_path, id) = match id {
         Some(id) => {
             refuse_unaddressable_id(&id)?;
-            // `op_type=create` is the whole guard: it 409s on an existing id
-            // instead of overwriting it. NEVER a bare `PUT` (a blind clobber).
             query.push(("op_type", "create".to_string()));
             let p = format!("/{}/_doc/{}", encode_segment(&index), encode_segment(&id));
             (Method::Put, p, id)
@@ -308,9 +206,6 @@ fn compile_insert(
     })
 }
 
-/// `_index` + `_id` (+ `_routing`) out of a mutation's `key`. Anything else —
-/// a missing field, an unknown field, an ambiguous duplicate — is refused:
-/// this driver never guesses which document a write is for.
 struct WriteIdentity {
     index: String,
     id: String,
@@ -333,9 +228,6 @@ fn identity_from_key(key: &[(FieldPath, Value)]) -> Result<WriteIdentity, DbErro
             "_index" => &mut index,
             "_id" => &mut id,
             "_routing" => {
-                // `_routing` is refused twice regardless of value: a null entry
-                // used to `continue` before the ambiguity check, so a key that
-                // named `_routing` a second time slipped through.
                 if routing_seen {
                     return Err(DbError::Unsupported {
                         feature: "mutation key names `_routing` twice — refusing an ambiguous key"
@@ -343,8 +235,6 @@ fn identity_from_key(key: &[(FieldPath, Value)]) -> Result<WriteIdentity, DbErro
                     });
                 }
                 routing_seen = true;
-                // A hit without custom routing legitimately carries no
-                // `_routing`; a null/absent value means exactly that.
                 if matches!(value, Value::Null | Value::Absent) {
                     continue;
                 }
@@ -379,9 +269,6 @@ fn identity_from_key(key: &[(FieldPath, Value)]) -> Result<WriteIdentity, DbErro
     Ok(WriteIdentity { index, id, routing })
 }
 
-/// A guarded/generated write targets exactly one concrete index, never a
-/// wildcard or a comma-list — those would fan a single-document write out
-/// across more than one thing.
 fn refuse_wildcard_index(index: &str) -> Result<(), DbError> {
     if index.contains('*') || index.contains(',') {
         return Err(DbError::Unsupported {
@@ -394,12 +281,6 @@ fn refuse_wildcard_index(index: &str) -> Result<(), DbError> {
     Ok(())
 }
 
-/// A `_id` of `.` or `..` is a legal document id (creatable via `_bulk`) but an
-/// unaddressable write target: URL path resolution (WHATWG, which reqwest's
-/// `url` applies) normalises the dot-segment away — `/<index>/_doc/..` collapses
-/// to `/<index>`, the delete-index endpoint — and percent-encoding does not save
-/// it, because that normalisation also folds `%2e`. Refuse it rather than write
-/// to the wrong resource.
 fn refuse_unaddressable_id(id: &str) -> Result<(), DbError> {
     if id == "." || id == ".." {
         return Err(DbError::Unsupported {
@@ -422,10 +303,6 @@ fn missing_identity(field: &str) -> DbError {
     }
 }
 
-/// The optimistic-concurrency precondition: exactly `_seq_no` +
-/// `_primary_term`, both real (non-sentinel) values. Anything else is
-/// refused — Elasticsearch has no generic per-field compare-and-swap, and a
-/// write without the guard would be a blind clobber.
 struct Guard {
     seq_no: u64,
     primary_term: u64,
@@ -469,10 +346,6 @@ fn guard_from_expect(expect: &[(FieldPath, Value)]) -> Result<Guard, DbError> {
                 })
             }
         };
-        // Negative sequence numbers (and a primary term of 0) are engine
-        // sentinels, not real positions: an index with sequence numbers
-        // disabled (a time-series index on ES >= 9.4) returns them from
-        // search, and a guard built from one protects nothing.
         let floor = if name == Some("_seq_no") { 0 } else { 1 };
         if n < floor {
             return Err(DbError::Unsupported {
@@ -505,29 +378,15 @@ fn guard_query(guard: &Guard, routing: Option<&str>) -> Vec<(&'static str, Strin
     let mut query = vec![
         ("if_seq_no", guard.seq_no.to_string()),
         ("if_primary_term", guard.primary_term.to_string()),
-        // `wait_for`, never `true`: see the module doc.
+        // `wait_for`, never `true`: read-your-writes without forcing an immediate shard refresh.
         ("refresh", "wait_for".to_string()),
     ];
     if let Some(routing) = routing {
-        // Routing is part of identity: without it the write lands on the
-        // wrong shard of a custom-routed index (or 400s).
         query.push(("routing", routing.to_string()));
     }
     query
 }
 
-/// `sets` -> an `_update` body: either a `{"doc": …}` partial merge or a
-/// single `{"script": …}`.
-///
-/// A `Value::Absent` in `sets` means "remove this field" (`value.rs`'s
-/// Absent -> null degradation would otherwise silently set it to null).
-/// Removal can only be expressed with a scripted update, and Elasticsearch is
-/// explicit that *"if both `doc` and `script` are specified, then `doc` is
-/// ignored"* — so a mutation that both sets and removes fields must compile to
-/// **one script**, never `doc` + `script`. A pure-set update therefore stays a
-/// cheaper `{"doc": …}` partial merge (which keeps recursive-merge semantics),
-/// and only the presence of at least one removal escalates the whole thing to a
-/// script.
 fn sets_to_update_body(sets: &[(FieldPath, Value)]) -> Result<Json, DbError> {
     if sets.is_empty() {
         return Err(DbError::Unsupported {
@@ -541,10 +400,6 @@ fn sets_to_update_body(sets: &[(FieldPath, Value)]) -> Result<Json, DbError> {
             // A top-level Absent is an explicit "remove this field".
             removals.push(path);
         } else if contains_absent(value) {
-            // A *nested* Absent (inside an object/array set-value) is a
-            // different animal: `value_to_json` would degrade it to null one
-            // level down, and there is no unambiguous "remove `obj.f` while
-            // setting the rest of `obj`" — refuse it rather than approximate.
             return Err(DbError::Unsupported {
                 feature: format!(
                     "set `{path}`: a nested absent value is ambiguous (it would silently become a \
@@ -565,8 +420,6 @@ fn sets_to_update_body(sets: &[(FieldPath, Value)]) -> Result<Json, DbError> {
     }
 }
 
-/// The `{"doc": …}` partial document, built as *nested* objects so `_update`'s
-/// recursive merge touches only the named leaves.
 fn build_partial_doc(assignments: &[(&FieldPath, &Value)]) -> Result<Json, DbError> {
     let mut root = Map::new();
     for (path, value) in assignments {
@@ -576,31 +429,18 @@ fn build_partial_doc(assignments: &[(&FieldPath, &Value)]) -> Result<Json, DbErr
     Ok(Json::Object(root))
 }
 
-/// Compile the assignments and removals into a **single** scripted update:
-/// `{"script": {"lang":"painless", "source": …, "params": …}}`. Injected values
-/// ride in `params` — never string-interpolated into the Painless source, which
-/// would be both an injection hole and a type-fidelity loss.
 fn build_script_body(
     assignments: &[(&FieldPath, &Value)],
     removals: &[&FieldPath],
 ) -> Result<Json, DbError> {
     let mut lines: Vec<String> = Vec::new();
     let mut params = Map::new();
-    // The same overlap discipline as the doc path's `insert_nested`: a leaf that
-    // is written twice, AND a path that is a *prefix* of another in either
-    // direction (`a` alongside `a.b`), are a caller bug — not a
-    // last-write-wins. This spans assignments and removals together, so a set
-    // and a remove of overlapping paths is refused rather than silently
-    // resolved by emission order (all sets, then all removes).
     let mut seen: Vec<Vec<&str>> = Vec::new();
 
     for (i, (path, value)) in assignments.iter().enumerate() {
         let names = script_field_names(path)?;
         refuse_path_overlap(&seen, &names, path)?;
         seen.push(names.clone());
-        // Create any missing intermediate maps, shallow-to-deep, so the leaf
-        // assignment cannot NPE on an absent parent — the script analogue of
-        // the partial doc's nested-object building.
         for depth in 1..names.len() {
             let prefix = access_expr(&names[..depth]);
             lines.push(format!(
@@ -619,9 +459,6 @@ fn build_script_body(
         if names.len() == 1 {
             lines.push(format!("ctx._source.remove('{}');", names[0]));
         } else {
-            // Remove the leaf from its parent, but only once every prefix is
-            // confirmed a Map — `&&` short-circuits, so an absent parent is a
-            // no-op (the field is already gone) rather than an NPE.
             let guards: Vec<String> = (1..names.len())
                 .map(|depth| format!("{} instanceof Map", access_expr(&names[..depth])))
                 .collect();
@@ -643,11 +480,6 @@ fn build_script_body(
     }))
 }
 
-/// Refuse `names` if it collides with any path already in `seen`: an exact
-/// duplicate, or one being a prefix of the other in either direction (`a`
-/// versus `a.b`). Two paths collide exactly when their shared leading segments
-/// are equal — siblings (`a.b` versus `a.c`) do not. This is the script-path
-/// mirror of `insert_nested`'s scalar-vs-object overlap refusal.
 fn refuse_path_overlap(
     seen: &[Vec<&str>],
     names: &[&str],
@@ -662,8 +494,6 @@ fn refuse_path_overlap(
     Ok(())
 }
 
-/// `ctx._source.a.b.c` for the field-name path `["a","b","c"]`. Only valid on
-/// names [`script_field_names`] has already proven safe Painless identifiers.
 fn access_expr(names: &[&str]) -> String {
     let mut expr = String::from("ctx._source");
     for name in names {
@@ -673,17 +503,11 @@ fn access_expr(names: &[&str]) -> String {
     expr
 }
 
-/// The field-name segments of a set path, refusing what neither an `_update`
-/// partial doc nor a script can address: an array-element index, the hit
-/// envelope, or an empty path.
 fn set_field_names(path: &FieldPath) -> Result<Vec<&str>, DbError> {
     let mut names: Vec<&str> = Vec::with_capacity(path.segments().len());
     for seg in path.segments() {
         match seg {
             PathSeg::Field(name) => names.push(name),
-            // A partial doc replaces arrays wholesale and Painless has no safe
-            // positional address either; pretending to edit one element would
-            // silently drop the others.
             PathSeg::Index(_) => {
                 return Err(DbError::Unsupported {
                     feature: format!(
@@ -713,12 +537,6 @@ fn set_field_names(path: &FieldPath) -> Result<Vec<&str>, DbError> {
     Ok(names)
 }
 
-/// [`set_field_names`], plus the extra discipline a scripted update needs: every
-/// segment must be a plain identifier, so it is safe both as Painless map
-/// member access (`ctx._source.name`) and as a single-quoted string literal
-/// (`.remove('name')`). A name that is not — a space, a dot inside the name, a
-/// quote — is refused rather than approximated into Painless the driver cannot
-/// vouch for (the same discipline as the array-element refusal).
 fn script_field_names(path: &FieldPath) -> Result<Vec<&str>, DbError> {
     let names = set_field_names(path)?;
     for name in &names {
@@ -735,8 +553,6 @@ fn script_field_names(path: &FieldPath) -> Result<Vec<&str>, DbError> {
     Ok(names)
 }
 
-/// A plain ASCII identifier: `[A-Za-z_][A-Za-z0-9_]*`. Safe as both Painless
-/// member access and a single-quoted literal, and it cannot carry an injection.
 fn is_safe_painless_field(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -746,10 +562,6 @@ fn is_safe_painless_field(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Insert `value` at `names` inside `root`, creating intermediate objects,
-/// refusing overlap: two sets that address the same leaf, or a leaf through
-/// which another set already wrote a scalar, are a caller bug that would
-/// otherwise resolve by silent last-write-wins.
 fn insert_nested(
     root: &mut Map<String, Json>,
     names: &[&str],
@@ -783,11 +595,6 @@ fn overlap(path: &FieldPath) -> DbError {
     }
 }
 
-/// Whether `value` is, or nests, a [`Value::Absent`]. `value_to_json` degrades
-/// Absent to a JSON null *recursively*, so a document/array set-value carrying a
-/// nested Absent would silently set that leaf to null in the partial document —
-/// the same field-removal ambiguity refused at the top level, hidden one level
-/// down.
 fn contains_absent(value: &Value) -> bool {
     match value {
         Value::Absent => true,
@@ -797,19 +604,6 @@ fn contains_absent(value: &Value) -> bool {
     }
 }
 
-/// From a `GET /<index>/_settings?flat_settings=true` response, the reason a
-/// guarded write against that index must be refused — or `None` when the
-/// guard is real. An alias/data-stream write target may expand to several
-/// concrete indices; if *any* of them cannot honour the guard, the whole
-/// target is refused.
-///
-/// `version` is the server's reported version. The time-series-mode hazard is
-/// **ES >= 9.4 only** (plan §3.2.3): that is where TSDB indices default to
-/// disabled sequence numbers and return sentinel `_seq_no` values. On 8.7–9.3 a
-/// time-series index tracks sequence numbers normally and the
-/// `disable_sequence_numbers` setting does not exist, so refusing there would
-/// reject legitimate edits and point at an unfollowable escape hatch. An index
-/// with sequence numbers *explicitly* disabled is refused on any version.
 pub fn guard_unsupported_reason(settings: &Json, version: &str) -> Option<String> {
     let sentinel_era = version_pair(version) >= (9, 4);
     let indices = settings.as_object()?;
@@ -846,19 +640,12 @@ pub fn guard_unsupported_reason(settings: &Json, version: &str) -> Option<String
     None
 }
 
-/// What one issued write came back with.
 #[derive(Debug)]
 pub enum WriteOutcome {
-    /// 2xx — the parsed response body.
     Applied(Json),
-    /// The error the write failed with. A 409 arrives as
-    /// [`DbError::Conflict`] — recoverable, the connection survives.
     Failed(DbError),
 }
 
-/// `index/id` for a notice, or `index (server-assigned id)` for an insert
-/// whose id the server generates — so a notice never prints a dangling
-/// `index/` with an empty id.
 fn target_label(write: &CompiledWrite) -> String {
     if write.id.is_empty() {
         format!("{} (server-assigned id)", write.index)
@@ -867,14 +654,9 @@ fn target_label(write: &CompiledWrite) -> String {
     }
 }
 
-/// The identity columns every report row carries whatever the outcome: `op`,
-/// `_index`, `_id` (omitted for a not-yet-assigned server-generated insert id)
-/// and `_routing`.
 fn push_identity(doc: &mut Document, write: &CompiledWrite) {
     doc.push("op", Value::Str(Arc::from(write.op)));
     doc.push("_index", Value::Str(Arc::from(write.index.as_str())));
-    // An insert with no user-supplied id has an empty compile-time id; the
-    // server generates one, echoed back from the response by the applied path.
     if !write.id.is_empty() {
         doc.push("_id", Value::Str(Arc::from(write.id.as_str())));
     }
@@ -883,12 +665,6 @@ fn push_identity(doc: &mut Document, write: &CompiledWrite) {
     }
 }
 
-/// The fields describing a write that applied — `outcome=applied`, the engine
-/// `result`, a server-assigned insert id, and the NEW `_seq_no`/`_primary_term`
-/// so a follow-up edit of the same row can be guarded without re-reading. A
-/// `forced_refresh: true` (refresh=wait_for silently degraded to an immediate
-/// refresh) is surfaced as a `Notice`. `response` is the single-write response
-/// body or, in a bulk report, the per-item object — the two share this shape.
 fn push_applied_fields(
     doc: &mut Document,
     write: &CompiledWrite,
@@ -896,8 +672,6 @@ fn push_applied_fields(
     notices: &mut Vec<Notice>,
 ) {
     doc.push("outcome", Value::Str(Arc::from("applied")));
-    // A server-generated insert id is only known now: echo it so the grid can
-    // address the new document on a follow-up edit.
     if write.id.is_empty() {
         if let Some(new_id) = response.get("_id").and_then(Json::as_str) {
             doc.push("_id", Value::Str(Arc::from(new_id)));
@@ -929,10 +703,6 @@ fn push_applied_fields(
     }
 }
 
-/// The fields describing a write that failed — `outcome=failed`, the `conflict`
-/// flag (a precondition/409 loss, which is a UI state not a toast), the engine
-/// `error_code` and the `error` message. Returns whether it was a conflict so
-/// the caller can count them.
 fn push_failed_fields(doc: &mut Document, error: &DbError) -> bool {
     doc.push("outcome", Value::Str(Arc::from("failed")));
     let (code, message, conflict) = match error {
@@ -941,8 +711,6 @@ fn push_failed_fields(doc: &mut Document, error: &DbError) -> bool {
         other => (None, other.to_string(), false),
     };
     if conflict {
-        // The precondition no longer held: someone else wrote the document
-        // since it was read.
         doc.push("conflict", Value::Bool(true));
     }
     if let Some(code) = code {
@@ -952,15 +720,6 @@ fn push_failed_fields(doc: &mut Document, error: &DbError) -> bool {
     conflict
 }
 
-/// Fold the compiled writes plus the outcomes gathered before the halt into
-/// the batch report: one `Value::Document` per mutation (applied / failed /
-/// not attempted) plus the summary and refresh notices. This is the
-/// **single-document, serial** path (a batch of one); more than one mutation
-/// goes through [`bulk_report`] instead.
-///
-/// `outcomes` is as long as `writes` when everything applied; on a halt it is
-/// exactly one longer than the applied prefix, ending in the failure —
-/// everything after it was deliberately never sent.
 pub fn batch_report(
     writes: &[CompiledWrite],
     outcomes: Vec<WriteOutcome>,
@@ -1028,39 +787,9 @@ pub fn batch_report(
     (docs, notices)
 }
 
-/// Elasticsearch's default `http.max_content_length`. A `_bulk` body larger
-/// than this is rejected by the node before it is read, so the batch is refused
-/// up front with a clear message rather than sent as a body the server drops
-/// whole. 100 MB is the shipped default (a cluster may raise or lower it in
-/// `elasticsearch.yml`, but that is not visible from here).
 pub const MAX_BULK_BODY_BYTES: usize = 100 * 1024 * 1024;
 
-/// Frame already-compiled writes into ONE `_bulk` request body: newline-
-/// delimited JSON (`application/x-ndjson`), each value on a single compact
-/// line, the whole body terminated by a trailing `\n`.
-///
-/// For each mutation this emits an **action line** and, for everything except a
-/// delete, a **source line**:
-///
-/// - update → `{"update":{"_index","_id","if_seq_no","if_primary_term",…}}`
-///   then `{"doc":…}` or `{"script":…}` — the compiled update body, reused
-///   verbatim (a removal is a `script`, a pure set a `doc`).
-/// - delete → `{"delete":{…,"if_seq_no","if_primary_term"}}` — no source line.
-/// - insert → `{"create":{"_index","_id",…}}` (id present; `op_type=create`
-///   semantics, so it 409s instead of overwriting) or `{"index":{"_index",…}}`
-///   (no id; the server generates one) then the `_source` line. NEVER a bare
-///   `index` with an id — that is the blind overwrite the guard exists to
-///   prevent.
-///
-/// The optimistic-concurrency guard rides on the **action line**
-/// (`if_seq_no`/`if_primary_term` are action-line fields in bulk, not query
-/// params); `refresh` and `include_source_on_error` are `_bulk` URL params and
-/// are set by the caller, not here. `retry_on_conflict` — also an action-line
-/// field — is deliberately NEVER emitted: silently retrying is exactly the
-/// clobber the guard prevents (plan §3.2.6).
-///
-/// Refuses (having framed nothing that leaves the process) if the body would
-/// exceed `max_bytes`, rather than send a body Elasticsearch rejects whole.
+// The guard rides each action line; retry_on_conflict is deliberately never emitted — a silent retry is the clobber the guard prevents.
 pub fn compile_bulk_body(writes: &[CompiledWrite], max_bytes: usize) -> Result<String, DbError> {
     let mut body = String::new();
     for write in writes {
@@ -1086,12 +815,6 @@ pub fn compile_bulk_body(writes: &[CompiledWrite], max_bytes: usize) -> Result<S
     Ok(body)
 }
 
-/// The action line, and where one exists the source line, for one compiled
-/// write — each a compact single-line JSON string. See [`compile_bulk_body`].
-///
-/// `serde_json::to_string` is compact (no pretty-printing) and escapes any
-/// newline inside a string value as `\n`, so a field value that contains a
-/// newline cannot break the one-JSON-per-line NDJSON framing.
 fn bulk_lines(write: &CompiledWrite) -> Result<(String, Option<String>), DbError> {
     let mut meta = Map::new();
     meta.insert("_index".to_string(), Json::String(write.index.clone()));
@@ -1114,8 +837,6 @@ fn bulk_lines(write: &CompiledWrite) -> Result<(String, Option<String>), DbError
                 // No id: the server generates one. `index` with no `_id`.
                 ("index", write.body.clone())
             } else {
-                // `create` = op_type=create semantics: 409s on an existing id
-                // instead of blind-overwriting. NEVER a bare `index` with an id.
                 meta.insert("_id".to_string(), Json::String(write.id.clone()));
                 ("create", write.body.clone())
             }
@@ -1140,12 +861,7 @@ fn bulk_lines(write: &CompiledWrite) -> Result<(String, Option<String>), DbError
     Ok((action_line, source_line))
 }
 
-/// Lift the compiled guard (`if_seq_no`/`if_primary_term`, carried as query
-/// params on the single-document request) onto the bulk **action line**, where
-/// bulk wants it — as JSON numbers, not strings. Belt-and-braces: an update/
-/// delete is already refused at [`compile_mutation`] if it has no guard, so a
-/// compiled one always carries it, but an unguarded action line is refused here
-/// too rather than silently framed.
+// Bulk wants if_seq_no/if_primary_term on the action line as JSON numbers, not query-param strings.
 fn add_bulk_guard(meta: &mut Map<String, Json>, write: &CompiledWrite) -> Result<(), DbError> {
     match (
         query_u64(write, "if_seq_no"),
@@ -1166,16 +882,12 @@ fn add_bulk_guard(meta: &mut Map<String, Json>, write: &CompiledWrite) -> Result
     }
 }
 
-/// Routing is part of identity, and in bulk it rides on the action line too.
 fn add_bulk_routing(meta: &mut Map<String, Json>, write: &CompiledWrite) {
     if let Some(routing) = &write.routing {
         meta.insert("routing".to_string(), Json::String(routing.clone()));
     }
 }
 
-/// Read one integer query parameter off a compiled write, for lifting the
-/// guard onto the bulk action line. `if_seq_no`/`if_primary_term` were rendered
-/// from `u64`s, so parsing them back is lossless.
 fn query_u64(write: &CompiledWrite, key: &str) -> Option<u64> {
     write
         .query
@@ -1184,20 +896,7 @@ fn query_u64(write: &CompiledWrite, key: &str) -> Option<u64> {
         .and_then(|(_, v)| v.parse().ok())
 }
 
-/// Fold a `_bulk` response into the batch report: one `Value::Document` per
-/// submitted action (applied / failed, with the conflict flag on a 409) plus a
-/// summary and any per-item refresh notices.
-///
-/// **Bulk is not atomic and returns HTTP 200 even when items fail.** Every
-/// action is executed server-side — there is no early stop — so this is the
-/// honest shape of halt-and-report on bulk: it reports each item truthfully as
-/// applied or failed and the summary states that bulk applied every item it
-/// could (a failed item was simply not applied; the successful ones stay
-/// written). It never pretends the batch stopped, because it did not — there is
-/// no "not attempted" here, unlike the serial [`batch_report`]. The real
-/// per-item signal is each item's `status`/`error` (the top-level `errors`
-/// flag only says *some* item failed); parsing is keyed off the structured
-/// status/`error.type`, never the reason prose.
+// Bulk is not atomic and returns HTTP 200 with per-item failures; every item executes — no early stop, so no not_attempted, unlike the serial batch_report.
 pub fn bulk_report(
     writes: &[CompiledWrite],
     response: &Json,
@@ -1207,8 +906,6 @@ pub fn bulk_report(
         .and_then(Json::as_array)
         .ok_or_else(|| DbError::Protocol("a _bulk response with no `items` array".into()))?;
     if items.len() != writes.len() {
-        // Bulk returns exactly one item per submitted action, in order; a
-        // mismatch means outcomes cannot be lined up with mutations safely.
         return Err(DbError::Protocol(format!(
             "a _bulk response carried {} item(s) for {} submitted action(s)",
             items.len(),
@@ -1277,21 +974,12 @@ pub fn bulk_report(
     Ok((docs, notices))
 }
 
-/// The per-item object under a `_bulk` item's single action key
-/// (`{"update": {…}}` → the `{…}`), whichever action it was.
 fn bulk_item_inner(item: &Json) -> Result<&Json, DbError> {
     item.as_object()
         .and_then(|o| o.values().next())
         .ok_or_else(|| DbError::Protocol("a _bulk item with no action object".into()))
 }
 
-/// Map one failed `_bulk` item onto a [`DbError`], keyed off the item's HTTP
-/// `status` and structured `error.type` — never the reason prose. A 409 is a
-/// [`DbError::Conflict`] (a precondition or `op_type=create` collision, a UI
-/// state); anything else is a [`DbError::Query`] that keeps the engine `type`
-/// as its code. Mirrors [`crate::error::map_status_error`]'s 409 split, here
-/// for an error that arrives already parsed inside the 200 bulk envelope rather
-/// than as a non-2xx body.
 fn bulk_item_error(status: i64, inner: &Json) -> DbError {
     let err = inner.get("error");
     let code = err
@@ -1314,9 +1002,6 @@ fn bulk_item_error(status: i64, inner: &Json) -> DbError {
     }
 }
 
-/// A single path/id URL segment, percent-encoded. Unlike an index
-/// *expression*, an identity segment never keeps `*` or `,` — those would
-/// address more than one thing, and a write targets exactly one.
 fn encode_segment(segment: &str) -> String {
     let mut out = String::with_capacity(segment.len());
     for ch in segment.chars() {
@@ -1344,8 +1029,6 @@ fn single_field(path: &FieldPath) -> Option<&str> {
 fn scalar_to_string(value: &Value) -> Option<String> {
     match value {
         Value::Str(s) => Some(s.to_string()),
-        // A hand-built mutation may carry a numeric id; base-10 rendering is
-        // canonical and unambiguous, so this is not a guess.
         Value::I64(n) => Some(n.to_string()),
         Value::U64(n) => Some(n.to_string()),
         _ => None,
@@ -1494,8 +1177,6 @@ mod tests {
 
     #[test]
     fn a_write_without_the_guard_is_refused_never_sent_unguarded() {
-        // Empty `expect` — an aggregation row, a fields-only projection, a scan
-        // from before the guard was requested.
         let update = Mutation::Update {
             path: path(),
             key: key("events", "abc"),
@@ -1533,8 +1214,6 @@ mod tests {
 
     #[test]
     fn a_sentinel_guard_is_refused_as_a_tsdb_index() {
-        // A negative `_seq_no` is the sentinel a sequence-numbers-disabled
-        // (time-series) index returns; guarding with it protects nothing.
         let m = Mutation::Delete {
             path: path(),
             key: key("events", "abc"),
@@ -1550,10 +1229,6 @@ mod tests {
 
     #[test]
     fn an_absent_set_compiles_to_a_single_guarded_removal_script() {
-        // Was "field removal is refused". A top-level `Value::Absent` now means
-        // "remove this field", compiled to a scripted update — and, crucially,
-        // to a `{"script": …}` with NO `doc` key (ES ignores `doc` when a
-        // script is present, so removal cannot be a `doc` + `script` pair).
         let m = Mutation::Update {
             path: path(),
             key: key("events", "abc"),
@@ -1648,8 +1323,6 @@ mod tests {
         assert!(body.get("doc").is_none());
         let script = body.get("script").unwrap();
         let source = script.get("source").and_then(Json::as_str).unwrap();
-        // Missing intermediate maps are created shallow-to-deep before the leaf
-        // assignment, so it cannot NPE on an absent parent.
         assert!(
             source.contains("if (!(ctx._source.a instanceof Map)) { ctx._source.a = [:]; }"),
             "{source}"
@@ -1662,8 +1335,6 @@ mod tests {
             source.contains("ctx._source.a.b.c = params.p0;"),
             "{source}"
         );
-        // A nested removal guards every prefix is a Map (short-circuiting on an
-        // absent parent), then removes the leaf from its parent.
         assert!(
             source.contains("if (ctx._source.d instanceof Map) { ctx._source.d.remove('e'); }"),
             "{source}"
@@ -1673,8 +1344,6 @@ mod tests {
 
     #[test]
     fn a_scripted_update_refuses_a_field_name_it_cannot_express_in_painless() {
-        // A removal (or set-alongside-removal) whose field name is not a plain
-        // identifier is refused rather than approximated into unsafe Painless.
         let m = Mutation::Update {
             path: path(),
             key: key("events", "abc"),
@@ -1770,8 +1439,6 @@ mod tests {
 
     #[test]
     fn a_nested_absent_in_a_set_value_is_refused_not_turned_into_a_null() {
-        // An object set-value carrying a nested Absent: `value_to_json` would
-        // degrade it to `{"obj":{"f":null}}`, silently setting `f` to null.
         let nested_doc = Value::Document(Arc::new(Document::from_fields(vec![
             (Arc::from("keep"), Value::I64(1)),
             (Arc::from("f"), Value::Absent),
@@ -1803,8 +1470,6 @@ mod tests {
 
     #[test]
     fn a_duplicate_routing_key_is_refused_even_when_the_first_is_null() {
-        // The null entry used to `continue` before the ambiguity check, so a
-        // second `_routing` slipped through.
         let m = Mutation::Delete {
             path: path(),
             key: vec![
@@ -1858,8 +1523,6 @@ mod tests {
         assert_eq!(w.routing.as_deref(), Some("tenant-7"));
         assert_eq!(q(&w, "include_source_on_error"), Some("false"));
         assert_eq!(w.id, "abc");
-        // The body is the `_source` only — the envelope is stripped, never
-        // written back into the document.
         assert_eq!(w.body, Some(json!({ "status": "new", "count": 3 })));
     }
 
@@ -1884,8 +1547,6 @@ mod tests {
 
     #[test]
     fn an_insert_refuses_a_nested_absent_in_the_document() {
-        // A nested Absent would degrade to a JSON null via `value_to_json`,
-        // silently inserting a null-valued field.
         let nested = Value::Document(Arc::new(Document::from_fields(vec![
             (Arc::from("keep"), Value::I64(1)),
             (Arc::from("f"), Value::Absent),
@@ -1898,8 +1559,6 @@ mod tests {
             compile_mutation(&m, true),
             Err(DbError::Unsupported { .. })
         ));
-        // A top-level Absent field is refused the same way (an insert is not an
-        // update — there is no field to remove).
         let m = Mutation::Insert {
             path: path(),
             doc: doc_val(vec![("status", Value::Absent), ("keep", Value::I64(1))]),
@@ -2003,10 +1662,6 @@ mod tests {
 
     #[test]
     fn overlapping_paths_are_refused_on_the_script_path_too() {
-        // A set of a scalar `a` alongside a nested set `a.b` is a prefix
-        // overlap the doc path refuses via `insert_nested`; the presence of a
-        // removal (`junk`) forces the script path, which must refuse it just
-        // the same rather than silently turn `a=5` into `{b:1}`.
         let m = Mutation::Update {
             path: path(),
             key: key("events", "abc"),
@@ -2021,9 +1676,6 @@ mod tests {
         assert!(matches!(err, DbError::Unsupported { .. }));
         assert!(err.to_string().contains("overlap"), "{err}");
 
-        // A set and a remove that overlap must be refused regardless of the
-        // caller's ordering — the emit-sets-then-removes shape must not silently
-        // pick a winner.
         for sets in [
             vec![(fp("a"), Value::Absent), (fp("a.b"), Value::I64(1))],
             vec![(fp("a.b"), Value::I64(1)), (fp("a"), Value::Absent)],
@@ -2040,8 +1692,6 @@ mod tests {
             );
         }
 
-        // An exact set-then-remove of the same leaf is also refused (it is not a
-        // way to "set then clear").
         let m = Mutation::Update {
             path: path(),
             key: key("events", "abc"),
@@ -2056,8 +1706,6 @@ mod tests {
             Err(DbError::Unsupported { .. })
         ));
 
-        // Siblings under a shared parent do NOT overlap — a genuine multi-field
-        // scripted edit still compiles.
         let m = Mutation::Update {
             path: path(),
             key: key("events", "abc"),
@@ -2069,8 +1717,6 @@ mod tests {
 
     #[test]
     fn an_empty_insert_id_becomes_a_server_generated_post_not_a_broken_put() {
-        // `PUT /events/_doc/` (empty id segment) would 400 server-side mid-batch;
-        // an empty `_id` is treated as no id, like `identity_from_key`'s filter.
         let m = Mutation::Insert {
             path: path(),
             doc: doc_val(vec![
@@ -2131,8 +1777,6 @@ mod tests {
 
     #[test]
     fn guard_unsupported_reason_flags_time_series_and_disabled_sequence_numbers() {
-        // Explicitly disabled: refused on any version — even one before the
-        // setting nominally existed.
         let disabled = json!({
             "metrics-000001": {
                 "settings": { "index.disable_sequence_numbers": "true" }
@@ -2171,9 +1815,6 @@ mod tests {
         let tsdb = json!({
             "metrics-000001": { "settings": { "index.mode": "time_series" } }
         });
-        // Before 9.4 a TSDB index tracks sequence numbers normally: editing it
-        // is legitimate, and refusing would point at an escape hatch (the
-        // `disable_sequence_numbers` setting) that does not exist there.
         assert!(guard_unsupported_reason(&tsdb, "9.3.0").is_none());
         assert!(guard_unsupported_reason(&tsdb, "8.13.0").is_none());
         // 9.4 and up: refused.
@@ -2209,8 +1850,6 @@ mod tests {
             panic!("expected a document row");
         };
         assert_eq!(doc.get("outcome"), Some(&Value::Str(Arc::from("applied"))));
-        // The new `_seq_no` is echoed so a follow-up edit can be guarded
-        // without re-reading.
         assert_eq!(doc.get("_seq_no"), Some(&Value::I64(42)));
         assert!(notices
             .iter()
@@ -2326,8 +1965,6 @@ mod tests {
         // Two lines (action + source), body newline-terminated.
         assert!(body.ends_with('\n'));
         assert_eq!(body.lines().count(), 2, "{body:?}");
-        // The guard rides the ACTION LINE, as numbers — not query params. No
-        // retry_on_conflict anywhere.
         assert_eq!(
             line(&body, 0),
             json!({"update":{"_index":"events","_id":"abc","if_seq_no":41,"if_primary_term":3}})

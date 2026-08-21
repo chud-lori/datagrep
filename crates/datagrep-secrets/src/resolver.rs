@@ -1,9 +1,3 @@
-//! [`SecretResolver`] — turns a [`SecretRef`] into a live
-//! [`SecretString`], and writes/deletes keychain-backed refs.
-//!
-//! Called once per pool creation, on a blocking thread — resolution is not a
-//! hot path, so every choice here favors safety over speed.
-
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -15,31 +9,16 @@ use tokio::process::Command;
 
 use crate::{wipe, SecretError, SecretRef};
 
-/// Longest stderr excerpt carried in an [`SecretError::ExecFailed`]. Enough to
-/// diagnose `op`/`aws` failures without dragging a novel into the error chain.
 const MAX_STDERR: usize = 1024;
 
-/// Default `exec:` timeout. Cloud credential helpers (SSO re-auth, MFA push)
-/// can legitimately take many seconds; 30 s bounds a hung helper without
-/// strangling a slow one.
 const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Resolves [`SecretRef`]s to [`SecretString`]s.
-///
-/// All methods are async; keychain work is shipped to the blocking pool
-/// because Secret Service is DBus IPC — tens to hundreds of ms — and must
-/// never stall an async worker.
 #[derive(Debug, Clone)]
 pub struct SecretResolver {
     exec_timeout: Duration,
-    /// When set, `keychain:` refs are served from this map instead of the OS
-    /// store. Only [`SecretResolver::in_memory`] ever sets it, and that
-    /// constructor exists only under the `test-support` feature — so a release
-    /// build has no way to produce a resolver that skips the real keychain.
     memory: Option<MemoryStore>,
 }
 
-/// Test-only backing map for `keychain:` refs, keyed by `(service, account)`.
 type MemoryStore = Arc<Mutex<HashMap<(String, String), String>>>;
 
 impl Default for SecretResolver {
@@ -49,7 +28,6 @@ impl Default for SecretResolver {
 }
 
 impl SecretResolver {
-    /// Resolver with the default 30 s `exec:` timeout.
     pub fn new() -> Self {
         Self {
             exec_timeout: DEFAULT_EXEC_TIMEOUT,
@@ -57,7 +35,6 @@ impl SecretResolver {
         }
     }
 
-    /// Override the `exec:` timeout (tests use ~1 s; UIs may shorten it).
     pub fn with_exec_timeout(exec_timeout: Duration) -> Self {
         Self {
             exec_timeout,
@@ -65,18 +42,6 @@ impl SecretResolver {
         }
     }
 
-    /// A resolver whose `keychain:` refs live in memory for the life of the
-    /// value, touching no OS credential store.
-    ///
-    /// Two problems it exists to solve, both observed rather than theoretical:
-    /// a test asserting the keychain path fails outright on a bare Linux CI
-    /// runner, where no Secret Service is running ("The name
-    /// org.freedesktop.secrets was not provided by any .service files"); and on
-    /// a developer's Mac the same test *succeeds*, writing a junk credential
-    /// into their real login keychain on every run, which accumulates.
-    ///
-    /// `env:`, `exec:` and `prompt:` refs are unaffected — they resolve
-    /// normally, because none of them touch the OS store to begin with.
     #[cfg(feature = "test-support")]
     pub fn in_memory() -> Self {
         Self {
@@ -85,15 +50,7 @@ impl SecretResolver {
         }
     }
 
-    /// Resolve `reference` to its secret value.
-    ///
-    /// - `keychain:` → keyring crate, on the blocking pool.
-    /// - `env:` → process environment.
-    /// - `exec:` → `sh -c <command>`, trimmed stdout, bounded by the timeout.
-    /// - `prompt:` → always `Err(NeedsPrompt)`; the UI owns prompting.
     pub async fn resolve(&self, reference: &SecretRef) -> Result<SecretString, SecretError> {
-        // Refs are safe to log (they are what profiles commit to git);
-        // resolved values never are, and never appear below.
         tracing::debug!(scheme = reference.scheme(), "resolving secret ref");
         match reference {
             SecretRef::Keychain { service, account } => {
@@ -142,8 +99,6 @@ impl SecretResolver {
         }
     }
 
-    /// Store `secret` at a **keychain** ref. Env/exec/prompt refs are
-    /// read-only sources and return [`SecretError::ReadOnly`].
     pub async fn store(
         &self,
         reference: &SecretRef,
@@ -182,7 +137,6 @@ impl SecretResolver {
         }
     }
 
-    /// Delete a **keychain** ref's stored secret. Read-only refs error.
     pub async fn delete(&self, reference: &SecretRef) -> Result<(), SecretError> {
         match reference {
             SecretRef::Keychain { service, account } => {
@@ -220,11 +174,6 @@ impl SecretResolver {
         }
     }
 
-    /// Run `sh -c <command>`; trimmed stdout is the secret.
-    ///
-    /// SECURITY: the command line is never placed in an error or
-    /// log, so it can never appear alongside its output; stdout is either the
-    /// returned `SecretString` or wiped — it is never part of any error.
     async fn resolve_exec(&self, command: &str) -> Result<SecretString, SecretError> {
         let mut child = Command::new("/bin/sh")
             .arg("-c")
@@ -232,14 +181,10 @@ impl SecretResolver {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // If we time out and drop the child, the process is killed rather
-            // than left running with a secret on its stdout pipe.
             .kill_on_drop(true)
             .spawn()
             .map_err(|source| SecretError::ExecSpawn { source })?;
 
-        // Drive stdout/stderr reads concurrently with waiting, all under one
-        // timeout. `wait_with_output` is avoided so we control the buffers.
         let mut stdout_pipe = child.stdout.take();
         let mut stderr_pipe = child.stderr.take();
         let run = async {
@@ -317,7 +262,6 @@ fn keychain_entry(service: &str, account: &str) -> Result<keyring::Entry, Secret
     })
 }
 
-/// Volatile-wipe a byte buffer (stdout that may contain secret material).
 fn wipe_bytes(mut bytes: Vec<u8>) -> Vec<u8> {
     for b in bytes.iter_mut() {
         // SAFETY: `b` is a valid, aligned, exclusive reference into the Vec.
@@ -327,8 +271,6 @@ fn wipe_bytes(mut bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
-/// Largest byte index `<= max` that is a char boundary (stable-Rust stand-in
-/// for `str::floor_char_boundary`).
 fn floor_char_boundary(s: &str, max: usize) -> usize {
     let mut i = max.min(s.len());
     while i > 0 && !s.is_char_boundary(i) {
@@ -337,11 +279,6 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
     i
 }
 
-/// Lock the in-memory store, recovering from a poisoned mutex.
-///
-/// A panic in another test must not cascade into unrelated failures here: the
-/// map holds no invariant that a partial write could corrupt, so the contents
-/// are still perfectly usable after a poisoning panic.
 fn lock(memory: &MemoryStore) -> std::sync::MutexGuard<'_, HashMap<(String, String), String>> {
     memory
         .lock()
@@ -361,10 +298,7 @@ mod tests {
 
     #[tokio::test]
     async fn env_round_trip() {
-        // SAFETY: test-only env mutation; no other test in this crate reads
-        // this var, and tests in this module run single-threaded by default
-        // under `cargo test` per-crate (no `#[tokio::test(flavor = ...)]`
-        // parallel env sharing concern beyond the usual std::env caveats).
+        // SAFETY: test-only env mutation; no other test in this crate reads this var.
         unsafe { std::env::set_var("DATAGREP_SECRETS_TEST_ENV_ROUNDTRIP", "s3cret-value") };
         let r: SecretRef = "env:DATAGREP_SECRETS_TEST_ENV_ROUNDTRIP".parse().unwrap();
         let got = resolver().resolve(&r).await.unwrap();
@@ -436,8 +370,6 @@ mod tests {
             }
             other => panic!("expected ExecFailed, got {other:?}"),
         }
-        // SECURITY: the Display of the error must never contain the
-        // command's stdout (the secret channel) nor the command line itself.
         let rendered = err.to_string();
         assert!(!rendered.contains("top-secret-stdout"));
         assert!(!rendered.contains("echo"));
@@ -446,8 +378,6 @@ mod tests {
     #[tokio::test]
     async fn exec_spawn_failure_is_reported() {
         let r: SecretRef = "exec:/definitely/not/a/real/binary --flag".parse().unwrap();
-        // `sh -c` itself spawns fine; the *inner* command fails to exec,
-        // which sh reports via a non-zero exit and stderr, not ExecSpawn.
         let err = resolver().resolve(&r).await.unwrap_err();
         assert!(matches!(err, SecretError::ExecFailed { .. }));
     }
@@ -483,12 +413,6 @@ mod tests {
         }
     }
 
-    // --- keychain: live round-trip, opt-in only -------------------------
-    //
-    // Talks to the real OS credential store (Keychain on macOS, Secret
-    // Service on Linux, Credential Manager on Windows). `#[ignore]`d so
-    // normal `cargo test` runs stay hermetic; run explicitly with
-    // `cargo test -- --ignored keychain_live_round_trip`.
     #[tokio::test]
     #[ignore = "touches the real OS keychain; run explicitly"]
     async fn keychain_live_round_trip() {

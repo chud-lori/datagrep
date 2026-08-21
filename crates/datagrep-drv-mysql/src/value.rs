@@ -1,19 +1,3 @@
-//! MySQL wire values → `datagrep_api::Value`: an honest mapping, in which
-//! DECIMAL never rides through f64 (a silently rounded number is worse than
-//! an error).
-//!
-//! Decoding is driven by the column metadata, not the wire variant, because
-//! the two protocols disagree about representation: the binary (prepared)
-//! protocol delivers typed `mysql_async::Value` variants, while the text
-//! protocol delivers nearly everything as `Value::Bytes`. Every arm below
-//! therefore accepts both the typed form and the textual form.
-//!
-//! Timezone honesty: `TIMESTAMP` columns are UTC-normalized by the server
-//! and rendered in the *session* time zone — this driver pins the session to
-//! `+00:00` at connect (see `driver.rs`), so a decoded `TIMESTAMP` really is
-//! UTC and is tagged `TzSpec::Utc`. `DATETIME` has no timezone semantics at
-//! all and is tagged `TzSpec::Naive`. The two are never conflated.
-
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -24,22 +8,16 @@ use mysql_async::Value as MyValue;
 use datagrep_api::shape::{FieldDef, FieldFlags, LogicalType};
 use datagrep_api::value::{TzSpec, Value};
 
-/// Is this column the conventional MySQL boolean — signed `TINYINT(1)`?
 fn is_bool_column(col: &Column) -> bool {
     col.column_type() == ColumnType::MYSQL_TYPE_TINY
         && col.column_length() == 1
         && !col.flags().contains(ColumnFlags::UNSIGNED_FLAG)
 }
 
-/// Is this string-ish column binary (BLOB/BINARY/VARBINARY) rather than text?
-/// Character set 63 is MySQL's `binary` charset — the reliable signal; the
-/// BINARY_FLAG alone is also set on some text collations (`*_bin`).
 fn is_binary_column(col: &Column) -> bool {
     col.character_set() == 63
 }
 
-/// The engine-neutral type of a column (schema-level mirror of the per-cell
-/// decode below).
 pub fn logical_type_of(col: &Column) -> LogicalType {
     use ColumnType::*;
     match col.column_type() {
@@ -89,10 +67,6 @@ pub fn logical_type_of(col: &Column) -> LogicalType {
     }
 }
 
-/// A human-readable native type name for the inspector (`FieldDef::native_type`
-/// — "what the server said, not what we mapped it to"). Approximate but
-/// truthful: built from the wire type plus the unsigned/charset facts the
-/// protocol actually carries.
 pub fn native_type_name(col: &Column) -> String {
     use ColumnType::*;
     let base = match col.column_type() {
@@ -173,10 +147,6 @@ pub fn native_type_name(col: &Column) -> String {
     }
 }
 
-/// Build a [`FieldDef`] from result-set column metadata. Nullability, key and
-/// auto-increment facts are all carried by the MySQL column definition
-/// packet, unlike Postgres's RowDescription — so this driver can set them
-/// honestly per result column.
 pub fn field_def_of(col: &Column) -> FieldDef {
     let mut flags = FieldFlags::empty();
     if !col.flags().contains(ColumnFlags::NOT_NULL_FLAG) {
@@ -199,8 +169,6 @@ pub fn field_def_of(col: &Column) -> FieldDef {
     }
 }
 
-/// Days from the Unix epoch for a civil date (Howard Hinnant's algorithm) —
-/// no chrono dependency for one conversion.
 pub fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     let y = i64::from(y) - i64::from(m <= 2);
     let era = if y >= 0 { y } else { y - 399 } / 400;
@@ -223,17 +191,12 @@ fn timestamp_micros(y: i32, mo: u32, d: u32, h: i64, mi: i64, s: i64, us: i64) -
 
 fn tz_for(col_type: ColumnType) -> TzSpec {
     match col_type {
-        // TIMESTAMP is UTC-normalized server-side and rendered in the session
-        // tz, which this driver pins to +00:00 at connect.
         ColumnType::MYSQL_TYPE_TIMESTAMP | ColumnType::MYSQL_TYPE_TIMESTAMP2 => TzSpec::Utc,
         // DATETIME stores exactly what was written; no timezone semantics.
         _ => TzSpec::Naive,
     }
 }
 
-/// The all-zero DATE/DATETIME (`0000-00-00[ 00:00:00]`) MySQL emits under
-/// permissive sql_modes. It is not a representable date; it survives as
-/// `Unsupported` with its text intact rather than being bent into a real day.
 fn zero_date_value(type_name: &str, text: &str) -> Value {
     Value::Unsupported {
         type_name: Arc::from(type_name),
@@ -250,7 +213,6 @@ fn unsupported(col: &Column, raw: &[u8]) -> Value {
     }
 }
 
-/// Parse `YYYY-MM-DD` (returns y, m, d).
 fn parse_date_text(s: &str) -> Option<(i32, u32, u32)> {
     let mut it = s.splitn(3, '-');
     let y = it.next()?.parse().ok()?;
@@ -259,7 +221,6 @@ fn parse_date_text(s: &str) -> Option<(i32, u32, u32)> {
     Some((y, m, d))
 }
 
-/// Parse `hh:mm:ss[.ffffff]` into (h, m, s, micros).
 fn parse_time_text(s: &str) -> Option<(i64, i64, i64, i64)> {
     let (hms, frac) = match s.split_once('.') {
         Some((a, b)) => (a, b),
@@ -279,7 +240,6 @@ fn parse_time_text(s: &str) -> Option<(i64, i64, i64, i64)> {
     Some((h, m, sec, us))
 }
 
-/// Decode one cell. `col` is the result-set column the cell belongs to.
 pub fn decode_value(col: &Column, v: MyValue) -> Value {
     use ColumnType::*;
     let ct = col.column_type();
@@ -291,8 +251,6 @@ pub fn decode_value(col: &Column, v: MyValue) -> Value {
             if is_bool_column(col) {
                 Value::Bool(i != 0)
             } else if ct == MYSQL_TYPE_YEAR {
-                // YEAR is flagged UNSIGNED on the wire but is a year number,
-                // mapped to I64 by contract.
                 Value::I64(i)
             } else if unsigned && i >= 0 {
                 Value::U64(i as u64)
@@ -353,8 +311,6 @@ pub fn decode_value(col: &Column, v: MyValue) -> Value {
     }
 }
 
-/// The text-protocol (and string-typed) side of decoding: everything arrives
-/// as bytes and the column type decides what those bytes mean.
 fn decode_bytes(col: &Column, raw: Vec<u8>) -> Value {
     use ColumnType::*;
     let ct = col.column_type();
@@ -373,14 +329,10 @@ fn decode_bytes(col: &Column, raw: Vec<u8>) -> Value {
     match ct {
         MYSQL_TYPE_NULL => Value::Null,
         MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL => {
-            // DECIMAL/NUMERIC is string-backed, NEVER f64: it is an exact
-            // arbitrary-precision type and a float would round it.
             let s = text!();
             Value::Decimal(Arc::from(s))
         }
         MYSQL_TYPE_JSON => {
-            // Raw JSON text, never re-serialized (key order and number
-            // precision are data).
             let s = text!();
             Value::Json(Arc::from(s))
         }
@@ -487,8 +439,6 @@ fn decode_bytes(col: &Column, raw: Vec<u8>) -> Value {
     }
 }
 
-/// Civil date from days since the Unix epoch (inverse of
-/// [`days_from_civil`]; Hinnant's `civil_from_days`).
 pub fn civil_from_days(z: i64) -> (i32, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -502,10 +452,6 @@ pub fn civil_from_days(z: i64) -> (i32, u32, u32) {
     ((y + i64::from(m <= 2)) as i32, m as u32, d as u32)
 }
 
-/// Convert a seam [`Value`] into a bindable `mysql_async::Value`. This is the
-/// ONLY place request values are encoded, and it produces protocol-level
-/// bound parameters, never SQL text — which is what keeps a value from ever
-/// being re-parsed as SQL.
 pub fn to_my_value(v: &Value) -> Result<MyValue, datagrep_api::DbError> {
     use datagrep_api::DbError;
     Ok(match v {
@@ -514,8 +460,6 @@ pub fn to_my_value(v: &Value) -> Result<MyValue, datagrep_api::DbError> {
         Value::I64(i) => MyValue::Int(*i),
         Value::U64(u) => MyValue::UInt(*u),
         Value::F64(f) => MyValue::Double(*f),
-        // Decimal binds as its exact text — the server parses it with
-        // DECIMAL semantics; f64 never enters the picture.
         Value::Decimal(s) => MyValue::Bytes(s.as_bytes().to_vec()),
         Value::Str(s) => MyValue::Bytes(s.as_bytes().to_vec()),
         Value::Bytes(b) => MyValue::Bytes(b.to_vec()),
@@ -540,10 +484,6 @@ pub fn to_my_value(v: &Value) -> Result<MyValue, datagrep_api::DbError> {
             MyValue::Time(neg, days, h, m, s, us)
         }
         Value::Timestamp { micros, tz } => {
-            // Utc and Naive both bind as their wall-clock reading (the
-            // session is pinned to +00:00, so a Utc instant's wall clock IS
-            // its UTC reading). A Named/Offset zone would need a calendar
-            // conversion this driver refuses to guess at.
             match tz {
                 TzSpec::Utc | TzSpec::Naive => {}
                 other => {
@@ -585,8 +525,6 @@ pub fn to_my_value(v: &Value) -> Result<MyValue, datagrep_api::DbError> {
     })
 }
 
-/// Map an `information_schema.columns.data_type` string to a [`LogicalType`]
-/// (the catalog path has no wire `Column` to inspect).
 pub fn logical_type_of_data_type(data_type: &str, column_type: &str) -> LogicalType {
     match data_type.to_ascii_lowercase().as_str() {
         "tinyint" => {
@@ -689,8 +627,6 @@ mod tests {
     fn decimal_is_string_backed_never_f64() {
         let c = col(ColumnType::MYSQL_TYPE_NEWDECIMAL);
         assert_eq!(logical_type_of(&c), LogicalType::Decimal);
-        // A value that f64 cannot represent exactly — trailing precision is
-        // data and must survive verbatim.
         let v = decode_value(
             &c,
             MyValue::Bytes(b"12345678901234567890.123456789012345678".to_vec()),
@@ -816,8 +752,6 @@ mod tests {
 
     #[test]
     fn year_is_i64_even_though_the_wire_flags_it_unsigned() {
-        // Real servers set UNSIGNED_FLAG on YEAR columns; the mapping
-        // contract is still I64.
         let c = col_flags(ColumnType::MYSQL_TYPE_YEAR, ColumnFlags::UNSIGNED_FLAG);
         assert_eq!(logical_type_of(&c), LogicalType::I64);
         assert_eq!(

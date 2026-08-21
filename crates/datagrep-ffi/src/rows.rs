@@ -1,32 +1,3 @@
-//! The hot path: one materialised window, and nothing else.
-//!
-//! **Invariant: `datagrep` never holds a result set larger than
-//! `total_result_budget`, regardless of the query** — and the claim this ABI
-//! has to make true on every scroll is that the projected view materializes to
-//! a small Arrow batch **for the visible window only**.
-//!
-//! [`datagrep_query_rows`] is a single `CoreApi::get_rows(qid, off..off+len)` and a
-//! single pass over exactly that rectangle. It never widens the range, never
-//! reads ahead, and never waits: a window the feeder has not reached yet comes
-//! back with `datagrep_rows_pending() == true` and zero rows, which is the signal to
-//! draw skeletons. Asking for it is itself what resumes the feeder — scrolling
-//! *is* the pull signal — so the next call gets real rows.
-//!
-//! ## Memory shape of a window
-//!
-//! ```text
-//! DatagrepRows
-//!  ├─ slices : Vec<WindowSlice>   Arc clones of the store's own buffers. NOT copies.
-//!  ├─ text   : String             ONE arena, holding only cells that needed formatting
-//!  └─ cells  : Vec<CellMeta>      rows×cols of {ptr|offset, len, kind} — 24 bytes each
-//! ```
-//!
-//! `datagrep_rows_cell` returns a pointer that is either into `text` or **straight
-//! into an Arrow/`Arc<str>` buffer** the `slices` keep alive. The Swift side
-//! never allocates, never copies, and never re-formats on redraw. `format!` in
-//! the cell-render path is a banned anti-pattern here, and there is no
-//! cell-render path left on the Swift side to put one in.
-
 use std::ffi::c_char;
 use std::sync::Arc;
 
@@ -38,14 +9,11 @@ use crate::ffi_util::{guard, guard_quiet, to_c_string};
 use crate::query::{query_ref, DatagrepQuery};
 use crate::runtime::runtime;
 
-/// Where one cell's UTF-8 bytes live.
 #[derive(Clone, Copy)]
 struct CellMeta {
-    /// Byte offset into [`DatagrepRows::text`] — used only when `ptr` is null.
     off: u32,
     len: u32,
     kind: u8,
-    /// Non-null: borrowed straight from a store buffer, zero copy.
     ptr: *const u8,
 }
 
@@ -60,35 +28,21 @@ impl CellMeta {
     }
 }
 
-/// Which slice, and which row within its underlying container, a window row
-/// came from — so the detail pane can recover the original [`Value`] without
-/// this window ever having stored one.
 #[derive(Clone, Copy)]
 struct RowSource {
     slice: u32,
-    /// Row index inside the slice's `RecordBatch`/`DocSegment`.
     offset: u32,
 }
 
-/// One materialised window.
 pub struct DatagrepRows {
-    /// Arc clones of the store's buffers. Their only job is to outlive every
-    /// borrowed pointer in `cells`. Never iterated on the hot path.
     slices: Vec<WindowSlice>,
     rows: u64,
     cols: u32,
     pending: bool,
-    /// The window's single text arena.
     text: String,
-    /// `rows * cols`, row-major.
     cells: Vec<CellMeta>,
     sources: Vec<RowSource>,
-    /// Column names — the document lane projects by name, so it needs them.
     columns: Vec<String>,
-    /// The field the columns are projected from, when the driver declared one
-    /// (`Shape::Documents::root_hint`). Everything *outside* it is the row's
-    /// envelope: metadata that identifies and guards the document rather than
-    /// being part of it — see [`datagrep_rows_envelope_json`].
     root: Option<String>,
 }
 
@@ -103,30 +57,19 @@ impl std::fmt::Debug for DatagrepRows {
     }
 }
 
-/// Borrow a `DatagrepRows*` argument.
-///
-/// # Safety
-/// `r` must come from `datagrep_query_rows` and not yet be freed.
 unsafe fn rows_ref<'a>(r: *mut DatagrepRows) -> Option<&'a DatagrepRows> {
     if r.is_null() {
         None
     } else {
-        // SAFETY: non-NULL (checked) and, per the contract, a live
-        // `Box<DatagrepRows>` from `datagrep_query_rows`. A window is immutable
-        // once built — `fill` runs before the pointer ever leaves Rust — so a
-        // shared borrow handed to any number of concurrent readers is sound.
+        // SAFETY: non-NULL (checked) and live per the contract; a window is immutable once built, so concurrent shared borrows are sound.
         Some(unsafe { &*r })
     }
 }
 
 // ---- build -------------------------------------------------------------
 
-/// Materialises ONLY `[offset, offset+len)`.
-///
 /// # Safety
-/// `q` must come from `datagrep_query_run`; `err_out` must be NULL or writable.
-/// The returned pointer must be freed with `datagrep_rows_free` **before** its
-/// `DatagrepQuery` is freed.
+/// `q` is an unfreed query handle from `datagrep_query_run`. `err_out` is NULL or a writable slot.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_query_rows(
     q: *mut DatagrepQuery,
@@ -135,18 +78,11 @@ pub unsafe extern "C" fn datagrep_query_rows(
     err_out: *mut *mut c_char,
 ) -> *mut DatagrepRows {
     guard(err_out, std::ptr::null_mut(), "datagrep_query_rows", || {
-        // SAFETY: `q` is from `datagrep_query_run` and unfreed per the contract.
-        // The window built below holds `Arc` clones of the store's buffers, so
-        // it does not depend on `q` staying alive — but the header still
-        // requires freeing the window first, and `DatagrepQuery::free` closing
-        // the query is what makes that ordering matter.
+        // SAFETY: q unfreed per the contract; the window holds Arc clones so it never depends on q, but the header still requires freeing the window first.
         let q = unsafe { query_ref(q) }?;
         let skeleton_cols = q.column_count();
         let root = q.projection_root();
 
-        // Not accepted by the server yet (or already failed to start): there
-        // is nothing to materialise, and blocking here would be exactly the
-        // freeze this design exists to prevent. Skeletons.
         let Some(qid) = q.qid() else {
             return Ok(Box::into_raw(Box::new(DatagrepRows::skeleton(
                 skeleton_cols,
@@ -170,8 +106,6 @@ pub unsafe extern "C" fn datagrep_query_rows(
 }
 
 impl DatagrepRows {
-    /// An empty, pending window — what a query that has not reached the
-    /// server yet can honestly offer.
     fn skeleton(cols: u32) -> Self {
         Self {
             slices: Vec::new(),
@@ -186,18 +120,9 @@ impl DatagrepRows {
         }
     }
 
-    /// Format one window, once.
     fn build(window: RowWindow, fallback_cols: u32, root: Option<String>) -> Self {
-        // `Pending` means none of it arrived; `Partial` means the tail did
-        // not. Both mean "the feeder was resumed, ask again" — and both mean
-        // the caller should draw skeletons for what `datagrep_rows_count` does not
-        // cover, so both set the flag.
         let pending = matches!(window.status, WindowStatus::Pending | WindowStatus::Partial);
 
-        // Window-local, like the column union itself: a window in which no row
-        // carries the root field is projected unrooted, so hits fetched with
-        // `_source: false` still show the fields they DO have instead of a
-        // fabricated column of absences.
         let root = effective_root(&window.slices, root);
         let columns = project_columns(&window.slices, root.as_deref());
         let cols = if columns.is_empty() {
@@ -212,8 +137,6 @@ impl DatagrepRows {
             rows: rows as u64,
             cols,
             pending,
-            // A first guess at the arena: most cells are short. It grows if
-            // wrong; it is one allocation per window either way, not per cell.
             text: String::with_capacity(rows * cols.max(1) as usize * 8),
             cells: Vec::with_capacity(rows * cols as usize),
             sources: Vec::with_capacity(rows),
@@ -224,12 +147,8 @@ impl DatagrepRows {
         out
     }
 
-    /// The single formatting pass. Everything the Swift side ever reads is
-    /// produced here, once.
     fn fill(&mut self) {
         let cols = self.cols as usize;
-        // Take the arena out so the borrow checker lets us read `self.slices`
-        // and write the arena at the same time; put it back at the end.
         let mut arena = std::mem::take(&mut self.text);
         let mut cells = std::mem::take(&mut self.cells);
         let mut sources = std::mem::take(&mut self.sources);
@@ -251,9 +170,6 @@ impl DatagrepRows {
                                     let rendered = render_arrow(array.as_ref(), r, &mut arena);
                                     finish(&mut arena, start, rendered)
                                 }
-                                // Fewer Arrow columns than the projection (a
-                                // window straddling a schema delta): absent,
-                                // not a lie about being NULL.
                                 None => CellMeta::empty(KIND_ABSENT),
                             };
                             cells.push(meta);
@@ -273,8 +189,6 @@ impl DatagrepRows {
                                 let name = self.columns.get(c).map(String::as_str);
                                 let cell = doc_field(row, name, cols, self.root.as_deref());
                                 let meta = match cell {
-                                    // The whole point: a field that is not in
-                                    // this document is ABSENT, never NULL.
                                     None => CellMeta::empty(KIND_ABSENT),
                                     Some(v) => {
                                         let start = arena.len();
@@ -319,14 +233,6 @@ impl DatagrepRows {
         self.sources = sources;
     }
 
-    /// The row's fields that are *outside* the projected root — the envelope.
-    ///
-    /// For an Elasticsearch hit that is `_index`/`_id`/`_routing` plus the
-    /// `_seq_no`/`_primary_term` pair a guarded write compares against: the
-    /// facts that say *which* document a row is and *which version* of it was
-    /// loaded, none of which belong in a column of the user's own document.
-    /// `None` when this result has no root, because then there is nothing
-    /// outside it and an envelope would be an invention.
     fn envelope(&self, row: u64) -> Option<serde_json::Value> {
         let root = self.root.as_deref()?;
         let src = *self.sources.get(row as usize)?;
@@ -357,8 +263,6 @@ impl DatagrepRows {
         self.cells.get(idx).copied()
     }
 
-    /// The original [`Value`] at `(row, col)`, recovered from the borrowed
-    /// slices — this window never stored one.
     fn value_at(&self, row: u64, col: u32) -> Option<Value> {
         if row >= self.rows || col >= self.cols {
             return None;
@@ -395,17 +299,6 @@ impl DatagrepRows {
     }
 }
 
-/// Resolve a [`Rendered`] against the arena it may have written into.
-///
-/// [`CellMeta`] keeps its offset and length as `u32` to stay at 24 bytes — at
-/// rows×cols per window that size is the difference between a cheap index and a
-/// second copy of the data. The cast is therefore the one place a hostile result
-/// set could bend this module: a window whose arena grew past 4 GiB, or a single
-/// cell longer than that, would silently wrap the offset and hand
-/// `datagrep_rows_cell` a pointer to the wrong bytes. It stays in bounds of the
-/// allocation either way, so it is garbled text rather than UB — but garbled
-/// text presented as the server's answer is its own kind of wrong. Both cases
-/// are refused here instead, and the cell renders empty.
 fn finish(arena: &mut String, start: usize, rendered: Rendered<'_>) -> CellMeta {
     match rendered {
         Rendered::Empty(kind) => CellMeta::empty(kind),
@@ -427,10 +320,6 @@ fn finish(arena: &mut String, start: usize, rendered: Rendered<'_>) -> CellMeta 
                     kind,
                     ptr: std::ptr::null(),
                 },
-                // Give the bytes back rather than leaving text in the arena that
-                // no `CellMeta` points at — the next cell's `start` is
-                // `arena.len()`, so an abandoned tail would push every later
-                // cell that much closer to the same cliff.
                 _ => {
                     arena.truncate(start);
                     CellMeta::empty(kind)
@@ -440,13 +329,6 @@ fn finish(arena: &mut String, start: usize, rendered: Rendered<'_>) -> CellMeta 
     }
 }
 
-/// The document a row's columns are projected from.
-///
-/// With no root hint that is the row itself. With one — `_source` for an
-/// Elasticsearch hit — it is that field, so the grid shows the document the
-/// user wrote rather than the envelope the server wrapped it in. A row that
-/// does not carry the root field at all projects nothing, which renders as
-/// ABSENT cells: the honest answer for a hit fetched with `_source: false`.
 fn row_root<'a>(row: &'a Value, root: Option<&str>) -> Option<&'a Value> {
     match root {
         None => Some(row),
@@ -457,7 +339,6 @@ fn row_root<'a>(row: &'a Value, root: Option<&str>) -> Option<&'a Value> {
     }
 }
 
-/// The declared root, or `None` when no row of this window carries it.
 fn effective_root(slices: &[WindowSlice], root: Option<String>) -> Option<String> {
     let name = root.as_deref()?;
     let carried = slices.iter().any(|slice| match slice {
@@ -476,10 +357,6 @@ fn effective_root(slices: &[WindowSlice], root: Option<String>) -> Option<String
     carried.then_some(root).flatten()
 }
 
-/// Field `name` of a document row, or `None` when it is **not present**.
-///
-/// A non-document value in a `Shape::Documents` stream (a bare scalar, an
-/// array) is the whole row and occupies the single projected column.
 fn doc_field<'a>(
     row: &'a Value,
     name: Option<&str>,
@@ -495,16 +372,6 @@ fn doc_field<'a>(
     }
 }
 
-/// The window's column projection.
-///
-/// - **Table**: the Arrow schema, verbatim.
-/// - **Documents**: the ordered union of top-level field names seen *in this
-///   window*, taken from the driver's `root_hint` when it declared one. A
-///   `ViewProjection` at its simplest honest form. It is window-local on
-///   purpose — a document store has no global column list, and inventing one
-///   would mean scanning rows nobody asked for, which is exactly the
-///   eager-materialisation this whole design is built against.
-/// - **Pairs**: `key`, `value` (Redis `SCAN`/`HGETALL`).
 fn project_columns(slices: &[WindowSlice], root: Option<&str>) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for slice in slices {
@@ -540,9 +407,6 @@ fn project_columns(slices: &[WindowSlice], root: Option<&str>) -> Vec<String> {
     names
 }
 
-/// Column names of a whole `DocSegment` — used by
-/// [`crate::query::datagrep_query_status_json`] to report a document result's
-/// columns before any window has been asked for.
 pub(crate) fn doc_columns(segment: &Arc<DocSegment>, root: Option<&str>) -> Vec<String> {
     project_columns(
         &[WindowSlice::Docs {
@@ -557,31 +421,24 @@ pub(crate) fn doc_columns(segment: &Arc<DocSegment>, root: Option<&str>) -> Vec<
 
 // ---- accessors ---------------------------------------------------------
 
-/// Rows actually available in this window.
-///
 /// # Safety
-/// `r` must come from `datagrep_query_rows` and not yet be freed.
+/// `r` is NULL or an unfreed window from `datagrep_query_rows`.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_rows_count(r: *mut DatagrepRows) -> u64 {
-    // SAFETY: `r` is NULL or a live window from `datagrep_query_rows`, per the
-    // contract; `rows_ref` maps NULL to `None`.
+    // SAFETY: r is NULL or a live window from datagrep_query_rows per the contract; rows_ref maps NULL to None.
     guard_quiet(0, || unsafe { rows_ref(r) }.map(|r| r.rows).unwrap_or(0))
 }
 
-/// Columns in this window.
-///
 /// # Safety
-/// `r` must come from `datagrep_query_rows` and not yet be freed.
+/// `r` is NULL or an unfreed window from `datagrep_query_rows`.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_rows_columns(r: *mut DatagrepRows) -> u32 {
     // SAFETY: as `datagrep_rows_count` — NULL or a live window.
     guard_quiet(0, || unsafe { rows_ref(r) }.map(|r| r.cols).unwrap_or(0))
 }
 
-/// `true` => not fetched yet, draw skeletons.
-///
 /// # Safety
-/// `r` must come from `datagrep_query_rows` and not yet be freed.
+/// `r` is NULL or an unfreed window from `datagrep_query_rows`.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_rows_pending(r: *mut DatagrepRows) -> bool {
     // SAFETY: as `datagrep_rows_count` — NULL or a live window.
@@ -590,14 +447,8 @@ pub unsafe extern "C" fn datagrep_rows_pending(r: *mut DatagrepRows) -> bool {
     })
 }
 
-/// Cell text, borrowed — valid until `datagrep_rows_free`. NOT null-terminated.
-///
-/// Returns NULL (and writes 0 to `len_out`) for a cell outside the window.
-///
 /// # Safety
-/// `r` must come from `datagrep_query_rows` and not yet be freed; `len_out` must be
-/// NULL or point at a writable `size_t`. The returned pointer must not be used
-/// after `datagrep_rows_free`.
+/// `r` is NULL or an unfreed window from `datagrep_query_rows`. The returned pointer is borrowed, length-tagged, NOT NUL-terminated, and dangles after `datagrep_rows_free`.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_rows_cell(
     r: *mut DatagrepRows,
@@ -606,20 +457,14 @@ pub unsafe extern "C" fn datagrep_rows_cell(
     len_out: *mut usize,
 ) -> *const c_char {
     guard_quiet(std::ptr::null(), || {
-        // Zero the length first so an early return can never leave the caller
-        // reading a stale count against a NULL pointer.
-        // SAFETY: non-NULL (checked) and writable per the contract.
+        // SAFETY: non-NULL (checked) and writable per the contract; length zeroed first so an early return cannot leave a stale count.
         if !len_out.is_null() {
             unsafe { *len_out = 0 };
         }
-        // SAFETY: `r` is NULL or a live window from `datagrep_query_rows`, per
-        // the contract; `rows_ref` maps NULL to `None`.
+        // SAFETY: r is NULL or a live window from datagrep_query_rows per the contract; rows_ref maps NULL to None.
         let Some(rows) = (unsafe { rows_ref(r) }) else {
             return std::ptr::null();
         };
-        // Out-of-window coordinates come back `None` — `cell_meta` bounds-checks
-        // against `rows`/`cols` and indexes with `.get`, so a hostile or merely
-        // stale (row, col) from the UI cannot reach the arithmetic below.
         let Some(meta) = rows.cell_meta(row, col) else {
             return std::ptr::null();
         };
@@ -628,42 +473,23 @@ pub unsafe extern "C" fn datagrep_rows_cell(
             unsafe { *len_out = meta.len as usize };
         }
         if meta.len == 0 {
-            // A real, empty string — distinct from NULL and from ABSENT,
-            // which the caller tells apart with `datagrep_rows_cell_kind`. Return
-            // a valid non-NULL pointer so an empty cell is never mistaken for
-            // an error.
             return rows.text.as_ptr() as *const c_char;
         }
         if meta.ptr.is_null() {
-            // SAFETY: `meta` came from this window's own `fill`, which only ever
-            // emits an arena cell with `off + len <= text.len()` — `finish`
-            // refuses to record a cell whose offset or length would not survive
-            // the `u32` round trip, so the stored numbers are the real ones
-            // rather than wrapped ones. The resulting pointer therefore lands
-            // inside `text`'s allocation, and `text` is owned by `rows` and
-            // dropped only by `datagrep_rows_free`.
+            // SAFETY: fill/finish guarantee off + len <= text.len() past the u32 round trip, so the pointer lands inside text, owned by rows and dropped only by datagrep_rows_free.
             unsafe { rows.text.as_ptr().add(meta.off as usize) as *const c_char }
         } else {
-            // A borrowed cell: the pointer is into an Arrow buffer or an
-            // `Arc<str>` that `rows.slices` holds an `Arc` on, so it stays valid
-            // for exactly as long as the window does.
             meta.ptr as *const c_char
         }
     })
 }
 
-/// 0 = value, 1 = SQL NULL, 2 = ABSENT, 3 = nested.
-///
-/// A cell outside the window reports `2` — "not present" is the literal truth
-/// about a coordinate this window does not cover.
-///
 /// # Safety
-/// `r` must come from `datagrep_query_rows` and not yet be freed.
+/// `r` is NULL or an unfreed window from `datagrep_query_rows`.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_rows_cell_kind(r: *mut DatagrepRows, row: u64, col: u32) -> u8 {
     guard_quiet(KIND_ABSENT, || {
-        // SAFETY: `r` is NULL or a live window from `datagrep_query_rows`, per
-        // the contract; `rows_ref` maps NULL to `None`.
+        // SAFETY: r is NULL or a live window from datagrep_query_rows per the contract; rows_ref maps NULL to None.
         unsafe { rows_ref(r) }
             .and_then(|rows| rows.cell_meta(row, col))
             .map(|m| m.kind)
@@ -671,13 +497,8 @@ pub unsafe extern "C" fn datagrep_rows_cell_kind(r: *mut DatagrepRows, row: u64,
     })
 }
 
-/// Full raw value of one cell as JSON, for the detail pane. Caller frees with
-/// `datagrep_string_free`.
-///
-/// Returns NULL for a cell outside the window.
-///
 /// # Safety
-/// `r` must come from `datagrep_query_rows` and not yet be freed.
+/// `r` is NULL or an unfreed window from `datagrep_query_rows`.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_rows_cell_detail_json(
     r: *mut DatagrepRows,
@@ -685,13 +506,10 @@ pub unsafe extern "C" fn datagrep_rows_cell_detail_json(
     col: u32,
 ) -> *mut c_char {
     guard_quiet(std::ptr::null_mut(), || {
-        // SAFETY: `r` is NULL or a live window from `datagrep_query_rows`, per
-        // the contract; `rows_ref` maps NULL to `None`.
+        // SAFETY: r is NULL or a live window from datagrep_query_rows per the contract; rows_ref maps NULL to None.
         let Some(rows) = (unsafe { rows_ref(r) }) else {
             return std::ptr::null_mut();
         };
-        // `value_at` bounds-checks `(row, col)` and indexes every container with
-        // `.get`, so out-of-window coordinates return `None` rather than panic.
         let Some(value) = rows.value_at(row, col) else {
             return std::ptr::null_mut();
         };
@@ -702,23 +520,12 @@ pub unsafe extern "C" fn datagrep_rows_cell_detail_json(
     })
 }
 
-/// This window's column names, as a JSON array. Caller frees with
-/// `datagrep_string_free`.
-///
-/// A document window projects its own columns — the union of the field names
-/// *its* rows carry — while the status JSON reports the names the first chunk
-/// revealed. The two agree for a homogeneous result and can differ for a
-/// heterogeneous one, so anything that must address a field by name (an edit
-/// naming the field it sets) has to ask the window it read the value from
-/// rather than assume the header above it describes the same column.
-///
 /// # Safety
-/// `r` must come from `datagrep_query_rows` and not yet be freed.
+/// `r` is NULL or an unfreed window from `datagrep_query_rows`.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_rows_column_names_json(r: *mut DatagrepRows) -> *mut c_char {
     guard_quiet(std::ptr::null_mut(), || {
-        // SAFETY: `r` is NULL or a live window from `datagrep_query_rows`, per
-        // the contract; `rows_ref` maps NULL to `None`.
+        // SAFETY: r is NULL or a live window from datagrep_query_rows per the contract; rows_ref maps NULL to None.
         let Some(rows) = (unsafe { rows_ref(r) }) else {
             return std::ptr::null_mut();
         };
@@ -729,28 +536,18 @@ pub unsafe extern "C" fn datagrep_rows_column_names_json(r: *mut DatagrepRows) -
     })
 }
 
-/// The hit envelope for one row as JSON — the identity and guard fields that
-/// live outside the projected columns. Caller frees with
-/// `datagrep_string_free`.
-///
-/// Returns NULL for a row outside the window, and for any result whose driver
-/// declared no projection root (there is then nothing outside the row).
-///
 /// # Safety
-/// `r` must come from `datagrep_query_rows` and not yet be freed.
+/// `r` is NULL or an unfreed window from `datagrep_query_rows`.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_rows_envelope_json(
     r: *mut DatagrepRows,
     row: u64,
 ) -> *mut c_char {
     guard_quiet(std::ptr::null_mut(), || {
-        // SAFETY: `r` is NULL or a live window from `datagrep_query_rows`, per
-        // the contract; `rows_ref` maps NULL to `None`.
+        // SAFETY: r is NULL or a live window from datagrep_query_rows per the contract; rows_ref maps NULL to None.
         let Some(rows) = (unsafe { rows_ref(r) }) else {
             return std::ptr::null_mut();
         };
-        // `envelope` indexes every container with `.get`, so a row outside the
-        // window is `None` rather than a panic.
         let Some(envelope) = rows.envelope(row) else {
             return std::ptr::null_mut();
         };
@@ -761,20 +558,13 @@ pub unsafe extern "C" fn datagrep_rows_envelope_json(
     })
 }
 
-/// Release the window and every pointer borrowed from it.
-///
 /// # Safety
-/// `r` must come from `datagrep_query_rows`, freed at most once. Every pointer
-/// `datagrep_rows_cell` returned for it is dangling afterwards.
+/// `r` is NULL or an unfreed window from `datagrep_query_rows`. Every cell pointer it handed out dangles after this returns.
 #[no_mangle]
 pub unsafe extern "C" fn datagrep_rows_free(r: *mut DatagrepRows) {
     guard_quiet((), || {
         if !r.is_null() {
-            // SAFETY: non-NULL (checked) and, per the contract, a pointer from
-            // `datagrep_query_rows` not yet freed. Dropping the `Box` releases
-            // the arena and the `Arc`s on the store's buffers, which is exactly
-            // why every pointer `datagrep_rows_cell` handed out dangles after
-            // this returns — the header says so.
+            // SAFETY: non-NULL (checked) and unfreed per the contract; dropping the Box releases the arena, so every cell pointer from datagrep_rows_cell dangles after this — the header says so.
             drop(unsafe { Box::from_raw(r) });
         }
     })
@@ -796,8 +586,6 @@ mod tests {
         rooted_window(values, None)
     }
 
-    /// A document window projected from `root`, the way a driver that declared
-    /// a `root_hint` is rendered.
     fn rooted_window(values: Vec<Value>, root: Option<&str>) -> DatagrepRows {
         let len = values.len();
         let segment = Arc::new(DocSegment::Values(values));
@@ -831,9 +619,6 @@ mod tests {
         std::str::from_utf8(slice).expect("utf8").to_string()
     }
 
-    /// **The reason the document model exists**, end to end through the ABI's
-    /// own data structures: one document has `note`, one has it as an explicit
-    /// null, one does not have it at all. Three states, three kinds.
     #[test]
     fn absent_null_and_empty_survive_the_window() {
         let rows = docs_window(vec![
@@ -973,10 +758,6 @@ mod tests {
         assert_eq!(text(&rows, 0, 1), "v");
     }
 
-    /// A hit with a `root_hint` shows the DOCUMENT, not the wrapper the server
-    /// put it in: an ES result whose columns were `_index`/`_id`/`_source` had
-    /// nothing in it a user could edit, because every field they wrote was
-    /// buried in one nested cell.
     #[test]
     fn a_root_hint_projects_the_document_and_not_its_envelope() {
         let hit = doc(vec![
@@ -998,9 +779,6 @@ mod tests {
         assert_eq!(text(&rows, 0, 1), "7");
     }
 
-    /// The guard fields a write compares against are not columns, so they have
-    /// to be reachable some other way — otherwise an edit could only be sent
-    /// unguarded, which the driver refuses outright.
     #[test]
     fn the_envelope_carries_the_identity_and_the_cas_guard() {
         let hit = doc(vec![
@@ -1024,16 +802,10 @@ mod tests {
             envelope.get("_source").is_none(),
             "the document itself is not part of its own envelope"
         );
-        // Without a root there is nothing outside the row, and inventing an
-        // envelope would be inventing metadata.
         let plain = docs_window(vec![doc(vec![("a", Value::I64(1))])]);
         assert!(plain.envelope(0).is_none());
     }
 
-    /// `_source: false` is a legal way to ask for hits, and the window it
-    /// produces carries no root at all. Projecting from a root nothing has
-    /// would show a grid of absences; the honest answer is the fields the rows
-    /// really do carry.
     #[test]
     fn a_window_with_no_root_anywhere_is_projected_unrooted() {
         let bare = doc(vec![
@@ -1043,8 +815,6 @@ mod tests {
         let rows = rooted_window(vec![bare], Some("_source"));
         assert_eq!(rows.columns, vec!["_index", "_id"]);
         assert_eq!(text(&rows, 0, 1), "abc");
-        // And with no root there is no envelope, so nothing offers to edit a
-        // document this window never saw.
         assert!(rows.envelope(0).is_none());
     }
 }

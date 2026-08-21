@@ -1,33 +1,10 @@
-//! Shared dialect-aware SQL lexical scanner, hand-rolled. One state machine
-//! walks the byte stream and
-//! classifies every byte into a [`Chunk`] — code, a quoted region (string or
-//! quoted identifier, in any of the dialects' quoting styles), or a comment
-//! (with nested `/* */` for Postgres). [`crate::sql::splitter`],
-//! [`crate::sql::classifier`], and [`crate::sql::highlight`] all build on
-//! this single pass so the quoting/comment/dollar-quote escaping rules are
-//! implemented exactly once.
-//!
-//! Scanning is byte-wise, which is safe for UTF-8 text here because every
-//! delimiter this scanner looks for (`'`, `"`, `` ` ``, `[`, `]`, `-`, `#`,
-//! `/`, `*`, `$`, `;`, `\n`) is ASCII, and no UTF-8 continuation or
-//! multi-byte lead byte ever equals an ASCII byte value. Unicode content
-//! inside strings/identifiers/comments rides through untouched, and every
-//! chunk boundary this scanner produces sits on a UTF-8 char boundary.
-
 use datagrep_api::SqlDialect;
 use std::ops::Range;
 
-/// One lexical region of a SQL buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Chunk {
-    /// Ordinary SQL text: keywords, identifiers, operators, punctuation,
-    /// literals other than strings.
     Code(Range<usize>),
-    /// A quoted region, delimiters included: `'...'`, `"..."`, `` `...` ``,
-    /// `[...]`, or Postgres `$tag$...$tag$`.
     Quoted(Range<usize>, QuoteKind),
-    /// A comment, delimiters included: `-- ...`, `# ...` (MySQL), or
-    /// `/* ... */` (nesting only for Postgres, the one dialect that nests).
     Comment(Range<usize>),
 }
 
@@ -41,22 +18,13 @@ impl Chunk {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuoteKind {
-    /// `'...'` — a string literal, `''` escapes a literal quote.
     SingleString,
-    /// `"..."` — a quoted identifier, `""` escapes a literal quote.
     DoubleIdent,
-    /// `` `...` `` — MySQL quoted identifier, `` `` `` escapes.
     Backtick,
-    /// `[...]` — SQLite/MSSQL bracketed identifier, `]]` escapes a literal
-    /// `]`.
     Bracket,
-    /// Postgres dollar-quoting, `$tag$...$tag$` (tag may be empty: `$$...$$`).
     DollarQuote,
 }
 
-/// Scan all of `src` into a flat sequence of [`Chunk`]s, dialect-aware.
-/// Adjacent `Code` chunks are never emitted (the scanner coalesces them),
-/// so callers can rely on chunk kinds alternating meaningfully.
 pub fn lex_chunks(src: &str, dialect: SqlDialect) -> Vec<Chunk> {
     let bytes = src.as_bytes();
     let len = bytes.len();
@@ -143,12 +111,6 @@ pub fn lex_chunks(src: &str, dialect: SqlDialect) -> Vec<Chunk> {
     chunks
 }
 
-/// Scan a `quote`-delimited region starting at `start` (`bytes[start] ==
-/// quote`), where the escape convention is doubling the delimiter
-/// (`''`, `""`, `` `` ``). Returns the exclusive end byte offset. An
-/// unterminated quote runs to end of input — still a well-formed chunk, just
-/// one that never closes (the splitter treats this as "still inside a
-/// statement," which is the honest behavior for a truncated buffer).
 fn scan_simple_quoted(bytes: &[u8], start: usize, quote: u8) -> usize {
     let mut i = start + 1;
     while i < bytes.len() {
@@ -164,7 +126,6 @@ fn scan_simple_quoted(bytes: &[u8], start: usize, quote: u8) -> usize {
     i
 }
 
-/// `[...]` with `]]` escaping a literal `]`.
 fn scan_bracket_quoted(bytes: &[u8], start: usize) -> usize {
     let mut i = start + 1;
     while i < bytes.len() {
@@ -188,8 +149,6 @@ fn scan_line_comment(bytes: &[u8], start: usize) -> usize {
     i
 }
 
-/// `/* ... */`, nesting only when `nest` is true (Postgres). Non-nesting
-/// dialects close on the first `*/` regardless of interior `/*`.
 fn scan_block_comment(bytes: &[u8], start: usize, nest: bool) -> usize {
     let mut i = start + 2;
     let mut depth = 1u32;
@@ -218,11 +177,6 @@ fn is_dollar_tag_continue(b: u8) -> bool {
     is_dollar_tag_start(b) || b.is_ascii_digit()
 }
 
-/// Try to scan a Postgres dollar-quoted region starting at `bytes[start] ==
-/// '$'`. Returns `(tag_end, close_end)` on success — `close_end` is the
-/// exclusive end of the whole `$tag$...$tag$` region. Returns `None` when
-/// this isn't a valid opening tag (e.g. a `$1` bind parameter), in which
-/// case the caller should treat the `$` as ordinary code.
 fn try_scan_dollar_quote(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
     debug_assert_eq!(bytes[start], b'$');
     let mut j = start + 1;
@@ -254,8 +208,6 @@ fn try_scan_dollar_quote(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
         }
         k += 1;
     }
-    // Unterminated dollar-quote: run to end of input, same honesty policy as
-    // `scan_simple_quoted`.
     Some((tag_end, bytes.len()))
 }
 

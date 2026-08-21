@@ -1,31 +1,3 @@
-//! The SQL statement splitter — this is where every client has bugs. Built on
-//! [`super::lexer::lex_chunks`] for quote/comment-aware scanning, plus three
-//! dialect-specific behaviors layered on top:
-//!
-//! - **MySQL `DELIMITER //`**: a client meta-command, recognized only when
-//!   it is the entire statement so far (nothing but whitespace precedes it
-//!   on the current statement). Switches the terminator until the next
-//!   `DELIMITER` line. The `DELIMITER` line itself produces no span.
-//! - **SQL Server `GO`**: a batch separator only when it is *alone on a
-//!   line* (optionally followed by a T-SQL repeat count, e.g. `GO 5`) —
-//!   `SELECT 'GO'` or `-- GO` must never split. The `GO` line itself
-//!   produces no span.
-//! - Every other dialect: `;` is the only terminator, always.
-//!
-//! **Empty statements** (`;;`, or a comment-only region between two
-//! terminators) are recognized but produce no span — a span with no
-//! statement content isn't useful to a caller and this crate would rather
-//! omit it than hand back something [`crate::Language::classify`] can only
-//! call `Unknown`.
-//!
-//! **Span ranges exclude the terminator** (`;`, a MySQL `DELIMITER` token,
-//! or the `GO`/`GO N` line): `"SELECT 1;"` splits to the span `"SELECT 1"`,
-//! not `"SELECT 1;"`. A trailing statement with no terminator is
-//! unaffected. This is a deliberate choice — a statement's *content* doesn't
-//! include its own separator — and it keeps
-//! [`crate::Language::classify`] fed with exactly the text a caller would
-//! want to re-execute standalone.
-
 use datagrep_api::SqlDialect;
 
 use super::lexer::{lex_chunks, Chunk};
@@ -101,9 +73,6 @@ fn skip_newline(bytes: &[u8], pos: usize) -> usize {
     }
 }
 
-/// Exclusive end of the physical line containing byte `start` (i.e. the
-/// index of the `\n`, or `bytes.len()` if the line is the last one).
-/// Returns `None` only if `start >= bytes.len()`.
 fn line_end_at(bytes: &[u8], start: usize) -> Option<usize> {
     if start >= bytes.len() {
         return None;
@@ -115,8 +84,6 @@ fn line_end_at(bytes: &[u8], start: usize) -> Option<usize> {
     Some(i)
 }
 
-/// `GO`, or `GO <positive integer>` (T-SQL batch repeat count), and nothing
-/// else on the line.
 fn is_go_line(trimmed: &str) -> bool {
     let mut words = trimmed.split_whitespace();
     match (words.next(), words.next(), words.next()) {
@@ -128,8 +95,6 @@ fn is_go_line(trimmed: &str) -> bool {
     }
 }
 
-/// `DELIMITER <new-delimiter>` — returns the new delimiter token (trailing
-/// whitespace trimmed) when `trimmed` is such a line.
 fn parse_delimiter_line(trimmed: &str) -> Option<&str> {
     const KW: &str = "delimiter";
     if trimmed.len() <= KW.len() {
@@ -146,10 +111,6 @@ fn parse_delimiter_line(trimmed: &str) -> Option<&str> {
     (!rest.is_empty()).then_some(rest)
 }
 
-/// Push a span for `[start, end)`, unless it's empty/whitespace-only (see
-/// module docs). Directives are parsed from the comment lines immediately
-/// above the statement's real content (skipping leading whitespace and
-/// comments within the span itself to find where that content starts).
 fn emit_span(
     spans: &mut Vec<StatementSpan>,
     src: &str,
@@ -172,9 +133,6 @@ fn emit_span(
     });
 }
 
-/// First byte offset in `[start, end)` that isn't whitespace and isn't
-/// inside a comment chunk — i.e. where the statement's real content begins,
-/// used only to anchor the backward walk for directive comments.
 fn skip_leading_trivia(chunks: &[Chunk], bytes: &[u8], start: usize, end: usize) -> usize {
     let mut pos = start;
     for chunk in chunks {

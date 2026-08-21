@@ -1,14 +1,3 @@
-//! Wire-level `Value` mapping. `numeric` becomes a `Decimal` carried as a
-//! string and NEVER goes through f64 — a silently wrong number is worse than
-//! a crash.
-//!
-//! Decoding reads Postgres's binary wire format directly rather than going
-//! through `tokio-postgres`'s convenience `FromSql` impls for chrono/uuid/etc
-//! (which this crate does not depend on — see the `Cargo.toml` comment): the
-//! [`DecodedCell`] wrapper below implements `FromSql` itself and dispatches
-//! on [`Type`] to `decode_binary`. Encoding (query parameters) is the mirror
-//! image via [`PgParam`]/`ToSql`.
-
 use std::error::Error as StdError;
 use std::fmt;
 use std::sync::Arc;
@@ -18,14 +7,9 @@ use tokio_postgres::types::{FromSql, IsNull, Kind, ToSql, Type};
 
 use datagrep_api::{shape::LogicalType, value::TzSpec, Value};
 
-/// Days from the Postgres epoch (2000-01-01) to the Unix epoch (1970-01-01).
 const PG_EPOCH_DAYS: i32 = 10_957;
-/// Microseconds from the Postgres epoch to the Unix epoch.
 const PG_EPOCH_MICROS: i64 = 946_684_800_000_000;
 
-/// The engine-neutral [`LogicalType`] a Postgres wire [`Type`] maps to.
-/// Shared between value decoding (`FieldDef::logical`) and the catalog
-/// (`describe`/`infer_shape`).
 pub fn logical_type_of(ty: &Type) -> LogicalType {
     if let Kind::Array(_) = ty.kind() {
         return LogicalType::Array;
@@ -49,10 +33,6 @@ pub fn logical_type_of(ty: &Type) -> LogicalType {
     }
 }
 
-/// A single decoded cell. Implements `FromSql` itself (rather than relying on
-/// per-type convenience impls) so it can accept *every* Postgres type and
-/// fall back to [`Value::Unsupported`] instead of erroring: an unrecognized
-/// type must still surface its bytes rather than fail the whole row.
 pub struct DecodedCell(pub Value);
 
 impl<'a> FromSql<'a> for DecodedCell {
@@ -65,15 +45,10 @@ impl<'a> FromSql<'a> for DecodedCell {
     }
 
     fn accepts(_ty: &Type) -> bool {
-        // We decode (or honestly fall back to `Unsupported`) every type
-        // Postgres can report — there is no type this driver refuses to see.
         true
     }
 }
 
-/// Decode one non-NULL cell already known to be in Postgres binary format.
-/// Never fails: unrecognized types become [`Value::Unsupported`] carrying the
-/// raw bytes untouched.
 pub fn decode_binary(ty: &Type, raw: &[u8]) -> Value {
     if let Kind::Array(elem_ty) = ty.kind() {
         return decode_array(elem_ty, raw);
@@ -170,8 +145,6 @@ fn read_u16(raw: &[u8]) -> Option<u16> {
 }
 
 fn decode_jsonb(raw: &[u8]) -> Option<Value> {
-    // jsonb binary format: a 1-byte version prefix (always 1 today) then the
-    // JSON text itself.
     let (version, text) = raw.split_first()?;
     if *version != 1 {
         return None;
@@ -216,12 +189,6 @@ fn decode_array(elem_ty: &Type, raw: &[u8]) -> Value {
     if ndim <= 0 {
         return Value::Array(Arc::from(Vec::<Value>::new()));
     }
-    // Every number below this point comes off the wire, so none of them may
-    // size an allocation on its own say-so. Each dimension header is 8 bytes
-    // (length + lower bound), so a payload too short to hold `ndim` of them is
-    // malformed rather than merely large — and a server claiming `ndim =
-    // 0x7fffffff` in a twelve-byte message would otherwise have this reserve
-    // ~17 GB before the first bounds-checked read ran.
     let ndim = ndim as usize;
     if ndim > cur.len() / 8 {
         return unsupported(elem_ty, raw);
@@ -238,11 +205,6 @@ fn decode_array(elem_ty: &Type, raw: &[u8]) -> Value {
         }
         dims.push(len);
     }
-    // Same reasoning for the element count, plus one more hazard: three
-    // dimensions of 2^31 overflow the `product()` and wrap to a small, wrong
-    // total, so multiply with `checked_mul`. Every element carries at least its
-    // own four-byte length prefix — a NULL is exactly that and nothing more —
-    // so anything above `cur.len() / 4` cannot be in this payload.
     let total = match dims.iter().try_fold(1usize, |acc, d| acc.checked_mul(*d)) {
         Some(total) if total <= cur.len() / 4 => total,
         _ => return unsupported(elem_ty, raw),
@@ -275,16 +237,6 @@ fn nest(dims: &[usize], iter: &mut impl Iterator<Item = Value>) -> Vec<Value> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// NUMERIC binary <-> decimal string. Never f64: NUMERIC is arbitrary
-// precision, and rounding it through a float would silently corrupt money.
-//
-// Wire format (`numeric_send`/`numeric_recv` in Postgres's `numeric.c`):
-//   i16 ndigits, i16 weight, u16 sign, u16 dscale, then `ndigits` base-10000
-//   digits (i16 each), most significant first. `weight` is the base-10000
-//   exponent of the first stored digit.
-// ---------------------------------------------------------------------------
-
 const NUMERIC_POS: u16 = 0x0000;
 const NUMERIC_NEG: u16 = 0x4000;
 const NUMERIC_NAN: u16 = 0xC000;
@@ -301,9 +253,6 @@ fn decode_numeric(raw: &[u8]) -> Option<Value> {
         return Some(Value::Decimal(Arc::from("NaN")));
     }
     if sign != NUMERIC_POS && sign != NUMERIC_NEG {
-        // Positive/negative infinity (PG 17+) or an unrecognized sign code —
-        // no stable decimal-string representation, so this is an honest
-        // "unsupported", not a silent wrong number.
         return None;
     }
     let neg = sign == NUMERIC_NEG;
@@ -358,8 +307,6 @@ fn numeric_digits_to_string(neg: bool, weight: i32, dscale: u16, digits: &[i32])
 
     // Fractional groups needed to cover `dscale` decimal digits.
     let min_group_exp = -div_ceil(dscale as i32, 4);
-    // Also cover any stored digits further right than dscale implies (should
-    // not happen with well-formed server output, but never drop real data).
     let last_stored_exp = weight - (ndigits - 1);
     let lowest_exp = min_group_exp.min(last_stored_exp.min(-1));
 
@@ -395,9 +342,6 @@ fn div_ceil(a: i32, b: i32) -> i32 {
     (a + b - 1) / b
 }
 
-/// Encode a decimal string to Postgres NUMERIC binary wire format — the
-/// inverse of [`decode_numeric`]. Used by [`PgParam`] when binding a
-/// `Value::Decimal` query parameter.
 fn encode_numeric(s: &str) -> Result<Vec<u8>, String> {
     if s.eq_ignore_ascii_case("nan") {
         let mut out = Vec::with_capacity(8);
@@ -422,8 +366,6 @@ fn encode_numeric(s: &str) -> Result<Vec<u8>, String> {
     }
     let dscale = frac_str.len() as u16;
 
-    // Pad to a multiple of 4 so grouping aligns on the decimal point:
-    // integer part padded on the left, fractional part padded on the right.
     let int_pad = (4 - int_str.len() % 4) % 4;
     let padded_int: String = "0".repeat(int_pad) + int_str;
     let frac_pad = (4 - frac_str.len() % 4) % 4;
@@ -442,8 +384,6 @@ fn encode_numeric(s: &str) -> Result<Vec<u8>, String> {
         groups.push(chunk.parse::<i32>().map_err(|e| e.to_string())?);
     }
 
-    // Trim leading all-zero groups (adjusting weight) and trailing all-zero
-    // groups (dscale already captures the intended display precision).
     let mut start = 0;
     while start < groups.len() && groups[start] == 0 {
         start += 1;
@@ -471,12 +411,6 @@ fn encode_numeric(s: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------
-// Query parameter encoding (`ToSql`) — the inverse direction.
-// ---------------------------------------------------------------------------
-
-/// Wraps a `&datagrep_api::Value` so it can implement the foreign `ToSql` trait
-/// (orphan rules forbid implementing it directly on `datagrep_api::Value`).
 pub struct PgParam<'a>(pub &'a Value);
 
 impl fmt::Debug for PgParam<'_> {
@@ -778,13 +712,6 @@ mod tests {
         );
     }
 
-    /// An array payload is a *server* message, so its dimension count and
-    /// per-dimension lengths are attacker-controlled numbers. They used to size
-    /// `Vec::with_capacity` directly: a claimed `ndim` of 2^31 reserved ~17 GB
-    /// from a twelve-byte message, and three dimensions of 2^31 overflowed the
-    /// `product()` outright. Both are now bounded by what the payload can
-    /// actually carry, and a malformed one degrades to `Unsupported` — the
-    /// driver's existing "never lose bytes, never crash on a quirk" answer.
     #[test]
     fn a_hostile_array_header_is_unsupported_not_an_allocation() {
         let hdr = |ndim: i32, dims: &[i32]| {

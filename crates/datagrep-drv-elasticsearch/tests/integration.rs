@@ -1,12 +1,3 @@
-//! Integration tests against a real Elasticsearch. Every test is `#[ignore]`d
-//! by default and needs a live server — see `tests/README.md` for the docker
-//! one-liner and the startup-wait caveat.
-//!
-//! Point them at a server with `DATAGREP_TEST_ES` (default
-//! `http://localhost:9200`). Each test creates its own throwaway index named
-//! `datagrep_es_test_<label>_<nanos>` and deletes it on the way out, so the
-//! suite is safe to run repeatedly and concurrently against one server.
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -41,10 +32,6 @@ fn unique_index(label: &str) -> String {
     format!("datagrep_es_test_{label}_{nanos}_{n}")
 }
 
-/// A bare HTTP client for *seeding* only. Fixtures are set up out of band —
-/// the driver now generates guarded single-document `Op::Mutate` writes, but a
-/// read test must not depend on the write path it is not exercising, and bulk
-/// seeding is not something the (deliberately non-`_bulk`) write path does.
 fn seeder() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
@@ -94,10 +81,6 @@ async fn bulk(index: &str, docs: &[serde_json::Value]) {
         .await;
 }
 
-/// Seed documents written as raw JSON text, so `_source`'s key order on the
-/// wire is exactly what the test wrote. `serde_json::json!` would alphabetize
-/// it (its `Map` is a `BTreeMap` without the crate-wide `preserve_order`
-/// feature), which would make a key-order assertion test nothing at all.
 async fn bulk_raw(index: &str, docs: &[&str]) {
     let mut ndjson = String::new();
     for doc in docs {
@@ -127,9 +110,6 @@ async fn drop_index(index: &str) {
         .await;
 }
 
-/// Seed anything that is not an index — a template, say — at an arbitrary
-/// path, for the same reason as [`create_index`]: a read test must not depend
-/// on a write path it is not exercising.
 async fn put_json(path: &str, body: serde_json::Value) {
     let resp = seeder()
         .put(format!("{}/{path}", es_url()))
@@ -148,7 +128,6 @@ async fn delete_path(path: &str) {
     let _ = seeder().delete(format!("{}/{path}", es_url())).send().await;
 }
 
-/// As [`put_json`], for the endpoints that only answer POST (`_aliases`).
 async fn post_json(path: &str, body: serde_json::Value) {
     let resp = seeder()
         .post(format!("{}/{path}", es_url()))
@@ -183,8 +162,6 @@ async fn connect(default_index: Option<&str>) -> Box<dyn Connection> {
         .expect("connect to elasticsearch")
 }
 
-/// Resident set size in bytes, via `ps` — no extra dependency, and it is the
-/// same number a user watching Activity Monitor would see.
 fn rss_bytes() -> u64 {
     let pid = std::process::id();
     let out = std::process::Command::new("ps")
@@ -215,10 +192,6 @@ fn field(value: &Value, path: &str) -> Option<Value> {
 
 // ------------------------------------------------------------------ tests --
 
-/// The bounded-memory contract, whole: 100 000 documents arrive as many
-/// bounded batches — never one buffered result — every document is seen
-/// exactly once, and the process's resident memory does not grow with the
-/// result size.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn streams_100k_documents_in_incremental_batches_with_flat_rss() {
@@ -270,8 +243,6 @@ async fn streams_100k_documents_in_incremental_batches_with_flat_rss() {
         max_rows: 1_000,
         ..FetchHint::default()
     };
-    // Baseline after the first batch, so index-time and connection setup are
-    // not counted as result-set growth.
     let mut first = cursor.next_batch(hint).await.unwrap().expect("first batch");
     let baseline_rss = rss_bytes();
     let mut seen = match std::mem::take(&mut first.payload) {
@@ -310,8 +281,6 @@ async fn streams_100k_documents_in_incremental_batches_with_flat_rss() {
         "the server's own `took` must be reported"
     );
 
-    // The memory invariant: the driver never accumulates the result. A
-    // generous ceiling — the point is that it is bounded, not that it is zero.
     let growth = peak_rss.saturating_sub(baseline_rss);
     assert!(
         growth < 128 * 1024 * 1024,
@@ -332,9 +301,6 @@ async fn streams_100k_documents_in_incremental_batches_with_flat_rss() {
     drop_index(&index).await;
 }
 
-/// A resume token really does continue the same scan after the cursor (and, as
-/// far as the driver is concerned, the connection) has gone away — the
-/// idle-auto-disconnect story.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn a_resume_token_continues_the_scan_where_it_stopped() {
@@ -373,10 +339,6 @@ async fn a_resume_token_continues_the_scan_where_it_stopped() {
     }
     assert_eq!(first_half.len(), 300);
     let token = cursor.resume_token().expect("a resume token");
-    // Close it properly: this releases the point-in-time, which is exactly
-    // what the core does when it disconnects an idle connection. The token
-    // must survive that — resuming re-opens a point-in-time and continues
-    // from the `search_after` position.
     cursor.close().await.unwrap();
     drop(cursor);
 
@@ -413,9 +375,6 @@ async fn a_resume_token_continues_the_scan_where_it_stopped() {
     drop_index(&index).await;
 }
 
-/// Heterogeneous documents make the grid grow columns without refetching:
-/// exactly one `AddColumn` per newly-observed `_source` field, in first-seen
-/// order, never re-announced.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn heterogeneous_documents_emit_schema_delta_add_column_events() {
@@ -425,9 +384,6 @@ async fn heterogeneous_documents_emit_schema_delta_add_column_events() {
         serde_json::json!({ "properties": { "n": { "type": "long" } }}),
     )
     .await;
-    // Each document introduces at least one field the previous ones lacked.
-    // Written as raw text so `_source` arrives in this exact key order, which
-    // is what the AddColumn ordering assertion below is really testing.
     bulk_raw(
         &index,
         &[
@@ -483,8 +439,6 @@ async fn heterogeneous_documents_emit_schema_delta_add_column_events() {
         "one AddColumn per new field, in first-seen order, never re-announced"
     );
 
-    // And the `Absent` distinction the whole driver exists for: document 4
-    // carries no `a`, which resolves to absence rather than a fake null.
     assert_eq!(field(&docs[3], "_source.a"), None, "absent, not null");
     assert_eq!(
         field(&docs[0], "_source.a"),
@@ -497,9 +451,6 @@ async fn heterogeneous_documents_emit_schema_delta_add_column_events() {
     drop_index(&index).await;
 }
 
-/// Cancellation, end to end: a genuinely slow search is cancelled through the
-/// task API, control returns immediately, the outcome honestly reports a
-/// server-side cancel, and the connection survives.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn cancel_mid_slow_query_reaches_the_server_and_returns_control() {
@@ -515,11 +466,6 @@ async fn cancel_mid_slow_query_reaches_the_server_and_returns_control() {
     let conn: Arc<dyn Connection> = Arc::from(connect(Some(&index)).await);
     assert!(conn.capabilities().flags.contains(Caps::SERVER_CANCEL));
 
-    // ~10 s of real work that Elasticsearch cannot short-circuit: a `script`
-    // *filter* (so the driver's `_shard_doc` sort cannot terminate the
-    // collection early) whose predicate matches nothing (so every document
-    // must be evaluated) and whose loop depends on a doc value (so the JIT
-    // cannot fold it away).
     let slow = format!(
         "POST /{index}/_search\n{}",
         serde_json::json!({
@@ -562,9 +508,6 @@ async fn cancel_mid_slow_query_reaches_the_server_and_returns_control() {
     );
     match pulled {
         Err(DbError::Cancelled) => {}
-        // A cancel that lands between shard phases can also surface as the
-        // engine's own partial-result error; both are honest outcomes, a
-        // silently successful full result is not.
         Err(other) => assert!(
             other.to_string().to_lowercase().contains("cancel"),
             "expected a cancellation, got {other:?}"
@@ -592,9 +535,6 @@ async fn cancel_mid_slow_query_reaches_the_server_and_returns_control() {
     drop_index(&index).await;
 }
 
-/// The catalog is lazy and truthful: indices list, one index's mapping is
-/// fetched on demand (never the cluster's), `describe` reports the field list
-/// plus document count and store size, and `infer_shape` samples.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn catalog_lists_indices_maps_fields_and_infers_shape() {
@@ -690,8 +630,6 @@ async fn catalog_lists_indices_maps_fields_and_infers_shape() {
     assert_eq!(indexes_json[0]["name"], serde_json::json!("_id"));
     assert_eq!(indexes_json[0]["primary"], serde_json::json!(true));
 
-    // Sampling: `n` is absent from one of the three documents, and absence is
-    // not a type.
     let inferred = catalog
         .infer_shape(&ObjectPath::new(vec![Arc::from(index.as_str())]), 100)
         .await
@@ -721,10 +659,6 @@ async fn catalog_lists_indices_maps_fields_and_infers_shape() {
     drop_index(&index).await;
 }
 
-/// The value mapping, end to end against the engine's own responses:
-/// `scaled_float` keeps its decimal, `long` stays exact past f64, `binary`
-/// decodes to bytes, an explicit null stays a null, and a missing field is
-/// absent.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn value_mapping_preserves_precision_bytes_and_the_absent_null_distinction() {
@@ -821,8 +755,6 @@ async fn value_mapping_preserves_precision_bytes_and_the_absent_null_distinction
     drop_index(&index).await;
 }
 
-/// `EXACT_COUNT_CHEAP` is off and the driver is honest about which count it
-/// ran; filters compile to a real Query DSL; and `EXPLAIN` works both ways.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn counts_filters_and_explain_report_what_they_actually_did() {
@@ -974,7 +906,6 @@ async fn counts_filters_and_explain_report_what_they_actually_did() {
     drop_index(&index).await;
 }
 
-/// The capability flags and the honest refusals behind them.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn capabilities_refusals_and_read_only_are_honest() {
@@ -1036,7 +967,6 @@ async fn capabilities_refusals_and_read_only_are_honest() {
     drop_index(&index).await;
 }
 
-/// Native console requests, including parameter binding into the parsed tree.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn native_console_requests_and_bound_parameters_work() {
@@ -1114,20 +1044,6 @@ async fn native_console_requests_and_bound_parameters_work() {
     drop_index(&index).await;
 }
 
-/// **The version-conflict loop, whole, against a real cluster.**
-///
-/// A guarded write is only worth having if a conflict is recoverable, and the
-/// recovery is the same three steps every time: the write is refused, the
-/// document is read back, the edit is re-sent against the version that read
-/// returned. Every one of those steps rests on an assumption about the server
-/// that no fixture can check — that a stale `if_seq_no` really does 409 rather
-/// than overwrite, that a scan by identity really does return the *current*
-/// `_seq_no`, and that the same edit really is accepted once re-guarded.
-///
-/// This is the shape `datagrep_reread_documents` builds for the grid's
-/// three-column conflict view: `Op::Scan` over the document's own index,
-/// filtered by the rest of its identity, `limit: 2` so an identity that
-/// answers twice can be told from one that answers once.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn a_stale_guard_is_refused_then_re_read_and_re_applied() {
@@ -1147,8 +1063,6 @@ async fn a_stale_guard_is_refused_then_re_read_and_re_applied() {
 
     let conn = connect(Some(&index)).await;
 
-    // The scan a re-read runs: the index is the object, the rest of the
-    // identity are terms inside it.
     let reread = |id: Option<&str>| {
         let mut terms = Vec::new();
         if let Some(id) = id {
@@ -1199,8 +1113,6 @@ async fn a_stale_guard_is_refused_then_re_read_and_re_applied() {
         Some(Value::Str(Arc::from("open")))
     );
 
-    // 2. Somebody else moves it — a different field, so a rebase would not be
-    //    overwriting their work.
     let resp = seeder()
         .post(format!(
             "{}/{index}/_update/{doc_id}?refresh=true",
@@ -1230,8 +1142,6 @@ async fn a_stale_guard_is_refused_then_re_read_and_re_applied() {
         }))
     };
 
-    // 3. The stale guard is refused — reported per row, not thrown, and the
-    //    document is NOT overwritten.
     let refused = read_one(update(vec![
         (FieldPath::field("_seq_no"), loaded_seq.clone()),
         (FieldPath::field("_primary_term"), loaded_term.clone()),
@@ -1245,9 +1155,6 @@ async fn a_stale_guard_is_refused_then_re_read_and_re_applied() {
     );
     assert_eq!(field(&refused[0], "conflict"), Some(Value::Bool(true)));
 
-    // 4. Re-read by identity: exactly one document, a FRESH guard, and the
-    //    other person's change visible — which is what the middle column of
-    //    the conflict view shows.
     let now = read_one(reread(Some(&doc_id))).await;
     assert_eq!(now.len(), 1, "an identity answers exactly once");
     let fresh_seq = field(&now[0], "_seq_no").expect("_seq_no");
@@ -1295,11 +1202,6 @@ async fn a_stale_guard_is_refused_then_re_read_and_re_applied() {
     drop_index(&index).await;
 }
 
-/// The root describe's fourth source: what the cluster is running.
-///
-/// `_tasks` is queried unfiltered, so the listing request itself is always in
-/// the answer — which is exactly what makes this checkable without arranging
-/// for a long-running reindex.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn the_root_describe_reports_running_tasks_alongside_health() {
@@ -1354,12 +1256,6 @@ async fn the_root_describe_reports_running_tasks_alongside_health() {
     conn.close().await.unwrap();
 }
 
-/// Index templates in the root describe: three systems, three sources.
-///
-/// The listing must find a template this test authored *and* the ones the
-/// server ships with — a stock 8.15 cluster has 45 composable, 44 component
-/// and 5 legacy templates before anybody authors one, which is the whole
-/// reason the listings are capped and counted separately.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
 async fn the_root_describe_lists_all_three_template_systems() {
@@ -1420,8 +1316,6 @@ async fn the_root_describe_lists_all_three_template_systems() {
             .all(|row| row["name"].is_string()));
     }
 
-    // The composable template this test wrote, with its patterns still an
-    // array rather than the `_cat` rendering `"[…-*]"`.
     let listing: serde_json::Value =
         serde_json::from_str(&extra("index_templates").unwrap()).unwrap();
     let mine = listing
@@ -1440,8 +1334,6 @@ async fn the_root_describe_lists_all_three_template_systems() {
     assert_eq!(mine["data_stream"], serde_json::json!(false));
     assert_eq!(mine["template_keys"], serde_json::json!(["settings"]));
 
-    // A composable template stores only the *name* of what it is composed of,
-    // so the component listing is what stops that name being a dead reference.
     let components: serde_json::Value =
         serde_json::from_str(&extra("component_templates").unwrap()).unwrap();
     let comp = components
@@ -1479,9 +1371,6 @@ async fn exists(path: &str) -> bool {
         .is_success()
 }
 
-/// The whole reason `Drop` carries an `ObjectKind`. An index and an alias
-/// share one namespace here, and the server refuses `DELETE /<alias>` — so
-/// the two kinds must take different requests, and neither may be guessed.
 #[tokio::test]
 #[ignore = "needs a live Elasticsearch"]
 async fn an_index_and_an_alias_drop_under_their_own_kinds() {
@@ -1519,8 +1408,6 @@ async fn an_index_and_an_alias_drop_under_their_own_kinds() {
     assert_eq!(kind_of(&index), ObjectKind::Collection);
     assert_eq!(kind_of(&alias), ObjectKind::View);
 
-    // Asking to drop the alias as if it were an index is the request the
-    // server refuses, and the refusal is surfaced rather than worked around.
     let err = ddl(
         conn.as_ref(),
         DdlOp::Drop {
@@ -1564,9 +1451,6 @@ async fn an_index_and_an_alias_drop_under_their_own_kinds() {
     assert!(!exists(&index).await, "index is gone");
 }
 
-/// Removing an alias that is on several indices is one action list, so it is
-/// never visible half-removed. Split into one call per index, a reader
-/// between them would see an alias pointing at only some of them.
 #[tokio::test]
 #[ignore = "needs a live Elasticsearch"]
 async fn an_alias_is_removed_from_every_index_in_one_call() {
@@ -1602,9 +1486,6 @@ async fn an_alias_is_removed_from_every_index_in_one_call() {
     drop_index(&b).await;
 }
 
-/// `if_exists` reaches the server by whichever mechanism each endpoint has —
-/// `ignore_unavailable` for an index, and for an alias by tolerating the one
-/// error type, since `must_exist: false` does not suppress it.
 #[tokio::test]
 #[ignore = "needs a live Elasticsearch"]
 async fn if_exists_is_honoured_on_both_endpoints() {
@@ -1639,9 +1520,6 @@ async fn if_exists_is_honoured_on_both_endpoints() {
     }
 }
 
-/// A name that could expand into more than one object never reaches the
-/// server. The cluster's own `action.destructive_requires_name` catches the
-/// wildcard too, but it is a setting, and a drop does not rely on it.
 #[tokio::test]
 #[ignore = "needs a live Elasticsearch"]
 async fn a_wildcard_name_is_refused_before_it_is_sent() {
@@ -1672,8 +1550,6 @@ async fn a_wildcard_name_is_refused_before_it_is_sent() {
     drop_index(&b).await;
 }
 
-/// The verbs this engine does not have are refused by name, before a request
-/// is built — and a read-only connection refuses DDL outright.
 #[tokio::test]
 #[ignore = "needs a live Elasticsearch"]
 async fn refusals_name_what_is_missing_and_read_only_blocks_ddl() {
@@ -1724,11 +1600,6 @@ async fn refusals_name_what_is_missing_and_read_only_blocks_ddl() {
     drop_index(&index).await;
 }
 
-/// Authoring an index template is DDL that stays native, for the same reason
-/// creating an index does: the body *is* mappings and settings. This proves
-/// the whole loop through the driver — write it, have the cluster apply it to
-/// a new index, read it back through the catalog, delete it — and that
-/// read-only refuses the write.
 #[tokio::test]
 #[ignore = "needs a live Elasticsearch"]
 async fn an_index_template_is_authored_read_back_and_deleted_through_the_driver() {
@@ -1765,8 +1636,6 @@ async fn an_index_template_is_authored_read_back_and_deleted_through_the_driver(
     .await
     .expect("author the composable template");
 
-    // The cluster applies it: an index created after the fact gets the
-    // mapping from the component the template is composed of.
     let index = format!("{label}-001");
     ack(format!("PUT /{index}"))
         .await

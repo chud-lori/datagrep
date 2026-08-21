@@ -1,29 +1,3 @@
-//! # datagrep-profiles — local persistence
-//!
-//! One SQLite file, WAL, opened lazily off the startup path. Tables:
-//! `folder`, `profile`, `tunnel`, `query_history` (+ FTS5), `saved_query`,
-//! `editor_tab` (present but unused — see `db.rs`; editor tabs are plain files
-//! under `~/Library/Application Support/datagrep/tabs`), `kv`. A `plugin` table
-//! is **not** implemented yet — there is
-//! no plugin host to populate it, and shipping dead DDL for a host that
-//! doesn't exist just means migrating it again once the host's real shape
-//! (sha256, granted hosts) is known.
-//!
-//! ## Secret hygiene
-//! [`Profile`] and [`Tunnel`] have no field that can hold a secret — only an
-//! opaque `secret_ref` pointing into the OS keychain. [`Store::create_profile`]
-//! and [`Store::update_profile`] additionally reject any `config` key that
-//! merely *looks* secret-shaped (`password`, `token`, `key`, ...) before it
-//! ever reaches SQLite. TOML export therefore excludes secrets structurally,
-//! not by filtering.
-//!
-//! ## Concurrency — SQLite is blocking, async workers are not
-//! All SQLite access happens on one dedicated worker thread owned by
-//! [`Store`]; every public method is `async` and channels its request to
-//! that thread. Construction ([`Store::open`]) does not touch disk — the
-//! worker thread, the connection, migrations, and the on-open retention trim
-//! only happen on the first real call.
-
 #![warn(rust_2018_idioms)]
 #![deny(missing_debug_implementations)]
 

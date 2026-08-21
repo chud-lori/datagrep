@@ -1,7 +1,3 @@
-//! Real end-to-end round trips for value mapping (unit-tested in isolation
-//! in `value.rs`; this proves the same thing through `execute()`) and the
-//! structured `Op::Scan`/`Op::Count`/`Op::Mutate` surface.
-
 mod common;
 
 use std::sync::Arc;
@@ -251,11 +247,6 @@ async fn op_mutate_insert_update_delete_round_trip() {
     assert_eq!(rows[0][0], Value::I64(0));
 }
 
-/// **Gap 2 — the named row identity is authoritative.** A composite key whose
-/// pairs arrive in a *different order* than the table's declared PRIMARY KEY
-/// still targets the right row, because each value names its own column. The
-/// old positional convention (`PRAGMA table_info` pk order) would have
-/// swapped `tenant` and `id` here and matched nothing.
 #[tokio::test]
 async fn named_key_mutation_round_trips_regardless_of_declared_pk_order() {
     let conn = common::connect_memory().await;
@@ -271,9 +262,6 @@ async fn named_key_mutation_round_trips_regardless_of_declared_pk_order() {
     .unwrap();
 
     let path = datagrep_api::ObjectPath::new(vec![Arc::from("t")]);
-    // Key pairs deliberately in (id, tenant) order — reversed from the
-    // declared (tenant, id). Positional matching would hit row (1, 2);
-    // named matching must hit row (tenant=2, id=1).
     conn.execute(Request::Op(Op::Mutate(MutationBatch {
         mutations: vec![Mutation::Update {
             path: path.clone(),
@@ -299,8 +287,6 @@ async fn named_key_mutation_round_trips_regardless_of_declared_pk_order() {
         "the other row must be untouched"
     );
 
-    // Delete through the same named identity, then prove the affected count
-    // arrives in the Ack shape (Gap 1's driver half).
     let cursor = conn
         .execute(Request::Op(Op::Mutate(MutationBatch {
             mutations: vec![Mutation::Delete {
@@ -336,9 +322,6 @@ async fn named_key_mutation_round_trips_regardless_of_declared_pk_order() {
     assert!(err.to_string().contains("row identity"), "got: {err}");
 }
 
-/// A non-empty `expect` precondition is refused, never silently dropped —
-/// this driver cannot check-and-set, and dropping the guard would turn a
-/// conditional write into a clobber.
 #[tokio::test]
 async fn non_empty_expect_is_refused_not_dropped() {
     let conn = common::connect_memory().await;

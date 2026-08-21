@@ -1,27 +1,3 @@
-//! Query lifecycle and cancellation.
-//!
-//! `QueryMgr` is the wiring between the three tasks a running query is made of
-//! — cursor → [`crate::feeder`] → [`crate::store`] — plus the one piece of
-//! behaviour this module exists to guarantee:
-//!
-//! **The stop button always returns control instantly** — drop the feeder,
-//! close the cursor, free the store — and the status line then tells the
-//! truth, e.g. "stopped receiving results; the server may still be executing
-//! this query."
-//!
-//! So [`QueryMgr::cancel`] is deliberately **not** `async`. It does the local
-//! half unconditionally and synchronously — cancel the query token, which stops
-//! the feeder, closes the cursor and stops the store — and returns a
-//! [`CancelReport`] that already knows what kind of cancel this engine
-//! supports. The server half is fired off in the background and its real
-//! outcome arrives later as [`QueryEvent::CancelOutcome`]. A UI that awaited
-//! the server would be a UI whose stop button hangs on exactly the query that
-//! most needs stopping.
-//!
-//! Everything a frontend needs to follow a query is on one broadcast channel of
-//! [`QueryEvent`]s, fed by a supervisor task that watches the store's `watch`
-//! channel. Nothing here polls: state changes push.
-
 use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
@@ -44,15 +20,10 @@ use crate::store::{
 };
 use crate::{lock, read, write};
 
-/// How long the background half of a cancel is given before we stop waiting.
-/// It is fire-and-forget either way; this only bounds the task.
 const SERVER_CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Capacity of the event broadcast. Lagging subscribers lose events rather than
-/// applying backpressure to the core — a slow UI must never stall a query.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
-/// Identity of a running (or finished) query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct QueryId(pub u64);
 
@@ -62,41 +33,23 @@ impl fmt::Display for QueryId {
     }
 }
 
-/// End-of-query totals for the status line and query history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct QueryStats {
     pub rows: u64,
     pub batches: u64,
-    /// Bytes the driver reported reading.
     pub bytes: u64,
-    /// Wall-clock from `execute` returning to the terminal state.
     pub elapsed_micros: u64,
-    /// Time to the first admitted chunk — the latency the user actually feels,
-    /// since the grid can paint as soon as it lands.
     pub first_batch_micros: Option<u64>,
-    /// Server-reported execution time, when the protocol carries one.
     pub server_elapsed_micros: Option<u64>,
     pub spilled_bytes: u64,
-    /// Affected-row count from an `Ack`-shaped result (INSERT/UPDATE/DDL).
-    /// `None` for row-producing results and for engines that don't report one.
     pub affected: Option<u64>,
 }
 
-/// What a stop actually achieved, stated honestly.
-///
-/// `local_stopped` is always `true` — that half never fails. `outcome` is
-/// `None` until the server half reports back, and stays `None` forever on an
-/// engine that has no server-side cancel; [`CancelReport::message`] is the
-/// sentence the status line shows in each case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelReport {
-    /// We stopped consuming, closed the cursor, and released the store.
     pub local_stopped: bool,
-    /// What cancelling can do at all on this engine.
     pub kind: CancelKind,
-    /// What the server said, once it says anything.
     pub outcome: Option<CancelOutcome>,
-    /// The exact words for the status line — never embellished.
     pub message: Arc<str>,
 }
 
@@ -155,46 +108,16 @@ impl CancelReport {
     }
 }
 
-/// Everything a frontend needs to follow a query, on one broadcast channel.
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryEvent {
-    /// The server accepted the request and a cursor exists. Emitted before any
-    /// data — this is what turns the spinner on.
-    Accepted {
-        qid: QueryId,
-    },
-    /// The first chunk is in the store and the grid can paint.
-    FirstBatch {
-        qid: QueryId,
-        micros: u64,
-    },
-    Progress {
-        qid: QueryId,
-        rows: u64,
-    },
-    /// Fetching stopped on purpose; the reason is shown, not hidden.
-    Parked {
-        qid: QueryId,
-        reason: ParkReason,
-    },
-    /// The soft row cap was reached — the UI offers "[Load more] [Export all]".
-    Capped {
-        qid: QueryId,
-        rows: u64,
-    },
-    Done {
-        qid: QueryId,
-        stats: QueryStats,
-    },
-    Failed {
-        qid: QueryId,
-        message: Arc<str>,
-    },
-    /// The truth about a stop, possibly arriving well after the button.
-    CancelOutcome {
-        qid: QueryId,
-        report: CancelReport,
-    },
+    Accepted { qid: QueryId },
+    FirstBatch { qid: QueryId, micros: u64 },
+    Progress { qid: QueryId, rows: u64 },
+    Parked { qid: QueryId, reason: ParkReason },
+    Capped { qid: QueryId, rows: u64 },
+    Done { qid: QueryId, stats: QueryStats },
+    Failed { qid: QueryId, message: Arc<str> },
+    CancelOutcome { qid: QueryId, report: CancelReport },
 }
 
 impl QueryEvent {
@@ -212,7 +135,6 @@ impl QueryEvent {
     }
 }
 
-/// One tracked query.
 struct Query {
     store: Arc<ResultStore>,
     canceller: Arc<dyn Canceller>,
@@ -220,7 +142,6 @@ struct Query {
     supervisor: Mutex<Option<JoinHandle<()>>>,
 }
 
-/// Owner of every running query's lifecycle.
 pub struct QueryMgr {
     policy: MemoryPolicy,
     budget: GlobalBudget,
@@ -230,10 +151,6 @@ pub struct QueryMgr {
 }
 
 impl QueryMgr {
-    /// A manager over a shared result budget. Every `QueryMgr` in a process
-    /// should share one [`GlobalBudget`] — that is what makes the result
-    /// budget a *process* number rather than a per-tab one, so twenty open
-    /// tabs cannot each claim the whole allowance.
     pub fn new(policy: MemoryPolicy, budget: GlobalBudget) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
@@ -245,7 +162,6 @@ impl QueryMgr {
         }
     }
 
-    /// A manager owning a budget derived from its own policy.
     pub fn with_policy(policy: MemoryPolicy) -> Self {
         let budget = GlobalBudget::from_policy(&policy);
         Self::new(policy, budget)
@@ -259,30 +175,16 @@ impl QueryMgr {
         &self.budget
     }
 
-    /// Follow every query in the process. Subscribers that fall behind lose
-    /// events; they never stall a query.
     pub fn subscribe(&self) -> broadcast::Receiver<QueryEvent> {
         self.events.subscribe()
     }
 
-    /// Start a query on `conn` and return as soon as the server accepts it.
-    ///
-    /// The lease is held for the query's whole life: a cursor outliving its
-    /// connection is not a state this core can reach. It is released when the
-    /// query reaches a terminal state or is cancelled.
     pub async fn run(&self, conn: ConnLease, req: Request) -> Result<QueryId, DbError> {
         let started = Instant::now();
-        // An explicit `row_limit` is the caller saying "I want exactly this
-        // many rows" — it lifts the grid's soft row cap up to that number, so
-        // `--limit 600000` is never silently clipped back to 500k. Spill keeps
-        // memory bounded either way, so lifting the cap is safe.
         let row_limit = match &req {
             Request::Native { opts, .. } => opts.row_limit,
             Request::Op(_) => None,
         };
-        // `execute` returns when the server accepts the request; it never waits
-        // for or buffers the result — that is what lets the UI show "running"
-        // immediately instead of freezing until the last row arrives.
         let cursor = conn.execute(req).await?;
         let shape = cursor.shape().clone();
 
@@ -326,19 +228,9 @@ impl QueryMgr {
         Ok(qid)
     }
 
-    /// **The stop button.** Does the local half unconditionally and returns
-    /// immediately; the server half is fired in the background and its outcome
-    /// arrives as [`QueryEvent::CancelOutcome`].
-    ///
-    /// Not `async` on purpose: there is no await between pressing stop and
-    /// getting control back.
     pub fn cancel(&self, qid: QueryId) -> Option<CancelReport> {
         let query = read(&self.queries).get(&qid).cloned()?;
 
-        // ---- local half: unconditional, synchronous ----------------------
-        // Cancelling the query token stops the feeder (which closes the
-        // cursor) and the store's writer task; the connection lease is
-        // released by the supervisor as it exits.
         query.store.stop();
         query.cancel.cancel();
 
@@ -363,26 +255,19 @@ impl QueryMgr {
         Some(report)
     }
 
-    /// The result store of a query, for as long as it is tracked.
     pub fn store(&self, qid: QueryId) -> Option<Arc<ResultStore>> {
         read(&self.queries).get(&qid).map(|q| q.store.clone())
     }
 
-    /// The current snapshot of a query's result set.
     pub fn state(&self, qid: QueryId) -> Option<Arc<StoreState>> {
         self.store(qid).map(|s| s.state())
     }
 
-    /// Resolve a row window. Asking for rows past the frontier is what un-parks
-    /// the feeder.
     pub async fn get_rows(&self, qid: QueryId, range: Range<u64>) -> Option<RowWindow> {
         let store = self.store(qid)?;
         Some(store.get_rows(range).await)
     }
 
-    /// Forget a query and release everything it holds — the tab was closed.
-    /// This, not `cancel`, is what returns the memory: a cancelled query keeps
-    /// the rows it already fetched so the user can still read them.
     pub fn close(&self, qid: QueryId) {
         let Some(query) = write(&self.queries).remove(&qid) else {
             return;
@@ -390,14 +275,12 @@ impl QueryMgr {
         stop_query(&query);
     }
 
-    /// Queries currently tracked (running or finished-but-open).
     pub fn open_queries(&self) -> Vec<QueryId> {
         let mut ids: Vec<_> = read(&self.queries).keys().copied().collect();
         ids.sort_unstable();
         ids
     }
 
-    /// Stop and forget everything.
     pub fn shutdown(&self) {
         for (_, query) in write(&self.queries).drain() {
             stop_query(&query);
@@ -405,8 +288,6 @@ impl QueryMgr {
     }
 }
 
-/// Stop a query's tasks and let its socket go. Shared by `close` and
-/// `shutdown` so both take exactly the same path.
 fn stop_query(query: &Query) {
     query.store.stop();
     query.cancel.cancel();
@@ -425,9 +306,6 @@ impl fmt::Debug for QueryMgr {
     }
 }
 
-/// Watches one store and turns its state changes into [`QueryEvent`]s. Holds
-/// the connection lease, so the socket goes back to the pool exactly when the
-/// query is over — cancelled, capped, failed or complete.
 async fn supervise(
     qid: QueryId,
     store: Arc<ResultStore>,
@@ -501,8 +379,6 @@ fn emit_terminal(
     };
     match &state.phase {
         StorePhase::Capped => {
-            // Capped is still a finished result — the UI needs both the banner
-            // and the totals.
             let _ = events.send(QueryEvent::Capped {
                 qid,
                 rows: state.rows,
@@ -518,16 +394,12 @@ fn emit_terminal(
                 message: message.clone(),
             });
         }
-        // A cancel reports through `CancelOutcome`, which says more than a
-        // `Done` ever could. Nothing else to announce.
         StorePhase::Cancelled => {}
         StorePhase::Loading | StorePhase::Parked(_) => {}
     }
 }
 
-/// Convenience for callers that want a window or nothing.
 impl QueryMgr {
-    /// A window, or an empty `Pending` one when the query is unknown.
     pub async fn rows_or_pending(&self, qid: QueryId, range: Range<u64>) -> RowWindow {
         match self.get_rows(qid, range.clone()).await {
             Some(window) => window,
@@ -618,7 +490,6 @@ mod tests {
         }
     }
 
-    /// Collect events until `f` returns true or the deadline passes.
     async fn drain_until(
         rx: &mut broadcast::Receiver<QueryEvent>,
         deadline_ms: u64,
@@ -642,8 +513,6 @@ mod tests {
         seen
     }
 
-    /// The whole pipeline in one test: cursor → feeder → store → events, with
-    /// rows readable through the window resolver at the end.
     #[tokio::test]
     async fn a_query_streams_end_to_end_and_reports_its_lifecycle() {
         let h = harness(MockPlan {
@@ -696,11 +565,6 @@ mod tests {
         h.sessions.shutdown();
     }
 
-    /// **The stop button returns instantly and tells the truth.**
-    ///
-    /// `cancel` is synchronous: the local half (feeder aborted, cursor closed,
-    /// store released) is done before it returns, and the server half is
-    /// reported later, exactly as it happened.
     #[tokio::test]
     async fn cancel_stops_locally_at_once_and_reports_the_server_half_later() {
         let h = harness(MockPlan {
@@ -763,9 +627,6 @@ mod tests {
         h.sessions.shutdown();
     }
 
-    /// On an engine with no server-side cancel the status line says so, in
-    /// plain words. We never claim to have killed a query we only stopped
-    /// listening to.
     #[tokio::test]
     async fn a_client_abandon_engine_says_the_server_may_still_be_running() {
         let h = harness(MockPlan {
@@ -811,10 +672,6 @@ mod tests {
         h.sessions.shutdown();
     }
 
-    /// **An acknowledgement's affected-row count reaches the frontend.**
-    /// An INSERT produces `Shape::Ack { affected }` and no rows;
-    /// the count must arrive in `QueryEvent::Done { stats }` (and in the
-    /// store snapshot), not die between the driver and the store.
     #[tokio::test]
     async fn an_ack_result_reports_its_affected_rows_in_done() {
         let h = harness(MockPlan {
@@ -850,8 +707,6 @@ mod tests {
         h.sessions.shutdown();
     }
 
-    /// A driver failure surfaces as a `Failed` event carrying the server's own
-    /// message, and the socket still goes back to the pool.
     #[tokio::test]
     async fn a_failing_query_reports_and_releases_its_connection() {
         let h = harness(MockPlan {
@@ -887,8 +742,6 @@ mod tests {
         h.sessions.shutdown();
     }
 
-    /// The soft row cap reaches the frontend as `Capped` plus the totals, not
-    /// as a silently short result.
     #[tokio::test]
     async fn the_soft_row_cap_is_announced() {
         let h = Harness::build(
@@ -917,9 +770,6 @@ mod tests {
         h.sessions.shutdown();
     }
 
-    /// An explicit `row_limit` lifts the soft row cap up to that number —
-    /// `--limit 600000` must never be silently clipped back to the default
-    /// cap, and the boundary is exact.
     #[tokio::test]
     async fn an_explicit_row_limit_lifts_the_soft_cap() {
         let h = Harness::build(
@@ -954,7 +804,6 @@ mod tests {
         h.sessions.shutdown();
     }
 
-    /// Closing a query is what returns its memory — cancel keeps the rows.
     #[tokio::test]
     async fn closing_a_query_returns_its_budget() {
         let h = harness(MockPlan {
@@ -979,8 +828,6 @@ mod tests {
         h.sessions.shutdown();
     }
 
-    /// Cancelling an unknown query is a no-op, not a panic — the UI can press
-    /// stop on a tab that finished a millisecond ago.
     #[tokio::test]
     async fn cancelling_an_unknown_query_is_a_no_op() {
         let h = harness(MockPlan::default());

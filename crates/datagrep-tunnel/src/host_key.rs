@@ -1,19 +1,3 @@
-//! Host-key verification: pin the key on first use, and prompt explicitly if
-//! it ever changes.
-//!
-//! [`HostKeyPolicy`] is what [`crate::SshTunnel::connect`] consults during
-//! the handshake. [`TofuStore`] is the shipped implementation: trust On
-//! First Use, persisted to a flat file (`host:port base64-key`, one entry
-//! per pinned host). Three outcomes:
-//!
-//! - **Known, matches** → the handshake proceeds silently.
-//! - **Unknown** → a [`HostKeyDecision`] is sent to whoever is listening on
-//!   [`TofuStore::decisions`] (the UI); the handshake blocks on that
-//!   decision (never on a TTY read — same rule datagrep-secrets' `prompt:` ref
-//!   follows).
-//! - **Changed** → a hard [`TunnelError::HostKeyChanged`], naming both
-//!   fingerprints, never auto-accepted.
-
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -24,16 +8,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use crate::base64;
 use crate::TunnelError;
 
-/// Consulted once per handshake with the server's offered host key.
-///
-/// Implementations decide whether to proceed. `check` runs on the async
-/// handshake path, so it must not block the thread (file I/O here goes
-/// through blocking-free buffered reads done once at construction, not per
-/// call — see [`TofuStore::open`]).
 pub trait HostKeyPolicy: Send + Sync {
-    /// `host`/`port` are the address actually dialed (post `~/.ssh/config`
-    /// resolution). Ok(()) proceeds; Err aborts the handshake with that
-    /// error.
     fn check(
         &self,
         host: &str,
@@ -42,11 +17,6 @@ pub trait HostKeyPolicy: Send + Sync {
     ) -> impl Future<Output = Result<(), TunnelError>> + Send;
 }
 
-/// A first-sight host key awaiting a UI decision. Sent on
-/// [`TofuStore::decisions`]; the handshake that triggered it is suspended
-/// awaiting the paired answer until [`accept`](Self::accept) or
-/// [`reject`](Self::reject) is called (or this value is dropped, which
-/// counts as reject — a UI that crashes must not silently trust a key).
 #[derive(Debug)]
 pub struct HostKeyDecision {
     host: String,
@@ -64,30 +34,21 @@ impl HostKeyDecision {
         self.port
     }
 
-    /// `SHA256:base64…`, the same form `ssh-keygen -l` prints. Not secret —
-    /// safe to show the user and to log.
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
 
-    /// Pin this key and let the handshake proceed.
     pub fn accept(self) {
         let _ = self.respond.send(true);
     }
 
-    /// Refuse this key; the handshake fails with [`TunnelError::HostKeyRejected`].
     pub fn reject(self) {
         let _ = self.respond.send(false);
     }
 }
 
-/// Trust-on-first-use host key store, persisted as one `host:port
-/// base64-key` line per pinned host.
 pub struct TofuStore {
     path: PathBuf,
-    // Raw SSH wire-format key bytes (`PublicKey::to_bytes`), keyed by the
-    // exact (host, port) pair dialed — matches the file format, which has
-    // no room for multiple key types per host.
     entries: Mutex<HashMap<(String, u16), Vec<u8>>>,
     decisions: mpsc::UnboundedSender<HostKeyDecision>,
 }
@@ -101,11 +62,6 @@ impl std::fmt::Debug for TofuStore {
 }
 
 impl TofuStore {
-    /// Open (creating if absent) the known-hosts file at `path`. Returns the
-    /// store plus the receiving end of unknown-host prompts — the UI layer
-    /// owns draining that channel and calling `accept`/`reject`; a store
-    /// with nobody listening will fail every unknown-host check with
-    /// [`TunnelError::NoPromptListener`] rather than hang forever.
     pub async fn open(
         path: impl Into<PathBuf>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<HostKeyDecision>), TunnelError> {
@@ -122,8 +78,6 @@ impl TofuStore {
         ))
     }
 
-    /// Default location: `~/.datagrep/known_hosts` (or platform config dir if
-    /// `$HOME` is unset — see `dirs::config_dir`).
     pub fn default_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(std::env::temp_dir)
@@ -209,9 +163,6 @@ async fn load(path: &Path) -> Result<HashMap<(String, u16), Vec<u8>>, TunnelErro
     Ok(out)
 }
 
-/// SHA256 fingerprint, `ssh-keygen -l` form. Falls back to a fixed string on
-/// (unreachable in practice) decode failure rather than panicking — this
-/// runs on the handshake path and must never `unwrap`.
 fn fingerprint_of(bytes: &[u8]) -> String {
     match PublicKey::from_bytes(bytes) {
         Ok(key) => key.fingerprint(HashAlg::Sha256).to_string(),
@@ -291,10 +242,6 @@ mod tests {
         ))
     }
 
-    // Two distinct throwaway ed25519 public keys (`ssh-keygen -t ed25519`,
-    // no matching private key kept anywhere) — enough to exercise
-    // known/unknown/changed without needing a signing capability, so no
-    // extra `rand`/`rand_core` dev-dependency is required (deps are pinned).
     const TEST_KEY_1: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKsDzHtaiI1omYo/DkchNpnOQStfPXYZBi/N82zxsxSA test1";
     const TEST_KEY_2: &str =

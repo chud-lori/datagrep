@@ -1,26 +1,3 @@
-//! Hostile input at the C ABI: nothing the Swift side can send may panic,
-//! dereference garbage, or return a pointer the caller cannot free.
-//!
-//! The unit tests in `src/` drive each entry point the way a correct caller
-//! would. This file does the opposite — it is the adversary. Every argument
-//! that can be NULL is NULL, every string is malformed in a different way,
-//! every index is out of range, and every call is made in an order the header
-//! does not describe.
-//!
-//! ## What this can and cannot prove
-//!
-//! It proves the *checked* half of each contract: NULL, non-UTF-8, embedded
-//! NUL, oversized, and out-of-range arguments become error strings or benign
-//! defaults rather than crashes. It cannot prove the *unchecked* half — a
-//! fabricated `DatagrepCore*`, a double free, or a `char*` with no terminator
-//! are undefined behaviour by construction and no test can make them safe.
-//! Those live in each function's `# Safety` section, which is where a Swift
-//! author has to read them.
-//!
-//! Everything runs against an in-memory profile store and never opens a
-//! socket or touches the OS keychain: the arguments below are rejected long
-//! before anything would resolve a secret.
-
 use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 
@@ -41,7 +18,6 @@ use datagrep_ffi::{
 
 // ---- helpers -----------------------------------------------------------
 
-/// A core over an ephemeral store. Freed by the caller.
 fn core() -> *mut DatagrepCore {
     let path = CString::new(":memory:").expect("no interior NUL");
     let mut err: *mut c_char = ptr::null_mut();
@@ -52,39 +28,27 @@ fn core() -> *mut DatagrepCore {
     core
 }
 
-/// Take ownership of a `char*` the ABI returned, freeing it the way the header
-/// says to. Returns `None` for NULL.
 fn take(p: *mut c_char) -> Option<String> {
     if p.is_null() {
         return None;
     }
-    // SAFETY: non-NULL and produced by this library, so `from_ptr` sees a
-    // NUL-terminated buffer and `datagrep_string_free` is the matching free.
+    // SAFETY: non-NULL and produced by this library; datagrep_string_free is the matching free.
     let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
     unsafe { datagrep_string_free(p) };
     Some(s)
 }
 
-/// A `*const c_char` over bytes that are **not** valid UTF-8 but *are*
-/// NUL-terminated — the shape a Swift `Data` blob mistakenly passed as a
-/// string would have. Kept alive by the returned `Vec`.
 fn invalid_utf8() -> Vec<u8> {
     // 0x80 is a continuation byte with no lead byte: never valid UTF-8.
     vec![b'a', 0x80, 0xFF, b'b', 0]
 }
 
-/// NUL-terminated bytes with a NUL in the middle. `CStr` stops at the first
-/// one, so the tail is unreachable — the point is that this truncates rather
-/// than confusing the length arithmetic.
 fn embedded_nul() -> Vec<u8> {
     b"good\0evil\0".to_vec()
 }
 
 // ---- string arguments --------------------------------------------------
 
-/// Every `*const c_char` argument, NULL, on every entry point that takes one.
-/// The contract says NULL is an *error*, not a precondition, so each must come
-/// back with a message and no crash.
 #[test]
 fn null_string_arguments_are_errors_with_messages() {
     let c = core();
@@ -144,9 +108,6 @@ fn null_string_arguments_are_errors_with_messages() {
     }
 }
 
-/// Bytes that are NUL-terminated but not UTF-8. `CStr::to_str` must reject
-/// them before anything treats them as text — a lossy conversion here would
-/// let a mangled profile name reach the store.
 #[test]
 fn non_utf8_arguments_are_rejected_not_lossily_converted() {
     let c = core();
@@ -154,9 +115,7 @@ fn non_utf8_arguments_are_rejected_not_lossily_converted() {
     let ok = CString::new("ok").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
 
-    // SAFETY: `bad` outlives every call and its last byte is NUL, so the
-    // pointer satisfies `cstr`'s "NUL-terminated" half. Being invalid UTF-8 is
-    // the checked half under test.
+    // SAFETY: bad outlives every call and ends in NUL; being invalid UTF-8 is the half under test.
     unsafe {
         let bad_ptr = bad.as_ptr() as *const c_char;
 
@@ -181,9 +140,6 @@ fn non_utf8_arguments_are_rejected_not_lossily_converted() {
     }
 }
 
-/// A string with a NUL in the middle truncates at it. The risk is not the
-/// truncation — C has no other option — but that the *store* might end up with
-/// the tail bytes anyway. It must see exactly `"good"`.
 #[test]
 fn an_embedded_nul_truncates_and_the_tail_never_reaches_the_store() {
     let c = core();
@@ -212,9 +168,6 @@ fn an_embedded_nul_truncates_and_the_tail_never_reaches_the_store() {
     }
 }
 
-/// A megabyte of SQL and a megabyte of profile name. Neither may panic; the
-/// name is only bounded by what the store accepts, and the SQL never leaves
-/// this process because the profile does not exist.
 #[test]
 fn oversized_strings_do_not_panic() {
     let c = core();
@@ -224,14 +177,10 @@ fn oversized_strings_do_not_panic() {
 
     // SAFETY: both `CString`s outlive the calls and are NUL-terminated.
     unsafe {
-        // No such profile — the point is that a megabyte of argument is an
-        // ordinary error, not a crash or a stack overflow.
         let q = datagrep_query_run(c, huge_name.as_ptr(), huge_sql.as_ptr(), &mut err);
         if q.is_null() {
             assert!(take(err).is_some());
         } else {
-            // `datagrep_query_run` is non-blocking, so an unknown profile is
-            // reported through the status JSON instead of `err_out`.
             assert!(err.is_null());
             let status = take(datagrep_query_status_json(q, &mut err));
             assert!(status.is_some());
@@ -241,8 +190,6 @@ fn oversized_strings_do_not_panic() {
     }
 }
 
-/// Whitespace-only SQL is refused synchronously — the one class of query error
-/// that *is* knowable without touching the network.
 #[test]
 fn blank_sql_is_refused_before_anything_is_spawned() {
     let c = core();
@@ -265,9 +212,6 @@ fn blank_sql_is_refused_before_anything_is_spawned() {
 
 // ---- JSON arguments ----------------------------------------------------
 
-/// The JSON-shaped arguments are parsed with `serde_json`, which is not the
-/// problem; the problem would be a parse error reaching a `.unwrap()`. Feed
-/// each one a spread of malformed and merely surprising input.
 #[test]
 fn malformed_json_arguments_are_errors_not_panics() {
     let c = core();
@@ -275,9 +219,6 @@ fn malformed_json_arguments_are_errors_not_panics() {
     let url = CString::new(":memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
 
-    // Malformed for both `options_json` and `patch_json` — the two share
-    // `parse_patch`, and `deny_unknown_fields` is what turns a misspelled
-    // safety setting into an error instead of a silently ignored guardrail.
     let malformed = [
         "{",
         "]",
@@ -292,9 +233,6 @@ fn malformed_json_arguments_are_errors_not_panics() {
 
     // SAFETY: every pointer below is a live `CString` or the live core.
     unsafe {
-        // The profile has to exist first, or `update` would error for the
-        // uninteresting reason (no such profile) and prove nothing about
-        // parsing.
         assert!(
             datagrep_profiles_add(c, name.as_ptr(), url.as_ptr(), &mut err),
             "{:?}",
@@ -336,9 +274,6 @@ fn malformed_json_arguments_are_errors_not_panics() {
         assert!(take(err).is_some_and(|m| m.contains("name")));
         err = ptr::null_mut();
 
-        // `path_json` wants a JSON array of strings; anything else is an error
-        // with a message, never a panic. It is parsed before the profile is
-        // even looked up, so these fail on the JSON and nothing else.
         for text in ["{}", "[1,2,3]", "[null]", "not json at all", "[", "\"x\""] {
             let json = CString::new(text).unwrap();
             let out = datagrep_catalog_children_json(c, name.as_ptr(), json.as_ptr(), &mut err);
@@ -357,9 +292,6 @@ fn malformed_json_arguments_are_errors_not_panics() {
     }
 }
 
-/// A NULL `options_json` is documented as "use the defaults", so it is the one
-/// NULL string in this ABI that must *succeed*. Worth pinning: the obvious
-/// hardening (reject every NULL) would silently break it.
 #[test]
 fn null_options_json_means_defaults_not_an_error() {
     let c = core();
@@ -378,16 +310,12 @@ fn null_options_json_means_defaults_not_an_error() {
 
 // ---- handle arguments --------------------------------------------------
 
-/// Every entry point taking an opaque handle, with NULL. The header gives some
-/// of them no `err_out` at all, so those must degrade to a documented default
-/// rather than reporting anything.
 #[test]
 fn null_handles_are_errors_or_documented_defaults() {
     let mut err: *mut c_char = ptr::null_mut();
     let ok = CString::new("ok").unwrap();
 
-    // SAFETY: NULL is explicitly in-contract for all of these ("`r` must be
-    // NULL or …"), and the free functions document NULL as a no-op.
+    // SAFETY: NULL is in-contract for all of these, and the free functions document NULL as a no-op.
     unsafe {
         assert!(datagrep_profiles_list_json(ptr::null_mut(), &mut err).is_null());
         assert!(take(err).is_some_and(|m| m.contains("NULL")));
@@ -405,8 +333,6 @@ fn null_handles_are_errors_or_documented_defaults() {
         assert!(datagrep_query_rows(ptr::null_mut(), 0, 10, &mut err).is_null());
         assert!(take(err).is_some());
 
-        // No `err_out` in the frozen header: these report by returning the
-        // safest possible answer.
         assert_eq!(datagrep_rows_count(ptr::null_mut()), 0);
         assert_eq!(datagrep_rows_columns(ptr::null_mut()), 0);
         assert!(!datagrep_rows_pending(ptr::null_mut()));
@@ -428,9 +354,6 @@ fn null_handles_are_errors_or_documented_defaults() {
     }
 }
 
-/// A NULL `err_out` must be tolerated on every entry point that takes one:
-/// a caller who does not want the message should not have to allocate a slot
-/// for it. The failing calls below would each write a message if they could.
 #[test]
 fn a_null_err_out_is_tolerated_everywhere() {
     let c = core();
@@ -457,16 +380,13 @@ fn a_null_err_out_is_tolerated_everywhere() {
     }
 }
 
-/// `err_out` pointing at a slot that already holds a stale pointer. Success
-/// must NULL it, or a caller who frees on non-NULL frees the same string twice.
 #[test]
 fn a_stale_err_out_slot_is_nulled_on_success() {
     let c = core();
     let name = CString::new("stale").unwrap();
     let url = CString::new(":memory:").unwrap();
 
-    // SAFETY: live core and NUL-terminated arguments. `err` deliberately starts
-    // life holding a dangling-looking value to prove the success path clears it.
+    // SAFETY: live core and NUL-terminated arguments; err starts dangling to prove the success path clears it.
     unsafe {
         let mut err: *mut c_char = 0xdead_beef_usize as *mut c_char;
         assert!(datagrep_profiles_add(
@@ -482,9 +402,6 @@ fn a_stale_err_out_slot_is_nulled_on_success() {
 
 // ---- window coordinates ------------------------------------------------
 
-/// Extreme row/column coordinates against a real (skeleton) window. The
-/// arithmetic behind `datagrep_rows_cell` is `row * cols + col`, so `u64::MAX`
-/// is the value that would overflow it if it were not bounds-checked first.
 #[test]
 fn extreme_window_coordinates_are_absent_not_a_crash() {
     let c = core();
@@ -492,14 +409,11 @@ fn extreme_window_coordinates_are_absent_not_a_crash() {
     let sql = CString::new("SELECT 1").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
 
-    // SAFETY: live core and NUL-terminated arguments; the handle is freed below
-    // in the order the header requires (rows first, then query, then core).
+    // SAFETY: live core and NUL-terminated arguments; freed below in header order (rows, then query, then core).
     unsafe {
         let q = datagrep_query_run(c, name.as_ptr(), sql.as_ptr(), &mut err);
         assert!(!q.is_null(), "run is non-blocking: {:?}", take(err));
 
-        // `offset + len` saturates rather than wrapping, and an unaccepted
-        // query yields a skeleton window regardless.
         for (off, len) in [(0, 0), (0, u64::MAX), (u64::MAX, u64::MAX), (u64::MAX, 1)] {
             let rows = datagrep_query_rows(q, off, len, &mut err);
             assert!(!rows.is_null(), "window ({off},{len}): {:?}", take(err));
@@ -528,10 +442,6 @@ fn extreme_window_coordinates_are_absent_not_a_crash() {
 
 // ---- call ordering -----------------------------------------------------
 
-/// Calls in orders the header does not describe: cancel before the server has
-/// accepted anything, cancel twice, status after cancel, progress attached and
-/// detached repeatedly. None of these is UB — they are just wrong-looking, and
-/// a UI under a user's fingers produces all of them.
 #[test]
 fn out_of_order_calls_stay_well_defined() {
     let c = core();
@@ -548,8 +458,6 @@ fn out_of_order_calls_stay_well_defined() {
         datagrep_query_on_progress(q, None, ptr::null_mut());
         datagrep_query_on_progress(q, None, ptr::null_mut());
 
-        // Cancel before acceptance, then again — idempotent, and each call
-        // hands back a JSON report the caller owns.
         let mut out: *mut c_char = ptr::null_mut();
         datagrep_query_cancel(q, &mut out);
         let first = take(out).expect("a cancel report");
@@ -570,9 +478,6 @@ fn out_of_order_calls_stay_well_defined() {
     }
 }
 
-/// Two cores at once over the same process-global runtime, each freed while
-/// the other is live. The runtime is deliberately never dropped, so this is
-/// the case that would panic if `datagrep_core_free` owned it.
 #[test]
 fn two_cores_can_be_opened_and_freed_independently() {
     let a = core();

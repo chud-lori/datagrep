@@ -1,43 +1,3 @@
-//! [`EsCanceller`] — real, server-side cancellation for this engine:
-//! *async search -> task id -> `POST /_tasks/<id>/_cancel`*.
-//!
-//! # Why a plain `_search` is not enough
-//!
-//! Closing the HTTP channel on a `_search` abandons the *response*, not the
-//! work: the coordinating node keeps the search phase running across every
-//! shard. To reach the work we need the task that is doing it, and to name
-//! that task we need something the server will echo back to us.
-//!
-//! Two mechanisms, used together:
-//!
-//! 1. **`X-Opaque-Id`.** Every search this driver issues carries a unique
-//!    `X-Opaque-Id` header, which Elasticsearch attaches to the resulting task
-//!    and surfaces in `GET /_tasks?detailed`. `cancel()` looks the task up by
-//!    that tag and issues `POST /_tasks/<node:id>/_cancel`. This is the exact
-//!    analogue of the Mongo driver's `comment`-tagged `killOp`.
-//! 2. **`_async_search`.** When the connection is configured for it (the
-//!    default on Elasticsearch), a scan's search is submitted as
-//!    `POST /<index>/_async_search?wait_for_completion_timeout=0`, which
-//!    returns immediately with a search id for work that is still running.
-//!    `DELETE /_async_search/<id>` cancels a still-running async search, and
-//!    is used both as a second cancel path and as the cleanup that stops a
-//!    completed search's results from lingering in the `.async-search` system
-//!    index.
-//!
-//! # The honesty contract
-//!
-//! [`Canceller::kind`] reports `ServerSide` only where an async search
-//! actually gives us a cancellable handle; on OpenSearch (whose asynchronous
-//! search lives behind a different plugin endpoint) or with async search
-//! turned off it reports `ClientAbandon`.
-//!
-//! [`CancelOutcome`] is never embellished: `ServerCancelled` is returned only
-//! when the server acknowledged cancelling something specific — a task the
-//! tasks API confirmed, or a running async search whose deletion it
-//! acknowledged. If nothing was in flight, or nothing matched, the answer is
-//! `ClientAbandoned`, which is the truth: we stopped consuming and the server
-//! may still be executing.
-
 use std::sync::Arc;
 
 use serde_json::Value as Json;
@@ -48,15 +8,9 @@ use datagrep_api::error::DbError;
 
 use crate::http::{EsHttp, Method, OPAQUE_ID_HEADER};
 
-/// What is currently running, as far as the connection knows. Shared between
-/// the cursor that issues the searches and every [`EsCanceller`] the
-/// connection hands out (`Canceller` must be usable from another task while
-/// `execute()` is in flight, so it can never borrow from the cursor).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InFlight {
-    /// The `X-Opaque-Id` on the currently-running request.
     pub opaque_id: Option<Arc<str>>,
-    /// The `_async_search` id, when the search was submitted asynchronously.
     pub async_id: Option<Arc<str>>,
 }
 
@@ -66,14 +20,11 @@ impl InFlight {
     }
 }
 
-/// Shared slot the cursor writes and the canceller reads.
 pub type InFlightSlot = Arc<Mutex<InFlight>>;
 
 pub struct EsCanceller {
     http: Arc<EsHttp>,
     inflight: InFlightSlot,
-    /// Whether this connection submits searches as async searches, i.e.
-    /// whether a genuine server-side handle exists at all.
     async_search: bool,
 }
 
@@ -86,7 +37,6 @@ impl EsCanceller {
         }
     }
 
-    /// Ask the tasks API for every search task tagged with `opaque_id`.
     async fn tasks_for(&self, opaque_id: &str) -> Result<Vec<String>, DbError> {
         let json = self
             .http
@@ -94,8 +44,6 @@ impl EsCanceller {
                 Method::Get,
                 "/_tasks",
                 &[
-                    // Both the async-search submit task and the search task it
-                    // spawns match this wildcard.
                     ("actions", "*search*".to_string()),
                     ("detailed", "true".to_string()),
                     // Flat list rather than the nodes -> tasks nesting.
@@ -148,9 +96,6 @@ impl Canceller for EsCanceller {
         if self.async_search {
             CancelKind::ServerSide
         } else {
-            // A plain `_search` gives us channel-close; the task-API attempt
-            // in `cancel()` may still succeed, and if it does the *outcome*
-            // says so — but the advertised strength never over-promises.
             CancelKind::ClientAbandon
         }
     }
@@ -159,9 +104,6 @@ impl Canceller for EsCanceller {
         Box::pin(async move {
             let snapshot = self.inflight.lock().await.clone();
             if snapshot.is_empty() {
-                // Nothing tagged as running: either the search already
-                // finished or this cursor never issued one. Abandoning
-                // consumption is the whole story, and saying so is the point.
                 return Ok(CancelOutcome::ClientAbandoned);
             }
 
@@ -189,9 +131,6 @@ impl Canceller for EsCanceller {
                 }
             }
 
-            // 2. Cancel (and clean up) the async search itself. Deleting a
-            //    still-running async search cancels it; deleting a finished
-            //    one stops its results occupying the `.async-search` index.
             if let Some(async_id) = snapshot.async_id.as_deref() {
                 match self.delete_async_search(async_id).await {
                     Ok(true) => server_cancelled = true,
@@ -211,11 +150,6 @@ impl Canceller for EsCanceller {
     }
 }
 
-/// Extract `node:id` task identifiers whose `X-Opaque-Id` header matches.
-///
-/// Handles both response shapes: the flat `group_by=none` list this driver
-/// asks for, and the default `nodes -> tasks` nesting, so a proxy that strips
-/// the query parameter cannot silently break cancellation.
 pub fn task_ids_with_opaque_id(json: &Json, opaque_id: &str) -> Vec<String> {
     let mut out = Vec::new();
     let matches = |task: &Json| -> bool {
@@ -253,10 +187,6 @@ pub fn task_ids_with_opaque_id(json: &Json, opaque_id: &str) -> Vec<String> {
     out
 }
 
-/// Did `POST /_tasks/<id>/_cancel` actually cancel something?
-///
-/// A 200 with an empty `nodes` map means the task was already gone — that is
-/// not a server cancel and must not be reported as one.
 pub fn cancel_was_acknowledged(json: &Json) -> bool {
     if json
         .get("node_failures")
@@ -378,8 +308,6 @@ mod tests {
 
     #[test]
     fn kind_never_promises_server_side_without_an_async_handle() {
-        // Constructed without a live server: `kind()` is a pure function of
-        // configuration, which is exactly the property being asserted.
         let http = Arc::new(
             EsHttp::new(
                 "http://127.0.0.1:9200".into(),

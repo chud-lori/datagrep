@@ -1,64 +1,3 @@
-//! [`EsCatalog`] — lazy, on-demand namespace browsing: expand per node when
-//! the user asks, never an eager whole-catalog index.
-//!
-//! Two levels: **index / alias / data stream**, then **field**. Both are
-//! bounded server-side calls:
-//!
-//! - the top level is one `_cat/indices` (plus `_alias` and `_data_stream`),
-//!   narrowed by an index-expression prefix so the server does the filtering;
-//! - the field level is `GET /<that one index>/_mapping` — **never** a
-//!   cluster-wide `GET /_mapping`, which on a cluster with a few thousand
-//!   indices is tens of megabytes of JSON fetched to answer a question about
-//!   one index.
-//!
-//! # `SCHEMA_DECLARED` is false, and `describe` respects that
-//!
-//! Elasticsearch mappings are real declarations, but dynamic mapping means
-//! they are not exhaustive: a document can introduce a field the mapping has
-//! never seen. So [`ObjectDetail::schema`] — whose contract is "declared
-//! schema, when the engine has one" — stays `None`, and the mapping is
-//! reported through `extra` as a `fields` JSON array clearly labelled with the
-//! index's `dynamic` setting. `infer_shape` is the honest, explicitly-labelled
-//! substitute, exactly as for Mongo.
-//!
-//! # Root-level describe: cluster / node / shard health, and what is running
-//!
-//! `describe(ObjectPath::root())` reports cluster health through the existing
-//! `ObjectDetail::extra` — not a new screen: `_cluster/health`, `_cat/nodes`,
-//! `_cat/shards` and `_tasks`, four bounded `GET`s. Two rules, both learned
-//! from failures filed against other Elasticsearch clients:
-//!
-//! - **each source degrades independently** — a cluster where `_cat/shards`
-//!   is forbidden still shows health and nodes, with the failed source marked
-//!   under its own `*_error` key (the cautionary `Promise.all` tale: one
-//!   failing alias call blanked another client's whole index listing);
-//! - **cat APIs are human-formatted by default** ("3.5mb", "12.1h") and
-//!   Elastic says they are "not intended for use by applications" — so every
-//!   `_cat` call here passes `format=json`, `bytes=b` and `time=ms`, and the
-//!   surfaced keys carry their unit (`disk_avail_bytes`, `uptime_ms`).
-//!
-//! `_tasks` is the same shape of answer as `_cat/shards`: a count, per-action
-//! totals, and a capped list of the longest-running ones, so a reindex or a
-//! delete-by-query somebody started is visible without a screen of its own.
-//! It is a **read**. Cancelling an arbitrary task is deliberately not offered
-//! here — this driver's canceller only ever cancels tasks datagrep itself
-//! tagged, and a button that cancelled a stranger's reindex from a browser
-//! would be a different feature with a different confirmation.
-//!
-//! # Index templates, also a read
-//!
-//! Three more sources, same rules. Templates are **three** systems, not one:
-//! composable `_index_template`, the `_component_template` pieces those are
-//! `composed_of`, and legacy `_template`, which still wins when no composable
-//! template matches — so listing only the first would hide the template that
-//! actually governs a new index. Each is the JSON API rather than
-//! `_cat/templates`: cat renders `index_patterns` as the string `"[logs-*]"`
-//! where the JSON API returns a real array, and cat does not know about
-//! component templates at all.
-//!
-//! Authoring a template is not offered. That is DDL, it has no structured
-//! request to compile to, and the honest route stays the engine's own text.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -78,38 +17,18 @@ use crate::http::{EsHttp, Method};
 use crate::json::OrderedJson;
 use crate::value::{json_to_value, FieldTypes};
 
-/// Default sample size for [`Catalog::infer_shape`].
 const DEFAULT_SAMPLE_SIZE: u32 = 500;
-/// `index.max_result_window` bounds any single sample.
 const MAX_SAMPLE_SIZE: u32 = 10_000;
-/// Completion candidate cap: completion is a *server-side* prefix query with
-/// a small limit, never a client-side filter over everything.
 const COMPLETE_LIMIT: usize = 50;
-/// Cap on the `problem_shards` array the root-level describe reports: enough
-/// to see what is broken, never 18 071 rows (the scale that took out another
-/// client's shard view). Full per-state counts are always in `shard_states`.
 const PROBLEM_SHARD_CAP: usize = 50;
-/// Columns requested from `_cat/nodes` — exactly the ones the root describe
-/// surfaces, nothing speculative.
 const CAT_NODES_COLUMNS: &str =
     "name,ip,node.role,master,heap.percent,ram.percent,cpu,load_1m,disk.used_percent,disk.avail,uptime,version";
-/// Columns requested from `_cat/shards` — likewise only what is surfaced.
 const CAT_SHARDS_COLUMNS: &str = "index,shard,prirep,state,docs,store,node,unassigned.reason";
-/// Cap on the `running_tasks` array the root describe reports, for the same
-/// reason as [`PROBLEM_SHARD_CAP`]: a busy cluster can be running thousands of
-/// shard-level sub-tasks, and the full per-action counts are always in
-/// `task_actions`.
 const RUNNING_TASK_CAP: usize = 25;
-/// Cap on each template listing, for the same reason as [`PROBLEM_SHARD_CAP`]:
-/// a stock 8.15 cluster ships 45 composable, 44 component and 5 legacy
-/// templates before anyone has authored one. The `*_count` keys always carry
-/// the server's full total.
 const TEMPLATE_CAP: usize = 50;
 
 pub struct EsCatalog {
     http: Arc<EsHttp>,
-    /// Per-index mapping cache, populated lazily on first use and shared with
-    /// the connection so a scan and the browser never fetch it twice.
     mapping_cache: Arc<Mutex<HashMap<String, Arc<FieldTypes>>>>,
 }
 
@@ -124,7 +43,6 @@ impl EsCatalog {
         }
     }
 
-    /// One index's mapping, cached. Never cluster-wide.
     pub async fn mapping(&self, index: &str) -> Result<Arc<FieldTypes>, DbError> {
         if let Some(hit) = self.mapping_cache.lock().await.get(index) {
             return Ok(hit.clone());
@@ -164,8 +82,6 @@ impl EsCatalog {
                         "h",
                         "index,health,status,docs.count,store.size,pri,rep".to_string(),
                     ),
-                    // Hidden/system indices (`.security`, `.async-search`) are
-                    // noise in a data browser and are not listed.
                     ("expand_wildcards", "open".to_string()),
                 ],
                 None,
@@ -173,8 +89,6 @@ impl EsCatalog {
                 None,
             )
             .await
-            // A prefix matching nothing is a 404 from `_cat`, not an error the
-            // user needs to see.
             .or_else(not_found_is_empty_array)?;
         Ok(parse_cat_indices(&json))
     }
@@ -204,9 +118,6 @@ impl EsCatalog {
             Some(p) if !p.is_empty() => format!("/{}*", encode_index_expression(p)?),
             _ => String::new(),
         };
-        // Data streams landed in ES 7.9 / OpenSearch 2.0; on anything older
-        // (or with the feature disabled) this 400s or 404s, which is not an
-        // error the browser should surface.
         let json = match self
             .http
             .request(
@@ -310,9 +221,6 @@ impl EsCatalog {
     }
 
     async fn cluster_health(&self) -> Result<Json, DbError> {
-        // `_cluster/health` is a real JSON API (numbers are numbers); no unit
-        // params to pass — its one time-valued field carries `_millis` in its
-        // own name.
         self.http
             .request(Method::Get, "/_cluster/health", &[], None, None, None)
             .await
@@ -331,8 +239,6 @@ impl EsCatalog {
             .await
     }
 
-    /// `_cat/shards`, cluster-wide (`None`) or scoped to one index
-    /// expression.
     async fn cat_shards(&self, index: Option<&str>) -> Result<Json, DbError> {
         self.http
             .request(
@@ -346,13 +252,6 @@ impl EsCatalog {
             .await
     }
 
-    /// Every task the cluster is running, as a flat list.
-    ///
-    /// `group_by=none` rather than the default node -> task nesting, and
-    /// `detailed=true` for the descriptions that are the only thing telling a
-    /// reindex apart from a search. Unfiltered on purpose: an `actions=` filter
-    /// would be a guess at which work is worth seeing, and would hide whatever
-    /// it did not think of.
     async fn tasks(&self) -> Result<Json, DbError> {
         self.http
             .request(
@@ -369,19 +268,12 @@ impl EsCatalog {
             .await
     }
 
-    /// One template listing, by endpoint.
     async fn templates(&self, endpoint: &str) -> Result<Json, DbError> {
         self.http
             .request(Method::Get, endpoint, &[], None, None, None)
             .await
     }
 
-    /// The root-level describe: cluster / node / shard health, what the
-    /// cluster is running, and the three template systems, in
-    /// `ObjectDetail::extra`. Never fails as a whole — each source is fetched
-    /// and folded in independently, so a permissions or version problem on one
-    /// endpoint marks that source and leaves the others intact (see the module
-    /// doc).
     async fn describe_root(&self) -> Result<ObjectDetail, DbError> {
         let health = self.cluster_health().await;
         let nodes = self.cat_nodes().await;
@@ -430,9 +322,6 @@ impl EsCatalog {
     async fn sample(&self, index: &str, sample_size: u32) -> Result<InferredSchema, DbError> {
         let size = sample_size.clamp(1, MAX_SAMPLE_SIZE);
         let types = self.mapping(index).await.unwrap_or_default();
-        // `random_score` is Elasticsearch's `$sample`: a cheap randomised
-        // ordering so inference is not biased toward whatever happens to sit
-        // at the head of the index.
         let body = json!({
             "size": size,
             "track_total_hits": false,
@@ -469,7 +358,6 @@ impl EsCatalog {
     }
 }
 
-/// One row of `_cat/indices?format=json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatIndex {
     pub name: String,
@@ -506,7 +394,6 @@ pub fn parse_cat_indices(json: &Json) -> Vec<CatIndex> {
     out
 }
 
-/// `GET /_alias` -> `{ "<index>": { "aliases": { "<alias>": {…} } } }`.
 pub fn parse_aliases(json: &Json) -> Vec<String> {
     let Some(map) = json.as_object() else {
         return Vec::new();
@@ -521,10 +408,6 @@ pub fn parse_aliases(json: &Json) -> Vec<String> {
     names
 }
 
-/// Query params for a `_cat` call. The cat APIs are "only intended for human
-/// consumption" and format values as `3.5mb` / `12.1h` by default;
-/// `bytes=b` and `time=ms` make them machine-parseable, `format=json` makes
-/// them rows, and `h=` bounds the response to the columns actually surfaced.
 fn cat_unit_params(columns: &str) -> Vec<(&'static str, String)> {
     vec![
         ("format", "json".to_string()),
@@ -534,9 +417,6 @@ fn cat_unit_params(columns: &str) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// Path for `_cat/shards`, cluster-wide or scoped to one index expression.
-/// The expression goes through [`encode_index_expression`] like every other
-/// server-returned or user-typed name that becomes part of a URL path.
 fn cat_shards_path(index: Option<&str>) -> Result<String, DbError> {
     Ok(match index {
         Some(expr) => format!("/_cat/shards/{}", encode_index_expression(expr)?),
@@ -544,10 +424,6 @@ fn cat_shards_path(index: Option<&str>) -> Result<String, DbError> {
     })
 }
 
-/// `_cat` responses under `format=json` still encode most values as strings
-/// (`"docs.count": "100000"`). With `bytes=b`/`time=ms` those strings are
-/// plain numbers — parse them when they are, keep the raw string when they
-/// are not (never invent a value), `null` when absent.
 fn cat_num(v: Option<&Json>) -> Json {
     let Some(s) = v.and_then(Json::as_str) else {
         // Some servers already emit real numbers under `format=json`.
@@ -566,11 +442,6 @@ fn push_pair(extra: &mut Vec<(Arc<str>, Arc<str>)>, k: &str, v: &str) {
     extra.push((Arc::from(k), Arc::from(v)));
 }
 
-/// Fold a `_cluster/health` result into `extra`, under the server's own field
-/// names (nothing invented, units stay in the names the server chose:
-/// `task_max_waiting_in_queue_millis`, `active_shards_percent_as_number`).
-/// On failure the source is marked under `cluster_health_error` and the other
-/// sources still render.
 fn push_cluster_health_extra(
     extra: &mut Vec<(Arc<str>, Arc<str>)>,
     result: &Result<Json, DbError>,
@@ -611,9 +482,6 @@ fn push_cluster_health_extra(
     }
 }
 
-/// Fold a `_cat/nodes` result into `extra` as one `nodes` JSON array (the
-/// same convention as the `fields`/`indexes` arrays in the per-index
-/// describe). On failure: marked under `nodes_error`, others still render.
 fn push_nodes_extra(extra: &mut Vec<(Arc<str>, Arc<str>)>, result: &Result<Json, DbError>) {
     match result {
         Ok(json) => push_pair(extra, "nodes", &parse_cat_nodes(json).to_string()),
@@ -621,9 +489,6 @@ fn push_nodes_extra(extra: &mut Vec<(Arc<str>, Arc<str>)>, result: &Result<Json,
     }
 }
 
-/// Fold a `_cat/shards` result into `extra`: total, per-state counts, and a
-/// capped `problem_shards` array (everything not `STARTED`). On failure:
-/// marked under `shards_error`, others still render.
 fn push_shards_extra(extra: &mut Vec<(Arc<str>, Arc<str>)>, result: &Result<Json, DbError>) {
     let json = match result {
         Ok(json) => json,
@@ -649,9 +514,6 @@ fn push_shards_extra(extra: &mut Vec<(Arc<str>, Arc<str>)>, result: &Result<Json
     }
 }
 
-/// Fold a `_tasks` result into `extra`: how many are running, per-action
-/// counts, and a capped list of the longest-running ones. On failure: marked
-/// under `tasks_error`, others still render.
 fn push_tasks_extra(extra: &mut Vec<(Arc<str>, Arc<str>)>, result: &Result<Json, DbError>) {
     let json = match result {
         Ok(json) => json,
@@ -677,9 +539,6 @@ fn push_tasks_extra(extra: &mut Vec<(Arc<str>, Arc<str>)>, result: &Result<Json,
     }
 }
 
-/// Fold one template listing into `extra`: the server's full count, a capped
-/// listing, and a truncation note. On failure: marked under `<key>_error`,
-/// others still render.
 fn push_template_extra(
     extra: &mut Vec<(Arc<str>, Arc<str>)>,
     key: &str,
@@ -705,19 +564,13 @@ fn push_template_extra(
     }
 }
 
-/// What the root describe reports about one template system: how many the
-/// server has, and a capped listing of them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TemplateSummary {
     pub total: usize,
-    /// JSON array of up to `cap` templates, sorted by name.
     pub listing: Json,
     pub truncated: bool,
 }
 
-/// Sort by name, cap, and count. Sorting by anything cleverer — precedence, or
-/// "user-authored first" — would be a guess at which templates matter, and the
-/// system ones are indistinguishable from a naming convention.
 fn summarise_templates(mut rows: Vec<Json>, cap: usize) -> TemplateSummary {
     rows.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     let total = rows.len();
@@ -730,19 +583,6 @@ fn summarise_templates(mut rows: Vec<Json>, cap: usize) -> TemplateSummary {
     }
 }
 
-/// Which of `settings` / `mappings` / `aliases` a template body sets, under
-/// the server's own key names. It is the one thing a listing can say about a
-/// composable template that a name cannot: `composed_of: ["x"]` is otherwise a
-/// dangling reference, and this tells a component that contributes a mapping
-/// apart from one that only sets shard counts. Sorted explicitly because the
-/// workspace parses JSON order-preserving.
-///
-/// This is why the template listings are fetched whole and summarised here
-/// rather than trimmed with `filter_path`: an exclusion such as
-/// `-index_templates.index_template.template.mappings.properties` prunes the
-/// emptied container along with it, so the `mappings` key vanishes and this
-/// would report "sets nothing" for a template that sets a mapping. Cheaper,
-/// and silently wrong.
 fn template_keys(body: Option<&Json>) -> Json {
     let mut keys: Vec<Json> = body
         .and_then(Json::as_object)
@@ -752,8 +592,6 @@ fn template_keys(body: Option<&Json>) -> Json {
     Json::Array(keys)
 }
 
-/// Summarise `GET /_index_template`. Entries without a name are skipped, not
-/// fatal — the same rule the `_cat` parsers follow.
 pub fn parse_index_templates(json: &Json, cap: usize) -> TemplateSummary {
     let rows = json
         .get("index_templates")
@@ -770,8 +608,6 @@ pub fn parse_index_templates(json: &Json, cap: usize) -> TemplateSummary {
                         "priority": body.get("priority").and_then(Json::as_i64),
                         "composed_of": body.get("composed_of").cloned(),
                         "version": body.get("version").and_then(Json::as_i64),
-                        // A data-stream template creates a stream, not an
-                        // index; the compact `_cat` listing does not say so.
                         "data_stream": body.get("data_stream").is_some(),
                         "template_keys": template_keys(body.get("template")),
                     }))
@@ -782,9 +618,6 @@ pub fn parse_index_templates(json: &Json, cap: usize) -> TemplateSummary {
     summarise_templates(rows, cap)
 }
 
-/// Summarise `GET /_component_template`. A component has no index pattern and
-/// no precedence of its own — it only contributes a body to whatever composes
-/// it, so that body's keys are the whole of what a listing can say.
 pub fn parse_component_templates(json: &Json, cap: usize) -> TemplateSummary {
     let rows = json
         .get("component_templates")
@@ -807,9 +640,6 @@ pub fn parse_component_templates(json: &Json, cap: usize) -> TemplateSummary {
     summarise_templates(rows, cap)
 }
 
-/// Summarise `GET /_template`. Legacy templates are a bare object keyed by
-/// name, and their precedence field is `order`, not `priority` — two different
-/// spellings for two systems that coexist on the same cluster.
 pub fn parse_legacy_templates(json: &Json, cap: usize) -> TemplateSummary {
     let rows = json
         .as_object()
@@ -829,34 +659,14 @@ pub fn parse_legacy_templates(json: &Json, cap: usize) -> TemplateSummary {
     summarise_templates(rows, cap)
 }
 
-/// What the root describe reports about `_tasks` without ever carrying every
-/// shard-level sub-task of a busy cluster.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskSummary {
     pub total: usize,
-    /// Per-action counts, sorted by action name.
     pub by_action: Vec<(String, usize)>,
-    /// JSON array of the `cap` longest-running tasks, longest first.
     pub running: Json,
     pub running_truncated: bool,
 }
 
-/// Summarise a `GET /_tasks?detailed&group_by=none` response.
-///
-/// Two things this deliberately does not do:
-///
-/// - **it does not drop the listing task itself.** Every `_tasks` answer
-///   contains the `cluster:monitor/tasks/lists` task that is the request
-///   asking, so the count is never zero. Filtering it out by action would also
-///   hide somebody *else* listing tasks, and a count that quietly disagrees
-///   with the server's own is worse than one that needs a sentence.
-/// - **it does not translate actions.** `indices:data/write/reindex` is what
-///   the cluster calls it, and it is what every other tool and every log line
-///   will call it too.
-///
-/// Running time is reported in milliseconds, from the server's own
-/// `running_time_in_nanos`, with the unit in the key — the same rule the `_cat`
-/// columns follow. Rows with no `action` are skipped, not fatal.
 pub fn parse_tasks(json: &Json, cap: usize) -> TaskSummary {
     let mut total = 0usize;
     let mut by_action: Vec<(String, usize)> = Vec::new();
@@ -879,8 +689,6 @@ pub fn parse_tasks(json: &Json, cap: usize) -> TaskSummary {
         }
     }
     by_action.sort_by(|a, b| a.0.cmp(&b.0));
-    // Longest-running first: on a cluster with more tasks than the cap, the
-    // ones worth seeing are the ones that have been going a while.
     rows.sort_by_key(|row| std::cmp::Reverse(row.0));
     let running_truncated = rows.len() > cap;
     rows.truncate(cap);
@@ -892,8 +700,6 @@ pub fn parse_tasks(json: &Json, cap: usize) -> TaskSummary {
     }
 }
 
-/// One `_tasks` entry as a display object. `cancellable` is reported because
-/// it is a fact about the task; nothing here offers to act on it.
 fn task_row_json(task: &Json, nanos: i64) -> Json {
     json!({
         "id": task.get("id").and_then(Json::as_i64),
@@ -907,10 +713,6 @@ fn task_row_json(task: &Json, nanos: i64) -> Json {
     })
 }
 
-/// One `_cat/nodes?format=json&bytes=b&time=ms` response as a JSON array of
-/// display objects, sorted by node name. Keys carry their unit
-/// (`disk_avail_bytes`, `uptime_ms`); rows without a `name` are skipped, not
-/// fatal.
 pub fn parse_cat_nodes(json: &Json) -> Json {
     let Some(rows) = json.as_array() else {
         return Json::Array(Vec::new());
@@ -939,21 +741,14 @@ pub fn parse_cat_nodes(json: &Json) -> Json {
     Json::Array(out)
 }
 
-/// What the root describe reports about `_cat/shards` without ever carrying
-/// every row of a very wide cluster.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShardSummary {
     pub total: usize,
-    /// Per-state counts (`STARTED`, `UNASSIGNED`, …), sorted by state name.
     pub by_state: Vec<(String, usize)>,
-    /// JSON array of the first `problem_cap` shards whose state is not
-    /// `STARTED`.
     pub problems: Json,
     pub problems_truncated: bool,
 }
 
-/// Summarise a `_cat/shards?format=json&bytes=b` response. Rows without a
-/// `state` are skipped, not fatal.
 pub fn parse_cat_shards(json: &Json, problem_cap: usize) -> ShardSummary {
     let mut total = 0usize;
     let mut by_state: Vec<(String, usize)> = Vec::new();
@@ -987,9 +782,6 @@ pub fn parse_cat_shards(json: &Json, problem_cap: usize) -> ShardSummary {
     }
 }
 
-/// Every row of a *single index's* `_cat/shards/<index>` response as a JSON
-/// array — bounded by that index's own shard count, unlike the cluster-wide
-/// listing the root describe deliberately summarises.
 pub fn shard_rows_json(json: &Json) -> Json {
     let Some(rows) = json.as_array() else {
         return Json::Array(Vec::new());
@@ -1002,8 +794,6 @@ pub fn shard_rows_json(json: &Json) -> Json {
     )
 }
 
-/// One `_cat/shards` row as a display object. `store` was requested with
-/// `bytes=b`, so it is a byte count and the key says so.
 fn shard_row_json(row: &Json) -> Json {
     json!({
         "index": row.get("index").and_then(Json::as_str),
@@ -1021,9 +811,6 @@ fn shard_row_json(row: &Json) -> Json {
     })
 }
 
-/// Merge every concrete index's `mappings.properties` in a `_mapping`
-/// response. A wildcard or an alias resolves to several indices, and a field
-/// present in any of them is a field the caller can query.
 pub fn merge_mappings(json: &Json) -> FieldTypes {
     let mut merged = FieldTypes::new();
     let Some(map) = json.as_object() else {
@@ -1041,9 +828,6 @@ pub fn merge_mappings(json: &Json) -> FieldTypes {
     merged
 }
 
-/// Record one `_source` into a [`FieldTrie`], recursing one level into
-/// object-valued fields — the same shallow-but-honest `FieldTrie` the Mongo
-/// driver's `record_doc` builds.
 fn record_source(
     root: &mut Vec<(Arc<str>, FieldTrie)>,
     source: &OrderedJson,
@@ -1079,11 +863,6 @@ fn record_source(
     }
 }
 
-/// Client-side keyset pagination over an already-sorted node list.
-///
-/// `_cat/indices` has no server-side paging, so a very wide cluster is paged
-/// here — by *name*, not by offset, so a concurrently-created index cannot
-/// make a page skip or repeat an entry.
 fn paginate_by_name(mut nodes: Vec<ObjectNode>, opts: &ListOpts) -> Page<ObjectNode> {
     nodes.sort_by_key(|a| a.path.to_string());
     nodes.dedup_by(|a, b| a.path == b.path);
@@ -1107,14 +886,6 @@ fn decode_name_token(token: &ResumeToken) -> Option<String> {
     String::from_utf8(token.0.to_vec()).ok()
 }
 
-/// Percent-encode anything outside Elasticsearch's own legal index-name
-/// character set, plus the `*`/`,`/`-`/`+` an index *expression* legitimately
-/// uses.
-///
-/// Introspection requests get built from server-returned names: a catalog
-/// path or a user-typed prefix reaches this function and then becomes part of
-/// a URL path, so a `/` or a `..` in it must not be able to retarget the
-/// request at a different endpoint.
 pub fn encode_index_expression(expr: &str) -> Result<String, DbError> {
     if expr.is_empty() {
         return Err(DbError::Unsupported {
@@ -1158,16 +929,6 @@ fn not_found_is_empty_object(err: DbError) -> Result<Json, DbError> {
     }
 }
 
-/// Build the `fields` and `indexes` JSON arrays `describe()` reports through
-/// `ObjectDetail::extra`.
-///
-/// `indexes` follows the shape the other drivers are standardising on — one
-/// object per index with `name`/`kind`/`fields`/`unique`/`primary`/
-/// `definition`. For Elasticsearch it is necessarily sparse and a little
-/// metaphorical: there is no secondary-index object to list, because *every
-/// mapped searchable field is its own inverted index*. So the array reports
-/// the document id as the primary key plus one entry per searchable field,
-/// which is the closest true statement about what this engine can seek on.
 pub fn describe_arrays(types: &FieldTypes) -> (Json, Json) {
     let mut fields: Vec<Json> = types
         .paths()
@@ -1225,8 +986,6 @@ impl Catalog for EsCatalog {
             LevelDef {
                 name: Arc::from("field"),
                 kind: ObjectKind::Field,
-                // One `_mapping` call scoped to a single index — cheap, and
-                // crucially never the cluster-wide mapping.
                 enumeration: Enumeration::Cheap,
             },
         ]
@@ -1248,14 +1007,11 @@ impl Catalog for EsCatalog {
 
     async fn describe(&self, path: &ObjectPath) -> Result<ObjectDetail, DbError> {
         match path.parts() {
-            // The cluster itself: health, nodes, shards (see the module doc).
+            // The cluster itself: health, nodes, shards.
             [] => self.describe_root().await,
             [index] => {
                 let types = self.mapping(index).await?;
                 let stats = self.index_stats(index).await.unwrap_or(Json::Null);
-                // This index's own shard placement — bounded by its shard
-                // count. Fetched independently: an error here marks itself
-                // below rather than sinking the whole describe.
                 let shards = self.cat_shards(Some(index.as_ref())).await;
                 let (fields, indexes) = describe_arrays(&types);
 
@@ -1286,8 +1042,6 @@ impl Catalog for EsCatalog {
                         );
                         push("shards", rows.to_string());
                     }
-                    // Degrades alone: no shard listing must not blank the
-                    // mapping-derived detail (or vice versa).
                     Err(e) => push("shards_error", e.to_string()),
                 }
                 // The honesty label that goes with `SCHEMA_DECLARED = false`.
@@ -1305,9 +1059,6 @@ impl Catalog for EsCatalog {
                         has_children: true,
                         comment: None,
                     },
-                    // See the module doc: a mapping is declared but not
-                    // exhaustive, and `SCHEMA_DECLARED` is false, so this
-                    // never fabricates a complete `RowSchema`.
                     schema: None,
                     extra,
                 })
@@ -1410,9 +1161,6 @@ impl Catalog for EsCatalog {
     }
 }
 
-/// Scan backwards from the caret over identifier characters (same convention
-/// as the Postgres and Mongo drivers; `.`, `-` and `*` are included because
-/// they are legal inside an index expression and a field path).
 fn prefix_at_caret(text: &str, offset: usize) -> String {
     let bytes = text.as_bytes();
     let end = offset.min(bytes.len());
@@ -1425,11 +1173,6 @@ fn prefix_at_caret(text: &str, offset: usize) -> String {
     {
         start -= 1;
     }
-    // Rebuild from the bytes, not by slicing the `str`: the caret `offset` is
-    // an editor position, and both it and the backwards scan can stop inside
-    // a multi-byte character (type after any non-ASCII text and they do).
-    // Slicing a `str` off a char boundary panics; an empty prefix is the
-    // right answer for a caret that is not on one.
     std::str::from_utf8(&bytes[start..end])
         .unwrap_or("")
         .to_string()
@@ -1485,9 +1228,6 @@ mod tests {
         assert!(merge_mappings(&json!(null)).is_empty());
     }
 
-    /// A name that came back from the server (or was typed by the user)
-    /// becomes part of a URL path, so it must not be able to retarget the
-    /// request.
     #[test]
     fn index_expressions_cannot_escape_their_path_segment() {
         assert_eq!(
@@ -1673,8 +1413,6 @@ mod tests {
                     .map(|(_, v)| v.as_str())
             };
             assert_eq!(get("format"), Some("json"));
-            // The cat APIs are "only intended for human consumption": without
-            // these, sizes come back as "3.5mb" and times as "12.1h".
             assert_eq!(get("bytes"), Some("b"));
             assert_eq!(get("time"), Some("ms"));
             assert_eq!(
@@ -1760,8 +1498,6 @@ mod tests {
         assert_eq!(rows[0]["name"], json!("node-1"), "sorted by name");
         assert_eq!(rows[0]["master"], json!(true), "\"*\" means elected master");
         assert_eq!(rows[1]["master"], json!(false));
-        // `bytes=b`/`time=ms` values arrive as string-encoded numbers and are
-        // surfaced as real numbers under unit-labelled keys.
         assert_eq!(rows[1]["disk_avail_bytes"], json!(52_613_349_376_i64));
         assert_eq!(rows[1]["uptime_ms"], json!(864_000_000_i64));
         assert_eq!(rows[1]["load_1m"], json!(0.52));
@@ -1837,9 +1573,6 @@ mod tests {
         assert!(shard_rows_json(&json!(null)).as_array().unwrap().is_empty());
     }
 
-    /// The P1-4 constraint: one endpoint failing (permissions, an older
-    /// server) must not blank the others — the `Promise.all` failure filed
-    /// against another client is the counterexample this guards against.
     #[test]
     fn health_sources_degrade_independently() {
         let mut extra: Vec<(Arc<str>, Arc<str>)> = Vec::new();
@@ -1970,8 +1703,6 @@ mod tests {
         assert!(!uncapped.running_truncated);
         assert_eq!(uncapped.running.as_array().unwrap().len(), 4);
 
-        // An idle cluster, and a response that is not the shape we expect,
-        // both read as "nothing running" rather than panicking.
         let empty = parse_tasks(&json!({ "tasks": [] }), 25);
         assert_eq!(empty.total, 0);
         assert!(empty.by_action.is_empty());
@@ -2037,8 +1768,6 @@ mod tests {
         assert_eq!(rows[0]["name"], json!("bare"), "sorted by name");
         assert_eq!(rows[1]["name"], json!("events"));
         assert_eq!(rows[2]["name"], json!("logs"));
-        // Patterns stay a real array — the reason this reads the JSON API and
-        // not `_cat/templates`, which renders them as the string "[logs-*]".
         assert_eq!(rows[2]["index_patterns"], json!(["logs-*"]));
         assert_eq!(rows[2]["priority"], json!(200));
         assert_eq!(rows[2]["composed_of"], json!(["log-mappings"]));
@@ -2072,13 +1801,9 @@ mod tests {
         let rows = components.listing.as_array().unwrap();
         assert_eq!(rows[0]["name"], json!("log-mappings"));
         assert_eq!(rows[0]["version"], json!(2));
-        // What a component contributes is the whole of what a listing can say
-        // about it: it has no pattern and no precedence of its own.
         assert_eq!(rows[0]["template_keys"], json!(["mappings"]));
         assert_eq!(rows[1]["template_keys"], json!(["settings"]));
 
-        // Legacy templates are a bare object keyed by name, and rank by
-        // `order` where the composable ones rank by `priority`.
         let legacy = parse_legacy_templates(
             &json!({
                 "old-logs": { "index_patterns": ["logs-*"], "order": 10, "version": 1 },

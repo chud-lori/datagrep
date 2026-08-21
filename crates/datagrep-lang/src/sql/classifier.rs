@@ -1,19 +1,8 @@
-//! Statement classification, feeding the client-side write guardrail: the
-//! first significant keyword after comments/whitespace decides
-//! [`StatementClass`], with one deliberate exception — `WITH` requires
-//! looking past the CTE list (skipping nested parens correctly, and
-//! visiting every CTE in a comma-separated list) to the real keyword, so
-//! `WITH ... INSERT` classifies as `Write`, not `Read`.
-
 use datagrep_api::SqlDialect;
 
 use super::lexer::{lex_chunks, Chunk};
 use crate::StatementClass;
 
-/// One significant lexeme for classification purposes: either a run of
-/// identifier/keyword characters, or a single punctuation byte we care about
-/// (`(`, `)`, `,`). Everything else in `Code` chunks (operators, other
-/// punctuation, numbers) is skipped — classification never needs it.
 enum Lexeme<'a> {
     Word(&'a str),
     Open,
@@ -29,19 +18,7 @@ fn is_word_continue(b: u8) -> bool {
     is_word_start(b) || b.is_ascii_digit()
 }
 
-/// Tokenize every `Code` chunk of `stmt` into [`Lexeme`]s, skipping
-/// `Quoted`/`Comment` chunks entirely (a `(` inside a string or comment must
-/// never affect paren depth, and a keyword-looking string literal must never
-/// be treated as a keyword).
 fn significant_lexemes(stmt: &str) -> Vec<Lexeme<'_>> {
-    // Classification doesn't depend on dialect-specific quoting rules in any
-    // way that changes the *keyword skeleton* of a statement, so a single
-    // dialect-agnostic-enough choice (Postgres profile: recognizes `'`, `"`,
-    // and nested `/* */`) is used purely to avoid miscounting parens inside
-    // strings/comments. Backtick/bracket idents and dollar-quotes only ever
-    // appear where an identifier or string is legal, never around the
-    // keywords or parens this scan is looking for, so this doesn't change
-    // classification correctness for any dialect.
     let chunks = lex_chunks(stmt, SqlDialect::Postgres);
     let bytes = stmt.as_bytes();
     let mut out = Vec::new();
@@ -79,13 +56,8 @@ pub fn classify(stmt: &str) -> StatementClass {
     classify_from(&toks, 0).0
 }
 
-/// Map a leading keyword directly (everything except `WITH`, which needs
-/// lookahead). Returns `None` for anything not in the fixed keyword table.
 fn classify_keyword(word: &str) -> Option<StatementClass> {
     use StatementClass::*;
-    // Case-insensitive match against the fixed vocabulary from design intent
-    // (requirement 3): SQL keywords are ASCII, so `eq_ignore_ascii_case` is
-    // exact and avoids allocating an uppercased copy per token.
     const READ: &[&str] = &["SELECT", "VALUES", "SHOW", "EXPLAIN"];
     const WRITE: &[&str] = &[
         "INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", "COPY",
@@ -110,9 +82,6 @@ fn classify_keyword(word: &str) -> Option<StatementClass> {
     }
 }
 
-/// Classify starting at token index `idx`. Returns the class and the index
-/// just past whatever it consumed (the latter is only meaningful for the
-/// `WITH` recursion).
 fn classify_from(toks: &[Lexeme<'_>], idx: usize) -> (StatementClass, usize) {
     let Some(Lexeme::Word(first)) = toks.get(idx) else {
         return (StatementClass::Unknown, idx);
@@ -126,9 +95,6 @@ fn classify_from(toks: &[Lexeme<'_>], idx: usize) -> (StatementClass, usize) {
     }
 }
 
-/// `WITH [RECURSIVE] name [(cols)] AS [[NOT] MATERIALIZED] (query) [, ...]
-/// <final statement>` — walk past every CTE (skipping nested parens
-/// correctly) to classify on the real final keyword.
 fn classify_with(toks: &[Lexeme<'_>], mut idx: usize) -> StatementClass {
     if matches!(toks.get(idx), Some(Lexeme::Word(w)) if w.eq_ignore_ascii_case("RECURSIVE")) {
         idx += 1;
@@ -180,8 +146,6 @@ fn classify_with(toks: &[Lexeme<'_>], mut idx: usize) -> StatementClass {
     classify_from(toks, idx).0
 }
 
-/// `toks[idx]` must be `Open`; returns the index just past the matching
-/// `Close`, or `None` if the parens never balance (malformed input).
 fn skip_balanced(toks: &[Lexeme<'_>], idx: usize) -> Option<usize> {
     let mut depth = 0i32;
     let mut i = idx;
@@ -230,10 +194,6 @@ mod tests {
         assert_eq!(classify(""), Unknown);
     }
 
-    /// DML with a `RETURNING` clause is still a **Write** — it produces rows,
-    /// but the leading keyword decides the class. Drivers that wrap
-    /// row-producing statements in a READ ONLY transaction must consult this
-    /// classification, not just "does it have columns" (TEST-REPORT F5).
     #[test]
     fn dml_with_returning_is_still_write() {
         assert_eq!(

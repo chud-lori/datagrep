@@ -1,6 +1,3 @@
-//! Cancellation must actually reach a running query — otherwise the user
-//! hits stop, the app looks responsive, and the server keeps burning.
-
 mod common;
 
 use std::time::Duration;
@@ -51,9 +48,6 @@ async fn interrupt_mid_scan_surfaces_cancelled_and_connection_stays_usable() {
         .await
         .expect("closing the cancelled cursor should still succeed");
 
-    // The load-bearing assertion: the *connection* survives a cancelled
-    // *cursor*. Connection isolation exists to stop a driver panic from
-    // poisoning a connection; a cooperative cancel must not do the same.
     let mut check = conn
         .execute(Request::native("SELECT 1"))
         .await

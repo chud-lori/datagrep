@@ -1,21 +1,3 @@
-//! Black-box, end-to-end tests against the real compiled `datagrep` binary
-//! (`env!("CARGO_BIN_EXE_datagrep")`) — no mocking, no reaching into the crate's
-//! internals. Every test gets its own isolated `DATAGREP_CONFIG_DIR` (a tempdir)
-//! so profiles/history from one test can never leak into another, and tests
-//! stay safe to run in parallel (the default) against a shared real
-//! `~/.config/datagrep` would not be.
-//!
-//! Covers, per the ticket's test list:
-//! - every output format end to end against SQLite;
-//! - NULL vs empty-string vs missing-column rendering;
-//! - a multi-statement script;
-//! - `@limit` actually capping;
-//! - `@readonly` blocking a write;
-//! - `profiles add` splitting an inline password into a `secret_ref`;
-//! - `catalog` listing one level lazily;
-//! - exit codes per failure class;
-//! - `datagrep doctor` clean with zero profiles.
-
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -23,8 +5,6 @@ fn datagrep() -> Command {
     Command::new(env!("CARGO_BIN_EXE_datagrep"))
 }
 
-/// One isolated `$DATAGREP_CONFIG_DIR`, torn down with the `TempDir` at the end
-/// of the test.
 struct Sandbox {
     dir: tempfile::TempDir,
 }
@@ -44,8 +24,6 @@ impl Sandbox {
         let mut c = datagrep();
         c.env("DATAGREP_CONFIG_DIR", self.config_dir());
         c.env_remove("NO_COLOR");
-        // Deterministic table width across whatever terminal happens to run
-        // the test suite.
         c.env("COLUMNS", "120");
         c
     }
@@ -66,10 +44,6 @@ fn stdout(o: &Output) -> String {
 fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).into_owned()
 }
-
-// ---------------------------------------------------------------------
-// Cold-start / usage
-// ---------------------------------------------------------------------
 
 #[test]
 fn help_exits_zero_and_never_touches_a_profile_store() {
@@ -122,10 +96,6 @@ fn doctor_is_clean_with_zero_profiles() {
     assert!(text.contains("profiles: 0 configured"));
 }
 
-// ---------------------------------------------------------------------
-// profiles add / show / export — secrets never touch disk in plaintext
-// ---------------------------------------------------------------------
-
 #[test]
 fn profiles_add_sqlite_then_list_then_show() {
     let sb = Sandbox::new();
@@ -152,11 +122,6 @@ fn profiles_add_postgres_url_with_inline_password_never_stores_it() {
         "staging",
         "postgres://alice:hunter2@localhost:5432/app",
     ]);
-    // This test drives the shipped binary, so it uses the real OS credential
-    // store and cannot be pointed at the in-memory one the unit tests use. A
-    // bare CI runner has no Secret Service on the session bus, so `add` fails
-    // there for reasons that have nothing to do with what is being asserted.
-    // Skip loudly rather than fail, and rather than pretend to have run.
     if !out.status.success() && stderr(&out).contains("secure storage") {
         eprintln!("SKIPPED profiles_add_…never_stores_it: no OS credential store here");
         return;
@@ -169,40 +134,18 @@ fn profiles_add_postgres_url_with_inline_password_never_stores_it() {
     assert!(text.contains("secret:     ••••"));
     assert!(!text.contains("hunter2"));
 
-    // The exported, git-committable TOML must not contain the password
-    // either — only a `secret_ref` pointing at the keychain.
     let out = sb.run(&["profiles", "export"]);
     let toml = stdout(&out);
     assert!(!toml.contains("hunter2"));
     assert!(toml.contains("secret_ref"));
     assert!(toml.contains("keychain:datagrep:"));
 
-    // Clean up the real keychain entry this test created.
-    //
-    // This test drives the shipped binary as a subprocess, so unlike the unit
-    // tests it cannot be pointed at an in-memory secret store — it really does
-    // write to the OS keychain, and really does have to clear up after itself.
-    //
-    // The account is read back out of the exported TOML rather than guessed.
-    // It is the profile's generated id (`<id>:password`), NOT the profile name,
-    // so the previous hard-coded `-a staging` never matched anything and every
-    // single run leaked one entry — 35 had piled up on one machine before this
-    // was noticed. Deleting by an account taken from this test's own output is
-    // also what keeps the deletion precise.
-    //
-    // Scoping by BOTH service and account stays mandatory: `-s datagrep` alone
-    // deletes the first entry for that service — i.e. one of the user's own
-    // saved connections. That destroyed real credentials before it was caught.
     let account = toml
         .split("keychain:datagrep:")
         .nth(1)
         .and_then(|rest| rest.split('"').next())
         .map(str::to_string)
         .expect("the exported TOML asserted a keychain: secret_ref above");
-    // `security` is a macOS tool; on Linux the equivalent entry lives in
-    // whatever Secret Service implementation is running and there is no
-    // portable CLI to remove it, so the assertion is scoped to where it can
-    // actually be enforced.
     if cfg!(target_os = "macos") {
         let cleaned = Command::new("security")
             .args(["delete-generic-password", "-s", "datagrep", "-a", &account])
@@ -214,10 +157,6 @@ fn profiles_add_postgres_url_with_inline_password_never_stores_it() {
         );
     }
 }
-
-// ---------------------------------------------------------------------
-// query: every format, NULL/empty/multi-statement/@limit/@readonly
-// ---------------------------------------------------------------------
 
 fn seed_table(sb: &Sandbox) {
     let url = format!("sqlite://{}", sb.sqlite_path().display());
@@ -332,10 +271,6 @@ fn query_csv_and_tsv_formats() {
 
 #[test]
 fn query_missing_column_via_a_query_alias_reads_as_null_not_a_crash() {
-    // No driver in this build produces a genuinely `Absent` cell (only
-    // sqlite/postgres, both `Shape::Table`), so this proves the adjacent,
-    // always-reachable claim: a column that is NULL for every row still
-    // gets a header and renders NULL, never panics or silently vanishes.
     let sb = Sandbox::new();
     seed_table(&sb);
     let out = sb.run(&[
@@ -372,8 +307,6 @@ fn multi_statement_script_runs_every_statement_in_order() {
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
     let text = stdout(&out);
-    // Scalars keep their JSON types (`{"id":1}`, never `{"id":"1"}`) — the
-    // README's `--format json | jq` pitch depends on it. See `value_text.rs`.
     assert!(text.contains("\"id\":1"), "got: {text}");
     assert!(text.contains("\"id\":2"), "got: {text}");
 }
@@ -382,11 +315,6 @@ fn multi_statement_script_runs_every_statement_in_order() {
 fn limit_directive_caps_the_rows_actually_printed() {
     let sb = Sandbox::new();
     seed_table(&sb);
-    // `--command=<value>` (one joined arg), not `-c <value>` (two args):
-    // clap treats a *following* argument that starts with `-` as an
-    // ambiguous new flag, and `-- @limit ...` starts with `--`. Real users
-    // hit the identical clap behavior; `-f a-file.sql` sidesteps it, which
-    // is what the other multi-statement test above uses.
     let out = sb.run(&[
         "query",
         "--profile",
@@ -454,10 +382,6 @@ fn empty_input_is_a_usage_error() {
     assert_eq!(out.status.code(), Some(2));
 }
 
-// ---------------------------------------------------------------------
-// export
-// ---------------------------------------------------------------------
-
 #[test]
 fn export_streams_to_disk_and_reports_progress_on_stderr_not_stdout() {
     let sb = Sandbox::new();
@@ -486,10 +410,6 @@ fn export_streams_to_disk_and_reports_progress_on_stderr_not_stdout() {
     assert_eq!(contents, "id,name\r\n1,alice\r\n2,bob\r\n");
 }
 
-// ---------------------------------------------------------------------
-// catalog: one level, lazily
-// ---------------------------------------------------------------------
-
 #[test]
 fn catalog_lists_tables_at_the_root_without_columns() {
     let sb = Sandbox::new();
@@ -497,9 +417,6 @@ fn catalog_lists_tables_at_the_root_without_columns() {
     let out = sb.run(&["catalog", "--profile", "db"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let text = stdout(&out);
-    // The root level is schemas/databases for sqlite ("main"), not the
-    // table itself — proves this is one level, not a crawl straight to
-    // columns.
     assert!(
         !text.contains("id"),
         "root listing leaked column names: {text}"
@@ -516,10 +433,6 @@ fn catalog_describe_shows_declared_columns() {
     assert!(text.contains("id"));
     assert!(text.contains("name"));
 }
-
-// ---------------------------------------------------------------------
-// history: query actually records something to look at
-// ---------------------------------------------------------------------
 
 #[test]
 fn history_list_shows_a_statement_that_was_run() {

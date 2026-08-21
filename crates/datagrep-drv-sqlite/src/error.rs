@@ -1,16 +1,5 @@
-//! Maps [`rusqlite::Error`] onto the one error type that crosses the
-//! `datagrep-api` seam ([`DbError`]) — datagrep-api's own doc comment on `DbError` is
-//! explicit that drivers must not leak their own error enums upward.
-
 use datagrep_api::DbError;
 
-/// Translate a rusqlite error into the coarse cross-seam [`DbError`].
-///
-/// SQLite's `SQLITE_INTERRUPT` (raised by [`rusqlite::InterruptHandle::interrupt`],
-/// see `canceller.rs`) is mapped to [`DbError::Cancelled`] rather than
-/// [`DbError::Query`] — the user asked for this, it is not a server-side
-/// rejection of the statement. A cancel is not a failure and the UI must
-/// not dress it as one.
 pub(crate) fn map_sqlite_err(err: rusqlite::Error) -> DbError {
     use rusqlite::ffi::ErrorCode;
     use rusqlite::Error as E;
@@ -58,16 +47,6 @@ mod tests {
 
     #[test]
     fn interrupt_maps_to_cancelled() {
-        // `interrupt()` only affects a statement that is *actually running*
-        // at the time — calling it on an idle connection is a no-op (the
-        // next statement executes normally, as opposed to erroring). Rather
-        // than racing two OS threads against each other (flaky under a busy
-        // CI runner — the query can finish before a delayed interrupt ever
-        // lands), this calls `interrupt()` from inside a `progress_handler`
-        // callback, which SQLite invokes synchronously *during* the running
-        // step. That makes "an in-flight step observes the interrupt"
-        // deterministic. Real cross-thread cancellation is covered
-        // end-to-end by `tests/cancel.rs`.
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let handle = conn.get_interrupt_handle();
         conn.progress_handler(

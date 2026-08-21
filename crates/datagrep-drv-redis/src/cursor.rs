@@ -1,19 +1,3 @@
-//! Cursor implementations.
-//!
-//! [`RedisPairsCursor`] is the one true SCAN-family cursor: `SCAN`, `HSCAN`,
-//! `SSCAN`, and `ZSCAN` share identical cursor mechanics (an opaque numeric
-//! cursor, `MATCH`, `COUNT`), so one struct with a command switch drives all
-//! four rather than four near-identical cursor types.
-//!
-//! **SCAN's own guarantee, restated so the UI doesn't get it wrong:** SCAN
-//! guarantees every key present for the entire scan's duration is returned
-//! at least once (*eventual completeness*), but keys can legitimately be
-//! returned **more than once** if the keyspace is resized mid-scan. This
-//! cursor does not deduplicate — silently deduping would hide the fact that
-//! the underlying keyspace is being mutated concurrently, which is
-//! information the UI should surface (e.g. a small "results may repeat"
-//! notice), not swallow. Deduping, if wanted, is the caller's business.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -28,12 +12,8 @@ use datagrep_api::Bytes;
 use crate::error::map_redis_error;
 use crate::value::from_resp;
 
-/// Which SCAN-family command this cursor drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanFamily {
-    /// Plain `SCAN` over the keyspace. Each key is paired with its `TYPE`
-    /// (one pipelined round trip per batch, not one round trip per key) so
-    /// a keyspace listing is at least minimally self-describing.
     Keyspace,
     Hash,
     Set,
@@ -60,16 +40,11 @@ impl ScanFamily {
     }
 }
 
-/// A paging cursor over one SCAN-family command.
 pub struct RedisPairsCursor {
     manager: redis::aio::ConnectionManager,
     family: ScanFamily,
-    /// The key `HSCAN`/`SSCAN`/`ZSCAN` operate on; unused for `Keyspace`.
     key: Option<String>,
-    /// Compiled `MATCH` glob, if a filter was supplied.
     match_glob: Option<String>,
-    /// The SCAN cursor for the *next* round; `"0"` means "start" and, after
-    /// at least one round has run, also means "done".
     cursor: String,
     started: bool,
     exhausted: bool,
@@ -118,9 +93,6 @@ impl Cursor for RedisPairsCursor {
         if self.exhausted {
             return Ok(None);
         }
-        // Redis cancellation is our own SCAN loop stopping — there is
-        // nothing to send the server. Checked at the one natural
-        // await-adjacent point in this loop, per round trip.
         if self.cancel.is_cancelled() {
             self.exhausted = true;
             return Err(DbError::Cancelled);
@@ -176,8 +148,7 @@ impl Cursor for RedisPairsCursor {
         if self.exhausted {
             None
         } else if !self.started {
-            // Not run yet: resuming means starting from whatever cursor
-            // this was constructed with (usually "0").
+            // Not run yet: resuming restarts from the constructed cursor (usually "0").
             Some(ResumeToken(Bytes::from(self.cursor.clone().into_bytes())))
         } else {
             Some(ResumeToken(Bytes::from(self.cursor.clone().into_bytes())))
@@ -189,15 +160,11 @@ impl Cursor for RedisPairsCursor {
     }
 
     async fn close(&mut self) -> Result<(), DbError> {
-        // SCAN has no server-side cursor to release — it is entirely
-        // client-driven state (the opaque cursor value itself). Nothing to
-        // do beyond marking local iteration finished.
         self.exhausted = true;
         Ok(())
     }
 }
 
-/// Pull the `[cursor, items]` shape every SCAN-family reply has.
 fn parse_scan_reply(v: redis::Value) -> Result<(String, Vec<redis::Value>), DbError> {
     match v {
         redis::Value::Array(mut top) if top.len() == 2 => {
@@ -232,10 +199,6 @@ fn scan_cursor_to_string(v: redis::Value) -> Result<String, DbError> {
     }
 }
 
-/// Pair up a flat `[a, b, a, b, …]` reply (HSCAN's field/value list,
-/// ZSCAN's member/score list) into `(Value, Value)`s, mapping the value
-/// side through `map_value` (plain [`from_resp`] for hashes, score-aware
-/// parsing for sorted sets).
 fn paired_chunks(
     items: Vec<redis::Value>,
     map_value: impl Fn(redis::Value) -> Value,
@@ -248,12 +211,6 @@ fn paired_chunks(
     out
 }
 
-/// `ZSCAN` scores are string-encoded doubles even though we negotiate
-/// RESP3 (score isn't one of the handful of RESP3-typed reply fields) — so
-/// parse the bulk string back into `Value::F64` rather than leaving a
-/// score looking like an opaque string in the grid; fall back to whatever
-/// [`from_resp`] would have produced if it doesn't parse (never invent
-/// data that isn't there).
 fn score_value(v: redis::Value) -> Value {
     let mapped = from_resp(v);
     if let Value::Str(s) = &mapped {
@@ -264,8 +221,6 @@ fn score_value(v: redis::Value) -> Value {
     mapped
 }
 
-/// Pair each scanned key with its `TYPE`, one pipelined round trip for the
-/// whole batch (never one round trip per key, and never `KEYS *`).
 async fn keyspace_pairs(
     manager: &mut redis::aio::ConnectionManager,
     raw_keys: Vec<redis::Value>,
@@ -298,10 +253,6 @@ async fn keyspace_pairs(
         .collect())
 }
 
-/// A cursor that yields exactly one batch and then ends — for `Shape::Ack`
-/// replies (`OK`, an integer/affected count) and for single-value or
-/// single-statement `Request::Native` results that don't fit the SCAN-shaped
-/// cursor above.
 pub struct OneShotCursor {
     shape: Shape,
     payload: Option<Payload>,
@@ -328,7 +279,6 @@ impl OneShotCursor {
         }
     }
 
-    /// Convenience for `Shape::Ack` results.
     pub fn ack(affected: Option<u64>, message: Option<Arc<str>>) -> Self {
         Self::new(Shape::Ack { affected, message }, Payload::Empty)
     }
@@ -369,9 +319,6 @@ impl Cursor for OneShotCursor {
     }
 }
 
-/// Windowed `LRANGE` paging for a `LIST`-typed key: a million-element list
-/// must page like a million-field hash does, never coming back whole.
-/// `resume_token` is the next start offset as ASCII decimal.
 pub struct ListCursor {
     manager: redis::aio::ConnectionManager,
     key: String,
@@ -473,8 +420,6 @@ impl Cursor for ListCursor {
     }
 }
 
-/// Windowed `XRANGE` paging for a `STREAM`-typed key. `resume_token` is the
-/// exclusive-start entry ID (`"("`-prefixed per Redis's own range syntax).
 pub struct StreamCursor {
     manager: redis::aio::ConnectionManager,
     key: String,
@@ -656,10 +601,6 @@ mod tests {
 
     #[test]
     fn resume_token_round_trips_through_scan_cursor_state() {
-        // Cursor state is plain ASCII text; exercised end-to-end against a
-        // live server in tests/integration.rs (#[ignore]), but the
-        // token <-> string mapping itself is a pure function worth pinning
-        // here without a server.
         let tok = ResumeToken(Bytes::from_static(b"482"));
         let s = String::from_utf8(tok.0.to_vec()).unwrap();
         assert_eq!(s, "482");

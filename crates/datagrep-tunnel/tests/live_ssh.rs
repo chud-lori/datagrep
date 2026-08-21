@@ -1,28 +1,4 @@
-//! Live SSH integration tests — `#[ignore]`d, opt-in.
-//!
-//! These need a real SSH server, so they sit behind `#[ignore]` and are
-//! never run by a plain `cargo test`. Run them explicitly once the
-//! environment below is set:
-//!
-//! ```text
-//! DATAGREP_TUNNEL_TEST_HOST=example.com \
-//! DATAGREP_TUNNEL_TEST_PORT=22 \
-//! DATAGREP_TUNNEL_TEST_USER=myuser \
-//! cargo test -p datagrep-tunnel --test live_ssh -- --ignored --nocapture
-//! ```
-//!
-//! Auth defaults to `Auth::Agent` (`SSH_AUTH_SOCK`). Set
-//! `DATAGREP_TUNNEL_TEST_PASSWORD` to use password auth instead, or
-//! `DATAGREP_TUNNEL_TEST_KEYFILE` (optionally with
-//! `DATAGREP_TUNNEL_TEST_KEYFILE_PASSPHRASE`) for a key file.
-//!
-//! **Not run as part of this task's verification**: no SSH server was
-//! reachable in the sandbox this crate was built in (no local `sshd`, no
-//! passwordless `sudo` to enable one, no outbound test fixture provided).
-//! These compile and are believed correct against the pinned `russh` API,
-//! but have not been exercised against a live server — flag this when
-//! reviewing.
-
+// Needs a real SSH server: set DATAGREP_TUNNEL_TEST_{HOST,PORT,USER} (auth vars in test_auth) and run with --ignored.
 use std::sync::Arc;
 
 use datagrep_api::SecretString;
@@ -46,12 +22,6 @@ fn test_auth() -> Auth {
     Auth::Agent
 }
 
-/// Connects, opens a `direct-tcpip` channel back to the server's own SSH
-/// port (as seen from the server's loopback — always listening, since we
-/// just used it to get in), and checks the bridged stream carries a real
-/// `SSH-2.0-` banner. This exercises the whole path: handshake, TOFU accept
-/// of a first-seen host key, auth, channel open, and the in-process
-/// duplex bridge — against a real server, not a mock.
 #[tokio::test]
 #[ignore = "needs a real SSH server; see module docs for the env vars"]
 async fn connect_and_open_channel_reads_a_real_ssh_banner() {
@@ -68,8 +38,6 @@ async fn connect_and_open_channel_reads_a_real_ssh_banner() {
     let (store, mut decisions) = TofuStore::open(&known_hosts).await.expect("open TofuStore");
     let store = Arc::new(store);
 
-    // Auto-accept the first-seen key for this test run only — a real UI
-    // would show `decision.fingerprint()` to the user instead.
     tokio::spawn(async move {
         while let Some(decision) = decisions.recv().await {
             decision.accept();
@@ -100,9 +68,6 @@ async fn connect_and_open_channel_reads_a_real_ssh_banner() {
     let _ = tokio::fs::remove_file(&known_hosts).await;
 }
 
-/// A second connect to the same host should find the key already pinned
-/// and need no prompt at all — proves TOFU persistence survives a fresh
-/// `TofuStore::open` (a new process, in the real app).
 #[tokio::test]
 #[ignore = "needs a real SSH server; see module docs for the env vars"]
 async fn reconnect_after_pinning_needs_no_prompt() {
@@ -135,11 +100,6 @@ async fn reconnect_after_pinning_needs_no_prompt() {
         .expect("first connect pins the host key");
     }
 
-    // Fresh store, same file: no prompt should fire this time. If one does,
-    // the unbounded channel just buffers it — dropping `decisions` here
-    // without ever calling `accept`/`reject` would make a genuinely-unknown
-    // key fail loudly instead of silently, which is what we want to assert
-    // implicitly by the connect below succeeding.
     let (store, _decisions) = TofuStore::open(&known_hosts)
         .await
         .expect("reopen TofuStore");

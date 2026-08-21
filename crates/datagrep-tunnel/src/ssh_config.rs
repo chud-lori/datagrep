@@ -1,20 +1,3 @@
-//! Minimal `~/.ssh/config` parser, so a saved connection can name a host the
-//! user already has configured for `ssh` rather than restating it.
-//!
-//! **`ProxyJump` is deferred.** Supporting it correctly means recursively
-//! dialing through intermediate hosts (each potentially needing its own
-//! auth/host-key flow) and layering a channel
-//! inside a channel; that's a real feature, not a config-parsing detail, and
-//! doesn't belong in a first pass at the parser. Every other line type is
-//! parsed; a `ProxyJump` line does not fail parsing — it's just not applied
-//! (a resolved [`HostConfig`] has no `proxy_jump` field yet).
-//!
-//! Supported keywords: `Host` (with glob patterns, `*` and `?`), `HostName`,
-//! `User`, `Port`, `IdentityFile` (repeatable). Matching and precedence
-//! follow OpenSSH: blocks are matched top to bottom, the *first* value seen
-//! for a scalar keyword wins, `IdentityFile` accumulates across every
-//! matching block.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -29,14 +12,11 @@ struct HostBlock {
     identity_files: Vec<String>,
 }
 
-/// A parsed `~/.ssh/config`.
 #[derive(Debug, Clone, Default)]
 pub struct SshConfig {
     blocks: Vec<HostBlock>,
 }
 
-/// The result of resolving an alias against an [`SshConfig`]: what to
-/// actually dial, and with which identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostConfig {
     pub hostname: Option<String>,
@@ -46,8 +26,6 @@ pub struct HostConfig {
 }
 
 impl SshConfig {
-    /// Parse config file contents. Pure and synchronous — callers reading
-    /// from disk do the (one-time, startup-path) I/O themselves.
     pub fn parse(contents: &str) -> Result<Self, TunnelError> {
         let mut blocks = Vec::new();
         let mut current: Option<HostBlock> = None;
@@ -72,9 +50,6 @@ impl SshConfig {
             }
 
             let Some(block) = current.as_mut() else {
-                // A keyword before any `Host` line applies to every host in
-                // real ssh_config (a leading implicit `Host *`); we treat it
-                // the same way by starting an implicit catch-all block.
                 current = Some(HostBlock {
                     patterns: vec!["*".to_owned()],
                     ..Default::default()
@@ -92,8 +67,6 @@ impl SshConfig {
         Ok(Self { blocks })
     }
 
-    /// Resolve `alias` (the name the user typed, e.g. `Host` field of a
-    /// profile) against every matching block, OpenSSH precedence rules.
     pub fn lookup(&self, alias: &str) -> HostConfig {
         let mut resolved = HostConfig::default();
         let mut seen_identity_files: HashMap<&str, ()> = HashMap::new();
@@ -120,8 +93,6 @@ impl SshConfig {
         resolved
     }
 
-    /// Load and parse `~/.ssh/config`. `Ok(None)` if the user has none (not
-    /// an error — most machines don't).
     pub fn load_default() -> Result<Option<Self>, TunnelError> {
         let Some(home) = dirs::home_dir() else {
             return Ok(None);
@@ -129,7 +100,6 @@ impl SshConfig {
         Self::load_path(home.join(".ssh").join("config"))
     }
 
-    /// Load and parse an explicit path. `Ok(None)` if it doesn't exist.
     pub fn load_path(path: impl Into<PathBuf>) -> Result<Option<Self>, TunnelError> {
         let path = path.into();
         match std::fs::read_to_string(&path) {
@@ -159,8 +129,6 @@ fn apply_keyword(block: &mut HostBlock, keyword_lc: &str, rest: &str) {
         }
         "identityfile" => block.identity_files.push(rest.to_owned()),
         "proxyjump" => {
-            // Deferred — see module docs. Deliberately not an error: an
-            // otherwise-usable config file must still parse.
             tracing::debug!(target: "datagrep_tunnel::ssh_config", "ignoring unsupported ProxyJump directive");
         }
         _ => {}
@@ -175,8 +143,6 @@ fn strip_comment(line: &str) -> &str {
 }
 
 fn split_keyword(line: &str) -> (&str, &str) {
-    // OpenSSH accepts `Keyword value` or `Keyword=value` (optionally with
-    // surrounding whitespace around `=`).
     if let Some(eq) = line.find('=') {
         let (k, v) = line.split_at(eq);
         (k.trim(), v[1..].trim())
@@ -197,8 +163,6 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// `?` = one char, `*` = any run (incl. empty). No character classes, no
-/// `!negation` — OpenSSH's fuller glob grammar, kept minimal on purpose.
 fn glob_match(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();

@@ -1,27 +1,3 @@
-//! An open table scan, stepped incrementally across many `FetchBatch`
-//! worker commands, one per `Cursor::next_batch`: chunk 1 renders before
-//! chunk 2 is ever requested.
-//!
-//! ## Why this needs `unsafe`
-//! rusqlite's `Rows<'stmt>` borrows its `Statement<'stmt>` mutably. A
-//! streaming cursor needs both to stay alive *and* keep their cursor
-//! position **across many separate worker-thread command dispatches**, which
-//! means they must live together in one struct stored in a map — the classic
-//! self-referential-struct problem safe Rust cannot express directly (the
-//! same reason crates like `ouroboros`/`rental` exist). [`OpenScan`] hand-rolls
-//! the same pattern rusqlite's own `CachedStatement`-adjacent internals use:
-//! heap-box the statement so its address is stable no matter how the owning
-//! `HashMap` reallocates around it, and store the `Rows` borrow with its
-//! lifetime erased to `'static`. Soundness rests on three invariants, all
-//! enforced right here and nowhere else in the crate:
-//! 1. `stmt` is heap-boxed — moving the `Box` handle (e.g. a `HashMap`
-//!    rehash) never moves the `Statement` it points to.
-//! 2. `stmt` is never read or moved-out-of while `rows` is alive; the only
-//!    access after construction goes through `rows`.
-//! 3. `rows` is declared *before* `stmt` in the struct, so Rust drops it
-//!    first — `Rows::drop` touches the underlying prepared statement, which
-//!    must not have been finalized yet.
-
 use std::sync::Arc;
 
 use datagrep_api::{Batch, DbError, FetchHint, LogicalType, Payload, ResumeToken, SortKey, Value};
@@ -30,17 +6,12 @@ use rusqlite::types::ValueRef;
 use crate::error::map_sqlite_err;
 use crate::value::{logical_type_for_decl, sqlite_value_to_datagrep, SqlParam};
 
-/// One column's schema facts, gathered once right after `PREPARE`. Never
-/// lie about a value: `logical` is a hint, not a promise about any
-/// individual cell (see `value.rs`).
 pub(crate) struct ColumnMeta {
     pub name: Arc<str>,
     pub logical: LogicalType,
     pub native_type: Option<Arc<str>>,
 }
 
-/// Column schema of an already-prepared statement, gathered via `&self`
-/// methods only (so it can run before the statement is boxed for storage).
 pub(crate) fn column_metas_for(stmt: &rusqlite::Statement<'_>) -> Vec<ColumnMeta> {
     stmt.columns()
         .into_iter()
@@ -65,10 +36,8 @@ fn estimate_value_bytes(v: &ValueRef<'_>) -> u64 {
 }
 
 pub(crate) struct OpenScan<'conn> {
-    // Declared first so it drops before `stmt` — see module doc, invariant 3.
+    // Declared before `stmt` so it drops first — `Rows::drop` touches the prepared statement.
     rows: rusqlite::Rows<'static>,
-    // Never touched again after `prepare_and_open`; kept purely to anchor
-    // the heap allocation `rows` borrows into.
     #[allow(dead_code)]
     stmt: Box<rusqlite::Statement<'conn>>,
     pub columns: Vec<ColumnMeta>,
@@ -76,19 +45,11 @@ pub(crate) struct OpenScan<'conn> {
     pub rows_emitted: u64,
     pub bytes_emitted: u64,
     done: bool,
-    /// Set only when the originating `Op::Scan` had exactly one `SortKey`
-    /// that resolved to one of this statement's output columns: (column
-    /// index, descending). See `compile_resume_clause` for the matching
-    /// consumer half.
     resume_key: Option<(usize, bool)>,
     last_resume_token: Option<ResumeToken>,
 }
 
 impl<'conn> OpenScan<'conn> {
-    /// Takes an already-prepared statement (the caller needed `column_count`
-    /// / `column_name` on it first to decide Ack-vs-Table classification and
-    /// build the `RowSchema`, so re-preparing here would be wasted work) and
-    /// its precomputed column metadata, and opens the row iterator.
     pub fn from_prepared(
         mut stmt: Box<rusqlite::Statement<'conn>>,
         columns: Vec<ColumnMeta>,
@@ -97,12 +58,7 @@ impl<'conn> OpenScan<'conn> {
     ) -> Result<Self, DbError> {
         let bound: Vec<SqlParam<'_>> = params.iter().map(SqlParam).collect();
 
-        // SAFETY: `stmt_ptr` points into the heap allocation owned by
-        // `boxed`/`stmt`, which we are about to store in `self.stmt` without
-        // ever moving out of it again — its address is therefore stable for
-        // the life of `self`. We erase the resulting `Rows<'_>` borrow to
-        // `'static` and rely on invariants 1-3 in the module doc (stable
-        // address, no other access, `rows` drops first) to make that sound.
+        // SAFETY: stmt is heap-boxed (stable address), only accessed via rows after construction, and rows is declared before stmt so it drops first — that trio makes erasing the Rows borrow to 'static sound.
         let stmt_ptr: *mut rusqlite::Statement<'conn> = &mut *stmt;
         let rows = unsafe { &mut *stmt_ptr }
             .query(rusqlite::params_from_iter(bound))
@@ -122,9 +78,6 @@ impl<'conn> OpenScan<'conn> {
         })
     }
 
-    /// Step the statement until `hint` is satisfied or the query is
-    /// exhausted. `None` means the scan is over; a returned `Batch` is never
-    /// empty — chunk counts are real rows, never phantom progress.
     pub fn fetch_batch(&mut self, hint: FetchHint) -> Result<Option<Batch>, DbError> {
         if self.done {
             return Ok(None);
@@ -182,14 +135,6 @@ impl<'conn> OpenScan<'conn> {
     }
 }
 
-// --- Keyset resume token encoding -----------------------------------------
-//
-// A small hand-rolled tagged encoding (not `serde_json`: datagrep-drv-sqlite's
-// dependency list is deliberately short, and a resume token is opaque to
-// everyone but this driver per the `Cursor::resume_token` contract). Only
-// the scalar types that plausibly appear in an `ORDER BY` key are encoded;
-// anything else fails loudly at encode time rather than truncating.
-
 const TAG_NULL: u8 = 0;
 const TAG_I64: u8 = 1;
 const TAG_F64: u8 = 2;
@@ -241,9 +186,6 @@ fn encode_resume(value: &Value) -> ResumeToken {
             buf.push(TAG_TIMESTAMP);
             buf.extend_from_slice(&micros.to_be_bytes());
         }
-        // Anything else (nested/document/graph-shaped values) cannot appear
-        // as a flat SQLite row cell in the first place; fall back to a
-        // token that never matches a real row rather than panicking.
         _ => buf.push(TAG_NULL),
     }
     ResumeToken(bytes::Bytes::from(buf))
@@ -274,11 +216,6 @@ fn decode_resume(token: &ResumeToken) -> Result<Value, DbError> {
     })
 }
 
-/// Compile the WHERE fragment continuing a single-sort-key scan past
-/// `token`. Multi-key resume is a documented gap (see the module doc and
-/// the gap notes in `driver.rs`): a correct multi-column keyset predicate
-/// needs direction-aware row-value comparison, deliberately not implemented
-/// here.
 pub(crate) fn compile_resume_clause(
     order: &[SortKey],
     token: &ResumeToken,

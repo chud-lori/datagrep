@@ -1,8 +1,3 @@
-//! Driver registry: registration costs a hashmap insert and constructs
-//! nothing; the driver is built lazily on first `get` and cached, so linking a
-//! driver the user never opens costs nothing at startup. `datagrep-core` never
-//! names a concrete driver — this registry is the only coupling.
-
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -13,13 +8,11 @@ use crate::{read, write};
 
 type DriverCtor = Box<dyn Fn() -> Arc<dyn Driver> + Send + Sync>;
 
-/// One registered driver: the lazy constructor plus the once-built instance.
 struct Entry {
     ctor: DriverCtor,
     cell: OnceLock<Arc<dyn Driver>>,
 }
 
-/// Thread-safe id → driver map with lazy, at-most-once construction per entry.
 pub struct DriverRegistry {
     entries: RwLock<HashMap<Arc<str>, Arc<Entry>>>,
 }
@@ -31,9 +24,6 @@ impl DriverRegistry {
         }
     }
 
-    /// Register a driver id with a lazy constructor. This is a hashmap
-    /// insert — nothing is constructed until the first [`DriverRegistry::get`].
-    /// Re-registering an id replaces the entry (and forgets any built instance).
     pub fn register(
         &self,
         id: impl Into<Arc<str>>,
@@ -46,14 +36,11 @@ impl DriverRegistry {
         write(&self.entries).insert(id.into(), entry);
     }
 
-    /// Fetch a driver, constructing it on first use. Construction runs outside
-    /// the map lock, so a slow constructor never blocks other lookups.
     pub fn get(&self, id: &str) -> Option<Arc<dyn Driver>> {
         let entry = read(&self.entries).get(id).cloned()?;
         Some(entry.cell.get_or_init(|| (entry.ctor)()).clone())
     }
 
-    /// Registered ids, unordered.
     pub fn ids(&self) -> Vec<Arc<str>> {
         read(&self.entries).keys().cloned().collect()
     }

@@ -1,25 +1,3 @@
-//! S8 — gpui-component gap audit. Not a kill gate, a *costing* spike.
-//!
-//! (a) `Table` fed by a synthetic delegate: 1,000,000 rows x 24 columns,
-//!     generated on demand from (row_ix, col_ix) -- NO materialized
-//!     `Vec` of rows. Delegate calls are counted with `AtomicU64`s; if
-//!     `render_td` is ever called anywhere near 1,000,000 x 24 times at
-//!     startup, virtualization is fake — that is the kill signal for S8.
-//! (b) `Input` in code-editor mode holding ~1 MB of generated SQL.
-//!
-//! A scripted sequence of `scroll_to_row` jumps exercises the table without
-//! needing real mouse input (no automation harness exists yet -- that lives
-//! on the CoreApi side, out of scope for a throwaway spike). Delegate call
-//! counts are
-//! logged before/after each jump so the report can show they stay bounded to
-//! the viewport rather than scaling with the jump target.
-//!
-//! Verified directly against the gpui-component 0.5.1 source (crates.io
-//! tarball == git tag v0.5.1, cross-checked) rather than `main`-branch docs,
-//! which describe some not-yet-released APIs (cell selection, `.line_number`
-//! existed already; `.text_center()` and `cell_selectable` did not -- see
-//! SPIKE-REPORT.md for the exact methods checked and where).
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -55,7 +33,6 @@ fn log_snapshot(tag: &str, start: Instant) {
     );
 }
 
-/// Deterministic cell content from (row, col) alone. No row is ever stored.
 fn cell_text(row_ix: usize, col_ix: usize) -> String {
     match col_ix % 6 {
         0 => format!("row-{row_ix}"),
@@ -71,9 +48,6 @@ fn cell_text(row_ix: usize, col_ix: usize) -> String {
     }
 }
 
-/// Generates deterministic SQL text, at least `target_bytes` long, without
-/// ever holding the whole thing as a Vec of statements -- append straight
-/// into one growing String.
 fn generate_sql(target_bytes: usize) -> String {
     let mut s = String::with_capacity(target_bytes + 512);
     let mut i: usize = 0;

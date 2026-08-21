@@ -1,13 +1,3 @@
-//! Lazy, incremental catalog over `sqlite_master` / `PRAGMA` introspection.
-//! Every listing is paged and bounded — never a whole-catalog dump on
-//! connect.
-//!
-//! The catalog talks to the connection's dedicated worker thread exactly
-//! like `Connection`/`Cursor` do: every method here sends a
-//! [`crate::connection::WorkerMsg::Catalog`] job closure-free command and
-//! awaits the reply, so `rusqlite::Connection` is still only ever touched
-//! from its one owning thread.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -24,21 +14,14 @@ pub struct SqliteCatalog {
     pub(crate) jobs: crate::connection::JobSender,
 }
 
-/// One row of `PRAGMA table_info`, in declaration order.
 pub(crate) struct ColumnInfo {
     pub name: String,
     pub decl_type: Option<String>,
     pub not_null: bool,
-    /// 0 = not part of the primary key; otherwise its 1-based position
-    /// within a composite primary key, per SQLite's own `pk` column.
     pub pk_position: i64,
-    /// The default expression's SQL text (`dflt_value`), verbatim.
     pub default_value: Option<String>,
 }
 
-/// Shared with `connection.rs`'s `Op::Mutate`/identity-detection path so
-/// both agree on exactly one source of truth for "what is this table's
-/// primary key" (see the datagrep-api gap noted in `driver.rs`).
 pub(crate) fn table_info(
     conn: &rusqlite::Connection,
     path: &ObjectPath,
@@ -79,10 +62,6 @@ pub(crate) fn table_info(
     Ok(out)
 }
 
-/// Primary-key columns of `path`, in composite-key order — used by
-/// `connection.rs::detect_identity` to report `RowSchema::identity` for a
-/// browsed table (mutation WHERE clauses now come from the mutation's own
-/// named key, not from this lookup).
 pub(crate) fn primary_key_columns(
     conn: &rusqlite::Connection,
     path: &ObjectPath,
@@ -110,11 +89,6 @@ fn row_schema_from_table_info(columns: &[ColumnInfo], indexes: &[IndexInfo]) -> 
             if c.pk_position > 0 {
                 flags |= FieldFlags::PRIMARY_KEY;
             }
-            // `INDEXED` = leading column of some index (the only position a
-            // lookup can actually use); `UNIQUE` = a single-column unique
-            // index on exactly this column. Both derived from the same
-            // `PRAGMA index_list`/`index_xinfo` pass `describe()` already
-            // paid for — no extra queries.
             let leading = |ix: &IndexInfo| {
                 ix.columns
                     .first()
@@ -149,10 +123,6 @@ fn row_schema_from_table_info(columns: &[ColumnInfo], indexes: &[IndexInfo]) -> 
     }
 }
 
-/// Apply `opts` (name prefix already applied server-side where possible;
-/// this re-slices for `limit`/`resume`) to an in-memory candidate list. Used
-/// for `PRAGMA`-backed levels (`database_list`, `table_info`) where the
-/// result set is inherently small and SQL-side pagination isn't available.
 fn paginate<T: Clone>(items: Vec<T>, key: impl Fn(&T) -> &str, opts: &ListOpts) -> Page<T> {
     let start = match &opts.resume {
         Some(ResumeToken(bytes)) => {
@@ -235,12 +205,6 @@ impl Catalog for SqliteCatalog {
         self.run(move |conn| describe_path(conn, &path)).await
     }
 
-    /// SQLite has `SCHEMA_DECLARED` — this exists mainly for driver-contract
-    /// completeness. Rather than parroting the declared schema back as a
-    /// trivially-"sampled" trie, it does a real (bounded) sample: SQLite's
-    /// type affinity means a declared `INTEGER` column can still hold TEXT,
-    /// so sampling actual storage classes is more honest than the decl type
-    /// alone. Never lie about a value.
     async fn infer_shape(
         &self,
         path: &ObjectPath,
@@ -251,9 +215,6 @@ impl Catalog for SqliteCatalog {
             .await
     }
 
-    /// Bounded `LIKE`-prefix completion over `sqlite_master`: a bounded
-    /// server-side prefix query, so the whole schema never has to be
-    /// resident just to complete a 3-character prefix.
     async fn complete(&self, ctx: CompletionCtx) -> Result<Vec<Completion>, DbError> {
         let prefix = current_word(&ctx.text, ctx.offset as usize).to_string();
         self.run(move |conn| complete_impl(conn, &prefix)).await
@@ -422,23 +383,12 @@ fn describe_path(conn: &rusqlite::Connection, path: &ObjectPath) -> Result<Objec
                 });
             }
             let ty = object_kind(conn, db, table)?;
-            // Indexes are listed here and only here — on an explicit
-            // `describe()` of this one table — lazily, never on tree
-            // expansion and never on connect. `PRAGMA index_list` +
-            // `index_xinfo` are metadata-only and O(indexes), not O(rows).
             let indexes = list_indexes(conn, db, table)?;
             let mut extra = vec![(Arc::from("indexes"), Arc::from(indexes_json(&indexes)))];
             let defaults = column_defaults_json(&cols);
             if let Some(defaults) = defaults {
                 extra.push((Arc::from("column_defaults"), Arc::from(defaults)));
             }
-            // Row count is deliberately NOT included here: `COUNT(*)` on
-            // SQLite has no cheap estimate (no trustworthy `reltuples`
-            // equivalent) and can be O(table size) — running it on every
-            // `describe()` would violate the "never eager, never slow on
-            // the happy path" catalog philosophy. A caller
-            // that wants an exact count should ask for it explicitly via
-            // `Op::Count`, which is what that request exists for.
             Ok(ObjectDetail {
                 node: ObjectNode {
                     path: path.clone(),
@@ -470,34 +420,20 @@ fn object_kind(conn: &rusqlite::Connection, db: &str, table: &str) -> Result<Obj
     })
 }
 
-/// One key column of an index, from `PRAGMA index_xinfo` (`key = 1` rows).
 struct IndexColumn {
-    /// `None` for the rowid (`cid = -1`) and for expression columns
-    /// (`cid = -2`) — SQLite has no cheap name for either; the `definition`
-    /// SQL is where the reader sees the expression text.
     name: Option<String>,
     descending: bool,
 }
 
-/// One index of a table, from `PRAGMA index_list` + `index_xinfo` +
-/// `sqlite_master.sql`.
 struct IndexInfo {
     name: String,
     unique: bool,
-    /// `index_list.origin`: `"c"` = CREATE INDEX, `"u"` = UNIQUE constraint,
-    /// `"pk"` = PRIMARY KEY constraint.
     origin: String,
     partial: bool,
     columns: Vec<IndexColumn>,
-    /// The verbatim `CREATE INDEX …` statement; `None` for indexes SQLite
-    /// created implicitly (constraint-backed ones have no stored SQL).
     definition: Option<String>,
 }
 
-/// All indexes of `db.table`, one `PRAGMA index_list` plus one
-/// `PRAGMA index_xinfo` per index. `PRAGMA` cannot bind parameters, so every
-/// interpolated identifier goes through [`quote_ident`], which rejects
-/// NUL-embedded (silently truncating) names outright.
 fn list_indexes(
     conn: &rusqlite::Connection,
     db: &str,
@@ -541,9 +477,6 @@ fn list_indexes(
         drop(xrows);
         drop(xstmt);
 
-        // Auto-created constraint indexes (`sqlite_autoindex_*`) sit in
-        // `sqlite_master` with a NULL `sql`; a missing row is treated the
-        // same rather than failing the whole describe.
         let dsql =
             format!("SELECT sql FROM {qdb}.sqlite_master WHERE type = 'index' AND name = ?1");
         let definition: Option<String> = {
@@ -565,14 +498,6 @@ fn list_indexes(
     Ok(out)
 }
 
-/// The engine-independent index JSON shape (see the datagrep-ffi describe
-/// contract): `[{name, columns:[{name, order}], unique, primary, type,
-/// partial, filter, size_bytes, definition, sparse, expire_after_seconds}]`.
-///
-/// SQLite specifics, stated honestly: every SQLite index is a b-tree;
-/// per-index size needs the optional `dbstat` vtab, so `size_bytes` is
-/// `null`; the partial predicate has no PRAGMA of its own, so `partial` is a
-/// boolean and the `WHERE` clause is visible only in `definition`.
 fn indexes_json(indexes: &[IndexInfo]) -> String {
     let entries: Vec<String> = indexes
         .iter()
@@ -604,8 +529,6 @@ fn indexes_json(indexes: &[IndexInfo]) -> String {
     format!("[{}]", entries.join(","))
 }
 
-/// `{"col": "<default SQL text>"}` for every column that has one; `None`
-/// when no column does (so `describe()` doesn't emit an empty `{}` pair).
 fn column_defaults_json(columns: &[ColumnInfo]) -> Option<String> {
     let entries: Vec<String> = columns
         .iter()
@@ -622,9 +545,6 @@ fn column_defaults_json(columns: &[ColumnInfo]) -> Option<String> {
     }
 }
 
-/// Minimal JSON string encoding. Hand-rolled on purpose: this crate's
-/// dependency policy keeps `serde_json` out of drivers (see `Cargo.toml`),
-/// and the catalog only ever needs to *emit* a handful of strings/bools.
 fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -718,9 +638,6 @@ fn complete_impl(conn: &rusqlite::Connection, prefix: &str) -> Result<Vec<Comple
     Ok(out)
 }
 
-/// The identifier-ish word ending at `offset` in `text` — a minimal
-/// tokenizer, not a SQL parser. The editor is language-agnostic and
-/// datagrep never translates user text; this only finds the prefix to look up.
 fn current_word(text: &str, offset: usize) -> &str {
     let bytes = text.as_bytes();
     let end = offset.min(bytes.len());
@@ -773,10 +690,6 @@ mod tests {
         conn
     }
 
-    /// The full shape contract for one engine, verified by *parsing* the
-    /// emitted JSON (with serde_json, dev-only) rather than substring poking:
-    /// every entry carries the cross-engine keys, key order and direction
-    /// are right, and the unique/partial facts land where the UI looks.
     #[test]
     fn describe_emits_index_json_with_the_cross_engine_shape() {
         let conn = memory_conn_with_indexes();
@@ -884,8 +797,6 @@ mod tests {
         assert!(!age.flags.contains(FieldFlags::UNIQUE));
     }
 
-    /// A table with no indexes still reports `indexes` — as an honest `[]`,
-    /// which the UI renders as "none" (distinct from "not reported").
     #[test]
     fn a_table_without_indexes_reports_an_empty_array() {
         let conn = rusqlite::Connection::open_in_memory().expect("open :memory:");
