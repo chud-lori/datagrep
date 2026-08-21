@@ -98,7 +98,8 @@ pkg_check_modules(DBUS REQUIRED dbus-1)
 
 # Svg: QSvgRenderer for the engine brand marks (vector, palette-aware).
 # Network: the once-per-launch update manifest GET.
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Svg Network)
+# Concurrent: the connection-test dial, which blocks for the connect timeout.
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Svg Network Concurrent)
 
 # ---------------------------------------------------------------------------
 # Optional: KSyntaxHighlighting (KF6, MIT) for real SQL syntax highlighting.
@@ -203,6 +204,7 @@ target_link_libraries(datagrep PRIVATE
     Qt6::Widgets
     Qt6::Svg
     Qt6::Network         # the once-per-launch update manifest GET
+    Qt6::Concurrent       # the connection-test dial, off the GUI thread
     datagrep_ffi          # the imported libdatagrep_ffi.a
     Threads::Threads      # pthread
     ${CMAKE_DL_LIBS}      # dl
