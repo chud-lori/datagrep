@@ -120,6 +120,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_executable(datagrep
     src/main.cpp
+    src/model/ConnectionSafety.cpp
     src/model/QueryStatus.cpp
     src/model/ResultModel.cpp
     src/ui/ConnectionDialog.cpp

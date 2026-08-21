@@ -1,6 +1,7 @@
 #include "MainWindow.hpp"
 
 #include "ffi/DatagrepFfi.hpp"
+#include "model/ConnectionSafety.hpp"
 #include "model/ResultModel.hpp"
 #include "ui/ConnectionDialog.hpp"
 #include "ui/ResultTableView.hpp"
@@ -14,12 +15,18 @@
 #include <QDir>
 #include <QFont>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLabel>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QPainter>
+#include <QPen>
+#include <QPixmap>
 #include <QPushButton>
+#include <QRectF>
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -168,7 +175,25 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     root->setStretchFactor(0, 0);
     root->setStretchFactor(1, 1);
     root->setSizes({260, 900});
-    setCentralWidget(root);
+
+    // --- the marked-connection band -----------------------------------------
+    // When the selected connection carries a user-chosen colour, this band sits
+    // across the whole window above everything else, filled with that colour and
+    // carrying the connection's name. The colour means whatever the user meant
+    // by it — the band says the name and nothing else. It is deliberately a
+    // full-width fill, not a dot or a tint: shrinking it is how these markers
+    // stop being noticed. Mirrors the macOS MarkedBanner in intent.
+    markedBanner_ = new QLabel(this);
+    markedBanner_->setTextFormat(Qt::PlainText);
+    markedBanner_->hide();
+
+    auto* central = new QWidget(this);
+    auto* centralLayout = new QVBoxLayout(central);
+    centralLayout->setContentsMargins(0, 0, 0, 0);
+    centralLayout->setSpacing(0);
+    centralLayout->addWidget(markedBanner_);
+    centralLayout->addWidget(root, 1);
+    setCentralWidget(central);
 
     // --- status bar --------------------------------------------------------
     status_ = new StatusBar(this);
@@ -200,12 +225,24 @@ void MainWindow::reloadProfiles() {
         return;
     }
     const QJsonArray arr = QJsonDocument::fromJson(json.toUtf8()).array();
+    safetyByProfile_.clear();
     for (const QJsonValue& v : arr) {
         const QJsonObject o = v.toObject();
         const QString name = o.value(QStringLiteral("name")).toString();
         const QString driver = o.value(QStringLiteral("driver")).toString();
         const QString env = o.value(QStringLiteral("env")).toString();
         const bool readOnly = o.value(QStringLiteral("read_only")).toBool(false);
+
+        // The safety slice every surface shares — the swatch below, the banner
+        // and the run path's confirm-writes prompt all read this one record.
+        dg::ConnectionSafety safety;
+        safety.name = name;
+        safety.color = o.value(QStringLiteral("color")).toString();
+        safety.env = env;
+        safety.readOnly = readOnly;
+        safety.confirmWrites =
+            o.value(QStringLiteral("confirm_writes")).toBool(false);
+        safetyByProfile_.insert(name, safety);
 
         auto* item = new QListWidgetItem(name, connections_);
 
@@ -219,6 +256,23 @@ void MainWindow::reloadProfiles() {
         }
         if (readOnly) {
             tip << QStringLiteral("read-only");
+        }
+
+        // A marked connection shows its colour as a swatch on the row itself, so
+        // the marker is visible while scanning the list, not only after
+        // selecting. The banner (updateMarkedBanner) is the loud half; this is
+        // the recognition cue.
+        if (const auto swatch = dg::connectionColor(safety.color)) {
+            QPixmap pm(12, 12);
+            pm.fill(Qt::transparent);
+            QPainter p(&pm);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setBrush(*swatch);
+            p.setPen(QPen(QColor(0, 0, 0, 64), 1));
+            p.drawEllipse(QRectF(0.5, 0.5, 11.0, 11.0));
+            p.end();
+            item->setIcon(QIcon(pm));
+            tip << QStringLiteral("marked %1").arg(safety.color);
         }
         item->setToolTip(tip.join(QStringLiteral(" · ")));
 
@@ -238,6 +292,7 @@ void MainWindow::reloadProfiles() {
             item->setFont(f);
         }
     }
+    updateMarkedBanner();
 }
 
 void MainWindow::onConnectionSelected() {
@@ -245,9 +300,30 @@ void MainWindow::onConnectionSelected() {
     const bool have = !profile.isEmpty();
     editButton_->setEnabled(have);
     removeButton_->setEnabled(have);
+    updateMarkedBanner();
     if (have) {
         schema_->showProfile(profile);
     }
+}
+
+void MainWindow::updateMarkedBanner() {
+    const QString profile = selectedProfile();
+    const dg::ConnectionSafety safety = safetyByProfile_.value(profile);
+    const std::optional<QColor> color = dg::connectionColor(safety.color);
+    if (profile.isEmpty() || !color) {
+        markedBanner_->hide();
+        return;
+    }
+    markedBanner_->setText(profile);
+    // Weight AND colour, never colour alone; white text on the user's colour
+    // keeps the band legible for every palette entry (all are mid-dark tones).
+    markedBanner_->setStyleSheet(
+        QStringLiteral("QLabel { background-color: %1; color: white; "
+                       "font-weight: 600; padding: 4px 10px; }")
+            .arg(color->name()));
+    markedBanner_->setAccessibleName(
+        QStringLiteral("Marked connection %1").arg(profile));
+    markedBanner_->show();
 }
 
 void MainWindow::onAddConnection() {
@@ -331,6 +407,30 @@ void MainWindow::runStatement() {
     const QString sql = editor_->statementUnderCursor();
     if (sql.isEmpty()) {
         return;
+    }
+    // The confirm-writes promise. The engine has no notion of this profile
+    // setting, so the prompt lives here: classify the statement, and ask before
+    // sending — never after. The classifier is a fat-finger guardrail (first
+    // verb only); real refusal on a read-only profile stays with the engine.
+    const dg::ConnectionSafety safety = safetyByProfile_.value(profile);
+    if (safety.confirmWrites && dg::isWriteStatement(sql)) {
+        const QString verb = dg::statementVerb(sql);
+        QMessageBox box(QMessageBox::Warning, QStringLiteral("Confirm write"),
+                        QStringLiteral("Run a %1 against ‘%2’?").arg(verb, profile),
+                        QMessageBox::Cancel, this);
+        box.setInformativeText(QStringLiteral(
+            "This connection is set to ask before every write. The statement "
+            "has not been sent yet."));
+        QPushButton* runButton = box.addButton(QStringLiteral("Run %1").arg(verb),
+                                               QMessageBox::DestructiveRole);
+        box.setDefaultButton(QMessageBox::Cancel);
+        box.exec();
+        if (box.clickedButton() != runButton) {
+            status_->showMessage(
+                QStringLiteral("not sent — ‘%1’ asks before every write")
+                    .arg(profile));
+            return;
+        }
     }
     try {
         auto query = std::make_unique<dg::Query>(
