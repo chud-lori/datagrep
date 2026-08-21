@@ -148,6 +148,7 @@ impl Cursor for RedisPairsCursor {
         if self.exhausted {
             None
         } else if !self.started {
+            // Not run yet: resuming restarts from the constructed cursor (usually "0").
             Some(ResumeToken(Bytes::from(self.cursor.clone().into_bytes())))
         } else {
             Some(ResumeToken(Bytes::from(self.cursor.clone().into_bytes())))
