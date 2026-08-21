@@ -158,6 +158,11 @@ final class AppModel: ObservableObject {
     /// it back.
     let history = HistoryModel()
 
+    /// Grid edits typed but not yet committed. Its own object for the same
+    /// reason: the model's whole contact with it is staging, committing and
+    /// clearing, and the grid draws straight from it.
+    let edits = PendingEdits()
+
     @Published var roots: [CatalogNode] = []
     @Published var activeProfile: String = ""
     @Published var sqlText: String = ""
@@ -185,6 +190,17 @@ final class AppModel: ObservableObject {
     @Published var detailTitle: String = ""
     @Published var detailBody: String = ""
     @Published var showDetail = false
+
+    /// A commit is in flight. `datagrep_mutate` blocks, so this is what keeps
+    /// the window honest about why the Commit button stopped responding.
+    @Published var isCommitting = false
+    /// The last commit's report, and whether its sheet is up. Kept after the
+    /// sheet closes so nothing is lost by dismissing it.
+    @Published var mutationReport: MutationReport?
+    @Published var showMutationReport = false
+    /// Bumped whenever staging changes, so the commit bar re-renders from an
+    /// AppKit-side edit.
+    @Published var stagingGeneration = 0
 
     /// The inspector's two modes. Cell detail and schema hold their own state;
     /// flipping between them is a view change, never a load.
@@ -1153,6 +1169,18 @@ final class AppModel: ObservableObject {
         execute(directives: directives)
     }
 
+    /// Run the same statement again — what "Reload" offers after a commit.
+    ///
+    /// The grid still holds the rows as they were loaded, so a committed value
+    /// is on screen because it was typed, not because it was read back. This is
+    /// the one honest way to show what the server now holds, and it is offered
+    /// rather than done automatically: a re-query costs a round trip and resets
+    /// the scroll position of a result someone may still be reading.
+    func reloadResult() {
+        guard !baseSQL.isEmpty else { return }
+        execute(directives: directives)
+    }
+
     func clearDerived() {
         sortColumn = nil
         baseFilters = []
@@ -1283,6 +1311,11 @@ final class AppModel: ObservableObject {
 
     private func send(sql: String, profile: String) {
         guard let core else { return }
+        // The window's veto on editing, decided per statement: a read-only
+        // connection offers no edit at all, however editable the result it
+        // returns. Set before the result exists, so no window of rows is ever
+        // editable for an instant.
+        results.allowsEditing = !safety(for: profile).readOnly
         message = "running on \(profile)…"
         isError = false
         // Four string copies, no I/O: the entry itself is only written once the
@@ -1311,6 +1344,10 @@ final class AppModel: ObservableObject {
 
     private func adopt(_ handle: DatagrepQueryHandle) {
         query = handle  // the previous handle deinits here -> datagrep_query_free
+        // A new result is new rows: the values the staged edits were typed
+        // against are gone, and so are the loaded versions their guards carry.
+        edits.discardAll()
+        stagingGeneration &+= 1
         results.beginNewResult(pager: RowPager(query: handle, pageSize: 512, maxPages: 4))
         handle.onProgress { [weak self, weak handle] in
             // Already hopped to main and coalesced by DatagrepQueryHandle.
@@ -1353,6 +1390,162 @@ final class AppModel: ObservableObject {
             isError = false
         }
         refreshFootprint()
+    }
+
+    // MARK: - committing staged edits
+
+    /// The one destructive step. Everything before it is staging.
+    ///
+    /// The confirmation states the shape of the batch *before* the click,
+    /// because afterwards the shape is no longer a choice: on an engine with no
+    /// transaction the writes go one at a time and a failure halts the rest,
+    /// leaving the ones before it written. Saying so afterwards would be an
+    /// apology, not a warning.
+    func commitStagedEdits() {
+        guard let core, !isCommitting else { return }
+        let pending = edits.pending
+        guard !pending.isEmpty else { return }
+        let profile = activeProfile
+        guard !profile.isEmpty else { return }
+        let atomic = results.editable?.atomicBatch ?? false
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText =
+            pending.count == 1
+            ? "Commit 1 document edit to `\(profile)`?"
+            : "Commit \(pending.count) document edits to `\(profile)`?"
+        alert.informativeText = Self.commitWarning(count: pending.count, atomic: atomic)
+        alert.addButton(
+            withTitle: pending.count == 1 ? "Commit 1 Document" : "Commit \(pending.count) Documents"
+        )
+        alert.addButton(withTitle: "Cancel")
+        // Nothing is written by pressing return on a sheet nobody read.
+        alert.buttons.first?.hasDestructiveAction = true
+        alert.buttons.last?.keyEquivalent = "\r"
+
+        let proceed: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.send(mutations: pending, profile: profile, core: core)
+        }
+        guard let window = NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) else {
+            proceed(alert.runModal())
+            return
+        }
+        alert.beginSheetModal(for: window, completionHandler: proceed)
+    }
+
+    /// The sentence that has to be read before the click.
+    ///
+    /// Numbered rather than abstract: "if #3 fails, #1 and #2 stay written" is
+    /// something someone can picture, where "the batch is not atomic" is
+    /// something they can nod at.
+    static func commitWarning(count: Int, atomic: Bool) -> String {
+        if atomic {
+            return
+                "This connection applies the batch atomically: either all \(count) are written, or none are."
+        }
+        if count == 1 {
+            return
+                "The document is written on its own. If it fails, nothing is written and the edit stays staged for another try."
+        }
+        let example = min(3, count)
+        let before = example - 1
+        // Deliberately does not promise that the batch stops at the first
+        // failure: on this engine a multi-document batch goes as one bulk
+        // request and every item is attempted, while a single-document path
+        // halts. What is true either way is that nothing is rolled back and
+        // the report names each document — so that is what it says.
+        return
+            "\(count) documents will be written one by one, and there is no transaction: if #\(example) fails, the \(before == 1 ? "one" : "\(before)") before it stay written and nothing is rolled back. The report then names every document — written, refused, or never attempted — and anything not written stays staged."
+    }
+
+    /// The commit itself. `datagrep_mutate` blocks until the write lands, so it
+    /// runs on `queryQueue` exactly like a query: the window keeps drawing and
+    /// says "committing…" instead of freezing on a cluster that is thinking.
+    private func send(mutations: [StagedDocument], profile: String, core: DatagrepCoreHandle) {
+        isCommitting = true
+        message = "committing \(mutations.count) document(s) to \(profile)…"
+        isError = false
+        let rows = mutations.map(\.row)
+        let ids = mutations.map(\.id)
+        let batch = mutations.map(\.mutation)
+        queryQueue.async { [weak self] in
+            var report: MutationReport?
+            var failure: String?
+            do { report = try core.mutate(profile: profile, mutations: batch) } catch {
+                failure = "\(error)"
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isCommitting = false
+                guard let report else {
+                    // The batch never ran at all — a read-only refusal, or a
+                    // driver that refused every write up front. Nothing was
+                    // written, and everything stays staged.
+                    self.message = failure ?? "the commit failed without a message"
+                    self.isError = true
+                    return
+                }
+                let linedUp = self.edits.apply(report, committed: ids)
+                self.mutationReport = report
+                self.showMutationReport = true
+                self.results.refreshStagedRows(rows)
+                self.stagingGeneration &+= 1
+                self.resultGeneration &+= 1
+                self.message =
+                    linedUp
+                    ? Self.reportHeadline(report)
+                    : "the engine reported \(report.rows.count) outcome(s) for \(ids.count) document(s), so datagrep cannot say which is which — read the report, and re-run the statement to see what was written"
+                self.isError = !report.isClean || !linedUp
+            }
+        }
+    }
+
+    /// The status line's version of the report — the same numbers the sheet
+    /// leads with, for after the sheet has been dismissed.
+    static func reportHeadline(_ report: MutationReport) -> String {
+        var parts = ["\(report.applied) applied"]
+        if report.failed > 0 {
+            parts.append(
+                report.conflicts > 0
+                    ? "\(report.failed) failed (\(report.conflicts) a version conflict)"
+                    : "\(report.failed) failed")
+        }
+        if report.notAttempted > 0 {
+            parts.append("\(report.notAttempted) never attempted, still staged")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Throw away every staged edit. Asks first — this is the only way typed
+    /// work is lost, and the button sits next to the one that commits it.
+    func discardStagedEdits() {
+        let rows = edits.documents.map(\.row)
+        guard !rows.isEmpty else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Discard \(edits.pendingCount) staged document edit(s)?"
+        alert.informativeText =
+            "Nothing has been written yet, and nothing will be. The values you typed are lost."
+        alert.addButton(withTitle: "Discard")
+        alert.addButton(withTitle: "Keep Editing")
+        alert.buttons.first?.hasDestructiveAction = true
+        alert.buttons.last?.keyEquivalent = "\r"
+        let clear: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            self.edits.discardAll()
+            self.results.refreshStagedRows(rows)
+            self.stagingGeneration &+= 1
+            self.resultGeneration &+= 1
+            self.message = "staged edits discarded"
+            self.isError = false
+        }
+        guard let window = NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) else {
+            clear(alert.runModal())
+            return
+        }
+        alert.beginSheetModal(for: window, completionHandler: clear)
     }
 
     func cancel() {

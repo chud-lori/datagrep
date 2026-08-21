@@ -57,6 +57,43 @@ public final class RowWindow {
     public func detailJSON(absoluteRow: UInt64, col: UInt32) -> String? {
         takeOwnedString(datagrep_rows_cell_detail_json(raw, absoluteRow &- offset, col))
     }
+
+    /// One cell's loaded value, when it is a value an edit can carry.
+    ///
+    /// Nil for a nested cell (a document or an array — those are edited as
+    /// documents, not as cells), for an ABSENT field (there is no loaded value
+    /// to preserve the type of), and for a cell outside the window.
+    public func loadedValue(absoluteRow: UInt64, col: UInt32) -> MutationValue? {
+        guard kind(absoluteRow: absoluteRow, col: col) != .nested,
+            let text = detailJSON(absoluteRow: absoluteRow, col: col)
+        else { return nil }
+        return MutationValue.decode(jsonObject(text))
+    }
+
+    /// The field names THIS window projected, in column order.
+    ///
+    /// Not the same list as the query status' columns for a heterogeneous
+    /// document result: the status reports what the first chunk revealed, a
+    /// window reports what its own rows carry. Anything naming a field — an
+    /// edit says which field it sets — must use these, because these are the
+    /// names the cell values were read under.
+    public func columnNames() -> [String] {
+        guard let text = takeOwnedString(datagrep_rows_column_names_json(raw)) else { return [] }
+        return jsonObject(text) as? [String] ?? []
+    }
+
+    /// The row's fields outside the projected columns — which document this
+    /// row is, and which version of it was loaded. Nil for a result that has
+    /// no envelope, which is also the honest answer to "can this be edited".
+    ///
+    /// Read at the moment an edit is staged, never at commit time: a guard
+    /// refreshed just before the write would compare the server against
+    /// itself and defeat the point of having one.
+    public func envelope(absoluteRow: UInt64) -> [String: Any]? {
+        guard let text = takeOwnedString(datagrep_rows_envelope_json(raw, absoluteRow &- offset))
+        else { return nil }
+        return jsonObject(text) as? [String: Any]
+    }
 }
 
 /// A bounded, page-keyed LRU over `RowWindow`s.
