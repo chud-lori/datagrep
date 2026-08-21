@@ -57,8 +57,8 @@ use crate::value::value_to_json;
 
 /// Hit-envelope fields that are never writable. Generated writes send back
 /// `_source` fields only — echoing envelope metadata into a document is the
-/// exact class of bug that has kept Dejavu's update button broken on ES 8
-/// since 2022 (`Field [_ignored] is a metadata field…`).
+/// exact class of bug that has kept another client's update button broken on
+/// ES 8 since 2022 (`Field [_ignored] is a metadata field…`).
 const ENVELOPE_FIELDS: &[&str] = &[
     "_index",
     "_id",
@@ -180,8 +180,8 @@ pub fn compile_mutation(
 ///
 /// The body is the new document's `_source` only: the envelope metadata
 /// (`_index`/`_id`/`_routing`/`_seq_no`/…) is stripped, never written back into
-/// the document — echoing it is the class of bug that has kept Dejavu's insert
-/// path broken on ES 8 since 2022 (`Field [_ignored] is a metadata field…`).
+/// the document — echoing it is the class of bug that has kept another client's
+/// insert path broken on ES 8 since 2022 (`Field [_ignored] is a metadata field…`).
 fn compile_insert(
     path: &ObjectPath,
     doc: &Value,
