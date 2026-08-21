@@ -336,10 +336,7 @@ impl SearchCursor {
                     self.finish_async(async_id.as_deref()).await;
                     return Err(err);
                 }
-                let response = current
-                    .get("response")
-                    .cloned()
-                    .unwrap_or(current);
+                let response = current.get("response").cloned().unwrap_or(current);
                 self.finish_async(async_id.as_deref()).await;
                 return Ok((response, bytes));
             }

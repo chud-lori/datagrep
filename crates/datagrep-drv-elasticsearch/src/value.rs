@@ -187,9 +187,7 @@ pub fn value_to_json(value: &Value) -> Json {
         Value::Bytes(b) => Json::String(base64::engine::general_purpose::STANDARD.encode(b)),
         Value::Date(days) => Json::Number((*days).into()),
         Value::Time { nanos } => Json::Number((*nanos).into()),
-        Value::Timestamp { micros, .. } => {
-            Json::Number((*micros / 1_000).into())
-        }
+        Value::Timestamp { micros, .. } => Json::Number((*micros / 1_000).into()),
         Value::Interval {
             months,
             days,

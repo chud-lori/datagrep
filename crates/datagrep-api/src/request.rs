@@ -139,7 +139,9 @@ pub enum Mutation {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DdlOp {
-    Native { text: Arc<str> },
+    Native {
+        text: Arc<str>,
+    },
     Drop {
         path: ObjectPath,
         kind: ObjectKind,

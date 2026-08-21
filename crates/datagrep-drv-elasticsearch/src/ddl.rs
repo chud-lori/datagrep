@@ -15,7 +15,9 @@ pub enum EsDdlKind {
         index: String,
         ignore_unavailable: bool,
     },
-    Aliases { body: Json },
+    Aliases {
+        body: Json,
+    },
 }
 
 fn one_object(path: &ObjectPath) -> Result<&str, DbError> {

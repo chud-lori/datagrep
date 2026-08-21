@@ -25,9 +25,7 @@ pub enum FieldKind {
     Password,
     Number,
     Bool,
-    Select {
-        options: Vec<Arc<str>>,
-    },
+    Select { options: Vec<Arc<str>> },
     Path,
 }
 

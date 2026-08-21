@@ -87,15 +87,10 @@ impl Value {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Geometry {
-    Point {
-        x: f64,
-        y: f64,
-    },
+    Point { x: f64, y: f64 },
     LineString(Vec<(f64, f64)>),
     Polygon(Vec<Vec<(f64, f64)>>),
-    Raw {
-        wkb: Bytes,
-    },
+    Raw { wkb: Bytes },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

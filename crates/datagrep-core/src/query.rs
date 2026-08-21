@@ -110,37 +110,14 @@ impl CancelReport {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryEvent {
-    Accepted {
-        qid: QueryId,
-    },
-    FirstBatch {
-        qid: QueryId,
-        micros: u64,
-    },
-    Progress {
-        qid: QueryId,
-        rows: u64,
-    },
-    Parked {
-        qid: QueryId,
-        reason: ParkReason,
-    },
-    Capped {
-        qid: QueryId,
-        rows: u64,
-    },
-    Done {
-        qid: QueryId,
-        stats: QueryStats,
-    },
-    Failed {
-        qid: QueryId,
-        message: Arc<str>,
-    },
-    CancelOutcome {
-        qid: QueryId,
-        report: CancelReport,
-    },
+    Accepted { qid: QueryId },
+    FirstBatch { qid: QueryId, micros: u64 },
+    Progress { qid: QueryId, rows: u64 },
+    Parked { qid: QueryId, reason: ParkReason },
+    Capped { qid: QueryId, rows: u64 },
+    Done { qid: QueryId, stats: QueryStats },
+    Failed { qid: QueryId, message: Arc<str> },
+    CancelOutcome { qid: QueryId, report: CancelReport },
 }
 
 impl QueryEvent {

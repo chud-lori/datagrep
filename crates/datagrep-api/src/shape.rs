@@ -13,7 +13,9 @@ pub enum Shape {
         root_hint: Option<FieldPath>,
         identity: Option<Vec<FieldPath>>,
     },
-    Pairs { value_kind: ValueKind },
+    Pairs {
+        value_kind: ValueKind,
+    },
     Graph(Arc<GraphSchema>),
     Ack {
         affected: Option<u64>,

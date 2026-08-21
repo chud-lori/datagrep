@@ -850,12 +850,16 @@ async fn spill_oldest(shared: &Arc<StoreShared>) -> bool {
     };
 
     let snapshot = shared.snapshot();
-    let Some((index, batch, bytes)) = snapshot.chunks.iter().enumerate().find_map(|(i, c)| {
-        match &c.body {
-            ChunkBody::Table(b) if b.schema() == schema => Some((i, b.clone(), c.bytes)),
-            _ => None,
-        }
-    }) else {
+    let Some((index, batch, bytes)) =
+        snapshot
+            .chunks
+            .iter()
+            .enumerate()
+            .find_map(|(i, c)| match &c.body {
+                ChunkBody::Table(b) if b.schema() == schema => Some((i, b.clone(), c.bytes)),
+                _ => None,
+            })
+    else {
         return false;
     };
 

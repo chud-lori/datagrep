@@ -190,7 +190,6 @@ mod tests {
             .map(|(k, _)| k.as_str())
             .collect();
         assert_eq!(keys, vec!["z", "m", "a"], "key order is data");
-
     }
 
     #[test]

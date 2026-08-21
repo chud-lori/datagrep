@@ -3,18 +3,13 @@ use std::time::Duration;
 #[derive(Debug, thiserror::Error)]
 pub enum SecretError {
     #[error("secret requires an interactive prompt (ref `{reference}`)")]
-    NeedsPrompt {
-        reference: String,
-    },
+    NeedsPrompt { reference: String },
 
     #[error("invalid secret reference `{input}`: {reason}")]
     Parse { input: String, reason: String },
 
     #[error("environment variable `{var}` is {problem}")]
-    Env {
-        var: String,
-        problem: &'static str,
-    },
+    Env { var: String, problem: &'static str },
 
     #[error("keychain error for service `{service}`, account `{account}`: {source}")]
     Keychain {
@@ -31,10 +26,7 @@ pub enum SecretError {
     },
 
     #[error("secret command failed with {status}; stderr: {stderr}")]
-    ExecFailed {
-        status: String,
-        stderr: String,
-    },
+    ExecFailed { status: String, stderr: String },
 
     #[error("secret command timed out after {timeout:?}")]
     ExecTimeout { timeout: Duration },

@@ -21,13 +21,11 @@ pub fn map_redis_error(err: redis::RedisError) -> DbError {
             })
         }
         ErrorKind::Io => DbError::Io(std::io::Error::other(err.to_string())),
-        _ => {
-            DbError::Query {
-                code: err.code().map(str::to_string),
-                message: err.to_string(),
-                position: None,
-            }
-        }
+        _ => DbError::Query {
+            code: err.code().map(str::to_string),
+            message: err.to_string(),
+            position: None,
+        },
     }
 }
 
