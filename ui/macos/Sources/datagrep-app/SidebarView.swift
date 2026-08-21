@@ -1,8 +1,6 @@
 import DatagrepKit
 import SwiftUI
 
-/// Profiles + a lazy schema tree. A node's children are fetched only when its
-/// disclosure group opens, and only for THAT level — never a crawl.
 struct SidebarView: View {
     @ObservedObject var model: AppModel
 
@@ -22,26 +20,16 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        // NO add button anywhere in this sidebar. New Connection is a toolbar
-        // icon and a File menu item, and that is the whole of it — a second
-        // affordance down here just competes with the one in the toolbar.
-        // A band, not a tint. Shrinking the same signal to a dot produced
-        // sustained backlash elsewhere, so a marked connection gets full width.
         .safeAreaInset(edge: .top, spacing: 0) {
             if let color = model.activeSafety.color, !model.activeProfile.isEmpty {
                 MarkedBanner(name: model.activeProfile, color: color)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        // ⌘E on the selected connection. A zero-size button rather than a menu
-        // item because the main menu is built in AppDelegate; the shortcut is
-        // live for as long as the window is.
         .background {
             Button("Edit Connection") { model.editActiveConnection() }
                 .keyboardShortcut("e", modifiers: .command)
                 .disabled(model.activeProfile.isEmpty)
-                // Not `.hidden()`: a hidden view is dropped from the responder
-                // chain in some releases and the shortcut goes with it.
                 .opacity(0)
                 .frame(width: 0, height: 0)
                 .allowsHitTesting(false)
@@ -51,9 +39,6 @@ struct SidebarView: View {
             ConnectionEditorSheet(model: model, draft: draft)
         }
         .animation(.smooth(duration: 0.2), value: model.activeSafety.color)
-        // Real window vibrancy. `.listStyle(.sidebar)` alone gives the sidebar
-        // *metrics*, not the material — hosted in an NSHostingView it renders
-        // as flat window gray without this.
         .scrollContentBackground(.hidden)
         .background(VisualEffect(material: .sidebar).ignoresSafeArea())
         .searchable(
@@ -92,15 +77,9 @@ private struct NodeRow: View {
             DisclosureGroup(
                 isExpanded: Binding(
                     get: { node.isExpanded },
-                    // The expand animation is on the binding, not the view, so
-                    // the fetch that follows does not get animated with it.
                     set: { v in withAnimation(.smooth(duration: 0.22)) { node.isExpanded = v } })
             ) {
                 if node.isLoading {
-                    // A real spinner, not three static dots. Fetching 200 tables
-                    // off a remote server takes seconds, and a row that says
-                    // "loading…" without moving is indistinguishable from a row
-                    // that has hung — which is exactly what it looked like.
                     HStack(spacing: 6) {
                         ProgressView()
                             .controlSize(.small)
@@ -113,9 +92,6 @@ private struct NodeRow: View {
                 } else if node.needsPrefix {
                     ScanPrompt(node: node, model: model)
                 } else if let err = node.loadError {
-                    // Named, and retryable. A failure used to leave the row
-                    // marked loaded, so collapsing and reopening it did nothing
-                    // and the only way back was relaunching the app.
                     VStack(alignment: .leading, spacing: 4) {
                         Label(err, systemImage: "exclamationmark.triangle")
                             .font(.caption)
@@ -143,8 +119,6 @@ private struct NodeRow: View {
     }
 }
 
-/// One row. Hover is the whole point: before this, nothing in the sidebar
-/// acknowledged the pointer at all.
 private struct NodeLabel: View {
     @ObservedObject var node: CatalogNode
     @ObservedObject var model: AppModel
@@ -152,15 +126,10 @@ private struct NodeLabel: View {
 
     private var isActive: Bool { node.isProfile && node.name == model.activeProfile }
 
-    /// The object the inspector is currently describing. Selection in this tree
-    /// is otherwise invisible — a schema pane with no indication of *which*
-    /// table it belongs to is a pane you have to guess at.
     private var isInspected: Bool {
         !node.isProfile && model.schemaTarget?.cacheKey == node.schemaCacheKey
     }
 
-    /// The connection's own facts, asked of the model so the row and the query
-    /// path can never disagree about whether this thing is protected.
     private var safety: ConnectionSafety? {
         node.isProfile ? model.safety(for: node.name) : nil
     }
@@ -168,8 +137,6 @@ private struct NodeLabel: View {
     var body: some View {
         HStack(spacing: 7) {
             if let safety, let color = safety.color {
-                // A solid bar down the leading edge. Wide enough to see at a
-                // glance, and it does not depend on the row being selected.
                 RoundedRectangle(cornerRadius: 1.5, style: .continuous)
                     .fill(ConnectionColor.color(color) ?? Color.clear)
                     .frame(width: 3, height: 17)
@@ -191,8 +158,6 @@ private struct NodeLabel: View {
 
             Spacer(minLength: 4)
 
-            // The pencil only appears under the pointer, so the resting row
-            // stays quiet — but the lock and the PROD marker never hide.
             if node.isProfile, hovering {
                 Button {
                     model.editConnection(named: node.name)
@@ -234,10 +199,6 @@ private struct NodeLabel: View {
         .contentShape(Rectangle())
         .onHover { h in withAnimation(.smooth(duration: 0.12)) { hovering = h } }
         .onTapGesture { model.select(node) }
-        // Double-click a connection: a new editor for it, the way every other
-        // client in the study does. The
-        // previewable branch is unchanged — a profile row is never previewable
-        // (its kind is `profile`), so these two have never overlapped.
         .onTapGesture(count: 2) {
             if node.isProfile {
                 model.openSQLEditor(for: node.name)
@@ -265,19 +226,10 @@ private struct NodeLabel: View {
 }
 
 /// Everything you can do to one connection, in one menu.
-///
-/// Ordered the way macOS orders a contextual menu: the thing you almost always
-/// want first (open it, work in it), then the editors that already exist for
-/// it, then the settings, and the irreversible one last behind its own
-/// separator. Verbs, and no "Connection" suffix on every line — the menu is
-/// already on a connection, so repeating the noun six times only makes the
-/// destructive entry harder to pick out.
 private struct ConnectionMenu: View {
     @ObservedObject var model: AppModel
     let name: String
 
-    /// Editors this connection already owns, open or closed. Reopening one
-    /// beats making a third copy of the same query.
     private var editors: [SavedQueryRecord] { model.editors(for: name) }
 
     var body: some View {
@@ -290,8 +242,6 @@ private struct ConnectionMenu: View {
 
         Button("New SQL Editor") { model.openSQLEditor(for: name) }
         if editors.isEmpty {
-            // Shown and disabled rather than hidden: the entry appearing only
-            // sometimes is harder to learn than one that says why it is off.
             Button("Open Editor") {}
                 .disabled(true)
         } else {
@@ -304,8 +254,6 @@ private struct ConnectionMenu: View {
 
         Divider()
 
-        // No `.keyboardShortcut` here: ⌘E is already registered window-wide by
-        // the sidebar, and registering it twice is ambiguous.
         Button("Edit…") { model.editConnection(named: name) }
         Button("Duplicate") { model.duplicateProfile(named: name) }
 
@@ -315,8 +263,6 @@ private struct ConnectionMenu: View {
     }
 }
 
-/// `Enumeration::ScanOnly` — a prefix is mandatory. This is the control that
-/// stops the app firing `KEYS *` at a 40 GB Redis.
 private struct ScanPrompt: View {
     @ObservedObject var node: CatalogNode
     @ObservedObject var model: AppModel

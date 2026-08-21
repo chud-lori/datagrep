@@ -3,28 +3,6 @@ import DatagrepKit
 import SwiftUI
 
 /// Query history: everything datagrep has actually run, searchable.
-///
-/// The shape is taken from what the UX study says the competitors get *wrong*,
-/// not from what they look like:
-///
-/// * **Searchable by text, connection and date.** Other clients' history cannot be
-///   searched by date and has no retention control ([#22238]); both are here, in
-///   the filter bar, one click deep.
-/// * **Retention is stated and editable, never a silent cap.** Other clients stop
-///   at 100 entries without saying so ([#1551]). The footer says exactly what is
-///   being kept and lets you change it.
-/// * **Not scoped to whatever you are connected to.** Users of other clients
-///   asked for precisely this — connection is a filter you may apply, not one
-///   applied for you.
-/// * **Failures are kept, with their error.** The query you want back is usually
-///   the one that broke.
-/// * **Separate from Saved Queries.** An automatic log and a curated list are two
-///   different things; `SavedQueries.swift` owns the curated half and this file
-///   never touches it.
-///
-/// Every colour here is semantic (`NSColor`/`ShapeStyle` roles), so light and
-/// dark are the same code path — four separate competitors have shipped literally
-/// unreadable dark mode, and none of them meant to.
 struct HistoryPanel: View {
     @ObservedObject var model: HistoryModel
     /// Present as a sheet? Then this is the dismissal. Nil when hosted inline.
@@ -115,8 +93,6 @@ struct HistoryPanel: View {
             )
             .frame(minWidth: 180)
 
-            // Connection: "All" first and default. History is never scoped for
-            // you — see [#1142] in the file header.
             Picker("", selection: $model.connectionFilter) {
                 Text("All connections").tag(String?.none)
                 if !model.knownConnections.isEmpty { Divider() }
@@ -253,10 +229,6 @@ struct HistoryPanel: View {
 // MARK: - one row
 
 /// One recorded statement, one or two lines of it.
-///
-/// Monospaced, whitespace collapsed, truncated at the tail — never reformatted
-/// and never re-indented. The full text is one click away in the detail strip
-/// below, so this line is allowed to be short.
 private struct HistoryRow: View {
     let entry: QueryHistoryEntry
 
@@ -314,8 +286,6 @@ private struct HistoryRow: View {
 
 // MARK: - selected entry
 
-/// The full statement, its error if it had one, and the three things you would
-/// want to do with it.
 private struct HistoryDetail: View {
     let entry: QueryHistoryEntry
     @ObservedObject var model: HistoryModel
@@ -404,8 +374,6 @@ private struct HistoryDetail: View {
 
 // MARK: - retention
 
-/// The fix for the two documented failures in one small popover: no retention
-/// control at all, or one nobody can see or change.
 private struct RetentionButton: View {
     @ObservedObject var model: HistoryModel
     @State private var showing = false
@@ -474,13 +442,6 @@ private struct RetentionButton: View {
 // MARK: - hosting
 
 /// Presents the panel as a sheet, driven by `HistoryModel.isPresented`.
-///
-/// A modifier and not a raw `.sheet` in `Workbench`: `HistoryModel` is a nested
-/// `ObservableObject`, so whoever owns the `isPresented` binding has to be
-/// observing *it* — a binding reached through `AppModel` would set the flag and
-/// then never redraw. This owns that observation, so the host adds one line.
-///
-///     .historySheet(model.history)
 struct HistorySheet: ViewModifier {
     @ObservedObject var history: HistoryModel
 
@@ -497,8 +458,6 @@ extension View {
     }
 }
 
-/// The toolbar control that opens it. Same reason as above — it observes the
-/// history model so the badge-free count in its tooltip stays true.
 struct HistoryToolbarButton: View {
     @ObservedObject var history: HistoryModel
 
@@ -518,9 +477,6 @@ struct HistoryToolbarButton: View {
 
 // MARK: - colour
 
-/// One definition of what an outcome looks like. All three are system semantic
-/// colours, so they are legible in both appearances without a second palette —
-/// unreadable dark mode comes from hardcoded colour values, every time.
 enum HistoryStyle {
     static func tint(_ outcome: QueryOutcome) -> Color {
         switch outcome {

@@ -4,20 +4,10 @@ import DatagrepKit
 import SwiftUI
 
 /// Entry point.
-///
-/// AppKit owns the lifecycle (`NSApplication` + a hand-built main menu) and
-/// SwiftUI owns every pixel below the titlebar, via one `NSHostingController`
-/// whose root view is `Workbench`. Doing it this way rather than with the
-/// SwiftUI `App` protocol buys two things this app actually needs: a real main
-/// menu with working ⌘Z/⌘X/⌘C/⌘V for the `NSTextView`, and direct access to the
-/// `NSWindow` so a production connection can tint the titlebar itself.
 @main
 enum DatagrepMain {
     @MainActor
     static func main() {
-        // First line of Swift that runs. Everything before it — dyld, the Swift
-        // and SwiftUI runtime init, framework mapping — is the floor no amount
-        // of application code can move, so it is measured separately.
         Startup.mark("pre-main (dyld + runtime)")
         let app = NSApplication.shared
         Startup.mark("NSApplication.shared")
@@ -38,55 +28,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var sidebarMenuItem: NSMenuItem!
     private var inspectorMenuItem: NSMenuItem!
 
-    /// The lazy-startup rule applied to the GUI: **the window is on screen
-    /// before anything is loaded.** The CLI honours it by never opening the
-    /// profile DB until a subcommand needs it and cold-starts in ~17 ms; the
-    /// GUI's equivalent is that nothing which touches the engine, the profile
-    /// store or the disk may sit between `exec` and first paint.
-    ///
-    /// So this method does exactly three things on the critical path — build the
-    /// menu, build the window, paint it — and everything else (`model.boot()`,
-    /// which creates `DatagrepCore`, opens `profiles.sqlite`, lists the profiles
-    /// and restores the editor session) runs in `finishBooting()` on the next
-    /// run-loop turn, after the user is already looking at the window.
-    ///
-    /// The `MEASURE cold start` line is emitted from a forced first display, not
-    /// from an `async` hop that would report a window that has not drawn yet.
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Before anything is built: this one prints and leaves, so there is no
-        // window to put it in. See `MutationProbe`.
         if MutationProbe.runIfRequested() {
             NSApp.terminate(nil)
             return
         }
-        // Before the window exists, so the first frame is already in the right
-        // appearance and nothing flashes. The screenshot paths further down
-        // assign `NSApp.appearance` themselves and deliberately run after this,
-        // so they still win for the shot they are taking.
         AppearanceMode.apply()
         buildMainMenu()
         Startup.mark("buildMainMenu")
 
         let host = NSHostingController(rootView: Workbench(model: model))
-        // Empty sizing options: otherwise the hosting controller pushes the
-        // SwiftUI ideal size onto the window and the frame set below is
-        // silently overridden (it opened at 872×572 instead of 1180×760).
         host.sizingOptions = []
         Startup.mark("NSHostingController(Workbench)")
 
         window = NSWindow(contentViewController: host)
         Startup.mark("NSWindow(contentViewController:) — SwiftUI loadView")
         // `--window-size 960x600` opens at a chosen size instead of 1180×760.
-        // A measurement affordance, in the same family as `--screenshot`: the
-        // status bar has to degrade gracefully at widths this machine's screen
-        // cannot be dragged to on demand, and "I could not look at it" is not
-        // an answer. It relaxes contentMinSize only as far as it has to.
         let size = Self.requestedWindowSize() ?? NSSize(width: 1180, height: 760)
         window.setContentSize(size)
-        // Sidebar-min (190) + detail-min (380, set on the SwiftUI detail) + a
-        // little slack. The window cannot be dragged narrower than the sidebar
-        // and a usable detail need TOGETHER, so the sidebar never clips; above
-        // this, narrowing shrinks the detail first and the grid scrolls.
         window.contentMinSize = NSSize(
             width: min(600, size.width), height: min(480, size.height))
         window.title = "datagrep"
@@ -99,16 +58,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.delegate = self
         Startup.mark("toolbar style + delegate")
         if let size = Self.requestedWindowSize() {
-            // No autosave name under `--window-size`: a measurement run must not
-            // write a test frame into the size the user's real window reopens at.
             window.setContentSize(size)
         } else {
             window.setFrameAutosaveName("datagrep.main")
-            // A frame restored from a previous session (or an older build with a
-            // smaller minimum) can come back BELOW contentMinSize, and AppKit does
-            // not re-clamp a restored frame — which let the window open narrow
-            // enough to push the sidebar off its own leading edge. Clamp it back
-            // up to the content minimum so the sidebar is never clipped.
             let minC = window.contentMinSize
             let cur = window.contentRect(forFrameRect: window.frame).size
             if cur.width < minC.width || cur.height < minC.height {
@@ -123,10 +75,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         Startup.mark("makeKeyAndOrderFront")
 
-        // Force the first pass through SwiftUI layout + draw NOW, so the number
-        // printed below is a window the user could actually see and not merely
-        // one that has been ordered in. Without this the measurement moves the
-        // cost off the clock instead of off the critical path.
         window.contentView?.displayIfNeeded()
         Startup.mark("first paint")
 
@@ -134,41 +82,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         FileHandle.standardError.write(
             Data(String(format: "MEASURE cold start exec -> window: %.0f ms\n", ms).utf8))
 
-        // Everything below here is off the critical path, in two more turns of
-        // the run loop so neither of them blocks the other: chrome, then engine.
         DispatchQueue.main.async { [weak self] in self?.finishChrome() }
     }
 
-    /// Turn 2: the chrome the first frame did without — toolbar controls, the
-    /// inspector column, the editor's `NSTextView` and the grid's `NSTableView`.
-    /// Nothing here can move the window's layout, so it fills in rather than
-    /// reflows.
-    ///
-    /// It runs BEFORE `model.boot()` on purpose: the controls are what makes the
-    /// window look finished, and the connection list arriving a frame later is
-    /// the part a user reads as "loading", not the part they read as "broken".
     private func finishChrome() {
         StartupStage.shared.markContentReady()
-        // Flipping the flag only invalidates the view; forcing the redraw here
-        // keeps the cost inside this run-loop turn instead of smearing it into
-        // whichever turn happens to draw next.
         window.contentView?.displayIfNeeded()
         Startup.mark("toolbar + inspector + editor + grid attached")
 
         DispatchQueue.main.async { [weak self] in self?.finishBooting() }
     }
 
-    /// Turn 3: the engine. `DatagrepCore` (tokio runtime), `profiles.sqlite`,
-    /// the profile list and the editor's session restore — the only things here
-    /// that touch a socket, a database or the disk, and none of them are between
-    /// `exec` and first paint any more.
     private func finishBooting() {
         model.boot()
         Startup.mark("model.boot() — core + profiles + editor session")
 
-        // The window chrome follows the connection's colour, not a timer, and
-        // only fires when the colour actually changes. Colour is the user's own
-        // marker — datagrep does not decide which connections are dangerous.
         model.$activeProfile
             .combineLatest(model.$profilesByName)
             .map { profile, byName in byName[profile]?.color }
@@ -204,15 +132,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         installLaunchHarnesses()
     }
 
-    /// The screenshot / diagnostic launch flags. They are all timers hung off an
-    /// already-visible window, so they belong here rather than on the critical
-    /// path — parsing `ProcessInfo.arguments` three times before first paint was
-    /// free, but scheduling from here keeps the launch method to one job.
     private func installLaunchHarnesses() {
         // `--screenshot <path> [delay]`: the app renders ITSELF to a PNG.
-        // `screencapture` needs Screen Recording consent, which a headless
-        // agent session does not have, and "I could not look at it" is not an
-        // acceptable answer for a UI change.
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "--screenshot"), i + 1 < args.count {
             let path = args[i + 1]
@@ -225,12 +146,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
-        // `--theme-flip-shot <light.png> <dark.png>`: forces aqua, snapshots,
-        // then flips NSApp.appearance to darkAqua and snapshots again. Setting
-        // `NSApp.appearance` changes `effectiveAppearance`, which fires the
-        // same KVO that a System Settings appearance change does — so the dark
-        // screenshot proves the engine artwork re-resolves at runtime, not
-        // just at launch.
         if let i = args.firstIndex(of: "--theme-flip-shot"), i + 2 < args.count {
             let lightPath = args[i + 1]
             let darkPath = args[i + 2]
@@ -278,36 +193,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return NSSize(width: w, height: h)
     }
 
-    /// Layer 1 of the production guardrail. `titlebarAppearsTransparent` means
-    /// the window background *is* the titlebar background, so one property
-    /// paints the whole chrome.
     private func applyChromeTint(_ colorName: String?) {
         guard let window else { return }
-        // Blended well down: this has to be unmistakable at a glance without
-        // making the window unreadable to work in all day.
         window.backgroundColor =
             colorName
             .flatMap(ConnectionColor.nsColor)
             .flatMap { $0.blended(withFraction: 0.78, of: .windowBackgroundColor) }
             ?? .windowBackgroundColor
-        // The title says which connection, not which tier — the colour is the
-        // user's own marker and only they know what it stands for. The toolbar
-        // does not draw it (the workbench removes the title item); this is the
-        // Window menu / Mission Control name, which SwiftUI no longer
-        // overwrites now that the workbench sets no `.navigationTitle`.
         window.title =
             colorName == nil ? "datagrep" : "datagrep — \(model.activeProfile)"
     }
 
     /// Writes a PNG of the app's own window for headless verification.
-    ///
-    /// Primary path is `CGWindowListCreateImage` of THIS window — the real
-    /// composited pixels from the window server, i.e. exactly what is on screen.
-    /// That matters because the obvious in-process alternative, `cacheDisplay`,
-    /// is BLIND to the SwiftUI-hosted results grid: it copies layer contents and
-    /// the scroll view's document subtree never shows up, so a cacheDisplay shot
-    /// of a populated grid comes back blank. `cacheDisplay` is kept only as a
-    /// fallback for the (rare) case the window-server capture returns nil.
     private func writeScreenshot(to path: String) {
         if let w = window,
             let cg = CGWindowListCreateImage(
@@ -367,13 +264,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         withAnimation(.smooth(duration: 0.25)) { model.sidebarVisible.toggle() }
     }
 
-    /// ⌘Y. In the menu as well as the toolbar because the toolbar controls are
-    /// deferred past first paint, and a shortcut that only works once the
-    /// chrome has caught up is a shortcut people stop trusting.
     @objc func showQueryHistory(_ sender: Any?) { model.history.isPresented = true }
 
-    /// The user asked, so this one reports its outcome instead of failing
-    /// silently the way the launch check does.
     @objc func checkForUpdates(_ sender: Any?) {
         UpdateCheck.shared.checkNow { newer, failed in
             let alert = NSAlert()
@@ -396,8 +288,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - main menu
 
     /// Hand-built because there is no Xcode here and therefore no MainMenu.nib.
-    /// The Edit menu is not decoration: without it the `NSTextView` has no
-    /// undo, no copy and no paste.
     private func buildMainMenu() {
         let main = NSMenu()
 
@@ -436,9 +326,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editItem.submenu = editMenu
         main.addItem(editItem)
 
-        // View: the third of the three routes back to a collapsed sidebar
-        // (toolbar button, ⌃⌘S, and this). The title flips with the state so
-        // the menu always says what the click will do.
         let viewItem = NSMenuItem()
         let viewMenu = NSMenu(title: "View")
         viewMenu.autoenablesItems = false
@@ -452,9 +339,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         inspectorMenuItem.target = self
         viewMenu.addItem(inspectorMenuItem)
 
-        // Appearance lives in View rather than behind a Preferences window:
-        // there is no Preferences window yet, and inventing one to hold a
-        // single three-way choice would be more chrome than setting.
         viewMenu.addItem(.separator())
         let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
         let appearanceMenu = NSMenu(title: "Appearance")
@@ -484,9 +368,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         add(queryMenu, "Focus Editor", #selector(focusEditor(_:)), "l")
         add(queryMenu, "Toggle Cell Detail", #selector(toggleDetail(_:)), "i")
         queryMenu.addItem(.separator())
-        // NO key equivalent. ⌘M is Minimize, a system-standard binding, and
-        // the Query menu is searched before the Window menu — so a debug
-        // diagnostic was answering ⌘M and the window never minimised.
         add(queryMenu, "Report Footprint", #selector(reportFootprint(_:)), "")
         add(queryMenu, "Run Scroll Benchmark", #selector(runScrollBench(_:)), "B")
         queryItem.submenu = queryMenu
@@ -515,8 +396,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 // MARK: - startup timing
 
 enum Startup {
-    /// Real exec -> now, read from the kernel, so it includes dyld and the
-    /// Swift/SwiftUI runtime init that an in-process stopwatch cannot see.
     static func millisSinceProcessStart() -> Double {
         var info = kinfo_proc()
         var size = MemoryLayout<kinfo_proc>.stride
@@ -529,14 +408,6 @@ enum Startup {
         return (Date().timeIntervalSince1970 - start) * 1000
     }
 
-    // MARK: - phase trace
-    //
-    // `--trace-startup` (or DATAGREP_TRACE_STARTUP=1) prints one line per phase
-    // with both the elapsed-since-exec clock and the cost of that phase alone.
-    // It stays in the binary permanently: the cold-start budget (P1, ≤250 ms
-    // target / >600 ms FAIL) is a number that regresses silently, and a
-    // breakdown is the only way to see WHICH phase moved.
-
     nonisolated(unsafe) private static var lastMark: Double = 0
     nonisolated(unsafe) private static var marks: [(String, Double, Double)] = []
 
@@ -545,8 +416,6 @@ enum Startup {
             || ProcessInfo.processInfo.environment["DATAGREP_TRACE_STARTUP"] == "1"
     }()
 
-    /// Records the end of a startup phase. Cheap enough (one sysctl) to leave
-    /// unconditional, but the sysctl is skipped entirely when not tracing.
     static func mark(_ label: String) {
         guard tracing else { return }
         let now = millisSinceProcessStart()
@@ -554,8 +423,6 @@ enum Startup {
         lastMark = now
     }
 
-    /// Times one phase and marks it. The return value is passed through so a
-    /// phase that produces a value can be wrapped without restructuring.
     @discardableResult
     static func phase<T>(_ label: String, _ body: () throws -> T) rethrows -> T {
         guard tracing else { return try body() }
@@ -577,22 +444,12 @@ enum Startup {
 
 // MARK: - autopilot (measurement harness)
 
-/// Drives the app from the command line so the performance numbers can be
-/// produced repeatably instead of by hand-scrolling and guessing.
-///
-///   datagrep --add-profile bench=sqlite:///tmp/bench.db \
-///       --sql "SELECT * FROM big" --bench --quit-after-bench
-///
-/// This is the ONLY thing in the app that polls, it only exists while a launch
-/// flag asked for it, and it stops the moment the run finishes.
 @MainActor
 final class Autopilot {
     private weak var model: AppModel?
     private let profile: (name: String, url: String)?
     private let sql: String?
     private let bench: Bool
-    /// `--select-path public/orders`: catalog path under the active profile to
-    /// expand and then select, exactly as clicking it in the sidebar would.
     private let selectPath: [String]
     private var settleTicks = 0
 
@@ -670,10 +527,6 @@ final class Autopilot {
         }
     }
 
-    /// Walks the catalog one level at a time — the same `load(_:prefix:)` the
-    /// disclosure triangle calls — and finishes with `select(_:)`, the same call
-    /// a sidebar click makes. Nothing here reaches past the UI's own entry
-    /// points, so a green result really does mean "clicking that table works".
     private func descend(from parent: CatalogNode?, remaining: ArraySlice<String>) {
         guard let model else { return }
         guard let wanted = remaining.first else {
@@ -690,8 +543,6 @@ final class Autopilot {
             siblings = parent.children
         } else {
             siblings = model.roots.filter { $0.name == model.activeProfile }
-            // The first hop is the profile row itself, whose "children" are the
-            // top-level schemas — so start by expanding the active profile.
             if let root = siblings.first, !root.didLoad, !root.isLoading {
                 model.load(root, prefix: nil)
             }

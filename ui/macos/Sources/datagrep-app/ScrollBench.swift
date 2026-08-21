@@ -1,14 +1,6 @@
 import AppKit
 import DatagrepKit
 
-/// A scripted fling through the grid, measuring the real cost of OUR path:
-/// scroll -> NSTableView asks for the newly visible rows -> RowPager may fetch a
-/// window through the FFI -> GridCellView draws -> the window backing store is
-/// updated synchronously.
-///
-/// This is NOT a display-link sampler (a display link is a timer, which the
-/// design bans). Each step runs one at a time on the main queue with the run
-/// loop free in between, so the numbers are per-scroll-step frame times.
 @MainActor
 enum ScrollBench {
     static var isRunning = false
@@ -26,8 +18,6 @@ enum ScrollBench {
         samples.reserveCapacity(steps)
         let before = Footprint.sample()
         let cpuBefore = Footprint.cpuSeconds()
-        // 37 rows/step: deliberately not a multiple of the 512-row page size, so
-        // page boundaries land mid-viewport rather than aligning conveniently.
         let stride = 37
 
         func step(_ i: Int) {

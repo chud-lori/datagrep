@@ -2,15 +2,6 @@ import AppKit
 import DatagrepKit
 import SwiftUI
 
-/// The structure half of the inspector: what a table, view, collection or key
-/// actually *is*.
-///
-/// Everything it draws comes from one `datagrep_catalog_describe_json` call,
-/// decoded by `SchemaDetail` — which treats every field as optional. So this
-/// view's rule is the same one: draw what arrived, say plainly what did not,
-/// and never imply a fact the engine did not report. "No indexes" and "indexes
-/// not reported" are two different sentences here, because they are two
-/// different facts.
 struct SchemaPane: View {
     @ObservedObject var model: AppModel
 
@@ -109,11 +100,6 @@ struct SchemaPane: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .loaded(let detail):
-            // Scrolls, because a table's structure is not a fixed height: a
-            // wide table's columns, its indexes and the engine block together
-            // run well past the inspector, and without this the overflow was
-            // simply unreachable — clipped at the bottom edge with no way to
-            // get at it. `CellDetailPane` next door already scrolls.
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 14) {
                     StatsStrip(detail: detail)
@@ -138,8 +124,6 @@ struct SchemaPane: View {
 
 // MARK: - stats
 
-/// Row estimate, size, column count — and, for anything sampled, the sentence
-/// that keeps the rest of the pane honest.
 private struct StatsStrip: View {
     let detail: SchemaDetail
 
@@ -176,8 +160,6 @@ private struct StatsStrip: View {
         var out: [String] = []
         if let n = detail.rowEstimate {
             let unit = detail.kind == "collection" ? "documents" : "rows"
-            // "≈" because every engine's cheap count is an estimate, and the
-            // one place this app must not round off is its own confidence.
             out.append("≈ \(SchemaDetail.formatCount(n)) \(unit)")
         }
         if let c = detail.columnCount {
@@ -224,8 +206,6 @@ private struct ColumnsSection: View {
                     }
                 }
             } else {
-                // `"columns": null` from the FFI. Redis and a Mongo database
-                // land here, and saying "no columns" would be a lie.
                 SchemaNote("This engine declares no schema for \(detail.kind) objects.")
             }
         }
@@ -238,8 +218,6 @@ private struct ColumnRow: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            // The key glyph is the one piece of decoration that earns its
-            // place: it is the first thing anyone opens a schema view to find.
             Image(systemName: column.isPrimaryKey ? "key.fill" : "circle.fill")
                 .font(.system(size: column.isPrimaryKey ? 9 : 3.5))
                 .foregroundStyle(
@@ -281,8 +259,6 @@ private struct ColumnRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 3.5)
         .frame(maxWidth: .infinity, alignment: .leading)
-        // Zebra striping, not grid lines: at 11.5 pt a rule per row is louder
-        // than the names it separates.
         .background(striped ? Color.primary.opacity(0.035) : Color.clear)
         .contentShape(Rectangle())
         .help(tooltip)
@@ -323,8 +299,6 @@ private struct IndexesSection: View {
                 title: "INDEXES", count: detail.indexesReported ? detail.indexes.count : nil)
 
             if !detail.indexesReported {
-                // The engine said nothing about indexes. Rendering "No indexes"
-                // here would be inventing an answer to a question nobody asked.
                 SchemaNote("Indexes not reported for this object.")
             } else if detail.indexes.isEmpty {
                 SchemaNote("No indexes.")
@@ -415,8 +389,6 @@ private struct Badge: View {
 // MARK: - engine extras
 
 /// Whatever the driver attached that has no column or index to hang off.
-/// Redis's whole answer lives here (`type`, `ttl`, `object_encoding`), so this
-/// is not a debug dump — for one engine it is the entire schema view.
 private struct ExtraSection: View {
     let detail: SchemaDetail
 
@@ -510,8 +482,6 @@ private struct SchemaMessage: View {
 
 // MARK: - copy
 
-/// The cheap, heavily-used half of a schema view: getting the column list out
-/// of it and into an editor.
 private struct CopyMenu: View {
     let detail: SchemaDetail
     @ObservedObject var model: AppModel
@@ -530,10 +500,6 @@ private struct CopyMenu: View {
             if let ddl = detail.definition, !ddl.isEmpty {
                 Button("Copy Definition (from the engine)") { copy(ddl, "definition") }
             } else if let generated = SchemaClipboard.generatedDDL(detail) {
-                // Labelled "generated" because it is reconstructed from the
-                // column list, not read back from the server: it will not carry
-                // constraints, collations or storage options the engine did not
-                // report here.
                 Button("Copy CREATE TABLE (generated)") { copy(generated, "generated DDL") }
             }
             Button("Copy Raw describe() JSON") { copy(detail.rawJSON, "describe JSON") }

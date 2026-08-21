@@ -2,16 +2,6 @@ import DatagrepKit
 import SwiftUI
 
 /// A version conflict, as three readings of the same document.
-///
-/// A 409 is the guard doing its job, and the only useful thing to say about it
-/// is *what changed*. So the document is read back and put next to what was
-/// loaded and what was typed — three columns, one row per edited field — and
-/// the two honest offers are made from there: re-apply my edits onto this
-/// version (*rebase*), or drop them (*discard mine*).
-///
-/// What is deliberately not offered anywhere: retrying the write as it stood.
-/// That is the clobber the guard exists to prevent, and it is not any less of
-/// one for being one click away.
 
 // MARK: - the review, built once
 
@@ -27,8 +17,6 @@ struct ConflictField: Identifiable {
 
     var id: String { name }
 
-    /// The server moved this field, not just the document around it — so a
-    /// rebase overwrites somebody else's value here, and the row says so.
     var movedUnderneath: Bool {
         switch server {
         case .value(let now): return now != loaded
@@ -40,9 +28,6 @@ struct ConflictField: Identifiable {
     var loadedDisplay: String { loaded?.display ?? "—" }
 }
 
-/// One conflicted document, ready to review. Every value it shows was computed
-/// when the re-read landed: the view does no lookups and no arithmetic, so
-/// there is nothing in a button action that can throw.
 struct ConflictDocument: Identifiable {
     /// The staged document's own id, which is how a resolution finds it again.
     let id: String
@@ -50,10 +35,6 @@ struct ConflictDocument: Identifiable {
     let title: String
     let fields: [ConflictField]
     let isDelete: Bool
-    /// The guard values a rebase would re-guard against, or nil when the
-    /// re-read did not bring back a usable one — a document that is gone, one
-    /// the engine could not read, or an engine whose guard is not in the
-    /// envelope. Rebase is not offered without it rather than sent unguarded.
     let rebaseGuard: [(field: String, value: MutationValue)]?
     /// The document is no longer on the server.
     let gone: Bool
@@ -72,10 +53,6 @@ struct ConflictReview {
 
     var isEmpty: Bool { documents.isEmpty }
 
-    /// Build the review from the staged documents and the re-read that answers
-    /// them — matched **by position**, which is the contract
-    /// `datagrep_reread_documents` states: one entry per address, in order. The
-    /// caller checks the two counts agree before getting here.
     init(
         conflicted: [StagedDocument], server: [ServerDocument], editable: EditableResult
     ) {
@@ -87,8 +64,6 @@ struct ConflictReview {
                     server: now.fields[set.field] ?? .missing,
                     typed: set.value)
             }
-            // The fresh guard, read out of the envelope by the field names the
-            // engine named — this layer never learns what `_seq_no` is.
             var rebaseGuard: [(field: String, value: MutationValue)]? = []
             for field in editable.guardFields {
                 guard let value = now.envelope[field]?.mutationValue else {
@@ -116,8 +91,6 @@ struct ConflictReview {
         ConflictReview(documents: documents.filter { $0.id != id })
     }
 
-    /// The document's identity as one line — the engine's own field names and
-    /// values, joined, rather than a guess at which one is "the id".
     private static func title(of staged: StagedDocument) -> String {
         staged.key.map { "\($0.field)=\($0.value.display)" }.joined(separator: "  ")
     }
@@ -294,8 +267,6 @@ private struct ConflictDocumentView: View {
     }
 }
 
-/// One field, three ways. The middle column is tinted when it moved: that is
-/// the whole reason this view exists, and it should be findable at a glance.
 private struct ConflictFieldRow: View {
     let field: ConflictField
 

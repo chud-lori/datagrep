@@ -1,24 +1,9 @@
 import Foundation
 
-/// On-disk shape of one editor tab. **This is the one editor-tab store** —
-/// `datagrep-profiles`' empty `editor_tab` table is unreachable from Swift and
-/// stays in the schema only because dropping it would mean a destructive
-/// migration for nothing.
-///
-/// Plain files are the deliberate choice: a saved query is a `.sql` file you
-/// can open in any editor and commit to git, plus a JSON sidecar for what SQL
-/// cannot carry (connection, caret). One file pair per tab, never one big
-/// blob — a half-written blob loses every tab, a half-written sidecar loses
-/// one tab's caret position.
 public struct SavedQueryRecord: Codable, Sendable, Equatable {
     /// Stable identity, and the sidecar/SQL basename for scratch tabs.
     public var id: String
-    /// `nil` for an untitled scratch tab. Scratch tabs are persisted too —
-    /// losing unsaved SQL because the app crashed is not acceptable.
     public var name: String?
-    /// The profile this editor belongs to. `nil` means no connection — where
-    /// pre-scoping tabs land, and where a statement runs against whatever the
-    /// window has selected.
     public var connection: String?
     public var cursorLocation: Int
     public var cursorLength: Int
@@ -43,8 +28,6 @@ public struct SavedQueryRecord: Codable, Sendable, Equatable {
 
     public var isScratch: Bool { name == nil }
 
-    /// Basename shared by the `.sql` and the `.json`. Named tabs get a
-    /// git-friendly slug; scratch tabs get their uuid.
     public var basename: String {
         guard let name, !name.isEmpty else { return "scratch-" + id }
         let slug = SavedQueryStore.slug(name)
@@ -52,22 +35,11 @@ public struct SavedQueryRecord: Codable, Sendable, Equatable {
     }
 }
 
-/// Tab order and which single tab was frontmost. Separate from the per-tab
-/// sidecars so that rewriting the order (a cheap, frequent event) never
-/// rewrites SQL.
 public struct EditorSession: Codable, Sendable, Equatable {
-    /// One global list: a tab's position is a property of the tab, not of the
-    /// connection it is filed under.
     public var order: [String]
-    /// The single globally-active editor tab. The tab bar shows every editor
-    /// at once, across all connections, so there is ONE active tab.
     public var activeID: String?
-    /// The connection a NEW (⌘T) editor is created for — the sidebar
-    /// selection. It does not hide the other connections' editors.
     public var activeConnection: String?
 
-    /// The key for tabs with no connection — kept for decoding an older,
-    /// per-connection `session.json`.
     public static let unbound = ""
 
     public init(
@@ -78,9 +50,6 @@ public struct EditorSession: Codable, Sendable, Equatable {
         self.activeConnection = activeConnection
     }
 
-    /// Hand-rolled for backward compatibility: older builds wrote `activeID`
-    /// directly or `activeByConnection`. Both must still restore every tab —
-    /// losing open SQL to a format change is not a trade this store may make.
     private enum CodingKeys: String, CodingKey {
         case order, activeID, activeConnection, activeByConnection
     }
@@ -92,8 +61,6 @@ public struct EditorSession: Codable, Sendable, Equatable {
         if let a = try c.decodeIfPresent(String.self, forKey: .activeID) {
             activeID = a
         } else {
-            // Older per-connection format: take the active tab for whichever
-            // connection was showing, or any as a fallback.
             let byConn =
                 try c.decodeIfPresent([String: String].self, forKey: .activeByConnection) ?? [:]
             activeID = byConn[activeConnection ?? Self.unbound] ?? byConn.values.first
@@ -112,8 +79,6 @@ public struct EditorSession: Codable, Sendable, Equatable {
 public final class SavedQueryStore: @unchecked Sendable {
     public let directory: URL
 
-    /// `~/Library/Application Support/datagrep/tabs/`, alongside the engine's
-    /// `profiles.sqlite`.
     public static var defaultDirectory: URL {
         SupportDirectory.base.appendingPathComponent("tabs", isDirectory: true)
     }
@@ -136,8 +101,6 @@ public final class SavedQueryStore: @unchecked Sendable {
 
     // MARK: - write
 
-    /// Writes the SQL and its sidecar. Atomic per file, so a crash mid-write
-    /// leaves the previous version intact rather than a truncated one.
     public func save(_ record: SavedQueryRecord, text: String) {
         let sql = sqlURL(for: record)
         try? text.write(to: sql, atomically: true, encoding: .utf8)
@@ -146,8 +109,6 @@ public final class SavedQueryStore: @unchecked Sendable {
         }
     }
 
-    /// Removes both files for a record. On rename the old basename's pair is
-    /// dropped after the new one is written, never before.
     public func delete(_ record: SavedQueryRecord) {
         try? FileManager.default.removeItem(at: sqlURL(for: record))
         try? FileManager.default.removeItem(at: sidecarURL(for: record))
@@ -160,10 +121,6 @@ public final class SavedQueryStore: @unchecked Sendable {
 
     // MARK: - read
 
-    /// Everything on disk, in the order `session.json` remembers. A stale or
-    /// corrupt session file costs tab *order*, never tab *content*. A bare
-    /// `.sql` with no sidecar is ignored: without one there is no id, no
-    /// connection and no caret.
     public func load() -> (tabs: [(record: SavedQueryRecord, text: String)], session: EditorSession)
     {
         let session = loadSession()
@@ -190,10 +147,6 @@ public final class SavedQueryStore: @unchecked Sendable {
         for id in session.order {
             if let entry = byID[id], seen.insert(id).inserted { ordered.append(entry) }
         }
-        // Anything the session forgot is reopened only if it is a *scratch*
-        // tab: unsaved work has nowhere else to live, so a truncated
-        // session.json must never strand it. A named query lives in the saved
-        // list, so it stays closed.
         for id in discovered.sorted() {
             guard let entry = byID[id], entry.0.isScratch, seen.insert(id).inserted else { continue }
             ordered.append(entry)
@@ -205,8 +158,6 @@ public final class SavedQueryStore: @unchecked Sendable {
         return (ordered, cleaned)
     }
 
-    /// Every tab on disk, named and scratch alike — what the connection's
-    /// "Open Editor" menu lists.
     public func allRecords() -> [SavedQueryRecord] {
         let files =
             (try? FileManager.default.contentsOfDirectory(
@@ -222,8 +173,6 @@ public final class SavedQueryStore: @unchecked Sendable {
         return out
     }
 
-    /// Every named query on disk. Closing a named tab removes it from the
-    /// session but never from the folder.
     public func allSaved() -> [SavedQueryRecord] {
         let files =
             (try? FileManager.default.contentsOfDirectory(
@@ -270,8 +219,6 @@ public final class SavedQueryStore: @unchecked Sendable {
 
     // MARK: - helpers
 
-    /// Filesystem-safe, lower-kebab — keeps the saved file recognisable from a
-    /// shell.
     public static func slug(_ name: String) -> String {
         var out = ""
         var lastWasDash = false

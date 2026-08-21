@@ -5,13 +5,6 @@ import SwiftUI
 // MARK: - materials
 
 /// `NSVisualEffectView` behind the sidebar.
-///
-/// SwiftUI's `.ultraThinMaterial` is a *blur of what is behind the view inside
-/// the window*; the sidebar needs the `.sidebar` material, which samples the
-/// desktop behind the whole window. There is no SwiftUI spelling for that, so
-/// this is a bridge for a material, not for a control — the "AppKit only for the
-/// grid and the editor" rule is about interactive controls, and this draws
-/// nothing and handles no events.
 struct VisualEffect: NSViewRepresentable {
     var material: NSVisualEffectView.Material = .sidebar
     var blending: NSVisualEffectView.BlendingMode = .behindWindow
@@ -36,13 +29,6 @@ struct VisualEffect: NSViewRepresentable {
 // MARK: - progress
 
 /// Query progress, drawn from real data and nothing else.
-///
-/// No 60 fps indeterminate spinner: 30 s of "working…" is 1 800 frames of GPU
-/// work for zero information. This bar moves **only** when a
-/// `DatagrepProgressFn` callback lands. If the block declared `-- @limit N` it
-/// is a true determinate bar; otherwise the segment advances one notch per
-/// progress event, so motion is literally proportional to rows arriving. When
-/// the query is terminal the bar is gone and nothing animates.
 struct QueryProgressBar: View {
     @ObservedObject var model: AppModel
 
@@ -79,9 +65,6 @@ struct QueryProgressBar: View {
 /// What the results pane shows when there is no grid worth showing.
 struct ResultsEmptyState: View {
     @ObservedObject var model: AppModel
-    /// Observed directly, because whether an editor is open is published by the
-    /// tabs model rather than by `AppModel`, and this view has to re-render
-    /// when the last tab closes.
     @ObservedObject var tabs: EditorTabsModel
 
     var body: some View {
@@ -95,10 +78,6 @@ struct ResultsEmptyState: View {
                     .buttonStyle(.borderedProminent)
             }
         } else if model.state == nil {
-            // Only while there IS a statement to run. With no editor open the
-            // pane below already says "No editor open", and this one then told
-            // the user, in the largest type in the window, to press ⌘↩ to run
-            // a statement under a caret that does not exist.
             if !tabs.tabs.isEmpty {
                 ContentUnavailableView {
                     Label("No result yet", systemImage: "command")
@@ -157,9 +136,6 @@ struct ErrorCard: View {
 enum Chrome {
     static let paneCorner: CGFloat = 8
 
-    /// A recessed content pane: the editor and the grid both sit in one of
-    /// these, so they read as two layers on the window rather than one flat
-    /// plane of the same gray.
     static func pane<V: View>(_ content: V) -> some View {
         content
             .background(Color(nsColor: .textBackgroundColor))

@@ -2,11 +2,6 @@ import CDatagrepFFI
 import Foundation
 
 /// One saved connection, as `datagrep_profiles_list_json` describes it.
-///
-/// Everything past `hasSecret` is decoded defensively: the safety fields
-/// (`read_only`, `enforcement`, …) are being added to the list payload
-/// by a separate change, and a build without them must degrade to "we do not
-/// know" rather than to "not read-only" — see `ReadOnlyEnforcement`.
 public struct Profile: Sendable, Hashable {
     public let name: String
     public let driver: String
@@ -61,8 +56,6 @@ public final class DatagrepCoreHandle: @unchecked Sendable {
     // MARK: profiles
 
     /// True once a `_list_json` payload has been seen carrying `read_only`.
-    /// A build without it cannot be asked which connections are protected, and
-    /// the UI must not let the absence of a badge read as "checked, and safe".
     public private(set) var listReportsReadOnly = false
 
     public func profiles() throws -> [Profile] {
@@ -83,14 +76,6 @@ public final class DatagrepCoreHandle: @unchecked Sendable {
         }
     }
 
-
-    /// What the header badge needs to say where the user actually is: the
-    /// database this profile points at, and what answered at handshake.
-    ///
-    /// `server` is `nil` until a connection has really succeeded — the engine
-    /// never guesses a version, because an unconfirmed one is exactly the
-    /// number someone would quote when asking whether a feature exists on
-    /// their server.
     public struct ConnectionInfo: Sendable, Equatable {
         public let profile: String
         public let driver: String
@@ -109,9 +94,6 @@ public final class DatagrepCoreHandle: @unchecked Sendable {
         }
     }
 
-    /// Reads the connection's identity. Warms the server info from the pool on
-    /// first call, so this can block briefly on a cold profile — call it off
-    /// the main thread.
     public func connectionInfo(profile: String) throws -> ConnectionInfo {
         let json = try profile.withCString { n in
             try datagrepTry { errOut in

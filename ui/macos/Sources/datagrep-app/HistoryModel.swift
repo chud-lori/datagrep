@@ -4,23 +4,10 @@ import Foundation
 import SwiftUI
 
 /// The view model behind `HistoryPanel`.
-///
-/// Deliberately its own object rather than more fields on `AppModel`: history is
-/// a log that happens to be watched, not application state that other panes
-/// depend on. Keeping it separate means the panel can be opened, filtered and
-/// closed without ever invalidating anything the grid or the editor is doing —
-/// and means the query path's only contact with history is three one-line calls.
-///
-/// Threading contract, in one sentence: **nothing here ever writes on the query
-/// path.** `executionStarted` records four strings; `executionFinished` hands a
-/// value to `QueryHistoryStore`, which returns immediately and does the file I/O
-/// on its own serial queue, debounced.
 @MainActor
 final class HistoryModel: ObservableObject {
     let store: QueryHistoryStore
 
-    /// Everything inside retention, newest first. Written only by the store's
-    /// change callback.
     @Published private(set) var entries: [QueryHistoryEntry] = []
 
     @Published var search: String = ""
@@ -29,18 +16,11 @@ final class HistoryModel: ObservableObject {
     @Published var outcomeFilter: QueryOutcome? = nil
     @Published var selectedID: String? = nil
 
-    /// Drives the panel's presentation. Owned here so whichever chrome presents
-    /// it — sheet, inspector tab, window — has one switch to flip.
     @Published var isPresented = false
 
     @Published private(set) var retention: HistoryRetention
 
-    /// Hand the SQL (and the profile it was run against, if the caller wants to
-    /// honour it) to the editor. The editor agent owns the tab model, so this
-    /// panel does not open a tab — it asks for one.
     var onOpenInEditor: ((String, String?) -> Void)?
-    /// Run it again, now. Same signature; the host decides whether to switch
-    /// connection first.
     var onRerun: ((String, String?) -> Void)?
     /// Short confirmations ("copied", "3 entries removed") for the status bar.
     var onStatus: ((String) -> Void)?
@@ -78,18 +58,12 @@ final class HistoryModel: ObservableObject {
 
     // MARK: - recording (called from the query path, after the fact)
 
-    /// Call when a statement is dispatched. Costs four string copies; records
-    /// nothing yet, because a statement that has not finished has no outcome,
-    /// no duration and no row count.
     func executionStarted(sql: String, connection: String, engine: String) {
         let text = sql.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         pending = PendingRun(sql: sql, connection: connection, engine: engine, startedAt: Date())
     }
 
-    /// Call on every status refresh. Records exactly once, when the query
-    /// reaches a terminal state — so a query that streams for a minute produces
-    /// one entry, not one per progress callback.
     func executionProgressed(
         state: QueryState?, rowsLoaded: UInt64, elapsedMs: UInt64, error: String?
     ) {
@@ -111,9 +85,6 @@ final class HistoryModel: ObservableObject {
             error: outcome == .error ? error : nil)
     }
 
-    /// Call when the run never got as far as a query handle (a connect failure,
-    /// a rejected statement). These are the entries people most want back, so
-    /// they are recorded exactly like any other.
     func executionFailedToStart(_ message: String) {
         guard var run = pending, !run.recorded else { return }
         run.recorded = true
@@ -126,8 +97,6 @@ final class HistoryModel: ObservableObject {
             error: message)
     }
 
-    /// Record a statement that was blocked before it ever reached the engine
-    /// (`-- @readonly`, for instance). Optional — the panel works without it.
     func executionBlocked(sql: String, connection: String, engine: String, reason: String) {
         pending = nil
         store.record(
@@ -158,11 +127,6 @@ final class HistoryModel: ObservableObject {
             text: search, connection: connectionFilter, range: range, outcome: outcomeFilter)
     }
 
-    /// Filtering and grouping are memoised against the filter and the snapshot
-    /// revision. SwiftUI reads `filtered`, `days` and the subtitle count several
-    /// times per render, and at 10 000 entries doing the substring scan three
-    /// times per keystroke is exactly the kind of quiet waste that turns into a
-    /// "typing lag" bug report later.
     var filtered: [QueryHistoryEntry] {
         refreshDerivedIfNeeded()
         return cachedFiltered

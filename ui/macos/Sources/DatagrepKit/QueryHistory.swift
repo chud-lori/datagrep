@@ -1,43 +1,9 @@
 import Foundation
 
 /// Query history: the automatic log of every statement datagrep actually ran.
-///
-/// This is deliberately **not** `SavedQueries.swift`. Saved queries are things a
-/// person chose to keep and gave a name to; history is a record of what happened,
-/// which nobody curates and which must never need curating to stay useful. The
-/// UX study is explicit that conflating the two — as several other clients do —
-/// is the mistake, and that a clean split is the right shape, so these are two
-/// stores, two directories, two panels, and they never write to each other's
-/// files.
-///
-/// ## Why this lives in Swift and not in the engine
-///
-/// `crates/datagrep-profiles` already has a `query_history` table with an FTS5
-/// index, a dedupe window and retention trimming — but the C ABI
-/// (`crates/datagrep-ffi/include/datagrep.h`) exposes profiles, catalog, query
-/// and rows and nothing else. There is no `datagrep_history_*` entry point, so
-/// that table is unreachable from Swift today. Rather than block the feature on
-/// an ABI change, this store mirrors the engine's schema field-for-field
-/// (`text`/`started_at`/`duration_ms`/`row_count`/`status`/`error`) so that when
-/// the ABI does arrive the move is a copy, not a redesign — and the CLI and the
-/// GUI then share one history instead of keeping two.
-///
-/// ## On-disk format
-///
-/// `~/Library/Application Support/datagrep/history/YYYY-MM-DD.jsonl` — one JSON
-/// object per line, one file per day, plus `retention.json`.
-///
-/// One file per day and not one big blob, for the same reason `SavedQueries`
-/// keeps one file pair per tab: a truncated blob loses every query you ever ran,
-/// a truncated day file loses one day. It also makes retention a `rm` of whole
-/// files rather than a rewrite, makes "group by day" free, and leaves the whole
-/// thing readable with `cat` — history you cannot inspect is history you cannot
-/// trust.
 
 // MARK: - values
 
-/// How a recorded statement finished. Same three cases, same spellings, as
-/// `datagrep-profiles`' `HistoryStatus` `CHECK` constraint.
 public enum QueryOutcome: String, Codable, Sendable, CaseIterable {
     case ok, error, cancelled
 
@@ -59,39 +25,20 @@ public enum QueryOutcome: String, Codable, Sendable, CaseIterable {
 }
 
 /// One executed statement.
-///
-/// `startedAtMs` is epoch milliseconds rather than a `Date` so the JSONL is
-/// stable, greppable, and identical in shape to `query_history.started_at`.
 public struct QueryHistoryEntry: Codable, Sendable, Identifiable, Equatable {
     public var id: String
-    /// The statement as the user ran it, verbatim — never reformatted. Sequel
-    /// Ace's history mangles multi-line queries and that is a filed bug.
     public var sql: String
     /// Profile name. Empty only if the app somehow ran without one.
     public var connection: String
-    /// Driver id (`postgres`, `mysql`, …) for the engine glyph. Kept on the
-    /// entry rather than looked up later: the profile may be gone by the time
-    /// anyone reads this back, and the filed complaint elsewhere is precisely
-    /// that history is useless once it depends on a connection still existing.
     public var engine: String
     public var startedAtMs: Int64
     public var durationMs: Int
     /// Rows returned. `nil` when the statement returned no result set.
     public var rowCount: Int?
-    /// Rows affected by a write. Always `nil` today — this ABI carries no
-    /// `Shape::Ack`, so an affected-row count is not available (the same gap the
-    /// status bar reports). The field exists so the number has somewhere to land
-    /// the day it does.
     public var affectedRows: Int?
     public var outcome: QueryOutcome
-    /// The server's message when `outcome == .error`. A failed query is often
-    /// the one you most want back, and it is worthless without its error.
     public var error: String?
-    /// How many times this exact statement collapsed into this entry via the
-    /// dedupe window. 1 for a normal entry.
     public var runCount: Int
-    /// FNV-1a over the whitespace-normalised SQL. Persisted (like the engine's
-    /// `text_hash`) so dedupe never re-normalises the whole file.
     public var textHash: String
 
     public init(
@@ -123,12 +70,8 @@ public struct QueryHistoryEntry: Codable, Sendable, Identifiable, Equatable {
 
     public var startedAt: Date { Date(timeIntervalSince1970: Double(startedAtMs) / 1000) }
 
-    /// Day bucket, in the user's own time zone — "Today" has to mean the day
-    /// they had, not UTC's.
     public var dayKey: String { HistoryFormat.dayKey(for: startedAt) }
 
-    /// One line, whitespace collapsed, for the list. The full text is kept
-    /// intact in `sql` and shown on selection.
     public var oneLine: String {
         let flat = sql.split(whereSeparator: { $0.isNewline || $0 == "\t" })
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -141,9 +84,6 @@ public struct QueryHistoryEntry: Codable, Sendable, Identifiable, Equatable {
         sql.trimmingCharacters(in: .whitespacesAndNewlines).contains(where: { $0.isNewline })
     }
 
-    /// Whitespace-normalised, trailing semicolons dropped. Case is *kept*:
-    /// identifiers are case-sensitive on several engines, and two statements
-    /// that differ only in case are still two different things a person typed.
     public static func normalise(_ sql: String) -> String {
         var out = ""
         var lastWasSpace = false
@@ -160,8 +100,6 @@ public struct QueryHistoryEntry: Codable, Sendable, Identifiable, Equatable {
         return out
     }
 
-    /// FNV-1a, not `Hasher`: `Hasher` is seeded per process, so its output would
-    /// change between launches and dedupe would stop working across restarts.
     public static func hash(_ sql: String) -> String {
         var h: UInt64 = 0xcbf2_9ce4_8422_2325
         for byte in Data(normalise(sql).utf8) {
@@ -172,11 +110,6 @@ public struct QueryHistoryEntry: Codable, Sendable, Identifiable, Equatable {
     }
 }
 
-/// How much history to keep. **User-configurable, and stated in the UI** — the
-/// study documents two ways to get this wrong: offering no retention control at
-/// all, and enforcing a silent hard cap of 100 entries that the user cannot see
-/// or change. The defaults are generous on purpose: 10 000 entries or 180 days,
-/// whichever bites first.
 public struct HistoryRetention: Codable, Sendable, Equatable {
     public var maxEntries: Int
     public var maxDays: Int
@@ -184,14 +117,10 @@ public struct HistoryRetention: Codable, Sendable, Equatable {
     public static let `default` = HistoryRetention(maxEntries: 10_000, maxDays: 180)
 
     public init(maxEntries: Int = 10_000, maxDays: Int = 180) {
-        // 0 or negative would silently mean "keep nothing"; clamp instead of
-        // quietly deleting the user's history because a field was left empty.
         self.maxEntries = max(100, maxEntries)
         self.maxDays = max(1, maxDays)
     }
 
-    /// Decoded values are clamped too — a `retention.json` someone hand-edited
-    /// to `0` must not be read as "delete everything".
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
@@ -199,16 +128,11 @@ public struct HistoryRetention: Codable, Sendable, Equatable {
             maxDays: try c.decodeIfPresent(Int.self, forKey: .maxDays) ?? 180)
     }
 
-    /// The sentence the panel shows. Retention the user cannot read is the same
-    /// as retention the user cannot set.
     public var summary: String {
         "keeping the last \(maxEntries.formatted()) queries, up to \(maxDays) days"
     }
 }
 
-/// Date window for the filter bar. The four coarse buckets people actually
-/// think in. The study's filed complaint against other clients is that they
-/// offer no date filtering at all.
 public enum HistoryDateRange: String, Codable, Sendable, CaseIterable, Identifiable {
     case day, week, month, all
     public var id: String { rawValue }
@@ -233,14 +157,8 @@ public enum HistoryDateRange: String, Codable, Sendable, CaseIterable, Identifia
     }
 }
 
-/// What the panel is currently asking for. A value, so filtering is a pure
-/// function of it and the snapshot — no hidden state, nothing to invalidate.
 public struct HistoryFilter: Sendable, Equatable {
     public var text: String
-    /// `nil` = every connection. History is *not* scoped to whatever you happen
-    /// to be connected to right now — that is the complaint filed against other
-    /// clients; the connection is a filter you may apply, never one applied for
-    /// you.
     public var connection: String?
     public var range: HistoryDateRange
     public var outcome: QueryOutcome?
@@ -294,8 +212,6 @@ public enum HistoryFormat {
 
     public static func date(fromDayKey key: String) -> Date? { dayFormatter.date(from: key) }
 
-    /// "Today" / "Yesterday" / "Monday 4 August". A date the reader has to
-    /// decode is a date they will not read.
     public static func dayTitle(for date: Date, now: Date = Date()) -> String {
         let cal = Calendar.current
         if cal.isDateInToday(date) { return "Today" }
@@ -335,29 +251,13 @@ public struct HistoryDay: Identifiable, Equatable {
 // MARK: - store
 
 /// Reads and writes the history directory. Pure file I/O — no engine, no ABI.
-///
-/// Every mutation and every byte of I/O happens on one private serial queue, so
-/// no caller can put a write on the main thread or on the query path by
-/// accident. Writes are debounced with a single `asyncAfter` (the same
-/// discipline `SavedQueries` uses) — there is no timer and nothing polls.
 public final class QueryHistoryStore: @unchecked Sendable {
     public let directory: URL
 
-    /// `~/Library/Application Support/datagrep/history/`, alongside the engine's
-    /// `profiles.sqlite` and the editor's `tabs/`. Not the temp directory: a
-    /// statement you ran last month has to still be there next month.
     public static var defaultDirectory: URL {
         SupportDirectory.base.appendingPathComponent("history", isDirectory: true)
     }
 
-    /// Re-running the same statement on the same connection inside this window
-    /// updates the entry in place instead of adding a second one. Two minutes is
-    /// long enough to absorb "run, tweak nothing, run again" and short enough
-    /// that this morning's run and this afternoon's stay two events.
-    ///
-    /// A *different* outcome always makes a new entry, even one second later:
-    /// the query that worked and the query that failed are not the same event,
-    /// and collapsing them would delete exactly the row you went looking for.
     public var dedupeWindow: TimeInterval = 120
 
     private let queue = DispatchQueue(label: "datagrep.history", qos: .utility)
@@ -380,8 +280,6 @@ public final class QueryHistoryStore: @unchecked Sendable {
 
     // MARK: observation
 
-    /// Called on the main queue whenever the snapshot changes. Set it before
-    /// `load()`; that call is what delivers the first snapshot.
     public func onChange(_ handler: @escaping ([QueryHistoryEntry]) -> Void) {
         lock.lock()
         changeHandler = handler
@@ -405,8 +303,6 @@ public final class QueryHistoryStore: @unchecked Sendable {
         return retentionValue
     }
 
-    /// Changing retention prunes immediately — a setting that only takes effect
-    /// "eventually" is a setting the user cannot verify.
     public func setRetention(_ new: HistoryRetention) {
         lock.lock()
         retentionValue = new
@@ -422,14 +318,6 @@ public final class QueryHistoryStore: @unchecked Sendable {
 
     // MARK: reading
 
-    /// Loads everything inside retention, newest day first, and drops what has
-    /// aged out. Cheap enough to be synchronous on the queue at launch: 10 000
-    /// short JSON lines is a few hundred KB.
-    ///
-    /// Idempotent, and deliberately so: a second `load()` would read the last
-    /// *flushed* state and so would silently discard anything recorded inside
-    /// the debounce window. Reading from disk must never be able to lose a query
-    /// that has already been run.
     public func load() {
         queue.async { [weak self] in
             guard let self, !self.didLoad else { return }
@@ -439,8 +327,6 @@ public final class QueryHistoryStore: @unchecked Sendable {
             let cutoffKey = Self.cutoffDayKey(days: retention.maxDays)
             let decoder = JSONDecoder()
 
-            // Newest day file first — the filenames are ISO dates, so a plain
-            // string sort is a chronological one.
             let newestFirst = self.dayFiles().sorted {
                 $0.lastPathComponent > $1.lastPathComponent
             }
@@ -457,8 +343,6 @@ public final class QueryHistoryStore: @unchecked Sendable {
                     else { continue }
                     loaded.append(entry)
                 }
-                // Newest-first order means we can stop reading as soon as the
-                // budget is met; older files stay on disk until pruned.
                 if loaded.count >= retention.maxEntries { break }
             }
 
@@ -479,16 +363,12 @@ public final class QueryHistoryStore: @unchecked Sendable {
 
     // MARK: writing
 
-    /// Records one executed statement. Returns immediately; the caller is never
-    /// blocked, and this is never on the query path — call it after the fact.
     public func record(_ entry: QueryHistoryEntry) {
         queue.async { [weak self] in
             guard let self else { return }
             let text = entry.sql.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return }
 
-            // Dedupe: the most recent entry with the same statement on the same
-            // connection, inside the window, and with the same outcome.
             if let i = self.entries.firstIndex(where: {
                 $0.textHash == entry.textHash && $0.connection == entry.connection
                     && $0.outcome == entry.outcome && $0.error == entry.error
@@ -528,8 +408,6 @@ public final class QueryHistoryStore: @unchecked Sendable {
         }
     }
 
-    /// Clears everything, or everything for one connection. Destructive and
-    /// explicit — nothing here ever clears history as a side effect.
     public func clear(connection: String? = nil) {
         queue.async { [weak self] in
             guard let self else { return }
@@ -548,8 +426,6 @@ public final class QueryHistoryStore: @unchecked Sendable {
 
     // MARK: - filtering (pure)
 
-    /// Applies a filter to a snapshot. Pure and static so the panel can call it
-    /// on whatever thread it likes, and so it is trivially testable.
     public static func filter(
         _ entries: [QueryHistoryEntry], with filter: HistoryFilter, now: Date = Date()
     ) -> [QueryHistoryEntry] {
@@ -565,9 +441,6 @@ public final class QueryHistoryStore: @unchecked Sendable {
             if let o = filter.outcome, e.outcome != o { return false }
             if let earliest, e.startedAt < earliest { return false }
             guard !terms.isEmpty else { return true }
-            // AND across terms: typing more words narrows, which is what every
-            // search box has trained people to expect. The error text is searched
-            // too — "deadlock" should find the query that hit one.
             for t in terms {
                 let opts: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
                 let inSQL = e.sql.range(of: t, options: opts) != nil
@@ -599,9 +472,6 @@ public final class QueryHistoryStore: @unchecked Sendable {
     }
 
     /// Connection names that actually appear in history, for the filter menu.
-    /// Taken from the entries and not from the live profile list on purpose: a
-    /// connection you deleted still has a past, and hiding it would be exactly
-    /// the coupling users complained about elsewhere.
     public static func connections(in entries: [QueryHistoryEntry]) -> [String] {
         Array(Set(entries.map(\.connection))).filter { !$0.isEmpty }.sorted()
     }
@@ -622,8 +492,6 @@ public final class QueryHistoryStore: @unchecked Sendable {
         }
     }
 
-    /// One pending write, coalesced. Not a timer: a single `asyncAfter` that
-    /// re-arms only when something else changes, exactly as `SavedQueries` does.
     private func scheduleFlush() {
         guard !flushScheduled else { return }
         flushScheduled = true
@@ -649,8 +517,6 @@ public final class QueryHistoryStore: @unchecked Sendable {
                 continue
             }
             var text = ""
-            // Oldest first inside a file, so appending stays natural for anyone
-            // reading it with `tail`.
             for e in rows.reversed() {
                 guard let data = try? encoder.encode(e),
                     let line = String(data: data, encoding: .utf8)
@@ -661,9 +527,6 @@ public final class QueryHistoryStore: @unchecked Sendable {
         }
         dirtyDays.removeAll()
 
-        // …and drop any day file retention has since outlived. Deriving this
-        // from what is actually in memory means a stale or hand-edited directory
-        // heals itself instead of accumulating forever.
         let live = Set(byDay.keys)
         let cutoffKey = Self.cutoffDayKey(days: retention.maxDays)
         for file in dayFiles() {
@@ -681,9 +544,6 @@ public final class QueryHistoryStore: @unchecked Sendable {
         return files.filter { $0.pathExtension == "jsonl" }
     }
 
-    /// Oldest day still inside retention. `days` counts *inclusive* of today, so
-    /// a retention of 1 keeps today and nothing else — "keep 1 day" that quietly
-    /// kept two would be the same class of surprise as an undocumented cap.
     private static func cutoffDayKey(days: Int) -> String {
         let cutoff =
             Calendar.current.date(byAdding: .day, value: -(max(1, days) - 1), to: Date())

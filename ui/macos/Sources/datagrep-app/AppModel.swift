@@ -3,8 +3,6 @@ import DatagrepKit
 import Foundation
 import SwiftUI
 
-/// One catalog node. A reference type with `@Published` so a lazily-loaded
-/// subtree can update in place without rebuilding the whole sidebar.
 final class CatalogNode: ObservableObject, Identifiable {
     let id = UUID()
     let profile: String
@@ -15,12 +13,9 @@ final class CatalogNode: ObservableObject, Identifiable {
     let hasChildren: Bool
     let isProfile: Bool
     let driver: String
-    /// Safety facts, copied off the profile so a row can draw its own badge
-    /// without reaching back into the model for every cell.
     let readOnly: Bool
     let enforcement: ReadOnlyEnforcement
     let colorName: String?
-
 
     @Published var children: [CatalogNode] = []
     @Published var isLoading = false
@@ -30,8 +25,6 @@ final class CatalogNode: ObservableObject, Identifiable {
     @Published var isExpanded = false {
         didSet {
             guard isExpanded, !didLoad, !isLoading else { return }
-            // ScanOnly refuses to enumerate without a prefix — this is what stops
-            // the app firing `KEYS *` at a 40 GB Redis.
             if enumeration == .scanOnly { return }
             onExpand?(self, nil)
         }
@@ -68,9 +61,6 @@ final class CatalogNode: ObservableObject, Identifiable {
         self.colorName = nil
     }
 
-    /// Engine glyphs and node glyphs come from `DatagrepKit.EngineStyle` /
-    /// `NodeStyle` — one definition, used by the sidebar, the toolbar picker
-    /// and the connection sheet alike, so an engine looks the same everywhere.
     var symbol: String {
         isProfile ? EngineStyle.symbol(for: driver) : NodeStyle.symbol(forKind: kind)
     }
@@ -100,10 +90,6 @@ final class CatalogNode: ObservableObject, Identifiable {
         ["table", "collection", "view", "key", "hash", "string"].contains(kind)
     }
 
-    /// Objects `describe()` has something to say about. Databases and schemas
-    /// are deliberately excluded: selecting one would spend a round trip to be
-    /// told its name back. Redis keys are in — `describe_key` is a `TYPE` plus a
-    /// `MEMORY USAGE`, and it is the only structure Redis will ever report.
     var isDescribable: Bool {
         !isProfile
             && [
@@ -112,22 +98,15 @@ final class CatalogNode: ObservableObject, Identifiable {
             ].contains(kind)
     }
 
-    /// Identity for the schema cache. The path is already unique within a
-    /// profile, and `\u{1}` cannot occur in an identifier.
     var schemaCacheKey: String {
         ([profile] + path).joined(separator: "\u{1}")
     }
 }
 
-/// What the inspector is showing. Two modes, one pane — and switching between
-/// them throws neither away.
 enum InspectorMode: String, Hashable {
     case cell, schema
 }
 
-/// The object the schema pane is pointed at. Held as plain values rather than a
-/// `CatalogNode` reference so a reloaded tree cannot leave the pane holding a
-/// node that is no longer in it.
 struct SchemaTarget: Equatable {
     let profile: String
     let path: [String]
@@ -144,23 +123,14 @@ enum SchemaLoad {
     case failed(String)
 }
 
-/// The whole application state. Everything published here is written on the
-/// main queue only; the FFI work happens on `queryQueue` / `catalogQueue`.
 @MainActor
 final class AppModel: ObservableObject {
     // The two AppKit bridges. Owned here so SwiftUI never re-creates them.
     let results = ResultsViewController()
     let editor = SQLEditorController()
 
-    /// The automatic log of every statement this window has run. Its own object
-    /// rather than more fields here: the query path's whole contact with it is
-    /// the three `execution*` calls below, and nothing else in the model reads
-    /// it back.
     let history = HistoryModel()
 
-    /// Grid edits typed but not yet committed. Its own object for the same
-    /// reason: the model's whole contact with it is staging, committing and
-    /// clearing, and the grid draws straight from it.
     let edits = PendingEdits()
 
     @Published var roots: [CatalogNode] = []
@@ -170,11 +140,7 @@ final class AppModel: ObservableObject {
 
     @Published var state: QueryState? = nil
     @Published var rowsLoaded: UInt64 = 0
-    /// Bumped every time a result status is applied, purely so the SwiftUI
-    /// host of the results grid re-runs its update and re-snapshots the table.
     @Published var resultGeneration: Int = 0
-    /// The results pane can render as the grid (default) or as a plain,
-    /// column-aligned monospaced text table the user can select and copy.
     @Published var showResultAsText = false
     @Published var totalKnown = true
     @Published var elapsedMs: UInt64 = 0
@@ -191,33 +157,19 @@ final class AppModel: ObservableObject {
     @Published var detailBody: String = ""
     @Published var showDetail = false
 
-    /// A commit is in flight. `datagrep_mutate` blocks, so this is what keeps
-    /// the window honest about why the Commit button stopped responding.
     @Published var isCommitting = false
-    /// The last commit's report, and whether its sheet is up. Kept after the
-    /// sheet closes so nothing is lost by dismissing it.
     @Published var mutationReport: MutationReport?
     @Published var showMutationReport = false
-    /// Bumped whenever staging changes, so the commit bar re-renders from an
-    /// AppKit-side edit.
     @Published var stagingGeneration = 0
 
-    /// The conflicted documents of the last commit, read back from the server,
-    /// and whether their three-column view is up. `isRereading` is what keeps
-    /// the window honest while `datagrep_reread_documents` blocks.
     @Published var conflictReview: ConflictReview?
     @Published var showConflictReview = false
     @Published var isRereading = false
 
-    /// The inspector's two modes. Cell detail and schema hold their own state;
-    /// flipping between them is a view change, never a load.
     @Published var inspectorMode: InspectorMode = .cell
     @Published var schemaTarget: SchemaTarget?
     @Published var schemaLoad: SchemaLoad = .idle
 
-    // New-connection sheet. The same `ConnectionForm` the Edit sheet uses, so
-    // adding and editing a connection ask for the same things in the same
-    // order rather than being two dialogs that happen to be about one subject.
     @Published var showNewConnection = false
     let newForm = ConnectionForm()
     let newTest = ConnectionTestState()
@@ -226,71 +178,32 @@ final class AppModel: ObservableObject {
     /// The Edit Connection sheet, or nil when it is closed.
     @Published var editDraft: ConnectionDraft?
 
-    /// Every saved connection by name, including the safety fields. The sidebar
-    /// draws from `roots`; this is what the *query path* asks before it sends a
-    /// statement, so a read-only refusal can name the profile that refused.
     @Published private(set) var profilesByName: [String: Profile] = [:]
 
-
-
-
-    /// Sidebar visibility, bound to `NavigationSplitView`'s `columnVisibility`
-    /// and persisted. Bound rather than driven by `toggleSidebar(_:)` because
-    /// the bound value is the only version we can guarantee is recoverable —
-    /// a split view dragged shut has no state we own.
     @Published var sidebarVisible = true {
         didSet { UserDefaults.standard.set(sidebarVisible, forKey: Self.sidebarKey) }
     }
     private static let sidebarKey = "datagrep.sidebarVisible"
 
-    /// Live content width, fed by a GeometryReader on the split view. Below the
-    /// width where the sidebar and a usable detail can coexist, SwiftUI's
-    /// `.balanced` split squeezes the sidebar off its own leading edge instead
-    /// of collapsing it — so we collapse it ourselves. This is the macOS-native
-    /// answer (HIG: a sidebar auto-hides when its window gets too narrow), not a
-    /// horizontally-scrolling sidebar.
     @Published var windowContentWidth: CGFloat = 1180
-    /// The width at/above which the sidebar is allowed to show. Empirically the
-    /// balanced split starts clipping the sidebar below ~900.
     static let sidebarFitsWidth: CGFloat = 900
 
-    /// Whether the sidebar is actually shown: the user wants it AND the window
-    /// is wide enough to hold it without clipping. Narrowing past the threshold
-    /// collapses it (revealed again by widening, or by the toolbar toggle / ⌃⌘S
-    /// once there is room). The user's own show/hide choice is remembered in
-    /// `sidebarVisible` and re-applied the moment the window is wide enough.
     var sidebarShown: Bool { sidebarVisible && windowContentWidth >= Self.sidebarFitsWidth }
 
-    /// Advances one notch per progress callback. The only thing driving the
-    /// activity bar — no timer anywhere.
     @Published var progressPhase: Double = 0
 
     /// Sorting is a re-issued query, so these are query state, not view state.
     @Published var sortColumn: String?
     @Published var sortAscending = true
-    /// The last statement the user actually asked for, before datagrep wrapped it in
-    /// an ORDER BY or a WHERE. Sorting twice must not nest two subqueries.
     private var baseSQL: String = ""
     private var baseFilters: [(column: String, value: String)] = []
 
-    /// The grid is only shown when it has something to show; otherwise the pane
-    /// holds a `ContentUnavailableView`, so "nothing here" is a stated fact and
-    /// not an empty rectangle the user has to interpret.
     var showsGrid: Bool { rowsLoaded > 0 }
 
     var activeDriver: String { roots.first { $0.name == activeProfile }?.driver ?? "" }
 
-    /// What the engine said about the active connection: which database it is
-    /// pointed at, and what answered at handshake. Drives the header badge.
-    ///
-    /// Nil until the first successful read for this profile, and cleared the
-    /// moment the active profile changes — a badge that keeps naming the
-    /// previous server for a few hundred milliseconds is precisely the badge
-    /// that gets someone running a statement against the wrong database.
     @Published var connectionInfo: DatagrepCoreHandle.ConnectionInfo?
 
-    /// Refresh the badge for the active connection, off the main thread: the
-    /// first call for a profile can dial the server to learn its version.
     func refreshConnectionInfo() {
         let name = activeProfile
         guard let core, !name.isEmpty else {
@@ -301,8 +214,6 @@ final class AppModel: ObservableObject {
             let info = try? core.connectionInfo(profile: name)
             DispatchQueue.main.async {
                 guard let self else { return }
-                // A late reply for a connection the user has already left must
-                // not overwrite the badge of the one they are looking at now.
                 guard self.activeProfile == name else { return }
                 self.connectionInfo = info
             }
@@ -311,25 +222,13 @@ final class AppModel: ObservableObject {
     var canSortInEngine: Bool { EngineStyle.supportsSubqueryOrderBy(activeDriver) }
 
     /// True when the user has put a colour on this connection.
-    ///
-    /// Named `isMarked`, not `isProd`: the dev/staging/prod enum was removed on
-    /// purpose, and the colour is the user's own "this one matters" marker —
-    /// datagrep does not decide what red means. The old name kept implying it
-    /// did, which is how every marked connection ended up painted red no matter
-    /// which colour was actually chosen.
     var isMarked: Bool { activeSafety.isMarked }
 
-    /// The colour the user marked this connection with, if any. The single
-    /// source for every surface that signals it — badge fill, window tint, edge
-    /// stripe — so they can never disagree with the sidebar band.
     var markColor: Color? { ConnectionColor.color(activeSafety.color) }
     var isRunning: Bool { state.map { !$0.isTerminal } ?? false }
 
     // MARK: - safety, resolved once
 
-    /// The safety facts for one connection: production, read-only, and *which*
-    /// read-only. Everything that draws a lock or refuses a statement reads
-    /// this, so the badge and the refusal can never disagree.
     func safety(for name: String) -> ConnectionSafety {
         let p = profilesByName[name]
         return ConnectionSafety(
@@ -348,15 +247,11 @@ final class AppModel: ObservableObject {
     var connectionSubtitle: String {
         guard !activeProfile.isEmpty else { return "no connection" }
         let driver = roots.first { $0.name == activeProfile }?.driver ?? "?"
-        // The lock is in the toolbar chip too, but the subtitle is the one line
-        // that survives a collapsed sidebar and a narrow window.
         let lock = activeSafety.readOnly ? " · \(activeSafety.enforcement.headline)" : ""
         guard let state else { return "\(driver)\(lock) · idle" }
         return "\(driver)\(lock) · \(state.rawValue) · \(rowsLoaded.formatted()) rows"
     }
 
-    /// Where the engine keeps its profile store. Not the temp directory: a
-    /// connection you added has to still be there tomorrow.
     static var profilesDBPath: String {
         SupportDirectory.ensured().appendingPathComponent("profiles.sqlite").path
     }
@@ -366,9 +261,6 @@ final class AppModel: ObservableObject {
     private var core: DatagrepCoreHandle?
     private var query: DatagrepQueryHandle?
 
-    /// One entry per object the user has looked at. Dropped wholesale when the
-    /// profile list changes — a schema is only true of the connection it came
-    /// from. Nothing evicts it on a timer; a describe payload is a few KB.
     private var schemaCache: [String: SchemaDetail] = [:]
     private var schemaGeneration = 0
 
@@ -381,11 +273,6 @@ final class AppModel: ObservableObject {
             let value =
                 Self.prettify(window.detailJSON(absoluteRow: UInt64(row), col: col))
                 ?? "(no detail available)"
-            // On a result with a projection root the columns are the document's
-            // own fields, so `_index`/`_id` are no longer among them — and the
-            // one place someone goes looking for "which document is this?" is
-            // the pane that shows them a value. The envelope leads, because it
-            // is the answer to that question.
             if let envelope = window.envelope(absoluteRow: UInt64(row)),
                 let text = Self.prettifyObject(envelope), !envelope.isEmpty
             {
@@ -393,9 +280,6 @@ final class AppModel: ObservableObject {
             } else {
                 self.detailBody = value
             }
-            // Clicking a chip is an unambiguous request for the cell, so the
-            // inspector switches to it — the loaded schema stays put behind
-            // the mode switch, one click away.
             self.inspectorMode = .cell
             withAnimation(.smooth(duration: 0.22)) { self.showDetail = true }
         }
@@ -411,9 +295,6 @@ final class AppModel: ObservableObject {
         }
         editor.onSelectionChanged = { [weak self] in self?.refreshDirectives() }
 
-        // The editor's view of the connection list. Without this the tab chips
-        // and the welcome state can only name the profiles a restored tab
-        // happens to be bound to, so neither could draw an engine mark.
         editor.profilesProvider = { [weak self] in
             (self?.roots ?? []).map { EditorConnectionOption(name: $0.name, driver: $0.driver) }
         }
@@ -424,9 +305,6 @@ final class AppModel: ObservableObject {
         editor.tabs.onNewConnection = { [weak self] in self?.showNewConnection = true }
         editor.tabs.onPickConnection = { [weak self] name in self?.selectProfile(name) }
 
-        // Query history. Opening an entry gets a NEW tab rather than replacing
-        // the active buffer — a history panel that silently overwrites the SQL
-        // someone was half way through writing has cost them more than it saved.
         history.onOpenInEditor = { [weak self] sql, connection in
             self?.openInNewEditorTab(sql: sql, connection: connection)
         }
@@ -442,12 +320,6 @@ final class AppModel: ObservableObject {
             sidebarVisible = UserDefaults.standard.bool(forKey: Self.sidebarKey)
         }
 
-        // No seed text, and no starter tab. An editor is something the user
-        // makes — for a connection — and until then the pane holds the welcome
-        // state. The old boilerplate here was a SQLite `sqlite_master` query
-        // that was wrong for every other engine, dropped into a document the
-        // user then had to clear before they could type.
-
         do {
             let c = try DatagrepCoreHandle(profilesDBPath: Self.profilesDBPath)
             core = c
@@ -461,28 +333,15 @@ final class AppModel: ObservableObject {
         refreshDirectives()
 
         // The read-only / production chip at the trailing end of the toolbar.
-        // Attached after the window is up, on the next turn, for the same
-        // reason the toolbar itself is: nothing that draws chrome belongs
-        // between `exec` and first paint.
         DispatchQueue.main.async { ConnectionSafetyTitlebar.install(model: self) }
 
         // Companion to DATAGREP_SAFETY_FIXTURE: opens the editor on one
-        // connection so the sheet can be rendered and looked at.
         if let n = ProcessInfo.processInfo.environment["DATAGREP_EDIT_FIXTURE"], !n.isEmpty {
             DispatchQueue.main.async { [weak self] in self?.editConnection(named: n) }
         }
-        // The sheet is its own window, so the app's `--screenshot` (which draws
-        // the main window) cannot see it. Same escape hatch as
-        // `DATAGREP_SCHEMA_SHOT`: render the view itself.
         if let out = ProcessInfo.processInfo.environment["DATAGREP_EDIT_SHOT"] {
-            // A cached rep carries no window background of its own, so dark-mode
-            // label text would come out white on nothing. Pin the shot to aqua.
             NSApp.appearance = NSAppearance(named: .aqua)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
-                // `cacheDisplay`, not `ImageRenderer`: the sheet is full of
-                // AppKit-backed controls (TextField, Toggle, Picker) that an
-                // `ImageRenderer` draws as placeholder glyphs, which is exactly
-                // the part that has to be looked at.
                 let sheet = NSApp.windows.first { $0.isSheet && $0.isVisible }
                 if let content = sheet?.contentView,
                     let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds)
@@ -496,13 +355,6 @@ final class AppModel: ObservableObject {
             }
         }
 
-        // Same family as DATAGREP_EDIT_FIXTURE, and for the same reason: the
-        // history panel is a sheet, which is its own window, so `--screenshot`
-        // (which draws the main window) cannot see it.
-        //   DATAGREP_HISTORY_FIXTURE=panel  opens the sheet — capture it with
-        //                                   DATAGREP_EDIT_SHOT.
-        //   DATAGREP_HISTORY_FIXTURE=open   replays the newest entry into a new
-        //                                   editor tab, visible to --screenshot.
         if let mode = ProcessInfo.processInfo.environment["DATAGREP_HISTORY_FIXTURE"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 guard let self else { return }
@@ -546,12 +398,8 @@ final class AppModel: ObservableObject {
 
     // MARK: - profiles
 
-    /// One `datagrep_profiles_list_json` call. Any subtree already expanded is
-    /// dropped with it — profiles changed, so the tree below them is stale.
     func reloadProfiles() {
         guard let core else { return }
-        // The tree below the profiles is about to be dropped; the schemas that
-        // came out of it go with it.
         schemaCache.removeAll()
         schemaTarget = nil
         schemaLoad = .idle
@@ -566,15 +414,8 @@ final class AppModel: ObservableObject {
             if !roots.contains(where: { $0.name == activeProfile }) {
                 activeProfile = profiles.first?.name ?? ""
             }
-            // Editors are scoped by connection, so the tab bar has to follow
-            // the profile list: a connection that just appeared (or vanished)
-            // changes which editors are showing.
             editor.refreshConnections()
             editor.setScope(activeProfile.isEmpty ? nil : activeProfile)
-            // This path assigns `activeProfile` directly rather than going
-            // through `selectProfile`, so it has to ask for the badge itself —
-            // otherwise the connection the app opens on is the one connection
-            // whose engine and database never appear.
             refreshConnectionInfo()
         } catch {
             message = "could not list profiles: \(error)"
@@ -582,9 +423,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Save the New Connection sheet. The URL sent carries the typed password,
-    /// which `datagrep_profiles_add` lifts into the keychain before the profile
-    /// is written — the one path that is known to keep it off disk.
     func addProfileFromForm() {
         addProfile(name: newForm.name, url: newForm.urlWithPassword)
     }
@@ -621,19 +459,11 @@ final class AppModel: ObservableObject {
 
     // MARK: - testing a connection
 
-    /// Test what the New Connection sheet currently describes. Nothing is
-    /// saved, and no password reaches the keychain — a failed test leaves no
-    /// wreckage behind to clean up.
     func testNewConnection() {
         runTest(newTest, name: nil, url: newForm.urlWithPassword)
     }
 
     /// Test what the Edit sheet currently describes.
-    ///
-    /// The edited URL is dialled rather than the saved profile whenever the
-    /// user has typed anything, so the button answers "will this work?" and not
-    /// "did the old one work?". With nothing typed it falls back to the saved
-    /// profile, which is the only way to test the keychain password.
     func testConnection(_ draft: ConnectionDraft) {
         let typed = draft.urlToTest.trimmingCharacters(in: .whitespacesAndNewlines)
         let unchanged = typed == draft.originalURL && draft.password.isEmpty
@@ -643,9 +473,6 @@ final class AppModel: ObservableObject {
     private func runTest(_ state: ConnectionTestState, name: String?, url: String?) {
         guard let core else { return }
         state.begin()
-        // The dial happens on `queryQueue` and can take the engine's full
-        // connect timeout: the sheet stays live and says "connecting…" instead
-        // of the window beachballing on a host that is not there.
         queryQueue.async { [weak self] in
             var result: ConnectionTestResult?
             var failure: String?
@@ -662,12 +489,6 @@ final class AppModel: ObservableObject {
     }
 
     /// `DATAGREP_SAFETY_FIXTURE` overlays read-only / enforcement / colour onto the
-    /// listed profiles, in the same family as `DATAGREP_SCHEMA_FIXTURE`: the
-    /// stub engine reports neither, and "I could not look at the red chrome or
-    /// the lock badge" is not an acceptable answer for safety UI. It is read
-    /// once per profile reload and does nothing when the variable is unset.
-    ///
-    /// Shape: `{"local_pg":{"read_only":true,"enforcement":"client","color":"red"}}`
     static func applySafetyFixture(to profiles: [Profile]) -> [Profile] {
         guard let text = ProcessInfo.processInfo.environment["DATAGREP_SAFETY_FIXTURE"],
             let data = text.data(using: .utf8),
@@ -688,10 +509,6 @@ final class AppModel: ObservableObject {
 
     // MARK: - editing a connection
 
-    /// Open the sheet on a saved connection. The sheet appears immediately with
-    /// what the profile list already knows; `datagrep_profiles_get_json` fills
-    /// in the rest from `queryQueue`, because it opens the profile store and the
-    /// main thread is never allowed to wait on that.
     func editConnection(named name: String) {
         guard let core, profilesByName[name] != nil else { return }
         let seed =
@@ -729,8 +546,6 @@ final class AppModel: ObservableObject {
 
     func closeConnectionEditor() { editDraft = nil }
 
-    /// Save. Everything below the first line runs on `queryQueue`; the sheet
-    /// stays live and says "saving" rather than freezing.
     func saveConnectionDraft() {
         guard let core, let draft = editDraft else { return }
         let oldName = draft.originalName
@@ -768,20 +583,12 @@ final class AppModel: ObservableObject {
     // MARK: - production marking
 
     /// Reconcile the window's idea of production with the profile store's.
-    ///
     func removeActiveProfile() {
         guard !activeProfile.isEmpty else { return }
         removeProfile(named: activeProfile)
     }
 
     /// Delete a connection, after asking.
-    ///
-    /// Destructive and irreversible — the engine's `datagrep_profiles_remove`
-    /// deletes the keychain entry along with the row — so it is confirmed, the
-    /// alert is `.critical`, and it says out loud that the saved password goes
-    /// too. The editors written for this connection are *not* deleted: their
-    /// `.sql` files stay where they are, because removing a connection is not
-    /// permission to destroy SQL someone wrote.
     func removeProfile(named name: String) {
         guard core != nil, profilesByName[name] != nil else { return }
         let safety = safety(for: name)
@@ -797,8 +604,6 @@ final class AppModel: ObservableObject {
         alert.informativeText = detail
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
-        // The destructive button is the one that has to be chosen deliberately;
-        // ⏎ must not delete a connection.
         alert.buttons.first?.hasDestructiveAction = true
         alert.buttons.last?.keyEquivalent = "\r"
 
@@ -829,12 +634,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Copy a connection, so a second one against the same server (a different
-    /// database, a read-only twin) does not have to be retyped.
-    ///
-    /// The copy carries the URL and the safety settings; it deliberately does
-    /// **not** carry the password — the secret never crosses this ABI, so the
-    /// only honest thing to do is say so and let the user type it once.
     func duplicateProfile(named name: String) {
         guard let core, let original = profilesByName[name] else { return }
         guard ProfileABI.canPrefill else {
@@ -886,17 +685,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Drop this connection's pooled socket so the next statement dials again.
-    ///
-    /// A connection that has gone stale — a laptop that slept, a server that
-    /// restarted, a VPN that dropped — otherwise keeps failing on the socket it
-    /// already has. The engine closes the pool when a profile is forgotten,
-    /// which is what a no-op update triggers, so this is a real reconnect and
-    /// not a cosmetic one.
     func reconnect(_ name: String) {
         guard let core, profilesByName[name] != nil else { return }
         var patch = ProfilePatch()
-        // A no-op patch is what makes the engine forget the profile and close
-        // its pool, so the next statement genuinely re-dials.
         patch.set("name", name)
         let json = patch.json
         message = "reconnecting `\(name)`…"
@@ -913,9 +704,6 @@ final class AppModel: ObservableObject {
                     self.isError = true
                     return
                 }
-                // Drop the cached catalog too: the tree came off the old
-                // connection, and half of a reconnect is forgetting what the
-                // stale one told us.
                 self.reloadProfiles()
                 self.message = "`\(name)` will dial again on the next statement"
                 self.isError = false
@@ -924,15 +712,7 @@ final class AppModel: ObservableObject {
     }
 
     /// Make `name` the window's connection, and show its editors.
-    ///
-    /// `scopeEditors: false` is for the one caller that is already inside the
-    /// editor — binding a tab to a connection — where re-scoping from here
-    /// would fight the move the editor has just made.
     func selectProfile(_ name: String, scopeEditors: Bool = true) {
-        // Clicking any node in the sidebar re-selects that node's profile, so
-        // this used to re-run for every table click: the badge dropped its
-        // database and version for a frame, changed width, and shifted the
-        // whole toolbar with it. Selecting what is already selected is a no-op.
         guard activeProfile != name else { return }
         activeProfile = name
         if scopeEditors { editor.setScope(name.isEmpty ? nil : name) }
@@ -963,11 +743,6 @@ final class AppModel: ObservableObject {
                     child.onExpand = { [weak self] n, p in self?.load(n, prefix: p) }
                     return child
                 }
-                // Only a level that actually came back counts as loaded. Marking
-                // a failed fetch loaded made the failure permanent: the expand
-                // hook fires once and `didLoad` is what stops it firing again,
-                // so a dropped connection could never be retried by reopening
-                // the node.
                 node.didLoad = failure == nil
                 if let failure {
                     self.message = "catalog error: \(failure)"
@@ -998,8 +773,6 @@ final class AppModel: ObservableObject {
 
     // MARK: - editors, per connection
 
-    /// New SQL Editor, owned by one connection. The double-click and the
-    /// context-menu entry on a connection row both land here.
     func openSQLEditor(for profile: String) {
         guard profilesByName[profile] != nil || roots.contains(where: { $0.name == profile })
         else { return }
@@ -1010,8 +783,6 @@ final class AppModel: ObservableObject {
         isError = false
     }
 
-    /// Every editor that belongs to a connection, open or closed — what the
-    /// connection's Open Editor submenu lists.
     func editors(for profile: String) -> [SavedQueryRecord] { editor.editors(for: profile) }
 
     func openEditor(_ record: SavedQueryRecord) {
@@ -1023,11 +794,6 @@ final class AppModel: ObservableObject {
     // MARK: - schema, one describe() per object, cached
 
     /// Point the inspector at an object and make sure its schema is there.
-    ///
-    /// A cache hit is synchronous and costs no round trip, so re-selecting a
-    /// table the user already looked at is instant and silent. A miss goes to
-    /// `catalogQueue`; `describe()` can open a connection and talk to a server,
-    /// and the main thread is never allowed to wait on that.
     func showSchema(for node: CatalogNode, force: Bool = false) {
         let target = SchemaTarget(
             profile: node.profile, path: node.path, name: node.name, kind: node.kind)
@@ -1051,9 +817,6 @@ final class AppModel: ObservableObject {
             return
         }
         schemaLoad = .loading
-        // Every in-flight describe carries the generation it was issued in. A
-        // slow answer for a table the user has already clicked away from is
-        // dropped instead of overwriting the pane.
         schemaGeneration &+= 1
         let generation = schemaGeneration
         catalogQueue.async { [weak self] in
@@ -1061,8 +824,6 @@ final class AppModel: ObservableObject {
             var failure: String?
             do {
                 let json = try core.describe(profile: target.profile, path: target.path)
-                // Decoding happens here too — it is the caller's JSON parse, not
-                // the main thread's.
                 detail = SchemaDetail.decode(
                     json, fallbackName: target.name, fallbackKind: target.kind)
                 if detail == nil { failure = "describe() returned something that is not an object" }
@@ -1106,24 +867,12 @@ final class AppModel: ObservableObject {
 
     // MARK: - history
 
-    /// The driver id recorded alongside a statement. Taken from the profile
-    /// rather than looked up later: history has to stay readable after the
-    /// connection it ran on has been deleted.
     private func driverID(for profile: String) -> String {
         profilesByName[profile]?.driver ?? roots.first { $0.name == profile }?.driver ?? ""
     }
 
-    /// Opens a recorded statement in a **new** editor tab, bound to the
-    /// connection it originally ran on.
-    ///
-    /// `editor.setText` replaces the *active* tab's text, so calling it alone
-    /// would destroy whatever unsaved SQL happened to be in front of the user.
-    /// `newTab()` makes a fresh tab active first, so nothing is overwritten and
-    /// ⌘W still throws the copy away.
     private func openInNewEditorTab(sql: String, connection: String?) {
         let known = connection.flatMap { profilesByName[$0] != nil ? $0 : nil }
-        // The tab is created *in* the connection it ran on, so it lands in that
-        // connection's bar rather than being made somewhere else and rebound.
         let tab = editor.newTab(connection: known)
         editor.setText(sql)
         if let known {
@@ -1137,9 +886,6 @@ final class AppModel: ObservableObject {
         isError = false
     }
 
-    /// Run Again: same statement, same connection, in its own tab. The tab is
-    /// deliberate — the results that appear should have visible SQL next to
-    /// them, and it still costs no one their buffer.
     private func rerunFromHistory(sql: String, connection: String?) {
         openInNewEditorTab(sql: sql, connection: connection)
         var d = SQLBlocks.directives(in: sql)
@@ -1166,9 +912,6 @@ final class AppModel: ObservableObject {
         run(sql: block.text, directives: block.directives)
     }
 
-    /// What the user asked for. Resets the derived state, because a new
-    /// statement is a new question — carrying the old sort into it would be
-    /// applying an ORDER BY to a column that may not exist any more.
     func run(sql: String, directives: BlockDirectives) {
         baseSQL = sql
         sortColumn = nil
@@ -1177,9 +920,6 @@ final class AppModel: ObservableObject {
         execute(directives: directives)
     }
 
-    /// Click a header: re-issue the SAME question with an ORDER BY pushed to
-    /// the engine. Sorting the 2 048 rows that happen to be in the page cache
-    /// would reorder 0.4% of a 500 000-row result and call it sorted.
     func sort(by column: String) {
         guard !baseSQL.isEmpty else { return }
         guard canSortInEngine else {
@@ -1197,8 +937,6 @@ final class AppModel: ObservableObject {
         execute(directives: directives)
     }
 
-    /// Right-click a cell -> "Filter by this value". Same rule as sorting: the
-    /// predicate goes to the engine, so it is true of the whole result.
     func filter(_ column: String, equals value: String) {
         guard !baseSQL.isEmpty, canSortInEngine else {
             message = "filtering needs an engine datagrep can wrap the statement for"
@@ -1211,12 +949,6 @@ final class AppModel: ObservableObject {
     }
 
     /// Run the same statement again — what "Reload" offers after a commit.
-    ///
-    /// The grid still holds the rows as they were loaded, so a committed value
-    /// is on screen because it was typed, not because it was read back. This is
-    /// the one honest way to show what the server now holds, and it is offered
-    /// rather than done automatically: a re-query costs a round trip and resets
-    /// the scroll position of a result someone may still be reading.
     func reloadResult() {
         guard !baseSQL.isEmpty else { return }
         execute(directives: directives)
@@ -1230,9 +962,6 @@ final class AppModel: ObservableObject {
 
     var hasDerivedClauses: Bool { sortColumn != nil || !baseFilters.isEmpty }
 
-    /// `baseSQL` wrapped in whatever ORDER BY / WHERE the user has clicked
-    /// together. One level of wrapping only — sorting twice re-wraps the base,
-    /// it never nests.
     var effectiveSQL: String {
         var inner = baseSQL.trimmingCharacters(in: .whitespacesAndNewlines)
         while inner.hasSuffix(";") { inner = String(inner.dropLast()) }
@@ -1254,8 +983,6 @@ final class AppModel: ObservableObject {
 
     private func quoteIdent(_ name: String) -> String {
         let escaped = name.replacingOccurrences(of: "\"", with: "\"\"")
-        // MySQL only accepts double-quoted identifiers under ANSI_QUOTES, which
-        // datagrep does not set; backticks are unambiguous there.
         if EngineStyle.displayName(for: activeDriver) == "MySQL" {
             return "`\(name.replacingOccurrences(of: "`", with: "``"))`"
         }
@@ -1272,17 +999,11 @@ final class AppModel: ObservableObject {
             message =
                 "blocked by `-- @readonly` — client-side classifier only; the server was not asked to enforce read-only"
             isError = true
-            // Recorded: a statement that was refused is exactly the one people
-            // come back looking for, and it never reaches the engine to be
-            // recorded any other way.
             history.executionBlocked(
                 sql: sql, connection: profile, engine: driverID(for: profile),
                 reason: message)
             return
         }
-        // The per-connection read-only guard. It names the profile that refused
-        // and which protection did the refusing — a bare "permission denied" is
-        // the thing this feature exists to replace.
         let safety = safety(for: profile)
         if safety.readOnly, SQLBlocks.isWriteStatement(sql) {
             let verb = Self.statementVerb(sql)
@@ -1324,7 +1045,6 @@ final class AppModel: ObservableObject {
     }
 
     /// The `confirm_writes` profile setting, as a real window-modal sheet.
-    /// `beginSheetModal` rather than `runModal`: the main thread keeps running.
     private func confirmWrite(
         verb: String, profile: String, safety: ConnectionSafety, proceed: @escaping () -> Void
     ) {
@@ -1352,15 +1072,9 @@ final class AppModel: ObservableObject {
 
     private func send(sql: String, profile: String) {
         guard let core else { return }
-        // The window's veto on editing, decided per statement: a read-only
-        // connection offers no edit at all, however editable the result it
-        // returns. Set before the result exists, so no window of rows is ever
-        // editable for an instant.
         results.allowsEditing = !safety(for: profile).readOnly
         message = "running on \(profile)…"
         isError = false
-        // Four string copies, no I/O: the entry itself is only written once the
-        // statement reaches a terminal state.
         history.executionStarted(sql: sql, connection: profile, engine: driverID(for: profile))
         state = .streaming
 
@@ -1375,8 +1089,6 @@ final class AppModel: ObservableObject {
                     self.message = "\(error)"
                     self.isError = true
                     self.results.clear()
-                    // Never got a query handle, so `refreshFromCore` will never
-                    // see this one go terminal.
                     self.history.executionFailedToStart("\(error)")
                 }
             }
@@ -1385,8 +1097,6 @@ final class AppModel: ObservableObject {
 
     private func adopt(_ handle: DatagrepQueryHandle) {
         query = handle  // the previous handle deinits here -> datagrep_query_free
-        // A new result is new rows: the values the staged edits were typed
-        // against are gone, and so are the loaded versions their guards carry.
         edits.discardAll()
         stagingGeneration &+= 1
         results.beginNewResult(pager: RowPager(query: handle, pageSize: 512, maxPages: 4))
@@ -1404,17 +1114,12 @@ final class AppModel: ObservableObject {
         results.apply(status: status)
         resultGeneration &+= 1
         state = status.state
-        // One notch per progress event. This is the ONLY thing that moves the
-        // activity bar — no timer, no display link.
         if !status.state.isTerminal, status.rowsLoaded != rowsLoaded {
             progressPhase = progressPhase >= 0.999 ? 0 : min(1, progressPhase + 0.14)
         }
         rowsLoaded = status.rowsLoaded
         totalKnown = status.totalKnown
         elapsedMs = status.elapsedMs
-        // A query is the cheapest moment to learn the server version: the
-        // handshake has just happened, so the engine can answer from its cache
-        // instead of dialling. Only asked while the badge is still missing it.
         if status.state.isTerminal, connectionInfo?.version == nil {
             refreshConnectionInfo()
         }
@@ -1436,12 +1141,6 @@ final class AppModel: ObservableObject {
     // MARK: - committing staged edits
 
     /// The one destructive step. Everything before it is staging.
-    ///
-    /// The confirmation states the shape of the batch *before* the click,
-    /// because afterwards the shape is no longer a choice: on an engine with no
-    /// transaction the writes go one at a time and a failure halts the rest,
-    /// leaving the ones before it written. Saying so afterwards would be an
-    /// apology, not a warning.
     func commitStagedEdits() {
         guard let core, !isCommitting else { return }
         let pending = edits.pending
@@ -1477,10 +1176,6 @@ final class AppModel: ObservableObject {
     }
 
     /// The sentence that has to be read before the click.
-    ///
-    /// Numbered rather than abstract: "if #3 fails, #1 and #2 stay written" is
-    /// something someone can picture, where "the batch is not atomic" is
-    /// something they can nod at.
     static func commitWarning(count: Int, atomic: Bool) -> String {
         if atomic {
             return
@@ -1492,18 +1187,10 @@ final class AppModel: ObservableObject {
         }
         let example = min(3, count)
         let before = example - 1
-        // Deliberately does not promise that the batch stops at the first
-        // failure: on this engine a multi-document batch goes as one bulk
-        // request and every item is attempted, while a single-document path
-        // halts. What is true either way is that nothing is rolled back and
-        // the report names each document — so that is what it says.
         return
             "\(count) documents will be written one by one, and there is no transaction: if #\(example) fails, the \(before == 1 ? "one" : "\(before)") before it stay written and nothing is rolled back. The report then names every document — written, refused, or never attempted — and anything not written stays staged."
     }
 
-    /// The commit itself. `datagrep_mutate` blocks until the write lands, so it
-    /// runs on `queryQueue` exactly like a query: the window keeps drawing and
-    /// says "committing…" instead of freezing on a cluster that is thinking.
     private func send(mutations: [StagedDocument], profile: String, core: DatagrepCoreHandle) {
         isCommitting = true
         message = "committing \(mutations.count) document(s) to \(profile)…"
@@ -1521,9 +1208,6 @@ final class AppModel: ObservableObject {
                 guard let self else { return }
                 self.isCommitting = false
                 guard let report else {
-                    // The batch never ran at all — a read-only refusal, or a
-                    // driver that refused every write up front. Nothing was
-                    // written, and everything stays staged.
                     self.message = failure ?? "the commit failed without a message"
                     self.isError = true
                     return
@@ -1543,8 +1227,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// The status line's version of the report — the same numbers the sheet
-    /// leads with, for after the sheet has been dismissed.
     static func reportHeadline(_ report: MutationReport) -> String {
         var parts = ["\(report.applied) applied"]
         if report.failed > 0 {
@@ -1561,13 +1243,6 @@ final class AppModel: ObservableObject {
 
     // MARK: - resolving a version conflict
 
-    /// Ask the server what it holds now for every conflicted document, then
-    /// show the three-column view.
-    ///
-    /// This is the whole answer to "a 409 is a UI state, not a toast": the
-    /// commit already refused to overwrite, and this is what turns that refusal
-    /// into a decision the user can make. It is a read — nothing is re-sent,
-    /// and no retry is offered anywhere in the flow.
     func reviewConflicts() {
         guard let core, !isRereading, !isCommitting else { return }
         let conflicted = edits.conflicted
@@ -1582,9 +1257,6 @@ final class AppModel: ObservableObject {
         }
         let addresses = conflicted.map(\.address)
         isRereading = true
-        // The report sheet is what this was reached from; two sheets are never
-        // up at once, and the review is presented a runloop turn later, after
-        // the read lands.
         showMutationReport = false
         message = "reading what the server holds now…"
         isError = false
@@ -1603,10 +1275,6 @@ final class AppModel: ObservableObject {
                     self.isError = true
                     return
                 }
-                // Matched by position, exactly like the commit report. A list
-                // that does not line up one-for-one is not guessed at: showing
-                // one document's server values against another's edits is how
-                // somebody overwrites the wrong thing.
                 guard server.count == conflicted.count else {
                     self.message =
                         "the engine answered for \(server.count) of \(conflicted.count) documents, so datagrep cannot say which answer belongs to which — re-run the statement"
@@ -1623,11 +1291,6 @@ final class AppModel: ObservableObject {
     }
 
     /// Re-apply one document's edits onto the version just shown.
-    ///
-    /// Staged again, not written: the rebase re-guards the edit against the
-    /// `_seq_no` the user has just looked at, and the commit button is still
-    /// the only thing that writes. A rebase that wrote immediately would be the
-    /// silent retry this whole flow exists to avoid.
     func rebaseConflicted(_ document: ConflictDocument) {
         guard let guardValues = document.rebaseGuard else {
             message =
@@ -1642,8 +1305,6 @@ final class AppModel: ObservableObject {
         isError = false
     }
 
-    /// Drop one document's edits — "discard mine". The server's version is
-    /// left exactly as it is, which is what discarding means.
     func discardConflicted(_ document: ConflictDocument) {
         let row = edits.discard(id: document.id)
         resolved(document, repainting: row)
@@ -1651,8 +1312,6 @@ final class AppModel: ObservableObject {
         isError = false
     }
 
-    /// Take one document out of the review and redraw its row. The sheet closes
-    /// when the last one is resolved: an empty conflict view is nothing to read.
     private func resolved(_ document: ConflictDocument, repainting row: Int?) {
         if let row { results.refreshStagedRows([row]) }
         stagingGeneration &+= 1
@@ -1662,8 +1321,6 @@ final class AppModel: ObservableObject {
         if remaining?.isEmpty ?? true { showConflictReview = false }
     }
 
-    /// Throw away every staged edit. Asks first — this is the only way typed
-    /// work is lost, and the button sits next to the one that commits it.
     func discardStagedEdits() {
         let rows = edits.documents.map(\.row)
         guard !rows.isEmpty else { return }
@@ -1725,8 +1382,6 @@ final class AppModel: ObservableObject {
         ScrollBench.run(on: results, model: self)
     }
 
-    /// The same pretty-printing as `prettify`, for an object that has already
-    /// been parsed (the row envelope).
     static func prettifyObject(_ object: [String: Any]) -> String? {
         guard JSONSerialization.isValidJSONObject(object),
             let data = try? JSONSerialization.data(

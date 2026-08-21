@@ -5,31 +5,17 @@ import SwiftUI
 // MARK: - the table view itself
 
 /// `NSTableView` with a pointer and a keyboard.
-///
-/// Everything here is presentation state — hover row, focused column, copy,
-/// context menu. None of it touches the pager, so none of it can break the
-/// virtualisation contract: the table still only ever asks for rows that are
-/// on screen.
 final class GridTableView: NSTableView {
     var onCopy: (() -> Void)?
     var onOpenFocusedCell: (() -> Void)?
     var onFocusChanged: (() -> Void)?
-    /// ⏎ on the focused cell. Nil-safe by construction: the controller only
-    /// starts an edit on a result the engine said is editable.
     var onBeginEdit: (() -> Void)?
 
     private(set) var hoverRow = -1
-    /// The rectangular block of cells the user has selected. `nil` until the
-    /// pointer or the keyboard has touched a cell.
     private(set) var cellRange: GridCellRange?
-    /// Set while WE are the ones changing the row selection, so the
-    /// selection-did-change hook does not fight the block it just applied.
     private var isSyncingSelection = false
     private var tracking: NSTrackingArea?
 
-    /// The block is only a *block* while the table's row selection is exactly
-    /// its rows. A ⌘-click that punches a hole in the selection makes it
-    /// discontiguous, and then the honest rendering is plain whole-row.
     var selectionMatchesRange: Bool {
         guard let r = cellRange else { return false }
         let sel = selectedRowIndexes
@@ -78,9 +64,6 @@ final class GridTableView: NSTableView {
         super.mouseExited(with: event)
     }
 
-    /// The pointer can also change which row it is over without moving at all —
-    /// the wheel moves the rows under a stationary pointer. This is driven by
-    /// the scroll notification, not by a timer, so a still grid posts nothing.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         NotificationCenter.default.removeObserver(
@@ -97,8 +80,6 @@ final class GridTableView: NSTableView {
         setHover(visibleRect.contains(p) ? row(at: p) : -1)
     }
 
-    /// Repaints exactly two rows: the one the pointer left and the one it
-    /// entered. Hover costs 2 row rects per pointer move, never a reload.
     private func setHover(_ newRow: Int) {
         guard newRow != hoverRow else { return }
         let old = hoverRow
@@ -110,8 +91,6 @@ final class GridTableView: NSTableView {
 
     // MARK: - selection plumbing
 
-    /// The single funnel every selection change goes through: clamp, mirror the
-    /// block onto the table's own row selection, repaint the visible rows.
     private func apply(_ range: GridCellRange, scroll: Bool = true) {
         guard let r = range.clamped(rowCount: numberOfRows, columnCount: numberOfColumns) else {
             return
@@ -129,9 +108,6 @@ final class GridTableView: NSTableView {
         onFocusChanged?()
     }
 
-    /// Called when AppKit changed the row selection behind our back — arrow
-    /// up/down, shift-arrow, ⌘-click. The column span of the block is kept and
-    /// the rows are re-derived from whatever AppKit decided.
     func selectionChangedExternally() {
         guard !isSyncingSelection else {
             refreshSelectionDecorations()
@@ -165,10 +141,6 @@ final class GridTableView: NSTableView {
         onFocusChanged?()
     }
 
-    /// Gutter click: select the whole row. Routed through the SAME block model
-    /// as every other selection gesture — anchor on the first column, focus on
-    /// the last, which `spansAllColumns` then renders as a plain row highlight.
-    /// No parallel selection path exists for the gutter to diverge from.
     func selectWholeRow(_ row: Int, extend: Bool) {
         guard numberOfRows > 0, numberOfColumns > 0 else { return }
         let r = max(0, min(numberOfRows - 1, row))
@@ -185,11 +157,7 @@ final class GridTableView: NSTableView {
         apply(range, scroll: false)
     }
 
-    /// Only the rows on screen are ever decorated: the block may be 20 000 rows
-    /// tall, but at most a viewport of row views exists to paint it.
     func refreshSelectionDecorations() {
-        // The gutter emphasises selected row numbers, so it repaints with the
-        // rows. One small strip, redrawn only on selection changes — never idle.
         enclosingScrollView?.verticalRulerView?.needsDisplay = true
         let vis = rows(in: visibleRect)
         guard vis.length > 0 else { return }
@@ -201,8 +169,6 @@ final class GridTableView: NSTableView {
         }
     }
 
-    /// Pushes the block's shape onto one row view. Also called from
-    /// `rowViewForRow` so a row scrolled into view arrives already correct.
     func decorate(_ rowView: GridRowView, row: Int) {
         rowView.isHovered = (row == hoverRow)
         guard let r = cellRange, selectionMatchesRange, r.rows.contains(row) else {
@@ -212,8 +178,6 @@ final class GridTableView: NSTableView {
             rowView.focusedColumn = -1
             return
         }
-        // A block that covers every column IS a row selection; drawing a border
-        // around it would only add noise.
         rowView.rangeColumns = r.spansAllColumns(of: numberOfColumns) ? nil : r.columns
         rowView.isRangeTop = (row == r.rows.lowerBound)
         rowView.isRangeBottom = (row == r.rows.upperBound)
@@ -230,9 +194,6 @@ final class GridTableView: NSTableView {
         let p = convert(event.locationInWindow, from: nil)
         let r = row(at: p)
         let c = column(at: p)
-        // Double-click (inspector), ⌘-click (discontiguous row selection) and
-        // control-click (context menu) stay with AppKit; everything else is a
-        // block gesture.
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard r >= 0, c >= 0, event.clickCount == 1,
             !flags.contains(.command), !flags.contains(.control)
@@ -251,11 +212,6 @@ final class GridTableView: NSTableView {
         trackDrag(startingFrom: event, range: range)
     }
 
-    /// A hand-rolled tracking loop rather than `super.mouseDown`, because
-    /// AppKit's own loop only ever reports rows and we need the column too.
-    /// It idles on a 50 ms `nextEvent` timeout so that holding the pointer
-    /// still outside the viewport keeps autoscrolling, and holding it still
-    /// inside costs nothing at all.
     private func trackDrag(startingFrom initial: NSEvent, range initialRange: GridCellRange) {
         guard let window else { return }
         var range = initialRange
@@ -286,9 +242,6 @@ final class GridTableView: NSTableView {
         }
     }
 
-    /// Point -> cell, clamped rather than nil'd: during an autoscroll drag the
-    /// pointer is by definition outside the rows, and the block must still
-    /// follow it to the first/last row and column.
     private func cell(at p: NSPoint) -> (row: Int, column: Int) {
         let step = rowHeight + intercellSpacing.height
         var r = step > 0 ? Int(floor(p.y / step)) : 0
@@ -301,8 +254,6 @@ final class GridTableView: NSTableView {
         return (r, c)
     }
 
-    /// Right-click outside the current block re-targets it, so "Copy Selection"
-    /// can never mean something other than what is highlighted.
     override func menu(for event: NSEvent) -> NSMenu? {
         let p = convert(event.locationInWindow, from: nil)
         let r = row(at: p)
@@ -392,9 +343,6 @@ final class GridTableView: NSTableView {
         apply(range)
     }
 
-    /// ⌘A means "the rows I can see", never "all 500 000 rows": a select-all
-    /// that spanned the whole result would turn the next ⌘C into a full-table
-    /// scan through the FFI, which is precisely the thing this grid does not do.
     override func selectAll(_ sender: Any?) {
         let vis = rows(in: visibleRect)
         guard vis.length > 0, numberOfColumns > 0 else { return }
@@ -405,8 +353,6 @@ final class GridTableView: NSTableView {
 
     // MARK: copy
 
-    /// ⌘C. Routed here by the Edit menu's `copy:` because the table is first
-    /// responder — no extra key handling needed.
     @objc func copy(_ sender: Any?) {
         onCopy?()
     }
@@ -422,18 +368,12 @@ final class GridTableView: NSTableView {
 
 // MARK: - controller
 
-/// The results grid. Virtual by construction:
-///   - `numberOfRows` returns the full row count the core reports
-///   - `viewFor row:` pulls ONLY that row, out of a 512-row page window
-///   - at most 4 pages (2,048 rows) are resident; eviction frees the DatagrepRows
 final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
     NSMenuDelegate
 {
     let tableView = GridTableView()
     private let scrollView = NSScrollView()
     private let rowNumberRuler = GridRowNumberRuler(scrollView: nil, orientation: .verticalRuler)
-    /// The gutter's header cell (the corner above the row numbers). Pinned to the
-    /// top-left; its width tracks the ruler's thickness as the digit count grows.
     private let gutterHeader = GridGutterHeader()
     private var gutterHeaderWidth: NSLayoutConstraint?
 
@@ -444,26 +384,16 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     /// Numeric columns render right-aligned; text left-aligned.
     private var rightAlignedByID: [NSUserInterfaceItemIdentifier: Bool] = [:]
     private var columnNames: [String] = []
-    /// A 400-path Mongo collection must not become a 400-column grid. Columns
-    /// beyond this are created but hidden.
     let maxVisibleColumns = 30
     private(set) var hiddenColumnCount = 0
     private var didSizeColumns = false
     private var isStreaming = false
     private var resultIsCapped = false
 
-    /// What the engine says this result may be edited into, or nil for the
-    /// read-only grid every other result is. Set from the query status on every
-    /// apply, so it can never outlive the result it describes.
     private(set) var editable: EditableResult?
-    /// The staging store, owned by the model. Held weakly-by-reference here so
-    /// the grid can draw staged values without carrying its own copy of them.
     var edits: PendingEdits?
 
     var onNestedCell: ((Int, UInt32, RowWindow) -> Void)?
-    /// An edit that could not be staged, in words that name the field and the
-    /// reason. Never silent: a cell that quietly refuses to keep what was typed
-    /// is indistinguishable from one that kept it and lost it.
     var onEditRefused: ((String) -> Void)?
     /// Something was staged or discarded — the commit bar redraws from this.
     var onStagingChanged: (() -> Void)?
@@ -471,16 +401,9 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     var onSortRequested: ((String) -> Void)?
     var onFilterRequested: ((String, String) -> Void)?
     var onCopied: ((String) -> Void)?
-    /// Fires whenever the selected block changes: "3 rows × 2 columns", or nil
-    /// when nothing is selected. Purely informational — a status-bar hook.
     var onSelectionChanged: ((String?) -> Void)?
-    /// Which column the engine is currently sorted by, and which way. Owned by
-    /// the model (the sort is a re-issued query, not a client-side shuffle).
     var sortColumn: String?
     var sortAscending = true
-    /// The window's own veto, set by the model: a read-only connection offers
-    /// no edit at all, however editable the result itself is. Kept here rather
-    /// than consulted through the model so `apply(status:)` cannot race it.
     var allowsEditing = true
 
     override func loadView() {
@@ -491,17 +414,11 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         tableView.rowHeight = GridStyle.rowHeight
         tableView.usesAlternatingRowBackgroundColors = true
         tableView.columnAutoresizingStyle = .noColumnAutoresizing
-        // Reordering is now allowed: `viewFor` resolves a column by IDENTITY,
-        // not by position, so moving a column cannot mis-address a cell.
         tableView.allowsColumnReordering = true
         tableView.allowsColumnResizing = true
         tableView.allowsMultipleSelection = true
         tableView.allowsEmptySelection = true
         tableView.style = .plain
-        // No layer forcing here on purpose. The cells render their text through
-        // a real NSTextField (see GridCellView), which composites itself, so the
-        // table uses AppKit's normal view-based compositing rather than being
-        // flattened into one hand-managed layer.
         tableView.selectionHighlightStyle = .regular
         tableView.gridStyleMask = [.solidVerticalGridLineMask]
         tableView.gridColor = .separatorColor
@@ -536,11 +453,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         scrollView.backgroundColor = .textBackgroundColor
         scrollView.scrollerStyle = .overlay
 
-        // The row-number gutter: a vertical RULER, not a table column, which is
-        // what pins it against horizontal scrolling and keeps it out of every
-        // copy path (those enumerate `tableColumns` only). It is set to clip to
-        // its bounds on install — see GridRowNumberRuler for why that is what
-        // stops it blanking the table inside the SwiftUI host.
         rowNumberRuler.grid = tableView
         rowNumberRuler.clientView = tableView
         rowNumberRuler.onSelectRow = { [weak self] row, extend in
@@ -558,9 +470,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
         ])
 
-        // The gutter header, filling the blank corner above the row numbers so
-        // the header row is continuous. Fixed at the top-left (it never scrolls);
-        // width follows the ruler, height matches the column-header band.
         gutterHeader.translatesAutoresizingMaskIntoConstraints = false
         gutterHeader.onSelectAll = { [weak self] in self?.tableView.selectAll(nil) }
         root.addSubview(gutterHeader)
@@ -586,8 +495,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     func beginNewResult(pager: RowPager) {
         self.pager?.invalidateAll()
         self.pager = pager
-        // Until the new result's status says otherwise, nothing here is
-        // editable — the previous result's answer describes rows that are gone.
         editable = nil
         rowCount = 0
         rowNumberRuler.update(rowCount: 0)
@@ -621,23 +528,16 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         tableView.reloadData()
     }
 
-    /// Applies a status snapshot. Columns only ever APPEND on the right; an
-    /// existing column is never moved, renamed or re-sized by a schema delta —
-    /// columns jumping mid-scroll is the failure mode.
     func apply(status: QueryStatus) {
         editable = allowsEditing ? status.editable : nil
         applySchema(status.columns)
         let newCount = Int(status.rowsLoaded)
         let grew = newCount != rowCount
         rowCount = newCount
-        // Gutter width follows the magnitude of the row count (1,000,000 must
-        // not clip). Derived from the count alone — no row fetch involved.
         if grew { rowNumberRuler.update(rowCount: newCount); syncGutterHeaderWidth() }
         isStreaming = !status.state.isTerminal
         resultIsCapped = status.state == .capped
 
-        // Pages fetched while the tail was still streaming may be short; drop
-        // only those, keep fully-materialised ones.
         pager?.invalidatePartialPages()
 
         if grew { tableView.noteNumberOfRowsChanged() }
@@ -655,22 +555,11 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
                 columnIndexes: IndexSet(integersIn: 0..<tableView.tableColumns.count))
         }
         // Put the pixels on screen, on the NEXT runloop turn.
-        //
-        // This runs during the SwiftUI update that delivered the result, and a
-        // display forced inside that pass is thrown away — which is the whole
-        // bug: the cells drew correctly (a capture showed the full grid, the
-        // cell layers held the right content) but the pane stayed blank until
-        // something later — a window resize — triggered a real redraw. Doing it
-        // one hop later is exactly what the resize did, and it sticks.
         DispatchQueue.main.async { [weak self] in self?.flushToScreen() }
         applySortIndicator()
         tableView.refreshSelectionDecorations()
     }
 
-    /// Called from the representable's SwiftUI update when a result lands. Do
-    /// NOT flush here — this runs inside SwiftUI's own update pass, and forcing
-    /// a CoreAnimation flush mid-update fights SwiftUI's layer commit (it blanks
-    /// the neighbouring panes). Invalidate now, flush one runloop later.
     func forceRedraw() {
         tableView.reloadData()
         invalidateGrid()
@@ -684,9 +573,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         rowNumberRuler.needsDisplay = true
     }
 
-    /// Invalidate the grid and commit the CoreAnimation transaction on a clean
-    /// runloop turn (never inside a SwiftUI update, which would fight SwiftUI's
-    /// own layer commit and blank the neighbouring panes).
     func flushToScreen() {
         invalidateGrid()
         view.displayIfNeeded()
@@ -734,8 +620,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         return t
     }
 
-    /// The chevron in the header. `NSAscendingSortIndicator` is AppKit's own
-    /// image, so it matches Finder's exactly.
     private func applySortIndicator() {
         for col in tableView.tableColumns {
             let isSorted = col.title == sortColumn
@@ -776,29 +660,9 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
                 (col.title as NSString).size(withAttributes: [.font: GridStyle.headerFont]).width
             col.width = min(max(max(widths[ci], header) + 34, 64), 340)
         }
-        // Re-tile after changing widths. NSTableView sizes its own frame from
-        // the sum of its column widths, and setting `col.width` directly does
-        // not always trigger that — the row views and the header were laid out
-        // across the true 3930 pt while the table's frame still claimed 1950,
-        // so rows were drawn into a coordinate space the view did not admit to
-        // having and the horizontal scroller could not reach them.
         tableView.tile()
-        // Existing row views were built at the old width and do not re-tile with
-        // the table, so they stay wider than the table admits to being. Rebuild
-        // them, then put the viewport back at the first column — otherwise the
-        // first thing shown is somewhere in the middle of a wide result, which
-        // reads as "no results" when the visible slice happens to be past the
-        // data.
         tableView.reloadData()
         tableView.scrollRowToVisible(0)
-        // Vertically only. The clip view's resting x is -ruleThickness when a
-        // vertical ruler is installed — that negative origin is the gutter's
-        // space, not a scroll offset. Forcing x to 0 slid the first column left
-        // underneath the ruler, which is why its text came out clipped ("lo"
-        // instead of "hello") and the first value looked missing entirely.
-        //
-        // The clip view still has to be re-reflected, though: that is what keeps
-        // the ruler in step, and without it the row numbers stop being drawn.
         scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
@@ -825,8 +689,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
             v = GridRowView()
             v.identifier = id
         }
-        // A row arriving from the reuse pool is decorated before it is ever
-        // drawn, so scrolling through a selection never flashes an unstyled row.
         self.tableView.decorate(v, row: row)
         return v
     }
@@ -835,9 +697,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         tableView.selectionChangedExternally()
     }
 
-    /// Reordering changes every cell's column POSITION, which is what the block
-    /// highlight is expressed in. The engine column index each cell reads from
-    /// is unaffected — it is resolved by identifier — so this is repaint-only.
     func tableViewColumnDidMove(_ notification: Notification) {
         reloadVisibleRows()
     }
@@ -860,9 +719,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         tableView.refreshSelectionDecorations()
     }
 
-    /// Double-click a column divider. AppKit asks the delegate how wide the
-    /// column would like to be; we answer from the VISIBLE rows only, so
-    /// size-to-fit is O(viewport) and not O(500 000).
     func tableView(_ tableView: NSTableView, sizeToFitWidthOfColumn column: Int) -> CGFloat {
         let col = tableView.tableColumns[column]
         guard let pager, let idx = columnIndexByID[col.identifier] else { return col.width }
@@ -879,9 +735,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         return min(max(maxWidth + 2 * GridStyle.cellPadX + 14, 64), 900)
     }
 
-    /// Header click -> sort. Handled by re-issuing the query through the
-    /// engine, never by sorting the page cache: with 500 000 rows behind a
-    /// 2 048-row window, a client-side sort would be a visible lie.
     func tableView(_ tableView: NSTableView, didClick tableColumn: NSTableColumn) {
         onSortRequested?(tableColumn.title)
     }
@@ -902,9 +755,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
             cell.identifier = GridCellView.reuseID
         }
 
-        // The block highlight is expressed in column POSITIONS, so each cell
-        // carries the position it is currently drawn at as well as the engine
-        // column index it reads from.
         let position = tableView.column(withIdentifier: tableColumn.identifier)
 
         guard let pager, let win = pager.window(for: UInt64(row)), colIndex < win.columns else {
@@ -913,15 +763,11 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
                 pending: true,
                 rightAligned: rightAlignedByID[tableColumn.identifier] ?? false)
             cell.onNestedClick = nil
-            // Shimmer only while rows are genuinely still arriving; a terminal
-            // query leaves a completely static window, within the idle budget.
             cell.setShimmer(isStreaming)
             return cell
         }
 
         let kind = win.kind(absoluteRow: UInt64(row), col: colIndex)
-        // Strings are built ONLY for cells that will actually be drawn, and only
-        // for the kinds that have text.
         let text: String
         switch kind {
         case .null, .absent: text = ""
@@ -946,9 +792,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         return cell
     }
 
-    /// Double-click is the universal "edit this cell" gesture, so on an
-    /// editable result it edits. Everywhere else it keeps opening the
-    /// inspector, which is what it has always done.
     @objc private func tableDoubleClicked(_ sender: Any?) {
         guard editable != nil else {
             openFocusedCell()
@@ -966,12 +809,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     // MARK: - editing
 
     /// The field name column `col` was read under, from the window itself.
-    ///
-    /// Not the table column's title: the title comes from the query status,
-    /// which reports what the *first* chunk revealed, while the value on screen
-    /// was read from this window's own projection. They agree for a
-    /// homogeneous result; where they do not, writing by the title would write
-    /// to a field the user never touched.
     private func fieldName(of col: UInt32, in window: RowWindow) -> String? {
         let names = window.columnNames()
         guard col < names.count else { return nil }
@@ -1004,11 +841,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     }
 
     /// Stage one typed cell against the document it belongs to.
-    ///
-    /// Everything a write needs is captured here, at the moment of the edit:
-    /// the identity that says which document, and the guard values that say
-    /// which version of it was on screen. Reading either later would guard the
-    /// write against whatever the server holds by then, which is no guard.
     private func stageEdit(row: Int, column: UInt32, typed: String) {
         guard let edits, let editable, let pager, let window = pager.window(for: UInt64(row))
         else { return }
@@ -1017,8 +849,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
             return
         }
         let loaded = window.loadedValue(absoluteRow: UInt64(row), col: column)
-        // Typing the loaded value back in is how an edit is taken back, so it
-        // un-stages the field rather than staging a write that changes nothing.
         if let loaded, loaded.display == typed {
             edits.unstage(row: row, field: field)
             repaint(row)
@@ -1056,9 +886,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         onStagingChanged?()
     }
 
-    /// The address of the document a row was read from, or nil after saying why
-    /// not. The envelope is the engine's own answer to "which document is this
-    /// and which version" — nothing here infers it from a column.
     private func address(row: Int, window: RowWindow, editable: EditableResult)
         -> (id: String, key: [(field: String, value: MutationValue)],
             expect: [(field: String, value: MutationValue)])?
@@ -1074,26 +901,16 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
             onEditRefused?(why.message)
             return nil
         case .success(let parts):
-            // Every identity field and its value, in the order the engine
-            // named them — two documents are the same one exactly when the
-            // engine would address them identically.
             let id = parts.key.map { "\($0.field)=\($0.value.display)" }.joined(separator: "\u{1}")
             return (id, parts.key, parts.expect)
         }
     }
 
     /// Repaint one row after its staging changed, on the next runloop turn.
-    ///
-    /// One row, never a full reload — and never in this turn: staging is
-    /// reached from the field editor's own end-editing notification, and
-    /// rebuilding the cell that notification came from, inside it, is how a
-    /// text field ends up half torn down.
     private func repaint(_ row: Int) {
         DispatchQueue.main.async { [weak self] in self?.refreshRow(row) }
     }
 
-    /// Repaint one row. One row, never a reload: a reload during editing closes
-    /// the field editor the user is still in.
     func refreshRow(_ row: Int) {
         guard row >= 0, row < rowCount, tableView.tableColumns.count > 0 else { return }
         tableView.reloadData(
@@ -1101,8 +918,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
             columnIndexes: IndexSet(integersIn: 0..<tableView.tableColumns.count))
     }
 
-    /// Every staged row repainted — after a commit folds its outcomes back in,
-    /// or after Discard All.
     func refreshStagedRows(_ rows: [Int]) {
         for row in rows { refreshRow(row) }
     }
@@ -1117,9 +932,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         }
     }
 
-    /// The raw value, for the clipboard and for `WHERE x = …`: a NULL copies as
-    /// an empty string here rather than the word NULL, because pasting the word
-    /// NULL into a spreadsheet would be wrong.
     private func rawText(_ win: RowWindow, row: Int, col: UInt32) -> String {
         switch win.kind(absoluteRow: UInt64(row), col: col) {
         case .null, .absent: return ""
@@ -1134,8 +946,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         }
     }
 
-    /// The columns inside a block, in display order, skipping hidden ones — a
-    /// block drawn across a hidden column must not paste that column's data.
     private func columnPairs(inPositions positions: ClosedRange<Int>)
         -> [(name: String, index: UInt32)]
     {
@@ -1148,11 +958,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         return out
     }
 
-    /// The whole loaded result as a monospaced, column-aligned text table —
-    /// the "Text" view. Pipe-separated with a dashed rule under the header, so a
-    /// user can select-all and paste the result somewhere as readable plain
-    /// text. Capped: a virtualised million-row grid is not turned into a
-    /// million-line string; past the cap it says how many rows were left off.
     func resultAsAlignedText(maxRows: Int = 5000) -> String {
         guard let pager, rowCount > 0 else { return "" }
         let cols = visibleColumnPairs()
@@ -1190,11 +995,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     }
 
     /// What ⌘C and "Copy Selection as TSV" put on the pasteboard.
-    ///
-    /// A single cell copies bare (a header line above one value is noise);
-    /// anything larger copies as TSV with a header row. Row count is capped:
-    /// a drag with autoscroll can cover more rows than it is sane to pull back
-    /// through the FFI one page at a time.
     func selectionAsTSV() -> (text: String, label: String)? {
         guard let pager else { return nil }
         let selected = tableView.selectedRowIndexes
@@ -1289,12 +1089,8 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
 
     // MARK: - context menu
 
-    /// Built fresh on every right-click from `clickedRow`/`clickedColumn`, so
-    /// the items always name the cell actually under the pointer.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        // `clickedRow` is the cell actually under the pointer; the focused cell
-        // is the fallback for a menu opened from the keyboard.
         let row = tableView.clickedRow >= 0 ? tableView.clickedRow : (tableView.focusedCell?.row ?? -1)
         let colPos =
             tableView.clickedColumn >= 0
@@ -1335,8 +1131,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
         menu.addItem(.separator())
         menu.addItem(item("Open in Inspector", #selector(ctxInspect(_:))))
 
-        // The editing half of the menu, present only on a result the engine
-        // said may be edited — never greyed-out-and-erroring.
         guard editable != nil else { return }
         menu.addItem(.separator())
         if kind != .nested {
@@ -1382,8 +1176,6 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
             cols.map(\.name).joined(separator: "\t") + "\n" + line, label: "row copied as TSV")
     }
 
-    /// Visible rows only, and the menu item says so. Copying a column of a
-    /// 500 000-row result would materialise every page in the store.
     @objc private func ctxCopyColumn(_ sender: Any?) {
         guard let c = ctx(sender), let pager else { return }
         let visible = tableView.rows(in: tableView.visibleRect)
@@ -1432,19 +1224,8 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     }
 }
 
-/// SwiftUI bridge for the grid. SwiftUI's own `Table`/`List` are NOT used: they
-/// do not virtualise predictably at a million rows, which is the entire product
-/// claim. `makeNSViewController` returns the model-owned controller so SwiftUI
-/// re-evaluation can never rebuild the table or drop the page cache.
 struct ResultsGridView: NSViewControllerRepresentable {
     let controller: ResultsViewController
-    /// Changes every time a result is applied. SwiftUI's `PlatformViewHost`
-    /// snapshots the hosted AppKit view's layer and only re-snapshots when this
-    /// representable's `body`/`update` runs — and the result data flows through
-    /// the controller, not through SwiftUI state, so without a value SwiftUI can
-    /// see change, the stale (empty) snapshot stayed on screen until a resize
-    /// forced a re-layout. Reading `generation` here is what makes the update
-    /// fire, and re-displaying the table in it is what refreshes the snapshot.
     let generation: Int
     func makeNSViewController(context: Context) -> ResultsViewController { controller }
     func updateNSViewController(_ nsViewController: ResultsViewController, context: Context) {
@@ -1453,24 +1234,11 @@ struct ResultsGridView: NSViewControllerRepresentable {
     }
 
     /// Take the size offered, never the table's own.
-    ///
-    /// Same trap the editor pane fell into: without this SwiftUI sizes the
-    /// representable from the controller view's Auto Layout fitting size, which
-    /// for an `NSTableView` grows with the columns and rows in it. A result
-    /// with two dozen columns laid the grid out far wider and taller than the
-    /// pane, so the rows sat outside the visible area and the pane looked empty
-    /// even though the query had returned. The split and the window decide this
-    /// pane's size; the result set does not.
     func sizeThatFits(
         _ proposal: ProposedViewSize,
         nsViewController: ResultsViewController,
         context: Context
     ) -> CGSize? {
-        // Never `return nil` on an unspecified proposal. SwiftUI proposes nil on
-        // some passes to ask "what size do you want?", and nil hands the answer
-        // back to AppKit's fitting size — the very thing this exists to ignore.
-        // One such pass is enough to blow the pane up again, which looked like
-        // the rows drawing and then vanishing a frame later.
         CGSize(width: proposal.width ?? 10, height: proposal.height ?? 10)
     }
 }

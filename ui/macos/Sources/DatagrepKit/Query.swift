@@ -24,9 +24,6 @@ public struct QueryStatus: Sendable {
     public let error: String?
     public let columns: [ColumnSpec]
     public let totalKnown: Bool
-    /// What this result may be edited into, or nil. Nil is also what an engine
-    /// build without the block reports, so an older engine degrades to a
-    /// read-only grid rather than to an edit that could never be sent.
     public let editable: EditableResult?
 
     public init(
@@ -47,7 +44,6 @@ public struct QueryStatus: Sendable {
 }
 
 /// Retains the Swift closure the C progress callback trampolines into.
-/// Kept alive by `DatagrepQueryHandle` for exactly as long as the query lives.
 final class ProgressBox {
     let fire: () -> Void
     init(_ fire: @escaping () -> Void) { self.fire = fire }
@@ -58,9 +54,6 @@ private let progressTrampoline: @convention(c) (UnsafeMutableRawPointer?) -> Voi
     Unmanaged<ProgressBox>.fromOpaque(ctx).takeUnretainedValue().fire()
 }
 
-/// Owns the `DatagrepQuery*`. `deinit` frees it, which (per the ABI contract, and as
-/// implemented by both the stub and the real shim) joins the feeder first, so no
-/// progress callback can outlive this object.
 public final class DatagrepQueryHandle: @unchecked Sendable {
     let raw: OpaquePointer
     private var progressBox: ProgressBox?
@@ -74,9 +67,6 @@ public final class DatagrepQueryHandle: @unchecked Sendable {
         progressBox = nil
     }
 
-    /// `handler` is always delivered on the main queue. The background callback
-    /// itself is coalesced: while a hop is in flight, further callbacks are
-    /// dropped, so a chatty feeder cannot flood the main queue with redraws.
     public func onProgress(_ handler: @escaping () -> Void) {
         let box = ProgressBox { [weak self] in
             guard let self else { return }
@@ -115,8 +105,6 @@ public final class DatagrepQueryHandle: @unchecked Sendable {
             editable: EditableResult.decode(d["editable"]))
     }
 
-    /// Returns instantly. The outcome JSON is shown to the user VERBATIM —
-    /// for engines that cannot truly cancel it says so.
     public func cancel() -> String? {
         var outcome: UnsafeMutablePointer<CChar>?
         withUnsafeMutablePointer(to: &outcome) { datagrep_query_cancel(raw, $0) }
@@ -127,8 +115,6 @@ public final class DatagrepQueryHandle: @unchecked Sendable {
         return text
     }
 
-    /// Materialises exactly one window. The caller owns the returned object and
-    /// the underlying `DatagrepRows*` dies with it.
     public func rows(offset: UInt64, len: UInt64) throws -> RowWindow {
         let ptr = try datagrepTry { errOut in datagrep_query_rows(raw, offset, len, errOut) }
         return RowWindow(raw: ptr, offset: offset)

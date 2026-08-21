@@ -1,36 +1,14 @@
 import Foundation
 
 /// The decoded form of `datagrep_catalog_describe_json`.
-///
-/// **Everything here is optional on purpose.** Three different producers already
-/// answer this call with three different payloads:
-///
-/// * the C stub — `{name, kind, columns:[{name,type,nullable}], primary_key:[…], approx_rows}`
-/// * `datagrep-ffi` today — `{path, name, kind, comment, columns:[{name,type,native_type,
-///   nullable,primary_key,unique,auto_generated,indexed}] | null, extra:[[k,v],…]}`
-/// * `datagrep-ffi` in progress — the above plus `default`, `ordinal`, `logical_type`,
-///   an `indexes` array, object stats, and `inferred`/`sampled_docs` for Mongo.
-///
-/// So this decoder never uses `Codable`: it walks untyped JSON, accepts every
-/// spelling of a field it has seen or been promised, coerces numbers that
-/// arrive as strings (Mongo's `extra` stringifies everything), and drops what
-/// it cannot read instead of failing. A missing key is rendered as absent, and
-/// absent is a fact the pane is allowed to state — it is never a crash and
-/// never a blank pane.
 public struct SchemaDetail: Sendable {
     public var name: String
     public var kind: String
     public var path: [String]
     public var comment: String?
 
-    /// `nil` means *this engine declares no schema* — a different fact from
-    /// "declared, and has no columns", which is `[]`. Redis and a Mongo
-    /// database both land on `nil`.
     public var columns: [SchemaColumn]?
 
-    /// Empty when the payload carried an `indexes` key with nothing in it, and
-    /// also when it carried no such key at all — `indexesReported` separates
-    /// the two so the pane can say "none" instead of implying none.
     public var indexes: [SchemaIndex]
     public var indexesReported: Bool
 
@@ -38,9 +16,6 @@ public struct SchemaDetail: Sendable {
     public var sizeBytes: Int64?
     public var sizeLabel: String?
 
-    /// Mongo (and the SQLite key/value shim) build the field list by sampling
-    /// documents. Presenting that as a declared schema would be a lie, so it
-    /// is carried separately and always labelled.
     public var inferred: Bool
     public var sampledDocs: Int64?
 
@@ -48,11 +23,8 @@ public struct SchemaDetail: Sendable {
     public var definition: String?
 
     /// Whatever else the driver attached, minus the keys promoted above.
-    /// Redis's entire answer is in here (`type`, `ttl`, `object_encoding`, …).
     public var extra: [(key: String, value: String)]
 
-    /// The payload, pretty-printed, for "copy raw JSON" and for the escape
-    /// hatch when the pane cannot make sense of a new field yet.
     public var rawJSON: String
 
     public var columnCount: Int? { columns?.count }
@@ -64,8 +36,6 @@ public struct SchemaColumn: Sendable, Identifiable, Hashable {
     public var name: String
     /// Engine spelling (`varchar(64)`, `timestamptz`) when the driver has one.
     public var nativeType: String?
-    /// datagrep's `LogicalType` — always a fallback, never a replacement, because
-    /// `Utf8` tells a DBA less than `varchar(64)` does.
     public var logicalType: String?
     public var nullable: Bool?
     public var defaultValue: String?
@@ -77,8 +47,6 @@ public struct SchemaColumn: Sendable, Identifiable, Hashable {
     /// Mongo only: the share of sampled documents the field was present in.
     public var presence: Double?
 
-    /// What the type column shows. Native first, logical second, `?` when the
-    /// driver declared neither — an unknown type is stated, not blanked.
     public var displayType: String {
         if let n = nativeType, !n.isEmpty { return n }
         if let l = logicalType, !l.isEmpty { return l }
@@ -97,8 +65,6 @@ public struct SchemaColumn: Sendable, Identifiable, Hashable {
 
 public struct SchemaIndexKey: Sendable, Hashable {
     public var name: String
-    /// `nil` when the driver did not say — an index on a hash or a GIN index
-    /// has no meaningful direction, and inventing `ASC` would be wrong.
     public var descending: Bool?
     public var arrow: String? {
         guard let descending else { return nil }
@@ -127,23 +93,16 @@ public struct SchemaIndex: Sendable, Identifiable {
 // MARK: - decoding
 
 extension SchemaDetail {
-    /// Never throws and never returns `nil` for a payload that is *some* kind of
-    /// JSON object. Only genuinely unparseable text fails, and the caller shows
-    /// that as an error rather than an empty schema.
     public static func decode(_ json: String, fallbackName: String, fallbackKind: String)
         -> SchemaDetail?
     {
         guard let root = jsonObject(json) as? [String: Any] else { return nil }
         let extraPairs = J.pairs(root["extra"])
-        // Extras are searched with the same aliasing as the top level, because
-        // the current FFI puts stats in `extra` and the next one promotes them.
         let bag = Bag(root: root, extra: extraPairs)
 
         let declaredColumns = decodeColumns(root)
         let (indexes, reported) = decodeIndexes(root)
 
-        // The stub spells the primary key as a top-level `["id"]` list rather
-        // than a per-column flag. Fold it in so the key glyph appears there too.
         var columns = declaredColumns
         let pkNames = Set(J.strings(root["primary_key"] ?? root["primary_keys"]))
         if !pkNames.isEmpty, columns != nil {
@@ -181,9 +140,6 @@ extension SchemaDetail {
                 "size_bytes", "storage_size_bytes", "total_size_bytes", "bytes",
                 "memory_bytes", "size",
             ]),
-            // Only keys that are pre-formatted *for a human*. `total_size` is
-            // deliberately absent: Postgres spells that in raw bytes, and
-            // printing "81920" where "80 KB" belongs is worse than no label.
             sizeLabel: bag.string(["size_pretty", "size_human"]),
             inferred: bag.bool(["inferred", "inferred_schema", "schema_inferred", "is_inferred"])
                 ?? false,
@@ -194,11 +150,7 @@ extension SchemaDetail {
     }
 
     private static func decodeColumns(_ root: [String: Any]) -> [SchemaColumn]? {
-        // `"columns": null` is load-bearing: the FFI writes it to mean "this
-        // engine declares no schema at all". Only a present array is a schema.
         var raw = root["columns"] ?? root["fields"] ?? root["schema"]
-        // `"schema": {"fields": [...]}` — the shape `RowSchema` would serialise to
-        // if the FFI ever stopped hand-flattening it.
         if let wrapper = raw as? [String: Any] { raw = wrapper["fields"] ?? wrapper["columns"] }
         guard let arr = raw as? [Any] else { return nil }
         return arr.enumerated().compactMap { idx, item -> SchemaColumn? in
@@ -211,8 +163,6 @@ extension SchemaDetail {
             }
             guard let d = item as? [String: Any] else { return nil }
             guard let name = J.string(d["name"] ?? d["column"] ?? d["field"]) else { return nil }
-            // `type` means the native spelling in the stub and the logical one
-            // in the FFI, so it is only used where the specific key is absent.
             let native = J.string(d["native_type"] ?? d["native"] ?? d["data_type"])
             let logical = J.string(d["logical_type"] ?? d["logical"])
             let loose = J.string(d["type"])
@@ -237,8 +187,6 @@ extension SchemaDetail {
 
     private static func decodeIndexes(_ root: [String: Any]) -> ([SchemaIndex], Bool) {
         let raw = root["indexes"] ?? root["index"]
-        // Not an array — including an explicit `null` — means the driver did
-        // not report indexes. The pane says "not reported", not "none".
         guard let arr = raw as? [Any] else { return ([], false) }
         let list = arr.enumerated().compactMap { idx, item -> SchemaIndex? in
             if let name = item as? String {
@@ -270,9 +218,6 @@ extension SchemaDetail {
         return (list, true)
     }
 
-    /// Keys arrive as `["a","b"]`, as `[{"name":"a","direction":"desc"}]`, as
-    /// `[{"field":"a","order":-1}]` (Mongo's own spelling), or as a single
-    /// string. All four land here.
     private static func decodeIndexKeys(_ raw: Any?) -> [SchemaIndexKey] {
         if let s = raw as? String { return [SchemaIndexKey(name: s, descending: nil)] }
         if let d = raw as? [String: Any] {
@@ -293,13 +238,8 @@ extension SchemaDetail {
         }
     }
 
-    /// `-1`, `"desc"`, `"DESC"`, `"descending"` and `true` all mean the same
-    /// thing; anything unrecognised means "the driver did not say".
     private static func directionIsDescending(_ v: Any?) -> Bool? {
         guard let v, !(v is NSNull) else { return nil }
-        // Order matters: Mongo writes `1`/`-1`, and Swift bridges NSNumber(1)
-        // to `Bool` happily, so a real boolean has to be identified as a
-        // CFBoolean first or `1` (ascending) would decode as `true` (descending).
         if let b = J.rawBool(v) { return b }
         if let n = J.int(v) { return n < 0 ? true : (n > 0 ? false : nil) }
         guard let s = J.string(v)?.lowercased() else { return nil }
@@ -318,9 +258,6 @@ extension SchemaDetail {
     }
 }
 
-/// Looks a key up at the top level first, then in `extra`, trying every alias
-/// in order. This is the whole reason a stat can move from `extra` into the
-/// root of the payload without breaking the pane.
 private struct Bag {
     let root: [String: Any]
     let extra: [(key: String, value: String)]
@@ -345,13 +282,7 @@ private struct Bag {
     func bool(_ keys: [String]) -> Bool? { J.bool(find(keys)) }
 }
 
-/// Coercions. Mongo stringifies every number it puts in `extra`, and a JSON
-/// bool can arrive as `"true"` through the same door, so nothing here trusts
-/// the static type it was handed.
 private enum J {
-    /// True only for a JSON `true`/`false`. `v as? Bool` is not good enough:
-    /// Swift bridges `NSNumber(0)` and `NSNumber(1)` to `Bool` as well, which
-    /// silently turns a Mongo sort direction into a flag.
     static func rawBool(_ v: Any?) -> Bool? {
         guard let v, !(v is NSNull) else { return nil }
         guard CFGetTypeID(v as CFTypeRef) == CFBooleanGetTypeID() else { return nil }
@@ -366,8 +297,6 @@ private enum J {
         return nil
     }
 
-    /// For `default`, where `0`, `false` and `"now()"` are all real values and
-    /// the difference between them matters to the reader.
     static func looseString(_ v: Any?) -> String? {
         guard let v, !(v is NSNull) else { return nil }
         if let s = v as? String { return s.isEmpty ? nil : s }
@@ -448,9 +377,6 @@ extension SchemaDetail {
     }
 }
 
-/// Turning a schema back into text you can paste. Lives beside the decoder
-/// rather than in the view because it is pure data work, and because it is the
-/// part of a schema pane people use most.
 public enum SchemaClipboard {
     public static func names(_ d: SchemaDetail) -> String {
         (d.columns ?? []).map(\.name).joined(separator: "\n")
@@ -470,14 +396,8 @@ public enum SchemaClipboard {
         (d.columns ?? []).map(\.name).joined(separator: ", ")
     }
 
-    /// Only offered when the engine declared the schema. An inferred field list
-    /// is not a table definition, and dressing one up as `CREATE TABLE` would
-    /// be exactly the kind of confident-sounding wrong answer this app avoids.
     public static func generatedDDL(_ d: SchemaDetail) -> String? {
         guard !d.inferred, let cols = d.columns, !cols.isEmpty else { return nil }
-        // A column whose type the driver never reported cannot appear in a
-        // CREATE statement, and `id ?` is not a definition — it is a guess with
-        // punctuation. No types, no offer.
         guard cols.allSatisfy({ $0.displayType != "?" }) else { return nil }
         let table = d.path.isEmpty ? d.name : d.path.suffix(2).joined(separator: ".")
         var lines = cols.map { c -> String in

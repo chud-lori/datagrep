@@ -2,8 +2,6 @@ import AppKit
 import DatagrepKit
 import SwiftUI
 
-/// What gets painted *behind* the text: the line the caret is on, the statement
-/// ⌘↵ will run, and the bracket pair the caret is touching.
 struct EditorDecorations {
     var line: NSRange?
     var block: NSRange?
@@ -11,11 +9,6 @@ struct EditorDecorations {
     var bracketB: NSRange?
 }
 
-/// NSTextView blinks its caret forever while focused. That alone is 2
-/// full-window repaints/sec and fails P12/P19/P20/P21/P22 simultaneously, so
-/// the caret stops blinking after 10 s of no input and resumes on the next
-/// keystroke. The 10 s arm is a ONE-SHOT `asyncAfter`, not a repeating
-/// timer, and it fully disarms — so a settled window is genuinely quiescent.
 final class IdleCaretTextView: NSTextView {
     private var caretParked = false
     private var parkWorkItem: DispatchWorkItem?
@@ -25,8 +18,6 @@ final class IdleCaretTextView: NSTextView {
         super.updateInsertionPointStateAndRestartTimer(caretParked ? false : restartFlag)
     }
 
-    /// Split out because Swift will not allow `super` inside a closure that
-    /// explicitly captures self.
     private func parkCaretNow() {
         caretParked = true
         super.updateInsertionPointStateAndRestartTimer(false)
@@ -74,9 +65,6 @@ final class IdleCaretTextView: NSTextView {
 
     private(set) var decorations = EditorDecorations()
 
-    /// Swaps the decorations and invalidates only the union of what moved —
-    /// a caret move must not repaint the whole editor, which is the same
-    /// discipline the parked caret above exists to enforce.
     func setDecorations(_ new: EditorDecorations) {
         let old = decorations
         decorations = new
@@ -105,8 +93,6 @@ final class IdleCaretTextView: NSTextView {
         let glyphs = lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
         var r = lm.boundingRect(forGlyphRange: glyphs, in: tc)
         if r.height <= 0 {
-            // Empty line: the bounding rect of a zero-glyph range is empty, so
-            // fall back to the fragment the caret would sit in.
             let g = min(glyphs.location, max(0, lm.numberOfGlyphs - 1))
             guard lm.numberOfGlyphs > 0 else { return nil }
             r = lm.lineFragmentRect(forGlyphAt: g, effectiveRange: nil)
@@ -131,13 +117,9 @@ final class IdleCaretTextView: NSTextView {
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
 
-        // The block first, so the current line reads as a stronger layer on top
-        // of it rather than fighting it.
         if let block = decorations.block, let r = bandRect(block), r.intersects(rect) {
             SQLTheme.currentBlock.setFill()
             r.fill()
-            // A 2 pt accent rule down the left edge: the subtle fill alone is
-            // easy to miss, and "what will ⌘↵ run" should never be a guess.
             NSColor.controlAccentColor.withAlphaComponent(0.45).setFill()
             NSRect(x: 0, y: r.origin.y, width: 2, height: r.height).fill()
         }
@@ -155,10 +137,6 @@ final class IdleCaretTextView: NSTextView {
     }
 }
 
-/// Hosts the tab bar and the scroll view, and is where ⌘T / ⌘W / ⌘S / ⌘1–9 are
-/// caught. Key equivalents are handled here rather than in the main menu
-/// because `AppDelegate` owns the menu and this file does not — see the
-/// integration note on `SQLEditorController`.
 final class EditorContainerView: NSView {
     var keyHandler: ((NSEvent) -> Bool)?
 
@@ -168,51 +146,13 @@ final class EditorContainerView: NSView {
     }
 }
 
-/// Hosts the tab bar. Tabs behave like window chrome (Safari's and Xcode's tabs
-/// both do this): the click that brings the window forward also lands on the
-/// tab, so switching tabs from an unfocused window is one click, not two. A
-/// plain `NSHostingView` refuses first mouse, which made the first tab click
-/// after app-switching vanish into window activation — indistinguishable, from
-/// the user's side, from the tab being unclickable.
 private final class TabBarHostingView: NSHostingView<EditorTabBar> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-/// Owns the real NSTextView. SwiftUI's `TextEditor` is deliberately NOT used:
-/// this needs syntax highlighting driven off `NSTextStorage`, background
-/// decoration behind the glyphs, and later completion popovers anchored to the
-/// caret — all of which need the AppKit text system.
-///
-/// ## Integration points (hooks this controller offers; nothing else edits it)
-///
-/// `AppModel` already drives everything it needs through `setText`, `text`,
-/// `currentBlock()` and `onSelectionChanged`, and the connection binding is
-/// delivered through `currentBlock()`'s directives — so tabs work with no
-/// change to `AppModel`. Two optional hooks make the picker complete:
-///
-/// ```swift
-/// // in AppModel.boot(), after reloadProfiles():
-/// editor.profilesProvider = { [weak self] in
-///     (self?.roots ?? []).map { EditorConnectionOption(name: $0.name, driver: $0.driver) }
-/// }
-/// editor.onConnectionChanged = { [weak self] name in
-///     if let name { self?.selectProfile(name) }
-/// }
-/// ```
-///
-/// Without them the picker still works, it just cannot list profiles it has
-/// never seen. `reloadProfiles()` should also call `editor.refreshConnections()`.
 final class SQLEditorController: NSViewController, NSTextViewDelegate {
     private(set) var textView: IdleCaretTextView!
     /// The document, held strongly.
-    ///
-    /// TextKit 1 ownership runs *downwards* — an `NSTextStorage` retains its
-    /// layout managers, never the reverse — and `SQLHighlighter` keeps its
-    /// reference `weak` on purpose, so a discarded editor cannot pin a document
-    /// alive. That leaves nobody above the storage holding it, and if it goes
-    /// the block map silently degrades to "no document": `blockRange` answers
-    /// with an empty range and ⌘↩ reports "nothing to run" over SQL the user
-    /// can plainly see. This property is that missing owner.
     private var textStorage: NSTextStorage!
     private let scroll = NSScrollView()
     private let highlighter = SQLHighlighter()
@@ -220,56 +160,26 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
 
     let tabs = EditorTabsModel()
     private var tabBarHost: NSHostingView<EditorTabBar>!
-    /// The welcome state, laid over the text view. Toggled by `isHidden` rather
-    /// than added and removed, so the text system is built exactly once and the
-    /// pane never reflows when the last editor closes.
     private var welcomeHost: NSHostingView<EditorWelcomeState>!
 
-    /// Every open editor, across every connection. `publishTabs()` mirrors this
-    /// whole list into `tabs.tabs`, so the bar shows every editor at once and
-    /// selecting a connection never hides or rearranges them.
     private var allTabs: [EditorTab] = []
 
     var onSelectionChanged: (() -> Void)?
 
-    /// Supplies the connection picker. See the class doc for the two lines that
-    /// wire this up in `AppModel`.
     var profilesProvider: (() -> [EditorConnectionOption])?
-    /// Fired when the user binds the active tab to a profile (`nil` = follow the
-    /// window). Lets the window's own connection UI follow the tab.
     var onConnectionChanged: ((String?) -> Void)?
 
     /// The active tab's binding, or nil when it follows the window.
     var activeConnection: String? { tabs.active?.connection }
 
-    /// True when a previous session's editors came back. Nothing gates on it
-    /// any more — `setText` no longer has boilerplate to defend against — but
-    /// it is what `restoredEditorCount` reports for the status line.
     private(set) var didRestoreSession = false
     private var autosaveItem: DispatchWorkItem?
 
-    /// True while `load(_:)` / `showEmptyEditor()` are swapping the document
-    /// under the text view. The swap fires `NSTextViewDidChangeSelection`
-    /// *synchronously from inside the text system's `endEditing`*, at a moment
-    /// when the highlighter is suspended and its block map still describes the
-    /// OUTGOING document. `currentBlock()`, reached from that notification via
-    /// `onSelectionChanged`, then substring'd a stale range out of the new,
-    /// shorter string and threw `NSRangeException` in the middle of the tab
-    /// chip's mouseUp. AppKit's event loop swallows the exception, which
-    /// aborts SwiftUI's in-flight update and leaves its button gesture state
-    /// wedged — the visible symptom was "editor tabs cannot be clicked": the
-    /// first cross-tab switch died silently and every later chip click was
-    /// dead. The delegate callbacks are gated on this flag; `load` delivers
-    /// one clean `onSelectionChanged` itself once the swap is consistent.
     private var isSwappingDocument = false
 
     // MARK: - view
 
     override func loadView() {
-        // The text system is built by hand rather than letting NSTextView make
-        // its own: an explicit NSTextContainer selects TextKit 1, whose
-        // NSLayoutManager geometry is what the background decorations and the
-        // visible-range highlighting both need.
         let storage = NSTextStorage()
         textStorage = storage
         let layout = NSLayoutManager()
@@ -312,8 +222,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         scroll.drawsBackground = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
-        // Scrolling re-attributes newly exposed lines. Event-driven — when the
-        // view is still, this fires zero times.
         scroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(
             self, selector: #selector(clipViewDidScroll),
@@ -324,23 +232,8 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         tabBarHost.translatesAutoresizingMaskIntoConstraints = false
         welcomeHost = NSHostingView(rootView: EditorWelcomeState(model: tabs))
         welcomeHost.translatesAutoresizingMaskIntoConstraints = false
-        // An NSHostingView installs its own constraints to defend its SwiftUI
-        // content's ideal size. That is what made this pane grow to fit the
-        // welcome state and the tab bar instead of the split's height — the
-        // same trap AppDelegate already sidesteps with
-        // `NSHostingController.sizingOptions = []` for the window. Both hosts
-        // here are laid out entirely by the constraints below, so neither
-        // should contribute a size of its own.
         welcomeHost.sizingOptions = []
         tabBarHost.sizingOptions = []
-        // An NSHostingView defends its SwiftUI content's intrinsic size at
-        // `required` priority, and a hidden view still takes part in Auto
-        // Layout. Pinned to all four of the scroll view's edges, that let the
-        // welcome state's own height inflate the scroll view and with it this
-        // whole controller's view — measured at 1151 pt inside a ~490 pt pane,
-        // which pushed the tab bar off the top and left the visible area
-        // showing the middle of an empty text view. It must never be the thing
-        // that decides how tall the editor is.
         for axis in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
             welcomeHost.setContentCompressionResistancePriority(.defaultLow, for: axis)
             welcomeHost.setContentHuggingPriority(.defaultLow, for: axis)
@@ -348,14 +241,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
 
         let container2 = EditorContainerView()
         container2.keyHandler = { [weak self] e in self?.handleKeyEquivalent(e) ?? false }
-        // NSScrollView's fitting size follows its document view, and an
-        // NSTextView's grows with its content, so this container reported a
-        // fitting height far larger than the window. VSplitView honours a
-        // child's ideal size, so SwiftUI laid the editor pane out at 1151 pt
-        // inside a 673 pt window: the tab bar ended up above the visible area
-        // and the pane showed the middle of an empty text view, with nothing
-        // to click. The editor's height is the split's decision, never the
-        // text's.
         for axis in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
             scroll.setContentCompressionResistancePriority(.defaultLow, for: axis)
             scroll.setContentHuggingPriority(.defaultLow, for: axis)
@@ -379,11 +264,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
             welcomeHost.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
             welcomeHost.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
         ])
-        // Order matters: `view` must be assigned before anything can call back
-        // out. Restoring a tab fires `onSelectionChanged`, and AppModel's
-        // handler calls `currentBlock()`, which calls `loadViewIfNeeded()` — if
-        // `isViewLoaded` were still false at that moment, `loadView()` would
-        // re-enter and build a second text system.
         view = container2
 
         restoreSession()
@@ -399,8 +279,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
 
     deinit { NotificationCenter.default.removeObserver(self) }
 
-    /// One screen of overscan either side, so a flick-scroll lands on lines that
-    /// are already coloured instead of colouring them in front of the user.
     private func visibleCharacterRange() -> NSRange {
         guard let lm = textView?.layoutManager, let tc = textView?.textContainer else {
             return NSRange(location: 0, length: 0)
@@ -421,14 +299,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
 
     // MARK: - external API (unchanged surface for AppModel)
 
-    /// Replaces the *active tab's* content. `AppModel.preview(node)` uses this
-    /// to drop a generated `SELECT` into the editor, which is exactly right.
-    ///
-    /// With no editor open there is nothing to replace, and one is made — for
-    /// the scoped connection — rather than the text being dropped on the floor.
-    /// Nothing seeds boilerplate through here any more: the welcome state says
-    /// what the sample statement used to, without putting text into a document
-    /// the user then has to delete.
     func setText(_ text: String) {
         loadViewIfNeeded()
         let tab = tabs.active ?? newTab()
@@ -442,16 +312,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     // MARK: - scope: which connection's editors are showing
 
     /// Show `connection`'s editors.
-    ///
-    /// Called whenever the window's connection changes. The outgoing scope's
-    /// frontmost tab is remembered, so coming back to a connection brings back
-    /// the editor that was in front of it — not whichever tab was last touched
-    /// anywhere in the app.
-    /// Selecting a connection. It only sets which connection a NEW editor (⌘T)
-    /// is created for, and which saved queries the reopen list offers — it no
-    /// longer hides the other connections' editors. The tab bar always shows
-    /// every open editor, and the active tab does not change just because the
-    /// window's connection did.
     func setScope(_ connection: String?) {
         loadViewIfNeeded()
         let next = (connection?.isEmpty ?? true) ? nil : connection
@@ -481,17 +341,11 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         onSelectionChanged?()
     }
 
-
     private func updateWelcomeState() {
         welcomeHost?.isHidden = !tabs.tabs.isEmpty
-        // A hidden overlay still sits in front of the text view for hit
-        // testing in some releases; taking it out of the responder path
-        // entirely is the only version that cannot swallow a click.
         scroll.isHidden = tabs.tabs.isEmpty
     }
 
-    /// Every editor that belongs to `connection`, open or closed — what the
-    /// connection's "Open Editor" menu lists.
     func editors(for connection: String) -> [SavedQueryRecord] {
         var seen = Set<String>()
         var out: [SavedQueryRecord] = []
@@ -505,8 +359,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         return out
     }
 
-    /// Open (or focus) one editor. It is already visible in the unified bar, so
-    /// this just activates it — no scope switch, no rearranging.
     func openEditor(_ record: SavedQueryRecord) {
         loadViewIfNeeded()
         openSaved(record)
@@ -517,47 +369,22 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         return textView.string
     }
 
-    /// The statement under the caret, with the tab's connection folded into its
-    /// directives.
-    ///
-    /// This is how a tab's connection binding reaches the engine without any
-    /// other file changing: `AppModel.execute()` already resolves the profile as
-    /// `directives.connection ?? activeProfile`. An explicit `-- @connection` in
-    /// the SQL still wins, because text the user wrote outranks a picker.
     func currentBlock() -> SQLBlock? {
         loadViewIfNeeded()
         let ns = textView.string as NSString
         guard ns.length > 0 else { return nil }
         let caret = min(textView.selectedRange().location, ns.length)
 
-        // Clamp every highlighter range to THIS string. The block map is
-        // rebuilt asynchronously to edits, so a range can momentarily describe
-        // a longer, previous document; a stale range must degrade to a smaller
-        // block, never to an NSRangeException thrown mid-event (which AppKit
-        // swallows, wedging SwiftUI's in-flight click — see
-        // `isSwappingDocument`).
         func clamped(_ r: NSRange) -> NSRange {
             NSIntersectionRange(r, NSRange(location: 0, length: ns.length))
         }
         var range = clamped(highlighter.blockRange(containing: caret))
         var body = ns.substring(with: range)
         if body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, range.location > 0 {
-            // Caret parked in the whitespace after the final `;` — run the
-            // statement that just ended, same fallback the old splitter had.
             range = clamped(highlighter.blockRange(containing: range.location - 1))
             body = ns.substring(with: range)
         }
         if body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            // The block map answered with nothing while the buffer plainly
-            // holds SQL — the highlighter's cache is empty or describes another
-            // document. It used to end here, and ⌘↩ said "nothing to run" at a
-            // visible statement. Re-split with the standalone splitter instead:
-            // it reads only `ns`, so a broken cache cannot reach it, and it
-            // resolves caret-past-the-last-`;` the same way this function does.
-            //
-            // Note the empty-range case never reached the whitespace fallback
-            // above: that one requires `range.location > 0`, and an empty map
-            // reports location 0.
             guard let rescued = SQLBlocks.block(at: caret, in: ns as String),
                 !rescued.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else { return nil }
@@ -586,22 +413,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         refreshSavedList()
     }
 
-    /// Drops from the bar every editor bound to a connection that no longer
-    /// exists. Profiles can disappear without `forgetEditors` ever running —
-    /// removed while the app was not open, or straight out of
-    /// `profiles.sqlite` — and a tab bound to a profile the app cannot resolve
-    /// can never run, draws no engine mark, and crowds the bar with stale
-    /// "Untitled n" chips.
-    ///
-    /// The `.sql`/`.json` pairs stay on disk — same rule as `forgetEditors`: a
-    /// missing connection is not a reason to destroy SQL someone wrote. The
-    /// files re-load on the next launch and are pruned again right here when
-    /// `AppModel.boot()` republishes the profile list, so they never resurface.
-    ///
-    /// Prunes only against an authoritative, NON-EMPTY profile list: before
-    /// `profilesProvider` is wired (or if the engine failed to boot) there is
-    /// no ground truth, and guessing would throw away valid tabs. Tabs with no
-    /// binding (`connection == nil`) follow the window and are never orphans.
     private func pruneOrphanEditors() {
         guard profilesProvider != nil else { return }
         let known = Set(tabs.connections.map(\.name))
@@ -628,11 +439,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         persistSession()
     }
 
-    /// Closed editors that could be reopened, across every connection — the
-    /// unified bar's "+" menu offers them all, not just the selected one's.
-    /// Records bound to a connection that no longer exists are hidden under the
-    /// same rule as `pruneOrphanEditors`, so pruned tabs do not reappear in the
-    /// menu as bare UUID entries.
     private func refreshSavedList() {
         let open = Set(allTabs.map(\.id))
         let known: Set<String>? =
@@ -673,8 +479,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         focus()
     }
 
-    /// Lowest unused number **within one connection**, so every connection
-    /// starts at "Untitled 1" rather than continuing a global count.
     private func nextUntitledNumber(in connection: String?) -> Int {
         let used = Set(
             allTabs.filter { $0.name == nil && $0.connection == connection }.map(\.untitledNumber))
@@ -683,8 +487,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         return n
     }
 
-    /// With no provider installed the picker still has to name the profiles a
-    /// restored tab is bound to, or a binding would display as a blank chip.
     private func fallbackConnections() -> [EditorConnectionOption] {
         let names = Set(allTabs.compactMap(\.connection))
         return names.sorted().map { EditorConnectionOption(name: $0, driver: "") }
@@ -704,8 +506,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
             tab.untitledNumber =
                 tab.name == nil ? self.nextUntitledNumber(in: name) : tab.untitledNumber
             self.persist(tab)
-            // The tab stays exactly where it is — the bar shows every connection
-            // — so rebinding just updates its connection label and reopen list.
             self.publishTabs()
             self.persistSession()
             self.refreshConnections()
@@ -713,14 +513,10 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         }
     }
 
-    /// A new editor **for the scoped connection**. Empty: an editor is a blank
-    /// page, and a sample statement in the wrong dialect is worse than none.
     @discardableResult
     func newTab(connection: String? = nil) -> EditorTab {
         loadViewIfNeeded()
         flushActive()
-        // An explicit connection also moves the scope, so the tab appears in
-        // the bar the user is looking at instead of silently in another one.
         if let connection, connection != tabs.scope { setScope(connection) }
         let tab = EditorTab(connection: tabs.scope)
         tab.untitledNumber = nextUntitledNumber(in: tab.connection)
@@ -748,11 +544,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     }
 
     private func close(_ tab: EditorTab) {
-        // Closing an unsaved scratch tab is the ONLY action that destroys typed
-        // SQL: quitting keeps everything (the session is restored verbatim,
-        // dirty flags included) and closing a *named* query only drops it from
-        // the session. So this is the one place a confirmation belongs, and
-        // there is deliberately none on quit.
         if tab.isDirty, tab.name == nil,
             !tab.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         {
@@ -768,17 +559,10 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         let wasActive = tab.id == tabs.activeID
         if wasActive { flushActive() }
         allTabs.remove(at: all)
-        // A named query is a file the user asked us to keep, so closing its tab
-        // must not delete it — it drops out of the session and stays in the
-        // saved list. Only an untitled scratch tab is discarded, because
-        // closing it is the only way the user has to say "throw this away".
         if tab.name == nil { store.delete(tab.record) }
 
         publishTabs()
         if wasActive {
-            // Closing the last editor leaves the welcome state, not a
-            // manufactured replacement tab. "Nothing open" is a state the user
-            // asked for by closing it.
             if let next = tabs.tabs.isEmpty ? nil : tabs.tabs[min(idx, tabs.tabs.count - 1)] {
                 tabs.activeID = next.id
                 load(next)
@@ -792,9 +576,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     }
 
     /// Drop every editor belonging to a connection that has just been deleted.
-    /// Their `.sql` files stay on disk — a removed connection is not a reason
-    /// to destroy SQL someone wrote — but nothing is left pointing at a profile
-    /// that no longer exists.
     func forgetEditors(of connection: String) {
         loadViewIfNeeded()
         let losingActive = allTabs.first { $0.id == tabs.activeID }?.connection == connection
@@ -838,13 +619,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         refreshSavedList()
     }
 
-    /// Asks before throwing away an untitled tab's SQL, offering to keep it as
-    /// a saved query instead. Returns true if the caller should go ahead and
-    /// close.
-    ///
-    /// "Save…" runs the normal save path, which prompts for a name; if the user
-    /// backs out of *that* prompt the tab is left untouched rather than closed,
-    /// because cancelling a name prompt is not consent to discard.
     private func confirmDiscard(_ tab: EditorTab) {
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -859,11 +633,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         alert.buttons[0].keyEquivalent = ""
         alert.buttons[1].keyEquivalent = "\r"
 
-        // A SHEET, not `runModal()`. This is reached from a SwiftUI button
-        // inside the tab bar's hosting view, and spinning a nested modal loop
-        // from inside SwiftUI's own event handling left the alert on screen
-        // with every button dead — it could not be dismissed at all. The sheet
-        // hands control back immediately and reports the choice later.
         let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
             guard let self else { return }
             switch response {
@@ -872,8 +641,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
             case .alertThirdButtonReturn:
                 self.activate(tab)
                 self.saveActiveTab()
-                // Only close if the name prompt actually completed; backing out
-                // of it is not consent to discard.
                 if tab.name != nil { self.performClose(tab) }
             default:
                 break  // Cancel: the tab stays exactly as it was.
@@ -886,8 +653,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         }
     }
 
-    /// First few words of the first statement, so the dialog opens with
-    /// something better than "Untitled".
     private func suggestedName(for sql: String) -> String {
         let words =
             sql
@@ -926,14 +691,7 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     }
 
     private func load(_ tab: EditorTab) {
-        // Everything up to the flag reset happens with the delegate callbacks
-        // gated — see `isSwappingDocument`: the text system posts selection
-        // changes synchronously mid-swap, while the highlighter's block map
-        // still describes the outgoing document.
         isSwappingDocument = true
-        // A wholesale replacement carries no incremental information, so the
-        // highlighter is told to ignore the edit and re-seed once instead of
-        // lexing the new document twice.
         highlighter.isSuspended = true
         textView.string = tab.text
         highlighter.isSuspended = false
@@ -944,8 +702,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         let len = min(max(0, tab.selectedRange.length), length - loc)
         textView.setSelectedRange(NSRange(location: loc, length: len))
         textView.scrollRangeToVisible(NSRange(location: loc, length: 0))
-        // Undo is per-document; carrying a previous tab's edits into this one
-        // would let ⌘Z type another tab's text into this buffer.
         textView.undoManager?.removeAllActions()
         isSwappingDocument = false
 
@@ -956,12 +712,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     // MARK: - persistence
 
     /// Reopen what was open, and **make nothing up**.
-    ///
-    /// A first launch restores zero tabs and that is the end of it: the welcome
-    /// state takes the pane until the user asks for an editor. The app used to
-    /// manufacture an "Untitled 1" here and `AppModel.boot()` filled it with a
-    /// SQLite sample — which is text nobody asked for, in a dialect that is
-    /// wrong for every connection except one.
     private func restoreSession() {
         let loaded = store.load()
         for (record, text) in loaded.tabs {
@@ -972,8 +722,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
                 isDirty: record.isDirty)
             allTabs.append(tab)
         }
-        // Renumber untitled tabs per connection, in the order they were
-        // restored, so two connections can each have an "Untitled 1".
         var counters: [String: Int] = [:]
         for tab in allTabs where tab.name == nil {
             let key = tab.connection ?? EditorSession.unbound
@@ -997,8 +745,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         refreshSavedList()
     }
 
-    /// One-shot, cancelled and re-armed on every edit — the same discipline as
-    /// the parked caret. Nothing polls; a settled editor schedules nothing.
     private func scheduleAutosave() {
         autosaveItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
@@ -1033,8 +779,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     // MARK: - key equivalents
 
     private func handleKeyEquivalent(_ event: NSEvent) -> Bool {
-        // Caps Lock and the function/numeric-pad bits ride along on ordinary
-        // keystrokes; only the intent-carrying modifiers may differ from ⌘.
         let mods = event.modifierFlags
             .intersection(.deviceIndependentFlagsMask)
             .subtracting([.capsLock, .function, .numericPad])
@@ -1050,8 +794,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
             saveActiveTab()
             return true
         case "w":
-            // Only claimed while the editor has focus, so File ▸ Close Window
-            // (⌘W, owned by AppDelegate's menu) still works everywhere else.
             guard view.window?.firstResponder === textView, let tab = tabs.active else {
                 return false
             }
@@ -1067,17 +809,8 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     // MARK: - NSTextViewDelegate
 
     func textDidChange(_ notification: Notification) {
-        // Mid-swap edits are the controller's own, not the user's — reacting to
-        // them runs `currentBlock()` against a stale highlighter map.
         guard !isSwappingDocument else { return }
-        // Every tab, not just named ones. An untitled scratch tab is the case
-        // that actually needs the marker: `close(_:)` deletes its record, so
-        // closing it is the one action in the app that destroys typed SQL for
-        // good. Gating this on `name != nil` meant the tab most at risk was the
-        // only one that never showed it.
         tabs.active?.isDirty = true
-        // Safe here: the edit cycle has completed, so asking the layout manager
-        // for the visible range will not re-enter it.
         highlighter.refreshVisible()
         updateDecorations()
         scheduleAutosave()
@@ -1085,9 +818,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
-        // See `isSwappingDocument`: this fires from INSIDE a document swap,
-        // when the highlighter still maps the outgoing text. `load` posts one
-        // clean `onSelectionChanged` itself once the swap is consistent.
         guard !isSwappingDocument else { return }
         updateDecorations()
         onSelectionChanged?()
@@ -1107,32 +837,17 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     }
 }
 
-/// SwiftUI bridge. `makeNSViewController` hands back the model-owned instance so
-/// SwiftUI re-evaluation never rebuilds the text system.
 struct SQLEditorView: NSViewControllerRepresentable {
     let controller: SQLEditorController
     func makeNSViewController(context: Context) -> SQLEditorController { controller }
     func updateNSViewController(_ nsViewController: SQLEditorController, context: Context) {}
 
     /// Take the height offered, never the one AppKit would ask for.
-    ///
-    /// Without this SwiftUI sizes the representable from the controller view's
-    /// Auto Layout fitting size, which follows the `NSScrollView`, which
-    /// follows the `NSTextView` — so the pane grew with the document. In a
-    /// 673 pt window the editor was laid out 1151 pt tall, putting the tab bar
-    /// above the visible area and leaving a dead, unclickable band where the
-    /// editor should be. `VSplitView` decides how tall this pane is; the text
-    /// inside it does not get a vote.
     func sizeThatFits(
         _ proposal: ProposedViewSize,
         nsViewController: SQLEditorController,
         context: Context
     ) -> CGSize? {
-        // Never `return nil` on an unspecified proposal. SwiftUI proposes nil on
-        // some passes to ask "what size do you want?", and nil hands the answer
-        // back to AppKit's fitting size — the very thing this exists to ignore.
-        // One such pass is enough to blow the pane up again, which looked like
-        // the rows drawing and then vanishing a frame later.
         CGSize(width: proposal.width ?? 10, height: proposal.height ?? 10)
     }
 }

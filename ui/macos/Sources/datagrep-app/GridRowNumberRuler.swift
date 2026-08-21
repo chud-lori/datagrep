@@ -1,8 +1,5 @@
 import AppKit
 
-/// The header cell of the row-number gutter — the "#" corner at the top-left,
-/// level with the column headers, which the scroll view otherwise leaves
-/// blank. Clicking it selects every row.
 final class GridGutterHeader: NSView {
     var onSelectAll: (() -> Void)?
 
@@ -34,27 +31,10 @@ final class GridGutterHeader: NSView {
 }
 
 /// The pinned row-number gutter.
-///
-/// An `NSRulerView`, NOT an `NSTableColumn` — load-bearing three times over:
-///
-///  1. **Pinned by construction** — the ruler tiles outside the clip view, so
-///     horizontal scrolling can never move it.
-///  2. **Excluded from copy by construction** — every copy path enumerates
-///     `tableView.tableColumns`; the gutter is not a column, so the row number
-///     can never leak onto the pasteboard.
-///  3. **Cannot break virtualisation** — the number is derived purely from the
-///     row index; drawing never touches the pager.
-///
-/// `clipsToBounds` must be true: macOS 14 defaults it to false, a vertical
-/// ruler overlays the clip view, and an unclipped ruler gets dirty rects
-/// larger than its bounds — `drawHashMarksAndLabels(in:)` then paints over the
-/// clip view, which inside a layer-backed `NSHostingView` leaves the whole
-/// table blank until a live resize.
+// Row numbers are ruler chrome, never table data — structurally excluded from copy.
 final class GridRowNumberRuler: NSRulerView {
     /// Weak: the scroll view owns both of us.
     weak var grid: GridTableView?
-    /// Fired on click/drag: (row, extend). Routed into the grid's existing
-    /// block-selection model — the gutter never invents its own selection path.
     var onSelectRow: ((Int, Bool) -> Void)?
 
     // Cached once — never allocated per draw.
@@ -68,8 +48,6 @@ final class GridRowNumberRuler: NSRulerView {
     private static let normal: [NSAttributedString.Key: Any] = [
         .font: font, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: para,
     ]
-    /// Selected rows get the primary label colour, so the gutter answers
-    /// "which rows are selected" even when the block is scrolled tall.
     private static let selected: [NSAttributedString.Key: Any] = [
         .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: para,
     ]
@@ -81,10 +59,9 @@ final class GridRowNumberRuler: NSRulerView {
 
     private var digits = 2
 
+    // macOS 14 flipped the clipsToBounds default; without it the gutter paints outside itself.
     override init(scrollView: NSScrollView?, orientation: NSRulerView.Orientation) {
         super.init(scrollView: scrollView, orientation: orientation)
-        // See the type doc: without this the table never composites inside
-        // NSHostingView.
         clipsToBounds = true
     }
 
@@ -93,8 +70,6 @@ final class GridRowNumberRuler: NSRulerView {
         clipsToBounds = true
     }
 
-    /// Width adapts to the magnitude of the row count: 1,000,000 rows widen
-    /// the gutter to 7 digits instead of clipping.
     func update(rowCount: Int) {
         // Min two digits, so single-digit results still read as a column.
         let d = max(2, String(max(rowCount, 1)).count)
@@ -102,8 +77,6 @@ final class GridRowNumberRuler: NSRulerView {
             digits = d
             ruleThickness = requiredThickness
         }
-        // New rows may already be inside the viewport (a short result growing);
-        // their numbers must appear without waiting for a scroll.
         needsDisplay = true
     }
 
@@ -112,8 +85,6 @@ final class GridRowNumberRuler: NSRulerView {
     }
 
     override func drawHashMarksAndLabels(in rect: NSRect) {
-        // Fill the whole bounds (clipsToBounds confines it to the gutter), so
-        // a dirty rect narrower than the ruler never leaves an unpainted band.
         (NSColor.textBackgroundColor.blended(withFraction: 0.5, of: .windowBackgroundColor)
             ?? .textBackgroundColor).setFill()
         bounds.fill()
@@ -121,9 +92,6 @@ final class GridRowNumberRuler: NSRulerView {
         NSRect(x: bounds.maxX - 1, y: bounds.minY, width: 1, height: bounds.height).fill()
 
         guard let grid, grid.numberOfRows > 0 else { return }
-        // Derive the row set from the table's own visibleRect, NOT the passed
-        // dirty rect — its converted Y-band comes up empty once the ruler
-        // clips to its bounds. Still O(viewport), never O(rows).
         let visible = grid.rows(in: grid.visibleRect)
         guard visible.length > 0 else { return }
         let sel = grid.selectedRowIndexes
@@ -142,12 +110,8 @@ final class GridRowNumberRuler: NSRulerView {
 
     // MARK: - click / drag -> whole-row selection
 
-    /// Click selects the row, shift-click extends, drag sweeps a range — all
-    /// routed through the grid's existing block-selection model.
     override func mouseDown(with event: NSEvent) {
         guard let grid, grid.numberOfRows > 0 else { return }
-        // Row from the y-coordinate alone: the gutter is horizontally OUTSIDE
-        // the table, so `row(at:)` would answer -1 for every gutter click.
         let p = grid.convert(event.locationInWindow, from: nil)
         let step = grid.rowHeight + grid.intercellSpacing.height
         guard step > 0, p.y >= 0 else { return }
@@ -157,9 +121,6 @@ final class GridRowNumberRuler: NSRulerView {
         trackDrag(from: event, lastRow: hit)
     }
 
-    /// Same loop shape as the grid's own drag tracking: a 50 ms `nextEvent`
-    /// timeout keeps autoscroll alive while the pointer rests outside the
-    /// viewport, and costs nothing while it rests inside.
     private func trackDrag(from initial: NSEvent, lastRow: Int) {
         guard let window, let grid else { return }
         var last = lastRow
@@ -180,9 +141,6 @@ final class GridRowNumberRuler: NSRulerView {
             let vr = grid.visibleRect
             let outside = p.y < vr.minY || p.y > vr.maxY
             if outside {
-                // Vertical-only autoscroll. `autoscroll(with:)` would chase
-                // the pointer's x — which sits in the gutter, left of every
-                // column — and drag the grid horizontally back to column 0.
                 let y = min(max(p.y, 0), max(grid.bounds.maxY - 1, 0))
                 grid.scrollToVisible(
                     NSRect(x: vr.midX, y: y, width: 1, height: grid.rowHeight))
@@ -195,8 +153,6 @@ final class GridRowNumberRuler: NSRulerView {
         }
     }
 
-    /// Clamped, not nil'd: during an autoscroll drag the pointer is outside the
-    /// rows, and the sweep must still follow it to the first/last row.
     private func clampedRow(at p: NSPoint, in grid: GridTableView) -> Int {
         let step = grid.rowHeight + grid.intercellSpacing.height
         let r = step > 0 ? Int(floor(p.y / step)) : 0

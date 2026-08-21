@@ -1,8 +1,6 @@
 import CDatagrepFFI
 import Foundation
 
-/// The four facts a cell can carry. `null` and `absent` are DIFFERENT facts:
-/// absent means the field is not present in the document at all.
 public enum CellKind: UInt8, Sendable {
     case value = 0
     case null = 1
@@ -12,8 +10,6 @@ public enum CellKind: UInt8, Sendable {
     public init(raw: UInt8) { self = CellKind(rawValue: raw) ?? .value }
 }
 
-/// Owns one `DatagrepRows*`. Freed exactly once, in `deinit` — which is what makes
-/// window eviction from the LRU leak-proof by construction.
 public final class RowWindow {
     let raw: OpaquePointer
     public let offset: UInt64
@@ -42,7 +38,6 @@ public final class RowWindow {
     }
 
     /// Builds a Swift String from the borrowed, NOT nul-terminated pointer.
-    /// Called only for cells that are actually on screen — never for a window.
     @inline(__always)
     public func text(absoluteRow: UInt64, col: UInt32) -> String {
         var len = 0
@@ -59,10 +54,6 @@ public final class RowWindow {
     }
 
     /// One cell's loaded value, when it is a value an edit can carry.
-    ///
-    /// Nil for a nested cell (a document or an array — those are edited as
-    /// documents, not as cells), for an ABSENT field (there is no loaded value
-    /// to preserve the type of), and for a cell outside the window.
     public func loadedValue(absoluteRow: UInt64, col: UInt32) -> MutationValue? {
         guard kind(absoluteRow: absoluteRow, col: col) != .nested,
             let text = detailJSON(absoluteRow: absoluteRow, col: col)
@@ -71,24 +62,11 @@ public final class RowWindow {
     }
 
     /// The field names THIS window projected, in column order.
-    ///
-    /// Not the same list as the query status' columns for a heterogeneous
-    /// document result: the status reports what the first chunk revealed, a
-    /// window reports what its own rows carry. Anything naming a field — an
-    /// edit says which field it sets — must use these, because these are the
-    /// names the cell values were read under.
     public func columnNames() -> [String] {
         guard let text = takeOwnedString(datagrep_rows_column_names_json(raw)) else { return [] }
         return jsonObject(text) as? [String] ?? []
     }
 
-    /// The row's fields outside the projected columns — which document this
-    /// row is, and which version of it was loaded. Nil for a result that has
-    /// no envelope, which is also the honest answer to "can this be edited".
-    ///
-    /// Read at the moment an edit is staged, never at commit time: a guard
-    /// refreshed just before the write would compare the server against
-    /// itself and defeat the point of having one.
     public func envelope(absoluteRow: UInt64) -> [String: Any]? {
         guard let text = takeOwnedString(datagrep_rows_envelope_json(raw, absoluteRow &- offset))
         else { return nil }
@@ -97,10 +75,6 @@ public final class RowWindow {
 }
 
 /// A bounded, page-keyed LRU over `RowWindow`s.
-///
-/// This is the whole memory story of the grid: `numberOfRows` may say
-/// 1,000,000, but at most `maxPages * pageSize` rows are ever materialised, and
-/// evicting a page drops its `DatagrepRows` immediately.
 public final class RowPager {
     public let pageSize: UInt64
     public let maxPages: Int
@@ -128,8 +102,6 @@ public final class RowPager {
         order.removeAll()
     }
 
-    /// Drops cached pages that were only partially filled while streaming, so a
-    /// half-page fetched at 40% progress is re-fetched once more rows land.
     public func invalidatePartialPages() {
         for (key, w) in pages where w.pending || w.count < pageSize {
             pages[key] = nil

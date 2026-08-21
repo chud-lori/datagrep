@@ -9,8 +9,6 @@ public struct DatagrepError: Error, CustomStringConvertible {
 }
 
 /// Copies a `char*` returned by the ABI into a Swift String and frees it.
-/// Nothing in this package is ever allowed to hold a raw `char*` past a
-/// statement boundary — that is why this is the only way to read one.
 @inline(__always)
 func takeOwnedString(_ p: UnsafeMutablePointer<CChar>?) -> String? {
     guard let p else { return nil }
@@ -18,8 +16,6 @@ func takeOwnedString(_ p: UnsafeMutablePointer<CChar>?) -> String? {
     return String(cString: p)
 }
 
-/// Runs an ABI call that uses the `char** err_out` convention. The error string
-/// is copied and freed on every path, so an error can never leak.
 @inline(__always)
 func datagrepTry<T>(_ body: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> T?) throws -> T {
     var err: UnsafeMutablePointer<CChar>?
