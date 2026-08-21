@@ -418,6 +418,23 @@ private struct WorkbenchToolbar: ToolbarContent {
             .keyboardShortcut("s", modifiers: [.control, .command])
             .help("Show or hide the connections sidebar (⌃⌘S)")
 
+            // New Connection lives in the window toolbar, as its own icon.
+            //
+            // It used to be reachable only from the File menu and from inside
+            // the toolbar's connection menu — but that menu is labelled with
+            // the CURRENT connection, so it reads as a switcher and the add
+            // hides inside it. A + on the sidebar's section header was tried
+            // and rejected: at that size, next to a secondary-grey label, it
+            // reads as decoration however it is coloured. A toolbar icon is
+            // where a window-level verb belongs, and it stays visible with the
+            // sidebar collapsed.
+            Button {
+                model.showNewConnection = true
+            } label: {
+                Label("New Connection", systemImage: "powerplug")
+            }
+            .help("New connection (⌘N)")
+
             Menu {
                 if model.roots.isEmpty {
                     Text("No connections yet")
