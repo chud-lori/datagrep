@@ -49,6 +49,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 class ResultModel : public QAbstractTableModel {
     Q_OBJECT
@@ -97,6 +98,16 @@ public:
 
     // Raw JSON detail of one cell, for a detail pane. On-demand, one cell.
     QString cellDetailJson(int row, int column) const;
+
+    // The kind of one loaded cell (NULL / ABSENT / nested / value), or nullopt
+    // when the cell's window is not resident. Same refuse-don't-guess rule as
+    // cellDetailJson: never triggers a fetch, so the inspector cannot churn the
+    // pager by merely being open.
+    std::optional<dg::CellKind> cellKind(int row, int column) const;
+
+    // The row's envelope (fields outside the projected root) as JSON, or empty
+    // when the driver declared no root or the window is not resident.
+    QString envelopeJson(int row) const;
 
 signals:
     // Fired after every status refresh so the status bar can update

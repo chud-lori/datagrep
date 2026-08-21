@@ -366,6 +366,44 @@ QString ResultModel::cellDetailJson(int row, int column) const {
     return QString();
 }
 
+std::optional<dg::CellKind> ResultModel::cellKind(int row, int column) const {
+    if (!pager_ || row < 0 || column < 0 ||
+        static_cast<std::uint64_t>(row) >= exposedRows_ || column >= columnCount_) {
+        return std::nullopt;
+    }
+    const dg::RowWindow* window = nullptr;
+    try {
+        window = pager_->window(static_cast<std::uint64_t>(row));
+    } catch (const dg::Error&) {
+        return std::nullopt;
+    }
+    if (window == nullptr || window->pending() ||
+        static_cast<std::uint32_t>(column) >= window->columns()) {
+        return std::nullopt;
+    }
+    return window->kind(static_cast<std::uint64_t>(row),
+                        static_cast<std::uint32_t>(column));
+}
+
+QString ResultModel::envelopeJson(int row) const {
+    if (!pager_ || row < 0 || static_cast<std::uint64_t>(row) >= exposedRows_) {
+        return QString();
+    }
+    const dg::RowWindow* window = nullptr;
+    try {
+        window = pager_->window(static_cast<std::uint64_t>(row));
+    } catch (const dg::Error&) {
+        return QString();
+    }
+    if (window == nullptr || window->pending()) {
+        return QString();
+    }
+    if (auto envelope = window->envelopeJson(static_cast<std::uint64_t>(row))) {
+        return QString::fromStdString(*envelope);
+    }
+    return QString();
+}
+
 bool ResultModel::numericType(const QString& type) const {
     const QString t = type.toLower();
     static const char* const kNumeric[] = {

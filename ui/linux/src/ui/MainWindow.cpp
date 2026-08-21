@@ -4,6 +4,7 @@
 #include "model/ConnectionSafety.hpp"
 #include "model/ResultModel.hpp"
 #include "ui/ConnectionDialog.hpp"
+#include "ui/DetailPanel.hpp"
 #include "ui/ResultTableView.hpp"
 #include "ui/SchemaTree.hpp"
 #include "ui/SqlEditor.hpp"
@@ -13,6 +14,7 @@
 #include <QBrush>
 #include <QColor>
 #include <QDir>
+#include <QDockWidget>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -135,6 +137,25 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(schema_, &SchemaTree::objectActivated, this,
             &MainWindow::onSchemaObjectActivated);
 
+    // --- the inspector: schema + cell detail, as a right-hand dock ----------
+    // A QDockWidget rather than a fixed pane: closable, floatable, movable to
+    // the left — the Linux-native shape for an inspector. Its toggle action
+    // lives on the editor toolbar so a closed inspector stays reachable.
+    inspector_ = new DetailPanel(this);
+    inspectorDock_ = new QDockWidget(QStringLiteral("Inspector"), this);
+    inspectorDock_->setObjectName(QStringLiteral("inspectorDock"));
+    inspectorDock_->setWidget(inspector_);
+    inspectorDock_->setAllowedAreas(Qt::LeftDockWidgetArea |
+                                    Qt::RightDockWidgetArea);
+    addDockWidget(Qt::RightDockWidgetArea, inspectorDock_);
+    // The schema pane follows the sidebar selection; the tree made the describe
+    // call, the panel only draws it, so selecting never describes twice.
+    connect(schema_, &SchemaTree::objectDescribed, inspector_,
+            &DetailPanel::showSchema);
+    connect(inspector_, &DetailPanel::cellCopied, this, [this]() {
+        status_->showMessage(QStringLiteral("cell JSON copied"));
+    });
+
     auto* sidebar = new QSplitter(Qt::Vertical, this);
     sidebar->addWidget(connPane);
     sidebar->addWidget(schema_);
@@ -148,6 +169,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* editorToolbar = new QToolBar(this);
     auto* runAction = editorToolbar->addAction(QStringLiteral("Run  (Ctrl+↵)"));
     connect(runAction, &QAction::triggered, this, &MainWindow::runStatement);
+    editorToolbar->addSeparator();
+    editorToolbar->addAction(inspectorDock_->toggleViewAction());
 
     auto* editorPane = new QWidget(this);
     auto* editorLayout = new QVBoxLayout(editorPane);
@@ -162,6 +185,24 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     grid_ = new ResultTableView(this);
     grid_->setModel(model_);
+    // Clicking a cell shows its full value in the inspector. Only a nested
+    // `{n fields}` chip RAISES the Cell tab — that click is an unambiguous
+    // request to see inside; a plain value click updates the pane quietly.
+    connect(grid_, &QAbstractItemView::clicked, this,
+            [this](const QModelIndex& idx) {
+                if (!idx.isValid()) {
+                    return;
+                }
+                const auto kind = model_->cellKind(idx.row(), idx.column());
+                if (!kind.has_value()) {
+                    return;  // skeleton/pending — nothing truthful to show yet
+                }
+                inspector_->showCell(
+                    idx.row(), idx.column(),
+                    model_->cellDetailJson(idx.row(), idx.column()),
+                    model_->envelopeJson(idx.row()),
+                    *kind == dg::CellKind::Nested);
+            });
 
     auto* rightPane = new QSplitter(Qt::Vertical, this);
     rightPane->addWidget(editorPane);
@@ -443,6 +484,9 @@ void MainWindow::runStatement() {
         status_->setLimitHint(parseLimitDirective(sql));
         status_->showMessage(QString());
         model_->setQuery(std::move(query));
+        // The cell pane could still be naming a row/column of the previous
+        // result; a new query makes that reference meaningless.
+        inspector_->clearCell();
     } catch (const dg::Error& e) {
         status_->showMessage(QString::fromUtf8(e.what()), true);
     }

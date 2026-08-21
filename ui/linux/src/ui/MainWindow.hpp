@@ -19,11 +19,13 @@
 namespace dg {
 class Core;
 }
+class DetailPanel;
 class ResultModel;
 class ResultTableView;
 class SqlEditor;
 class SchemaTree;
 class StatusBar;
+class QDockWidget;
 class QLabel;
 class QListWidget;
 class QPushButton;
@@ -62,6 +64,8 @@ private:
     QPushButton* removeButton_;
     SchemaTree* schema_;
     QLabel* markedBanner_;
+    DetailPanel* inspector_;
+    QDockWidget* inspectorDock_;
     SqlEditor* editor_;
     ResultTableView* grid_;
     ResultModel* model_;
