@@ -210,13 +210,10 @@ impl EditorPage {
     /// The record as it should hit disk right now: current caret, current dirty flag.
     pub fn snapshot_record(&self) -> SavedQueryRecord {
         let buffer = self.buffer();
-        let (start, end) = buffer.selection_bounds().map_or_else(
-            || {
-                let at = buffer.iter_at_mark(&buffer.get_insert());
-                (at, at)
-            },
-            |(s, e)| (s, e),
-        );
+        let (start, end) = buffer.selection_bounds().unwrap_or_else(|| {
+            let at = buffer.iter_at_mark(&buffer.get_insert());
+            (at, at)
+        });
         let mut record = self.imp().record.borrow().clone();
         record.cursor_location = start.offset() as i64;
         record.cursor_length = (end.offset() - start.offset()) as i64;
