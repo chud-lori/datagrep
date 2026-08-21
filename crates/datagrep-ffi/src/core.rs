@@ -62,6 +62,15 @@ pub(crate) struct CoreInner {
     /// say *which kind* of protection is in force and never imply server
     /// enforcement it does not have. Absent until the first connect.
     enforcement: Mutex<HashMap<String, Enforcement>>,
+    /// Saved-profile name → what the server said at handshake, as
+    /// (`product`, `version`).
+    ///
+    /// Absent until a connection of this profile has actually been opened, and
+    /// deliberately never guessed: the header badge shows the driver id alone
+    /// until a real handshake has answered, because a version nobody confirmed
+    /// is worse than no version at all — it is the number a user would quote
+    /// when asking whether a feature exists on their server.
+    server: Mutex<HashMap<String, (String, String)>>,
 }
 
 impl std::fmt::Debug for CoreInner {
@@ -114,6 +123,7 @@ impl DatagrepCore {
             secrets: Arc::new(secrets),
             registered: Mutex::new(HashMap::new()),
             enforcement: Mutex::new(HashMap::new()),
+            server: Mutex::new(HashMap::new()),
         })))
     }
 }
@@ -219,6 +229,7 @@ impl CoreInner {
         }
         let session = self.api.session(id).map_err(|e| e.to_string())?;
         let lease = session.acquire().await.map_err(|e| e.to_string())?;
+        self.record_server_info(name, lease.server_info());
         match lease.set_read_only(true).await {
             Ok(enforcement) => {
                 self.lock_enforcement()
@@ -257,6 +268,36 @@ impl CoreInner {
             .insert(name.to_string(), enforcement);
     }
 
+    /// What the server reported at handshake, if this profile has connected at
+    /// all since the process started.
+    pub(crate) fn server_info_for(&self, name: &str) -> Option<(String, String)> {
+        self.lock_server().get(name).cloned()
+    }
+
+    /// Remember a handshake result so the badge can name the engine and its
+    /// version without dialling again.
+    pub(crate) fn record_server_info(&self, name: &str, info: &datagrep_api::ServerInfo) {
+        self.lock_server().insert(
+            name.to_string(),
+            (info.product.to_string(), info.version.to_string()),
+        );
+    }
+
+    /// Fill the server-info cache for `name` if it is empty, by acquiring one
+    /// lease. Cheap once the pool is warm; a no-op that reports nothing rather
+    /// than an error when the profile cannot be reached, because the badge must
+    /// never be the reason an offline connection looks broken.
+    pub(crate) async fn ensure_server_info(&self, name: &str) -> Option<(String, String)> {
+        if let Some(hit) = self.server_info_for(name) {
+            return Some(hit);
+        }
+        let (id, _) = self.open_profile(name).await.ok()?;
+        let session = self.api.session(id).ok()?;
+        let lease = session.acquire().await.ok()?;
+        self.record_server_info(name, lease.server_info());
+        self.server_info_for(name)
+    }
+
     pub(crate) async fn saved_profile(
         &self,
         name: &str,
@@ -276,6 +317,7 @@ impl CoreInner {
     pub(crate) fn forget_profile(&self, name: &str) {
         let stale = self.lock_registered().remove(name);
         self.lock_enforcement().remove(name);
+        self.lock_server().remove(name);
         if let Some(id) = stale {
             let api = self.api.clone();
             if let Ok(rt) = runtime() {
@@ -286,6 +328,12 @@ impl CoreInner {
 
     fn lock_registered(&self) -> std::sync::MutexGuard<'_, HashMap<String, ProfileId>> {
         self.registered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_server(&self) -> std::sync::MutexGuard<'_, HashMap<String, (String, String)>> {
+        self.server
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }

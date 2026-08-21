@@ -84,6 +84,52 @@ public final class DatagrepCoreHandle: @unchecked Sendable {
     }
 
 
+    /// What the header badge needs to say where the user actually is: the
+    /// database this profile points at, and what answered at handshake.
+    ///
+    /// `server` is `nil` until a connection has really succeeded — the engine
+    /// never guesses a version, because an unconfirmed one is exactly the
+    /// number someone would quote when asking whether a feature exists on
+    /// their server.
+    public struct ConnectionInfo: Sendable, Equatable {
+        public let profile: String
+        public let driver: String
+        public let database: String?
+        public let product: String?
+        public let version: String?
+
+        public init(
+            profile: String, driver: String, database: String?, product: String?, version: String?
+        ) {
+            self.profile = profile
+            self.driver = driver
+            self.database = database
+            self.product = product
+            self.version = version
+        }
+    }
+
+    /// Reads the connection's identity. Warms the server info from the pool on
+    /// first call, so this can block briefly on a cold profile — call it off
+    /// the main thread.
+    public func connectionInfo(profile: String) throws -> ConnectionInfo {
+        let json = try profile.withCString { n in
+            try datagrepTry { errOut in
+                takeOwnedString(datagrep_connection_info_json(raw, n, errOut))
+            }
+        }
+        guard let d = jsonObject(json) as? [String: Any] else {
+            throw DatagrepError("the connection info was not an object")
+        }
+        let server = d["server"] as? [String: Any]
+        return ConnectionInfo(
+            profile: d["profile"] as? String ?? profile,
+            driver: d["driver"] as? String ?? "?",
+            database: (d["database"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            product: (server?["product"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            version: (server?["version"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+    }
+
     public func addProfile(name: String, url: String) throws {
         try name.withCString { n in
             try url.withCString { u in

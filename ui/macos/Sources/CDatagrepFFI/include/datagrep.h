@@ -35,6 +35,13 @@ char *datagrep_profiles_list_json(DatagrepCore *, char **err_out);
 bool  datagrep_profiles_add(DatagrepCore *, const char *name, const char *url, char **err_out);
 bool  datagrep_profiles_remove(DatagrepCore *, const char *name, char **err_out);
 
+/* {"profile","driver","database":str|null,
+ *  "server":null|{"product","version"},
+ *  "read_only":null|{"enforcement":"server"|"client"|"none","server_confirmed":bool}}
+ * "server" is what the engine reported at handshake, never a guess, and is
+ * null until a connection of this profile has succeeded. */
+char *datagrep_connection_info_json(DatagrepCore *, const char *name, char **err_out);
+
 /* path_json = JSON array of segments, [] for roots
  * [{"name","kind","has_children","enumeration":"cheap"|"scan_only"|"paged"|"on_demand"}] */
 char *datagrep_catalog_children_json(DatagrepCore *, const char *profile, const char *path_json,

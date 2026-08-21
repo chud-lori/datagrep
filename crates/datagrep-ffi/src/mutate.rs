@@ -121,6 +121,7 @@ async fn run_mutation(
     let (id, saved) = core.open_profile(profile).await?;
     let session = core.api.session(id).map_err(|e| e.to_string())?;
     let lease = session.acquire().await.map_err(|e| e.to_string())?;
+    core.record_server_info(profile, lease.server_info());
 
     // Same guard `run_request` applies: for a read-only profile, take a
     // read-only session on this exact socket so the connection refuses the

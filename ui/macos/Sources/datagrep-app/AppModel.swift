@@ -256,6 +256,35 @@ final class AppModel: ObservableObject {
     var showsGrid: Bool { rowsLoaded > 0 }
 
     var activeDriver: String { roots.first { $0.name == activeProfile }?.driver ?? "" }
+
+    /// What the engine said about the active connection: which database it is
+    /// pointed at, and what answered at handshake. Drives the header badge.
+    ///
+    /// Nil until the first successful read for this profile, and cleared the
+    /// moment the active profile changes — a badge that keeps naming the
+    /// previous server for a few hundred milliseconds is precisely the badge
+    /// that gets someone running a statement against the wrong database.
+    @Published var connectionInfo: DatagrepCoreHandle.ConnectionInfo?
+
+    /// Refresh the badge for the active connection, off the main thread: the
+    /// first call for a profile can dial the server to learn its version.
+    func refreshConnectionInfo() {
+        let name = activeProfile
+        guard let core, !name.isEmpty else {
+            connectionInfo = nil
+            return
+        }
+        catalogQueue.async { [weak self] in
+            let info = try? core.connectionInfo(profile: name)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                // A late reply for a connection the user has already left must
+                // not overwrite the badge of the one they are looking at now.
+                guard self.activeProfile == name else { return }
+                self.connectionInfo = info
+            }
+        }
+    }
     var canSortInEngine: Bool { EngineStyle.supportsSubqueryOrderBy(activeDriver) }
 
     var isProd: Bool { activeSafety.isMarked }
@@ -850,6 +879,8 @@ final class AppModel: ObservableObject {
     func selectProfile(_ name: String, scopeEditors: Bool = true) {
         activeProfile = name
         if scopeEditors { editor.setScope(name.isEmpty ? nil : name) }
+        connectionInfo = nil
+        refreshConnectionInfo()
     }
 
     // MARK: - catalog, one level per call
@@ -1303,6 +1334,12 @@ final class AppModel: ObservableObject {
         rowsLoaded = status.rowsLoaded
         totalKnown = status.totalKnown
         elapsedMs = status.elapsedMs
+        // A query is the cheapest moment to learn the server version: the
+        // handshake has just happened, so the engine can answer from its cache
+        // instead of dialling. Only asked while the badge is still missing it.
+        if status.state.isTerminal, connectionInfo?.version == nil {
+            refreshConnectionInfo()
+        }
         // Safe on every tick: this records once, when the query goes terminal.
         history.executionProgressed(
             state: status.state, rowsLoaded: status.rowsLoaded, elapsedMs: status.elapsedMs,

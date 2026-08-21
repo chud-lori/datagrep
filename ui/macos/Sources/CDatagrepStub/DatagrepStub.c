@@ -154,10 +154,38 @@ char *datagrep_profiles_list_json(DatagrepCore *c, char **err_out) {
     return s.buf;
 }
 
+/* Synthetic handshake result. The stub never opens a socket, so it answers
+ * with a fixed product/version rather than null: the badge is exactly what
+ * this build exists to let us look at without a database in the room. */
+char *datagrep_connection_info_json(DatagrepCore *c, const char *name, char **err_out);
+
 static const StubProfile *find_profile(DatagrepCore *c, const char *name) {
     for (size_t i = 0; i < c->n; i++)
         if (strcmp(c->profiles[i].name, name) == 0) return &c->profiles[i];
     return NULL;
+}
+
+char *datagrep_connection_info_json(DatagrepCore *c, const char *name, char **err_out) {
+    if (!c || !name) {
+        set_err(err_out, "null argument");
+        return NULL;
+    }
+    pthread_mutex_lock(&c->lock);
+    const StubProfile *p = find_profile(c, name);
+    if (!p) {
+        pthread_mutex_unlock(&c->lock);
+        set_err(err_out, "no such profile");
+        return NULL;
+    }
+    Sb s;
+    sb_init(&s);
+    sb_putf(&s,
+            "{\"profile\":\"%s\",\"driver\":\"%s\",\"database\":\"stub\","
+            "\"server\":{\"product\":\"%s\",\"version\":\"0.0.0-stub\"},"
+            "\"read_only\":null}",
+            p->name, p->driver, p->driver);
+    pthread_mutex_unlock(&c->lock);
+    return s.buf;
 }
 
 bool datagrep_profiles_add(DatagrepCore *c, const char *name, const char *url, char **err_out) {

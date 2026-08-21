@@ -335,6 +335,73 @@ private struct ProdStripe: View {
     }
 }
 
+// MARK: - connection badge
+
+/// Where you are, in one place: engine, connection, database.
+///
+/// The same three facts used to be spread over the connection picker, the
+/// window subtitle and the status bar, with the database named in none of them.
+/// Splitting an identity across three weak signals is how someone runs a
+/// statement against the wrong server, so this consolidates them into the one
+/// saturated element in an otherwise monochrome toolbar.
+///
+/// The connection's own colour fills it, which is what finally makes that
+/// colour *readable* rather than an ambient wash — and red for production is
+/// then impossible to mistake for dev at a glance.
+private struct ConnectionBadge: View {
+    @ObservedObject var model: AppModel
+
+    /// `mysql 8.0.36`, or just `mysql` until a handshake has confirmed a
+    /// version. Never a guess: an unconfirmed version is the number someone
+    /// would quote when asking whether a feature exists on their server.
+    private var engine: String {
+        let name = EngineStyle.displayName(for: model.activeDriver)
+        guard let v = model.connectionInfo?.version, !v.isEmpty else { return name }
+        return "\(name) \(v)"
+    }
+
+    private var fill: Color {
+        if model.isProd { return .red }
+        return ConnectionColor.color(model.activeSafety.color) ?? Color(nsColor: .systemGray)
+    }
+
+    var body: some View {
+        if model.activeProfile.isEmpty {
+            EmptyView()
+        } else {
+            HStack(spacing: 6) {
+                Text(engine)
+                Text("·")
+                    .foregroundStyle(.secondary)
+                Text(model.activeProfile)
+                    .fontWeight(.semibold)
+                if let db = model.connectionInfo?.database {
+                    Text("·")
+                        .foregroundStyle(.secondary)
+                    Text(db)
+                }
+                if model.activeSafety.readOnly {
+                    Image(systemName: "lock.fill")
+                        .help(model.activeSafety.enforcement.headline)
+                }
+            }
+            .font(.system(size: 11, weight: .regular, design: .monospaced))
+            .lineLimit(1)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(fill, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            // The badge must never be the widest thing in the toolbar: a long
+            // database name has to give way before the run and stop buttons do.
+            .frame(maxWidth: 420)
+            .help(
+                model.connectionInfo?.version == nil
+                    ? "\(model.activeProfile) — run a statement to learn the server version"
+                    : "\(engine) · \(model.activeProfile)")
+        }
+    }
+}
+
 // MARK: - toolbar
 
 private struct WorkbenchToolbar: ToolbarContent {
@@ -387,6 +454,10 @@ private struct WorkbenchToolbar: ToolbarContent {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("Switch, add or remove a connection")
+        }
+
+        ToolbarItem(placement: .principal) {
+            ConnectionBadge(model: model)
         }
 
         ToolbarItemGroup(placement: .primaryAction) {

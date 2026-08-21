@@ -71,6 +71,15 @@ bool  datagrep_profiles_remove(DatagrepCore*, const char* name, char** err_out);
 //   badge MUST say so - it is not the server protecting you.
 // "none"   - no enforcement of any kind is available.
 // The same object appears as "read_only" in datagrep_query_status_json.
+// Also carries what a header badge needs to name where the user is:
+//   "database": str|null   // what this profile points at; null on an engine
+//                          // with no database concept (Redis, SQLite)
+//   "server":   null                                  // never connected yet
+//             | {"product":str,"version":str}         // reported at handshake
+// "server" is NEVER guessed - an unconfirmed version is the number a user
+// would quote when asking whether a feature exists on their server. This call
+// warms it from the pool once; a profile that cannot be reached still returns
+// its identity, with "server":null.
 char* datagrep_connection_info_json(DatagrepCore*, const char* name, char** err_out);
 
 // ---- catalog (lazy, ONE level per call) -------------------------------

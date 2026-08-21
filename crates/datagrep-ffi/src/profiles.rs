@@ -508,6 +508,14 @@ pub unsafe extern "C" fn datagrep_profiles_get_json(
 ///   `"client"`. **The UI must not imply the server is protecting you.**
 /// - `"none"` — no enforcement of any kind is available.
 ///
+/// Also carries what the header badge needs to name where the user is:
+/// - `"database"` — the database this profile is pointed at, or `null` on an
+///   engine that has none (Redis, SQLite).
+/// - `"server"` — `{"product":str,"version":str}` as reported at handshake, or
+///   `null` when no connection of this profile has succeeded yet. Never
+///   guessed: an unconfirmed version is the number a user would quote when
+///   asking whether a feature exists on their server.
+///
 /// The same object appears as `"read_only"` in `datagrep_query_status_json`,
 /// refreshed as connections come and go.
 ///
@@ -531,9 +539,24 @@ pub unsafe extern "C" fn datagrep_connection_info_json(
             let name = unsafe { cstr(name, "name") }?;
             let rt = runtime()?;
             let p = rt.block_on(core.saved_profile(name))?;
+            // The database the profile is pointed at, straight from its saved
+            // config. Not every engine has one (Redis, SQLite), so this is an
+            // honest `null` rather than an invented default.
+            let database = match p.config.values.get("database") {
+                Some(ConfigValue::Str(db)) if !db.is_empty() => Some(db.clone()),
+                _ => None,
+            };
+            // Best-effort: warm once from the pool, report nothing if the
+            // server cannot be reached. A profile that is merely offline must
+            // still return its identity here.
+            let server = rt
+                .block_on(core.ensure_server_info(&p.name))
+                .map(|(product, version)| json!({"product": product, "version": version}));
             let payload = json!({
                 "profile": p.name,
                 "driver": p.driver_id,
+                "database": database,
+                "server": server,
                 "read_only": crate::core::read_only_json(
                     p.read_only,
                     &p.driver_id,

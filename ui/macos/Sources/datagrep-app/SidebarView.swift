@@ -24,12 +24,34 @@ struct SidebarView: View {
                     .padding(.vertical, 4)
                 }
             } header: {
-                Text("Connections")
-                    .font(.caption2)
-                    .fontWeight(.semibold)
-                    .textCase(.uppercase)
-                    .foregroundStyle(.secondary)
-                    .tracking(0.6)
+                // The + is on the header rather than under the list because
+                // the "Add a connection…" row below only appears while there
+                // are none — which means the moment you have one connection,
+                // the sidebar becomes the one list in the app you cannot add
+                // to from the list itself. New Connection… does live in the
+                // File menu and inside the toolbar's connection menu, but that
+                // menu is labelled with the current connection, so it reads as
+                // a switcher and the add hides inside it.
+                HStack(spacing: 4) {
+                    Text("Connections")
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                        .textCase(.uppercase)
+                        .foregroundStyle(.secondary)
+                        .tracking(0.6)
+                    Spacer(minLength: 0)
+                    Button {
+                        model.showNewConnection = true
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("New connection (⌘N)")
+                    .accessibilityLabel("New Connection")
+                }
             }
         }
         .listStyle(.sidebar)
