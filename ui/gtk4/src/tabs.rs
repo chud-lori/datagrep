@@ -559,7 +559,7 @@ impl EditorTabs {
 
         page.set_icon(
             info.as_ref()
-                .and_then(|i| engine::icon(&i.driver, dark))
+                .map(|i| engine::icon(&i.driver, dark))
                 .as_ref(),
         );
 
@@ -688,6 +688,13 @@ impl EditorTabs {
                 }
             }
         }
+        for editor in self.editors() {
+            self.update_page_chrome(&editor);
+        }
+    }
+
+    /// Re-resolve every page's icon against the palette now in effect.
+    pub fn refresh_chrome(&self) {
         for editor in self.editors() {
             self.update_page_chrome(&editor);
         }

@@ -780,9 +780,11 @@ dependencies = [
  "glib",
  "gtk4",
  "libadwaita",
+ "reqwest",
  "serde",
  "serde_json",
  "sourceview5",
+ "tokio",
 ]
 
 [[package]]

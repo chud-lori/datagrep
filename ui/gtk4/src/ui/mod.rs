@@ -4,6 +4,7 @@ mod inspector;
 mod schema;
 mod sidebar;
 mod status_bar;
+mod update_notice;
 mod utility;
 mod window;
 
@@ -13,6 +14,7 @@ pub use inspector::Inspector;
 pub use schema::SchemaTree;
 pub use sidebar::Sidebar;
 pub use status_bar::StatusBar;
+pub use update_notice::UpdateNotice;
 pub use utility::UtilityPane;
 pub use window::Window;
 
@@ -25,8 +27,10 @@ use gtk::glib;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::appearance;
 use crate::connection_dialog::ConnectionDialog;
 use crate::ffi::Core;
+use crate::model::update::UpdateCheck;
 use crate::model::Profile;
 use crate::tabs::EditorTabs;
 
@@ -34,7 +38,10 @@ pub const APP_ID: &str = "io.github.chud_lori.datagrep";
 
 pub fn run() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
-    app.connect_startup(|_| load_style());
+    app.connect_startup(|_| {
+        load_style();
+        appearance::apply_stored();
+    });
     app.connect_activate(|app| match app.active_window() {
         Some(window) => window.present(),
         None => open(app),
@@ -139,6 +146,37 @@ pub fn mount(app: &adw::Application, core: Arc<Core>) -> Window {
             glib::Propagation::Proceed
         }
     });
+
+    // AdwTabPage takes a GIcon, not a paintable, so tab marks re-resolve by signal.
+    appearance::connect_changed({
+        let tabs = tabs.clone();
+        move |_| tabs.refresh_chrome()
+    });
+
+    let update = UpdateCheck::new();
+    window
+        .notice_slot()
+        .set_child(Some(&UpdateNotice::new(&update)));
+    window.connect_check_updates({
+        let update = update.clone();
+        move |_| update.check_now()
+    });
+    update.connect_check_finished({
+        let window = window.downgrade();
+        // Only check_now() reports here — the user asked and is watching.
+        move |_, newer, failed| {
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            if failed {
+                window.status_bar().say("update check failed", true);
+            } else if !newer {
+                let message = format!("datagrep {} is up to date", UpdateCheck::current_version());
+                window.status_bar().say(&message, false);
+            }
+        }
+    });
+    update.check_on_launch_if_enabled();
 
     window.present();
     window

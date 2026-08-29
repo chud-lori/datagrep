@@ -207,7 +207,8 @@ fn connection_factory() -> gtk::SignalListItemFactory {
         let lock = gtk::Image::from_icon_name("changes-prevent-symbolic");
         lock.set_tooltip_text(Some("read-only"));
 
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.append(&gtk::Image::new());
         row.append(&text);
         row.append(&lock);
         item.set_child(Some(&row));
@@ -223,12 +224,19 @@ fn connection_factory() -> gtk::SignalListItemFactory {
             return;
         };
         let imp = entry.imp();
-        if let Some(text) = row.first_child().and_downcast::<gtk::Box>() {
+        if let Some(mark) = row.first_child().and_downcast::<gtk::Image>() {
+            mark.set_paintable(Some(&crate::engine::paintable(&imp.driver.borrow())));
+        }
+        if let Some(text) = row
+            .first_child()
+            .and_then(|c| c.next_sibling())
+            .and_downcast::<gtk::Box>()
+        {
             if let Some(name) = text.first_child().and_downcast::<gtk::Inscription>() {
                 name.set_text(Some(&imp.name.borrow()));
             }
             if let Some(driver) = text.last_child().and_downcast::<gtk::Inscription>() {
-                driver.set_text(Some(&imp.driver.borrow()));
+                driver.set_text(Some(&crate::engine::display_name(&imp.driver.borrow())));
             }
         }
         if let Some(lock) = row.last_child() {

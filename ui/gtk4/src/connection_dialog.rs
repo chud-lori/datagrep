@@ -1155,10 +1155,7 @@ fn engine_factory() -> gtk::SignalListItemFactory {
         let row: gtk::Box = item.child().and_downcast().unwrap();
         let image: gtk::Image = row.first_child().and_downcast().unwrap();
         let label: gtk::Label = row.last_child().and_downcast().unwrap();
-        match engine::icon(engine.id, adw::StyleManager::default().is_dark()) {
-            Some(icon) => image.set_from_gicon(&icon),
-            None => image.clear(),
-        }
+        image.set_paintable(Some(&engine::paintable(engine.id)));
         label.set_text(&engine::display_name(engine.id));
     });
     factory

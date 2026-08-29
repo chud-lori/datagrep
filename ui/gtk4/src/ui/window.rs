@@ -5,7 +5,9 @@ use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::glib;
 
+use crate::appearance;
 use crate::ffi::Core;
+use crate::model::update::UpdateCheck;
 use crate::model::ResultModel;
 use crate::sql::Derived;
 use crate::ui::{ResultsGrid, Sidebar, StatusBar};
@@ -26,6 +28,7 @@ mod imp {
         pub utility: adw::OverlaySplitView,
         pub editor_slot: adw::Bin,
         pub utility_slot: adw::Bin,
+        pub notice_slot: adw::Bin,
         pub derived: RefCell<Derived>,
         pub run_profile: RefCell<String>,
     }
@@ -44,6 +47,7 @@ mod imp {
                 utility: adw::OverlaySplitView::new(),
                 editor_slot: adw::Bin::new(),
                 utility_slot: adw::Bin::new(),
+                notice_slot: adw::Bin::new(),
                 derived: RefCell::new(Derived::default()),
                 run_profile: RefCell::new(String::new()),
             }
@@ -63,6 +67,7 @@ mod imp {
             SIGNALS.get_or_init(|| {
                 vec![
                     Signal::builder("new-connection").build(),
+                    Signal::builder("check-updates").build(),
                     Signal::builder("object-activated")
                         .param_types([String::static_type(), String::static_type()])
                         .build(),
@@ -95,6 +100,7 @@ mod imp {
 
             let toolbar = adw::ToolbarView::new();
             toolbar.add_top_bar(&self.header());
+            toolbar.add_top_bar(&self.notice_slot);
             toolbar.set_content(Some(&self.navigation));
             toolbar.add_bottom_bar(&self.status);
             obj.set_content(Some(&toolbar));
@@ -135,6 +141,8 @@ mod imp {
             };
             self.navigation.connect_collapsed_notify(refresh.clone());
             self.navigation.connect_show_content_notify(refresh);
+
+            header.pack_end(&primary_menu());
 
             let utility_toggle = gtk::ToggleButton::new();
             utility_toggle.set_icon_name("sidebar-show-right-symbolic");
@@ -192,6 +200,40 @@ mod imp {
 
         fn wire(&self) {
             self.status.bind(&self.model);
+
+            let appearance = gio::SimpleAction::new_stateful(
+                "appearance",
+                Some(glib::VariantTy::STRING),
+                &appearance::mode().as_str().to_variant(),
+            );
+            appearance.connect_activate(|action, parameter| {
+                if let Some(value) = parameter.and_then(|p| p.str()) {
+                    action.set_state(&value.to_variant());
+                    appearance::set_mode(appearance::Mode::parse(value));
+                }
+            });
+            self.obj().add_action(&appearance);
+
+            let launch_check = gio::SimpleAction::new_stateful(
+                "update-check-on-launch",
+                None,
+                &UpdateCheck::check_on_launch_enabled().to_variant(),
+            );
+            launch_check.connect_activate(|action, _| {
+                let on = !action.state().and_then(|s| s.get::<bool>()).unwrap_or(true);
+                action.set_state(&on.to_variant());
+                UpdateCheck::set_check_on_launch_enabled(on);
+            });
+            self.obj().add_action(&launch_check);
+
+            let check_updates = gio::SimpleAction::new("check-updates", None);
+            let window = self.obj().downgrade();
+            check_updates.connect_activate(move |_, _| {
+                if let Some(window) = window.upgrade() {
+                    window.emit_by_name::<()>("check-updates", &[]);
+                }
+            });
+            self.obj().add_action(&check_updates);
 
             let new_connection = gio::SimpleAction::new("new-connection", None);
             let window = self.obj().downgrade();
@@ -283,6 +325,33 @@ mod imp {
     }
 }
 
+fn primary_menu() -> gtk::MenuButton {
+    let appearance = gio::Menu::new();
+    for (label, value) in [
+        ("Follow System", "system"),
+        ("Light", "light"),
+        ("Dark", "dark"),
+    ] {
+        let item = gio::MenuItem::new(Some(label), None);
+        item.set_action_and_target_value(Some("win.appearance"), Some(&value.to_variant()));
+        appearance.append_item(&item);
+    }
+    let updates = gio::Menu::new();
+    updates.append(Some("Check for Updates…"), Some("win.check-updates"));
+    updates.append(
+        Some("Check for Updates at Launch"),
+        Some("win.update-check-on-launch"),
+    );
+    let menu = gio::Menu::new();
+    menu.append_submenu(Some("Appearance"), &appearance);
+    menu.append_section(None, &updates);
+    gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .menu_model(&menu)
+        .tooltip_text("Main Menu")
+        .build()
+}
+
 glib::wrapper! {
     pub struct Window(ObjectSubclass<imp::Window>)
         @extends adw::ApplicationWindow, gtk::ApplicationWindow, gtk::Window, gtk::Widget,
@@ -355,6 +424,21 @@ impl Window {
     /// Where the inspector / history pane mounts.
     pub fn utility_slot(&self) -> adw::Bin {
         self.imp().utility_slot.clone()
+    }
+
+    /// Where the update notice mounts, under the header bar.
+    pub fn notice_slot(&self) -> adw::Bin {
+        self.imp().notice_slot.clone()
+    }
+
+    pub fn connect_check_updates<F: Fn(&Self) + 'static>(&self, f: F) -> glib::SignalHandlerId {
+        self.connect_local("check-updates", false, move |values| {
+            let window = values[0]
+                .get::<Self>()
+                .expect("the signal carries the window");
+            f(&window);
+            None
+        })
     }
 
     /// Slide the utility pane out, for the one click that unambiguously asks for it.

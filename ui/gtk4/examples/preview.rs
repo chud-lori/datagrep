@@ -13,8 +13,20 @@ fn main() {
         .build();
     app.connect_startup(|_| datagrep_gtk::ui::load_style());
     app.connect_activate(move |app| {
+        // Pinned light so the closing force-dark flip is visible on any host theme.
+        adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceLight);
         let core = Arc::new(Core::open(&format!("{dir}/profiles.sqlite")).expect("core"));
         let _ = core.profiles_add("demo", &format!("sqlite://{dir}/demo.sqlite"));
+        // One row per engine, so a snapshot shows every brand mark. Never dialled.
+        for (name, url) in [
+            ("analytics", "postgres://demo@localhost:5432/analytics"),
+            ("orders", "mysql://demo@localhost:3306/orders"),
+            ("cache", "redis://localhost:6379/0"),
+            ("events", "mongodb://localhost:27017/events"),
+            ("logs", "elasticsearch://localhost:9200"),
+        ] {
+            let _ = core.profiles_add(name, url);
+        }
         let window = Window::new(app, core);
         let pane = UtilityPane::mount(&window, PathBuf::from(&dir).join("history"));
         window.present();
@@ -66,8 +78,12 @@ fn main() {
                     // Replay through the window's one run path: the entry should say ×2.
                     let _ = pane.history().activate_action("history.rerun", None);
                 }
-                _ => {
+                3 => {
                     shoot(&window, &out.replace(".png", "-rerun.png"));
+                    adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+                }
+                _ => {
+                    shoot(&window, &out.replace(".png", "-dark.png"));
                     app.quit();
                     return glib::ControlFlow::Break;
                 }

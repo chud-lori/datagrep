@@ -7,6 +7,7 @@ mod profile;
 mod result;
 mod row;
 mod status;
+pub mod update;
 
 pub use catalog::{CatalogNode, Enumeration};
 pub use detail::{pretty_json, DetailColumn, DetailIndex, ObjectDetail};

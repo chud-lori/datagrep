@@ -1,8 +1,10 @@
+pub mod appearance;
 pub mod connection_dialog;
 pub mod editor;
 pub mod engine;
 pub mod ffi;
 pub mod model;
+pub mod settings;
 pub mod sql;
 pub mod store;
 pub mod tabs;

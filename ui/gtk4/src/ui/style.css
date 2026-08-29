@@ -25,3 +25,8 @@ listview.dg-gutter > row:selected {
 listview.dg-history > row {
   padding: 6px 8px;
 }
+
+.dg-update-notice > box {
+  background: alpha(@accent_bg_color, 0.12);
+  padding: 2px 6px;
+}
