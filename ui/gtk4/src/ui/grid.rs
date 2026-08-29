@@ -5,10 +5,31 @@ use adw::subclass::prelude::*;
 use gtk::glib;
 
 use crate::ffi::CellKind;
-use crate::model::{ResultModel, ResultRow};
+use crate::model::{CellMark, MutationValue, ResultModel, ResultRow, StagedState};
 
 const NULL_TEXT: &str = "NULL";
 const NAT_CHARS: u32 = 18;
+const STAGE_CLASSES: [&str; 4] = [
+    "dg-staged",
+    "dg-staged-delete",
+    "dg-staged-written",
+    "dg-staged-conflict",
+];
+
+/// One css class per staging state, so the tint is a stylesheet decision and not a hard-coded colour.
+fn stage_class(mark: CellMark) -> Option<&'static str> {
+    if !mark.staged {
+        return None;
+    }
+    if mark.deleted {
+        return Some("dg-staged-delete");
+    }
+    match mark.state {
+        StagedState::Applied => mark.edited.then_some("dg-staged-written"),
+        StagedState::Conflicted => mark.edited.then_some("dg-staged-conflict"),
+        _ => mark.edited.then_some("dg-staged"),
+    }
+}
 
 /// Into a caller-owned buffer: the gutter repaints on every scroll step.
 fn decimal(mut value: u64, buf: &mut [u8; 20]) -> &str {
@@ -69,6 +90,13 @@ fn gutter_factory() -> gtk::SignalListItemFactory {
     factory
 }
 
+/// Hoisted out of the bind: a struck-through cell reuses this list rather than building one.
+fn struck_through() -> gtk::pango::AttrList {
+    let attributes = gtk::pango::AttrList::new();
+    attributes.insert(gtk::pango::AttrInt::new_strikethrough(true));
+    attributes
+}
+
 fn cell_factory(
     grid: &ResultsGrid,
     model: &ResultModel,
@@ -92,20 +120,41 @@ fn cell_factory(
         // Set up once per recycled widget, and weak both ways: the controller
         // outlives nothing it points at.
         let click = gtk::GestureClick::new();
-        let (owner, watched) = (owner.clone(), item.downgrade());
-        click.connect_pressed(move |_, _, _, _| {
-            let (Some(grid), Some(item)) = (owner.upgrade(), watched.upgrade()) else {
+        let (clicked, watched, anchor) = (owner.clone(), item.downgrade(), cell.downgrade());
+        click.connect_pressed(move |_, presses, _, _| {
+            let (Some(grid), Some(item), Some(anchor)) =
+                (clicked.upgrade(), watched.upgrade(), anchor.upgrade())
+            else {
                 return;
             };
-            if let Some(row) = item.item().and_downcast::<ResultRow>() {
-                grid.emit_by_name::<()>("cell-selected", &[&row.index(), &col]);
+            let Some(row) = item.item().and_downcast::<ResultRow>() else {
+                return;
+            };
+            grid.emit_by_name::<()>("cell-selected", &[&row.index(), &col]);
+            if presses == 2 {
+                grid.edit_cell(anchor.upcast_ref(), row.index(), col);
             }
         });
         cell.add_controller(click);
+
+        let menu = gtk::GestureClick::new();
+        menu.set_button(gtk::gdk::BUTTON_SECONDARY);
+        let (raised, watched, anchor) = (owner.clone(), item.downgrade(), cell.downgrade());
+        menu.connect_pressed(move |_, _, x, y| {
+            let (Some(grid), Some(item), Some(anchor)) =
+                (raised.upgrade(), watched.upgrade(), anchor.upgrade())
+            else {
+                return;
+            };
+            if let Some(row) = item.item().and_downcast::<ResultRow>() {
+                grid.open_row_menu(anchor.upcast_ref(), row.index(), col, x, y);
+            }
+        });
+        cell.add_controller(menu);
         item.set_child(Some(&cell));
     });
 
-    let model = model.clone();
+    let (model, struck) = (model.clone(), struck_through());
     factory.connect_bind(move |_, item| {
         let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -116,23 +165,38 @@ fn cell_factory(
         ) else {
             return;
         };
-        model.with_cell(row.index(), col, |kind, text| match kind {
-            CellKind::Value => {
-                cell.remove_css_class("dim-label");
-                cell.set_text(Some(text));
+        model.with_cell(row.index(), col, |kind, text, mark| {
+            for class in STAGE_CLASSES {
+                cell.remove_css_class(class);
             }
-            // Nested cells arrive as a summary ("{3 fields}") — chrome, whatever stands behind it.
-            CellKind::Nested => {
-                cell.add_css_class("dim-label");
-                cell.set_text(Some(text));
+            if let Some(class) = stage_class(mark) {
+                cell.add_css_class(class);
             }
-            CellKind::Null => {
-                cell.add_css_class("dim-label");
-                cell.set_text(Some(NULL_TEXT));
-            }
-            CellKind::Absent | CellKind::Pending => {
-                cell.add_css_class("dim-label");
-                cell.set_text(None);
+            // CSS text-decoration does not reach a GtkInscription's own text.
+            cell.set_attributes(mark.deleted.then_some(&struck));
+            // A staged value is data, however chrome the cell it was typed over was.
+            match kind {
+                _ if mark.edited => {
+                    cell.remove_css_class("dim-label");
+                    cell.set_text(Some(text));
+                }
+                CellKind::Value => {
+                    cell.remove_css_class("dim-label");
+                    cell.set_text(Some(text));
+                }
+                // Nested cells arrive as a summary ("{3 fields}") — chrome, whatever stands behind it.
+                CellKind::Nested => {
+                    cell.add_css_class("dim-label");
+                    cell.set_text(Some(text));
+                }
+                CellKind::Null => {
+                    cell.add_css_class("dim-label");
+                    cell.set_text(Some(NULL_TEXT));
+                }
+                CellKind::Absent | CellKind::Pending => {
+                    cell.add_css_class("dim-label");
+                    cell.set_text(None);
+                }
             }
         });
     });
@@ -155,6 +219,8 @@ mod imp {
         pub built: Cell<u32>,
         pub sort: RefCell<Option<(String, bool)>>,
         pub restoring: Cell<bool>,
+        // The cell the row menu was raised on, so "Edit Cell…" opens over it.
+        pub menu_anchor: RefCell<Option<gtk::Widget>>,
     }
 
     impl Default for ResultsGrid {
@@ -172,6 +238,7 @@ mod imp {
                 built: Cell::new(0),
                 sort: RefCell::new(None),
                 restoring: Cell::new(false),
+                menu_anchor: RefCell::new(None),
             }
         }
     }
@@ -193,6 +260,9 @@ mod imp {
                         .build(),
                     Signal::builder("cell-selected")
                         .param_types([u64::static_type(), u32::static_type()])
+                        .build(),
+                    Signal::builder("edit-refused")
+                        .param_types([String::static_type()])
                         .build(),
                 ]
             })
@@ -249,6 +319,8 @@ mod imp {
             overlay.add_overlay(&self.placeholder);
             self.obj().set_child(Some(&overlay));
 
+            self.add_editing_actions();
+
             if let Some(sorter) = self.view.sorter().and_downcast::<gtk::ColumnViewSorter>() {
                 let grid = self.obj().downgrade();
                 sorter.connect_changed(move |sorter, _| {
@@ -264,6 +336,57 @@ mod imp {
     impl BinImpl for ResultsGrid {}
 
     impl ResultsGrid {
+        /// The row menu's three items, reachable from any cell below this widget.
+        fn add_editing_actions(&self) {
+            let group = gio::SimpleActionGroup::new();
+
+            let edit = gio::SimpleAction::new("edit", Some(&<(u64, u32)>::static_variant_type()));
+            let grid = self.obj().downgrade();
+            edit.connect_activate(move |_, target| {
+                let (Some(grid), Some((row, col))) =
+                    (grid.upgrade(), target.and_then(|t| t.get::<(u64, u32)>()))
+                else {
+                    return;
+                };
+                let anchor = grid.imp().menu_anchor.borrow().clone();
+                // The menu popover is still down this turn; the editor needs its own.
+                glib::idle_add_local_once(move || {
+                    if let Some(anchor) = anchor {
+                        grid.edit_cell(&anchor, row, col);
+                    }
+                });
+            });
+            group.add_action(&edit);
+
+            for (name, delete) in [("delete", true), ("discard", false)] {
+                let action = gio::SimpleAction::new(name, Some(&u64::static_variant_type()));
+                let grid = self.obj().downgrade();
+                action.connect_activate(move |_, target| {
+                    let (Some(grid), Some(row)) =
+                        (grid.upgrade(), target.and_then(|t| t.get::<u64>()))
+                    else {
+                        return;
+                    };
+                    grid.imp().stage_row(row, delete);
+                });
+                group.add_action(&action);
+            }
+            self.obj().insert_action_group("results", Some(&group));
+        }
+
+        fn stage_row(&self, row: u64, delete: bool) {
+            let Some(model) = self.model.borrow().clone() else {
+                return;
+            };
+            if !delete {
+                model.discard_staged_row(row);
+                return;
+            }
+            if let Err(why) = model.stage_delete(row) {
+                self.obj().emit_by_name::<()>("edit-refused", &[&why]);
+            }
+        }
+
         pub(super) fn bind(&self, model: &ResultModel) {
             self.view
                 .set_model(Some(&gtk::MultiSelection::new(Some(model.clone()))));
@@ -401,6 +524,21 @@ impl ResultsGrid {
         })
     }
 
+    /// A refused staging attempt, in the words the status bar shows.
+    pub fn connect_edit_refused<F: Fn(&Self, &str) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.connect_local("edit-refused", false, move |values| {
+            let grid = values[0]
+                .get::<Self>()
+                .expect("the signal carries the grid");
+            let message = values[1].get::<String>().unwrap_or_default();
+            f(&grid, &message);
+            None
+        })
+    }
+
     /// A cell click: the result row and the column, for the inspector to open.
     pub fn connect_cell_selected<F: Fn(&Self, u64, u32) + 'static>(
         &self,
@@ -415,6 +553,158 @@ impl ResultsGrid {
             f(&grid, row, column);
             None
         })
+    }
+
+    /// The editor is a popover on the cell itself, so what is being retyped stays in view.
+    pub fn edit_cell(&self, anchor: &gtk::Widget, row: u64, col: u32) {
+        let Some(model) = self.imp().model.borrow().clone() else {
+            return;
+        };
+        if !model.is_editable_cell(row, col) {
+            return;
+        }
+        let Some(field) = model.field_name(row, col) else {
+            self.emit_by_name::<()>(
+                "edit-refused",
+                &[&"this column is not one of the fields the row was read under".to_owned()],
+            );
+            return;
+        };
+        let loaded = model.loaded_value(row, col);
+        let entry = gtk::Entry::new();
+        entry.set_text(&model.with_cell(row, col, |_, text, mark| {
+            match mark.edited {
+                true => text.to_owned(),
+                false => loaded
+                    .as_ref()
+                    .map(MutationValue::display)
+                    .unwrap_or_default(),
+            }
+        }));
+        entry.set_activates_default(true);
+
+        let title = gtk::Label::new(Some(&field));
+        title.add_css_class("heading");
+        title.add_css_class("monospace");
+        title.set_xalign(0.0);
+        let hint = gtk::Label::new(Some(&format!(
+            "holds {}",
+            loaded.as_ref().map_or("empty", MutationValue::type_name)
+        )));
+        hint.add_css_class("caption");
+        hint.add_css_class("dim-label");
+        hint.set_xalign(0.0);
+        let why_not = gtk::Label::new(None);
+        why_not.add_css_class("error");
+        why_not.add_css_class("caption");
+        why_not.set_wrap(true);
+        why_not.set_xalign(0.0);
+        why_not.set_visible(false);
+
+        let cancel = gtk::Button::with_label("Cancel");
+        let stage = gtk::Button::with_label("Stage Edit");
+        stage.add_css_class("suggested-action");
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        buttons.set_halign(gtk::Align::End);
+        buttons.append(&cancel);
+        buttons.append(&stage);
+
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        body.set_margin_top(6);
+        body.set_margin_bottom(6);
+        body.set_margin_start(6);
+        body.set_margin_end(6);
+        for child in [
+            title.upcast_ref::<gtk::Widget>(),
+            entry.upcast_ref(),
+            hint.upcast_ref(),
+            why_not.upcast_ref(),
+        ] {
+            body.append(child);
+        }
+        body.append(&buttons);
+
+        let popover = gtk::Popover::builder().child(&body).build();
+        popover.set_parent(anchor);
+        popover.connect_closed(|popover| popover.unparent());
+
+        let commit = {
+            let (grid, popover, entry, why_not) = (
+                self.downgrade(),
+                popover.clone(),
+                entry.clone(),
+                why_not.clone(),
+            );
+            move || {
+                let (Some(grid), Some(model)) = (grid.upgrade(), Some(model.clone())) else {
+                    return;
+                };
+                match model.stage_edit(row, col, &entry.text()) {
+                    Ok(()) => popover.popdown(),
+                    Err(why) => {
+                        why_not.set_text(&why);
+                        why_not.set_visible(true);
+                        grid.emit_by_name::<()>("edit-refused", &[&why]);
+                    }
+                }
+            }
+        };
+        let activate = commit.clone();
+        entry.connect_activate(move |_| activate());
+        stage.connect_clicked(move |_| commit());
+        let closing = popover.clone();
+        cancel.connect_clicked(move |_| closing.popdown());
+
+        popover.popup();
+        entry.grab_focus();
+    }
+
+    /// The same four choices the macOS and Qt grids offer, and no "retry as written".
+    pub fn open_row_menu(&self, anchor: &gtk::Widget, row: u64, col: u32, x: f64, y: f64) {
+        let Some(model) = self.imp().model.borrow().clone() else {
+            return;
+        };
+        if model.editable().is_none() {
+            return;
+        }
+        let edits = model.edits();
+        let menu = gio::Menu::new();
+        // Targets are built as typed variants: a detailed name would infer (ii), not (tu).
+        let item = |label: &str, action: &str, target: glib::Variant| {
+            let item = gio::MenuItem::new(Some(label), None);
+            item.set_action_and_target_value(Some(action), Some(&target));
+            item
+        };
+        if model.is_editable_cell(row, col) {
+            menu.append_item(&item("Edit Cell…", "results.edit", (row, col).to_variant()));
+        }
+        if edits.is_deleted(row) {
+            menu.append_item(&item(
+                "Keep This Document",
+                "results.discard",
+                row.to_variant(),
+            ));
+        } else {
+            menu.append_item(&item("Delete Document", "results.delete", row.to_variant()));
+            if edits.is_staged(row) {
+                menu.append_item(&item(
+                    "Discard Staged Changes",
+                    "results.discard",
+                    row.to_variant(),
+                ));
+            }
+        }
+        if menu.n_items() == 0 {
+            return;
+        }
+        *self.imp().menu_anchor.borrow_mut() = Some(anchor.clone());
+        let popover = gtk::PopoverMenu::from_model(Some(&menu));
+        popover.set_has_arrow(false);
+        popover.set_halign(gtk::Align::Start);
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        popover.set_parent(anchor);
+        popover.connect_closed(|popover| popover.unparent());
+        popover.popup();
     }
 
     pub fn clear_sort_indicator(&self) {

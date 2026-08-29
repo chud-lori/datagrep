@@ -27,6 +27,8 @@ ui/gtk4/
       history.rs            # the query-history store: JSONL day files, retention, dedupe
       row.rs                # the GListModel item: an index, nothing else
       result.rs             # ResultModel: GListModel over the windowed row API  <- core
+      mutation.rs           # the editing wire types: values, addresses, batches, the report
+      editing.rs            # PendingEdits: every edit typed into the grid and not yet committed
     ui/
       mod.rs                # AdwApplication, style sheet, config-directory paths
       window.rs             # the shell: toolbar view, split views, breakpoints, run path
@@ -37,7 +39,10 @@ ui/gtk4/
       utility.rs            # the utility pane: AdwViewSwitcher over Inspector and History
       inspector.rs          # schema detail for the selected object, cell detail for the cell
       history.rs            # the history panel: filters, day sections, rerun, retention
+      editing.rs            # the staged-edits bar and the commit report
+      conflict.rs           # the 409 review: loaded / on the server now / typed
   examples/preview.rs       # snapshots the realised window to PNG (see "Building")
+  examples/editing_preview.rs # the same, driving the editing chain against a live Elasticsearch
   tests/streaming.rs        # the model against the real engine, headless
   tests/catalog.rs          # the sidebar's data path against the real engine, headless
   tests/history.rs          # the history store against the format the other two read
@@ -127,11 +132,19 @@ Sandbox permissions this will need, each explicit rather than inherited:
 `--talk-name=org.freedesktop.secrets` (the engine stores passwords in the
 Secret Service), `--share=network`, and `--filesystem=~/.ssh:ro` for tunnels.
 
-The API floor is therefore **libadwaita 1.4 / GTK 4.12** — high enough for the
-window composition above, low enough to compile on a stock `ubuntu-24.04`
-runner, which is what keeps CI feedback fast. The CI job asserts it with
-`pkg-config --atleast-version`, so the floor is a build failure rather than a
-paragraph. Anything from 1.5/1.6 is used only behind a runtime version check.
+The API floor is **libadwaita 1.5 / GTK 4.12** — high enough for the window
+composition above, low enough to compile on a stock `ubuntu-24.04` runner
+(which ships libadwaita 1.5.0), which is what keeps CI feedback fast. The CI
+job asserts it with `pkg-config --atleast-version`, so the floor is a build
+failure rather than a paragraph. Anything from 1.6 up is used only behind a
+runtime version check.
+
+It was 1.4 until the editing chain landed. `AdwDialog` and `AdwAlertDialog` are
+1.5, and the commit confirmation, the commit report and the conflict review are
+all dialogs; on 1.4 the alternative is `AdwMessageDialog`, which was deprecated
+in 1.6. Raising the floor to what the CI runner already has costs nothing and
+avoids writing a deprecated idiom on day one. The Flatpak runtime is
+`org.gnome.Platform//50` (libadwaita 1.9), so shipping was never the constraint.
 
 ## The utility pane
 
@@ -187,6 +200,55 @@ lands in `run`, a replay is behind it by construction rather than by anyone
 remembering to guard the second entry point. `run-started` is emitted after
 every guard and before the engine is asked, so a statement that gets refused is
 never recorded as one that ran.
+
+## The editing chain
+
+Peer of `ui/macos/Sources/datagrep-app/{GridEditing,EditingSurface,ConflictResolution}.swift`
+and `ui/linux/src/{model/Mutation,model/GridEditing,ui/EditingSurface,ui/ConflictResolution}`.
+It is engine-neutral: nothing here knows that `_seq_no` and `_primary_term`
+are Elasticsearch's, because the guard field names come out of
+`status_json.editable.guard`, which the engine fills from a table in
+`crates/datagrep-ffi/src/query.rs`. A driver that guards on something else
+needs no change here.
+
+Editing is **staging, then one commit**. A double-click opens a popover on the
+cell itself; the value is coerced to the type the cell was **loaded** with (a
+text field stays text however numeric the typing looks), the row's identity and
+guard are read out of its envelope at that moment, and nothing is sent. The
+grid tints what is staged and keeps showing what was loaded — after a commit it
+still does, and the bar says so, because the only thing that makes the grid
+current is running the statement again.
+
+Six behaviours are contracts, not preferences:
+
+- **The confirmation states the shape of the batch before the click**, not
+  after: "3 documents will be written one by one, and there is no transaction:
+  if #3 fails, the 2 before it stay written and nothing is rolled back." On a
+  connection that reports `atomic_batch` it says the opposite, truthfully.
+  Cancel is the default response.
+- **Not-attempted rows stay staged.** The report folds back into
+  `PendingEdits` **by position** — one report row per mutation, in order, on
+  both the serial and `_bulk` paths — and a report that does not line up
+  one-for-one folds nothing in and says so.
+- **A 409 offers rebase or discard-mine, never a retry.** `retry_on_conflict`
+  is the clobber the guard exists to prevent. Rebase re-guards against the
+  version the user was **just shown** in the review, and stages it again: the
+  commit button is still the only thing that writes.
+- **A partly returned guard is no guard.** If the re-read does not carry every
+  field in `editable.guard`, "Re-apply" is insensitive, because the edit could
+  then only be re-sent unguarded.
+- **The read-only veto applies at send time.** `set_allows_editing` is called
+  before the query handle exists, so no window of rows is ever editable for an
+  instant; and it is re-read when Commit is pressed, so a result that stopped
+  being editable cannot still write.
+- **Notices are shown, never swallowed** — including the `es.bulk.partial`
+  warning that says the bulk path attempted every item rather than stopping at
+  the first failure.
+
+`datagrep_mutate` and `datagrep_reread_documents` block, so both run on
+`gio::spawn_blocking`. That is why `Core` holds its handle in an `Arc`: the
+worker's clone keeps the engine alive for the length of the write, rather than
+relying on the window outliving it the way the Qt front-end does.
 
 ## Streaming, and what the model exposes
 
@@ -287,3 +349,21 @@ streams 5,000 rows), clicks a cell, describes a table, and writes three PNGs:
 page and its detail strip, and `window-rerun.png` after driving `history.rerun`
 — where the entry reads `×2`, which is the replay having gone through the run
 path rather than around it.
+
+`examples/editing_preview.rs` does the same for the editing chain, and needs a
+real Elasticsearch because that is the only way `status_json.editable` is ever
+non-null:
+
+```
+docker run --rm -d -p 9200:9200 -e discovery.type=single-node \
+  -e xpack.security.enabled=false \
+  docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+PREVIEW_DIR=/tmp/dg PREVIEW_PNG=/tmp/dg/editing.png cargo run --example editing_preview
+```
+
+It seeds an eight-document index, stages two field edits and a delete, writes
+to one of those documents behind the app's back so the guard it staged is
+stale, commits, resolves the 409 by re-applying onto the current version, and
+commits again. Five PNGs: the tinted grid and its bar, the confirmation, the
+partial report, the conflict review, and the second report — which reads
+`written · now at _seq_no 11`, the version after the one the review showed.

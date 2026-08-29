@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -6,9 +6,14 @@ use adw::subclass::prelude::*;
 use gtk::glib;
 
 use crate::ffi::Core;
-use crate::model::ResultModel;
+use crate::model::mutation::{
+    document_address_batch_json, mutation_batch_json, MutationReport, ServerDocument,
+};
+use crate::model::{ResultModel, StagedDocument};
 use crate::sql::Derived;
-use crate::ui::{ResultsGrid, Sidebar, StatusBar};
+use crate::ui::conflict::{ConflictDialog, ConflictReview};
+use crate::ui::editing::{commit_warning, confirm, report_dialog, report_headline};
+use crate::ui::{ResultsGrid, Sidebar, StagedEditsBar, StatusBar};
 
 mod imp {
     use super::*;
@@ -21,6 +26,12 @@ mod imp {
         pub grid: ResultsGrid,
         pub sidebar: Sidebar,
         pub status: StatusBar,
+        pub staged: StagedEditsBar,
+        pub committing: Cell<bool>,
+        pub rereading: Cell<bool>,
+        // The connection the loaded result came from, which the selected one may no longer be.
+        pub ran_profile: RefCell<String>,
+        pub review: RefCell<ConflictReview>,
         pub title: adw::WindowTitle,
         pub navigation: adw::NavigationSplitView,
         pub utility: adw::OverlaySplitView,
@@ -38,6 +49,11 @@ mod imp {
                 model,
                 sidebar: Sidebar::new(),
                 status: StatusBar::new(),
+                staged: StagedEditsBar::new(),
+                committing: Cell::new(false),
+                rereading: Cell::new(false),
+                ran_profile: RefCell::new(String::new()),
+                review: RefCell::new(ConflictReview::default()),
                 title: adw::WindowTitle::new("datagrep", ""),
                 navigation: adw::NavigationSplitView::new(),
                 utility: adw::OverlaySplitView::new(),
@@ -107,6 +123,14 @@ mod imp {
         }
     }
 
+    #[derive(Clone, Copy)]
+    pub enum Action {
+        Commit,
+        Discard,
+        Resolve,
+        Reload,
+    }
+
     impl WidgetImpl for Window {}
     impl WindowImpl for Window {}
     impl ApplicationWindowImpl for Window {}
@@ -157,11 +181,16 @@ mod imp {
             self.utility.set_show_sidebar(false);
             self.utility.set_sidebar(Some(&self.utility_slot));
 
+            // The bar annotates the rows it is about, so it sits directly over them.
+            let results = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            results.append(&self.staged);
+            results.append(&self.grid);
+
             let workspace = gtk::Paned::new(gtk::Orientation::Vertical);
             workspace.set_shrink_start_child(false);
             workspace.set_shrink_end_child(false);
             workspace.set_start_child(Some(&self.editor_slot));
-            workspace.set_end_child(Some(&self.grid));
+            workspace.set_end_child(Some(&results));
             workspace.set_position(260);
             self.utility.set_content(Some(&workspace));
 
@@ -190,6 +219,8 @@ mod imp {
 
         fn wire(&self) {
             self.status.bind(&self.model);
+            self.staged.bind(&self.model.edits());
+            self.wire_editing();
 
             let new_connection = gio::SimpleAction::new("new-connection", None);
             let window = self.obj().downgrade();
@@ -248,6 +279,301 @@ mod imp {
             });
         }
 
+        fn wire_editing(&self) {
+            let window = self.obj().downgrade();
+            self.grid.connect_edit_refused(move |_, message| {
+                if let Some(window) = window.upgrade() {
+                    window.imp().status.say(message, true);
+                }
+            });
+            for (signal, action) in [
+                ("commit-requested", Action::Commit),
+                ("discard-requested", Action::Discard),
+                ("resolve-requested", Action::Resolve),
+                ("reload-requested", Action::Reload),
+            ] {
+                let window = self.obj().downgrade();
+                self.staged.connect_request(signal, move |_| {
+                    if let Some(window) = window.upgrade() {
+                        window.imp().on_staged_action(action);
+                    }
+                });
+            }
+        }
+
+        fn on_staged_action(&self, action: Action) {
+            match action {
+                Action::Commit => self.commit_staged_edits(),
+                Action::Discard => self.discard_staged_edits(),
+                Action::Resolve => self.review_conflicts(),
+                Action::Reload => self.execute(),
+            }
+        }
+
+        /// The one destructive step. Everything before it is staging.
+        fn commit_staged_edits(&self) {
+            let pending = self.model.edits().pending();
+            let profile = self.ran_profile.borrow().clone();
+            if self.committing.get() || pending.is_empty() || profile.is_empty() {
+                return;
+            }
+            // The veto is re-read here, not only when a cell was typed into.
+            let Some(editable) = self.model.editable() else {
+                self.status.say(
+                    "this result is no longer editable on this connection, so nothing was sent",
+                    true,
+                );
+                return;
+            };
+            let count = pending.len() as u32;
+            let heading = match count {
+                1 => format!("Commit 1 document edit to `{profile}`?"),
+                n => format!("Commit {n} document edits to `{profile}`?"),
+            };
+            let label = match count {
+                1 => "Commit 1 Document".to_owned(),
+                n => format!("Commit {n} Documents"),
+            };
+            let window = self.obj().downgrade();
+            let dialog = confirm(
+                &heading,
+                &commit_warning(count, editable.atomic_batch),
+                &label,
+                move || {
+                    if let Some(window) = window.upgrade() {
+                        window.imp().send_mutations(&pending, &profile);
+                    }
+                },
+            );
+            dialog.present(Some(self.obj().as_ref()));
+        }
+
+        fn send_mutations(&self, pending: &[StagedDocument], profile: &str) {
+            let Some(core) = self.core.borrow().clone() else {
+                return;
+            };
+            self.committing.set(true);
+            self.staged.set_committing(true);
+            self.status.say(
+                &format!("committing {} document(s) to {profile}…", pending.len()),
+                false,
+            );
+            let ids: Vec<String> = pending.iter().map(|d| d.id.clone()).collect();
+            let rows: Vec<u64> = pending.iter().map(|d| d.row).collect();
+            let batch = mutation_batch_json(
+                &pending
+                    .iter()
+                    .map(StagedDocument::mutation)
+                    .collect::<Vec<_>>(),
+            );
+            let (window, core, profile) =
+                (self.obj().downgrade(), (*core).clone(), profile.to_owned());
+            glib::spawn_future_local(async move {
+                let sent = gio::spawn_blocking(move || core.mutate_json(&profile, &batch)).await;
+                if let Some(window) = window.upgrade() {
+                    window.imp().finish_commit(sent.ok(), &ids, &rows);
+                }
+            });
+        }
+
+        fn finish_commit(
+            &self,
+            sent: Option<Result<String, crate::ffi::Error>>,
+            ids: &[String],
+            rows: &[u64],
+        ) {
+            self.committing.set(false);
+            self.staged.set_committing(false);
+            let report = match sent {
+                // The batch never ran: nothing was written, and everything stays staged.
+                Some(Err(error)) => return self.status.say(&error.0, true),
+                None => return self.status.say("the commit did not finish", true),
+                Some(Ok(json)) => match MutationReport::decode(&json) {
+                    Ok(report) => report,
+                    Err(why) => return self.status.say(&why, true),
+                },
+            };
+            let lined_up = self.model.edits().apply(&report, ids);
+            self.model.refresh_staged_rows(rows);
+            self.status.say(
+                &match lined_up {
+                    true => report_headline(&report),
+                    false => format!(
+                        "the engine reported {} outcome(s) for {} document(s), so datagrep cannot \
+                         say which is which — read the report, and re-run the statement to see \
+                         what was written",
+                        report.rows.len(),
+                        ids.len()
+                    ),
+                },
+                !report.is_clean() || !lined_up,
+            );
+            let window = self.obj().downgrade();
+            let dialog = report_dialog(&report, move || {
+                if let Some(window) = window.upgrade() {
+                    window.imp().review_conflicts();
+                }
+            });
+            dialog.present(Some(self.obj().as_ref()));
+        }
+
+        fn review_conflicts(&self) {
+            let conflicted = self.model.edits().conflicted();
+            let profile = self.ran_profile.borrow().clone();
+            if self.committing.get() || self.rereading.get() || conflicted.is_empty() {
+                return;
+            }
+            let (Some(core), false) = (self.core.borrow().clone(), profile.is_empty()) else {
+                return;
+            };
+            if self.model.editable().is_none() {
+                self.status.say(
+                    "this result no longer says how its documents are identified, so datagrep \
+                     cannot read them back — re-run the statement",
+                    true,
+                );
+                return;
+            }
+            self.rereading.set(true);
+            self.staged.set_rereading(true);
+            self.status.say("reading what the server holds now…", false);
+            let addresses = document_address_batch_json(
+                &conflicted
+                    .iter()
+                    .map(StagedDocument::address)
+                    .collect::<Vec<_>>(),
+            );
+            let (window, core) = (self.obj().downgrade(), (*core).clone());
+            glib::spawn_future_local(async move {
+                let read =
+                    gio::spawn_blocking(move || core.reread_documents_json(&profile, &addresses))
+                        .await;
+                if let Some(window) = window.upgrade() {
+                    window.imp().finish_reread(read.ok(), &conflicted);
+                }
+            });
+        }
+
+        fn finish_reread(
+            &self,
+            read: Option<Result<String, crate::ffi::Error>>,
+            conflicted: &[StagedDocument],
+        ) {
+            self.rereading.set(false);
+            self.staged.set_rereading(false);
+            let server = match read {
+                Some(Err(error)) => return self.status.say(&error.0, true),
+                None => return self.status.say("the re-read did not finish", true),
+                Some(Ok(json)) => match ServerDocument::decode_all(&json) {
+                    Ok(documents) => documents,
+                    Err(why) => return self.status.say(&why, true),
+                },
+            };
+            // By position, like the report: a list that does not line up is not guessed at.
+            if server.len() != conflicted.len() {
+                self.status.say(
+                    &format!(
+                        "the engine answered for {} of {} documents, so datagrep cannot say which \
+                         answer belongs to which — re-run the statement",
+                        server.len(),
+                        conflicted.len()
+                    ),
+                    true,
+                );
+                return;
+            }
+            let Some(editable) = self.model.editable() else {
+                return;
+            };
+            *self.review.borrow_mut() = ConflictReview::build(conflicted, &server, &editable);
+            self.status.say(
+                &format!("{} conflict(s) to resolve", conflicted.len()),
+                false,
+            );
+            self.present_conflict_review();
+        }
+
+        /// A rebase is staged again, not written: the commit button stays the only thing that writes.
+        fn present_conflict_review(&self) {
+            let dialog: Rc<RefCell<Option<ConflictDialog>>> = Rc::default();
+            let window = self.obj().downgrade();
+            let owner = Rc::clone(&dialog);
+            let review = ConflictDialog::new(&self.review.borrow(), move |id, rebase| {
+                let Some(window) = window.upgrade() else {
+                    return;
+                };
+                if window.imp().resolve_conflict(id, rebase) {
+                    if let Some(dialog) = owner.borrow().as_ref() {
+                        dialog.resolved(id);
+                    }
+                }
+            });
+            review.present(self.obj().as_ref());
+            *dialog.borrow_mut() = Some(review);
+        }
+
+        fn resolve_conflict(&self, id: &str, rebase: bool) -> bool {
+            let edits = self.model.edits();
+            if !rebase {
+                if let Some(row) = edits.discard_by_id(id) {
+                    self.model.refresh_staged_rows(&[row]);
+                }
+                self.status
+                    .say("edit discarded — the server's version is untouched", false);
+                return true;
+            }
+            let guard = self
+                .review
+                .borrow()
+                .document(id)
+                .filter(|document| document.can_rebase)
+                .map(|document| document.rebase_guard.clone());
+            let Some(guard) = guard else {
+                self.status.say(
+                    "the server did not return a version for this document, so the edit could \
+                     only be re-sent unguarded — which would overwrite whatever is there now",
+                    true,
+                );
+                return false;
+            };
+            if let Some(row) = edits.rebase(id, guard) {
+                self.model.refresh_staged_rows(&[row]);
+            }
+            self.status.say(
+                "re-applied onto the current version — still staged, and still not written. \
+                 Commit to write it.",
+                false,
+            );
+            true
+        }
+
+        fn discard_staged_edits(&self) {
+            let edits = self.model.edits();
+            let rows = edits.rows();
+            if rows.is_empty() {
+                return;
+            }
+            let window = self.obj().downgrade();
+            let dialog = confirm(
+                &format!(
+                    "Discard {} staged document edit(s)?",
+                    edits.counts().pending
+                ),
+                "Nothing has been written yet, and nothing will be. The values you typed are lost.",
+                "Discard",
+                move || {
+                    let Some(window) = window.upgrade() else {
+                        return;
+                    };
+                    let imp = window.imp();
+                    imp.model.edits().discard_all();
+                    imp.model.refresh_staged_rows(&rows);
+                    imp.status.say("staged edits discarded", false);
+                },
+            );
+            dialog.present(Some(self.obj().as_ref()));
+        }
+
         pub(super) fn execute(&self) {
             let Some(core) = self.core.borrow().clone() else {
                 return;
@@ -263,11 +589,15 @@ mod imp {
             }
             // Announced before the engine is asked, so a statement refused was never a run.
             let driver = self.sidebar.selected_driver().unwrap_or_default();
+            // Set before the result exists, so no window of rows is ever editable for an instant.
+            self.model
+                .set_allows_editing(!self.sidebar.selected_read_only());
             let obj = self.obj();
             obj.emit_by_name::<()>("run-started", &[&profile, &driver, &sql]);
             match core.query(&profile, &sql) {
                 Ok(query) => {
                     self.status.say("", false);
+                    *self.ran_profile.borrow_mut() = profile;
                     self.model.set_query(query);
                 }
                 Err(error) => {
@@ -317,6 +647,11 @@ impl Window {
 
     pub fn status_bar(&self) -> StatusBar {
         self.imp().status.clone()
+    }
+
+    /// Everything staged and unwritten, and the only button that writes.
+    pub fn staged_bar(&self) -> StagedEditsBar {
+        self.imp().staged.clone()
     }
 
     /// Where the SQL editor mounts.

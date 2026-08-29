@@ -51,7 +51,7 @@ jobs:
       - name: Assert the GTK4 / libadwaita floor
         run: |
           pkg-config --print-errors --atleast-version=4.12 gtk4
-          pkg-config --print-errors --atleast-version=1.4 libadwaita-1
+          pkg-config --print-errors --atleast-version=1.5 libadwaita-1
           echo "gtk4        $(pkg-config --modversion gtk4)"
           echo "libadwaita  $(pkg-config --modversion libadwaita-1)"
 

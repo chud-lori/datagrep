@@ -1,3 +1,5 @@
+mod conflict;
+pub mod editing;
 mod grid;
 mod history;
 mod inspector;
@@ -7,6 +9,8 @@ mod status_bar;
 mod utility;
 mod window;
 
+pub use conflict::{ConflictDialog, ConflictDocument, ConflictField, ConflictReview};
+pub use editing::StagedEditsBar;
 pub use grid::ResultsGrid;
 pub use history::HistoryPanel;
 pub use inspector::Inspector;

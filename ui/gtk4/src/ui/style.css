@@ -25,3 +25,25 @@ listview.dg-gutter > row:selected {
 listview.dg-history > row {
   padding: 6px 8px;
 }
+
+/* Staged edits are tinted, never redrawn as the server's truth: the row still shows
+   what was loaded until the statement is run again. */
+.dg-staged-bar {
+  border-bottom: 1px solid alpha(currentColor, 0.15);
+}
+
+columnview.data-table > listview > row > cell .dg-staged {
+  background: alpha(@warning_color, 0.22);
+}
+
+columnview.data-table > listview > row > cell .dg-staged-conflict {
+  background: alpha(@warning_color, 0.4);
+}
+
+columnview.data-table > listview > row > cell .dg-staged-written {
+  background: alpha(@success_color, 0.22);
+}
+
+columnview.data-table > listview > row > cell .dg-staged-delete {
+  background: alpha(@error_color, 0.18);
+}
