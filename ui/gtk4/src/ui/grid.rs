@@ -69,8 +69,14 @@ fn gutter_factory() -> gtk::SignalListItemFactory {
     factory
 }
 
-fn cell_factory(model: &ResultModel, col: u32, numeric: bool) -> gtk::SignalListItemFactory {
+fn cell_factory(
+    grid: &ResultsGrid,
+    model: &ResultModel,
+    col: u32,
+    numeric: bool,
+) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
+    let owner = grid.downgrade();
     factory.connect_setup(move |_, item| {
         let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -83,6 +89,19 @@ fn cell_factory(model: &ResultModel, col: u32, numeric: bool) -> gtk::SignalList
         if numeric {
             cell.add_css_class("numeric");
         }
+        // Set up once per recycled widget, and weak both ways: the controller
+        // outlives nothing it points at.
+        let click = gtk::GestureClick::new();
+        let (owner, watched) = (owner.clone(), item.downgrade());
+        click.connect_pressed(move |_, _, _, _| {
+            let (Some(grid), Some(item)) = (owner.upgrade(), watched.upgrade()) else {
+                return;
+            };
+            if let Some(row) = item.item().and_downcast::<ResultRow>() {
+                grid.emit_by_name::<()>("cell-selected", &[&row.index(), &col]);
+            }
+        });
+        cell.add_controller(click);
         item.set_child(Some(&cell));
     });
 
@@ -168,9 +187,14 @@ mod imp {
         fn signals() -> &'static [Signal] {
             static SIGNALS: OnceLock<Vec<Signal>> = OnceLock::new();
             SIGNALS.get_or_init(|| {
-                vec![Signal::builder("sort-requested")
-                    .param_types([String::static_type(), bool::static_type()])
-                    .build()]
+                vec![
+                    Signal::builder("sort-requested")
+                        .param_types([String::static_type(), bool::static_type()])
+                        .build(),
+                    Signal::builder("cell-selected")
+                        .param_types([u64::static_type(), u32::static_type()])
+                        .build(),
+                ]
             })
         }
 
@@ -280,7 +304,7 @@ mod imp {
                 let numeric = is_numeric(&spec.ty);
                 let column = gtk::ColumnViewColumn::new(
                     Some(&spec.name),
-                    Some(cell_factory(model, col, numeric)),
+                    Some(cell_factory(&self.obj(), model, col, numeric)),
                 );
                 column.set_resizable(true);
                 // Display state only: it makes the header clickable; the click re-issues SQL.
@@ -373,6 +397,22 @@ impl ResultsGrid {
             let column = values[1].get::<String>().unwrap_or_default();
             let ascending = values[2].get::<bool>().unwrap_or(true);
             f(&grid, &column, ascending);
+            None
+        })
+    }
+
+    /// A cell click: the result row and the column, for the inspector to open.
+    pub fn connect_cell_selected<F: Fn(&Self, u64, u32) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.connect_local("cell-selected", false, move |values| {
+            let grid = values[0]
+                .get::<Self>()
+                .expect("the signal carries the grid");
+            let row = values[1].get::<u64>().unwrap_or_default();
+            let column = values[2].get::<u32>().unwrap_or_default();
+            f(&grid, row, column);
             None
         })
     }

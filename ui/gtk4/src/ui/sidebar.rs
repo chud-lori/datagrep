@@ -103,6 +103,13 @@ mod imp {
                     Signal::builder("object-activated")
                         .param_types([String::static_type(), String::static_type()])
                         .build(),
+                    Signal::builder("object-described")
+                        .param_types([
+                            String::static_type(),
+                            String::static_type(),
+                            String::static_type(),
+                        ])
+                        .build(),
                 ]
             })
         }
@@ -138,6 +145,14 @@ mod imp {
                     sidebar.emit_by_name::<()>("object-activated", &[&profile, &path_json]);
                 }
             });
+
+            let sidebar = self.obj().downgrade();
+            self.schema
+                .connect_object_described(move |_, path, detail, error| {
+                    if let Some(sidebar) = sidebar.upgrade() {
+                        sidebar.emit_by_name::<()>("object-described", &[&path, &detail, &error]);
+                    }
+                });
 
             let connections = gtk::ScrolledWindow::builder()
                 .hscrollbar_policy(gtk::PolicyType::Never)
@@ -192,7 +207,8 @@ fn connection_factory() -> gtk::SignalListItemFactory {
         let lock = gtk::Image::from_icon_name("changes-prevent-symbolic");
         lock.set_tooltip_text(Some("read-only"));
 
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.append(&gtk::Image::new());
         row.append(&text);
         row.append(&lock);
         item.set_child(Some(&row));
@@ -208,12 +224,19 @@ fn connection_factory() -> gtk::SignalListItemFactory {
             return;
         };
         let imp = entry.imp();
-        if let Some(text) = row.first_child().and_downcast::<gtk::Box>() {
+        if let Some(mark) = row.first_child().and_downcast::<gtk::Image>() {
+            mark.set_paintable(Some(&crate::engine::paintable(&imp.driver.borrow())));
+        }
+        if let Some(text) = row
+            .first_child()
+            .and_then(|c| c.next_sibling())
+            .and_downcast::<gtk::Box>()
+        {
             if let Some(name) = text.first_child().and_downcast::<gtk::Inscription>() {
                 name.set_text(Some(&imp.name.borrow()));
             }
             if let Some(driver) = text.last_child().and_downcast::<gtk::Inscription>() {
-                driver.set_text(Some(&imp.driver.borrow()));
+                driver.set_text(Some(&crate::engine::display_name(&imp.driver.borrow())));
             }
         }
         if let Some(lock) = row.last_child() {
@@ -314,6 +337,22 @@ impl Sidebar {
                 .expect("the signal carries the sidebar");
             let name = values[1].get::<String>().unwrap_or_default();
             f(&sidebar, &name);
+            None
+        })
+    }
+
+    pub fn connect_object_described<F: Fn(&Self, &str, &str, &str) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.connect_local("object-described", false, move |values| {
+            let sidebar = values[0]
+                .get::<Self>()
+                .expect("the signal carries the sidebar");
+            let path = values[1].get::<String>().unwrap_or_default();
+            let detail = values[2].get::<String>().unwrap_or_default();
+            let error = values[3].get::<String>().unwrap_or_default();
+            f(&sidebar, &path, &detail, &error);
             None
         })
     }

@@ -20,6 +20,10 @@ async-channel = "2"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Already in the engine graph via the Elasticsearch driver; same version, fewer features.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt"] }
 gtk = { version = "0.9.7", package = "gtk4", features = ["v4_12"] }
 adw = { version = "0.7", package = "libadwaita", features = ["v1_5"] }
 sourceview5 = "0.9"
