@@ -4,20 +4,8 @@ use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::glib;
 
+use crate::model::format::count as format_count;
 use crate::model::{QueryState, QueryStatus, ResultModel};
-
-/// Grouped for prose ("first 12,000 rows"); the gutter stays ungrouped.
-fn format_count(value: u64) -> String {
-    let digits = value.to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, digit) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
-    grouped
-}
 
 fn format_elapsed(ms: u64) -> String {
     if ms < 1000 {
@@ -244,10 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn counts_are_grouped_and_elapsed_switches_unit_at_a_second() {
-        assert_eq!(format_count(0), "0");
-        assert_eq!(format_count(999), "999");
-        assert_eq!(format_count(1_234_567), "1,234,567");
+    fn elapsed_switches_unit_at_a_second() {
         assert_eq!(format_elapsed(999), "999 ms");
         assert_eq!(format_elapsed(1500), "1.50 s");
     }

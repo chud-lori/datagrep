@@ -1,7 +1,9 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use gtk::{gio, glib};
+use adw::prelude::*;
+use gtk::subclass::prelude::ObjectSubclassIsExt;
+use gtk::{gdk, gio, glib};
 
 struct Art {
     svg: &'static str,
@@ -65,34 +67,151 @@ pub fn display_name(driver_id: &str) -> String {
     }
 }
 
-/// Brand mark as a `GIcon`; the magnifier is Elasticsearch everywhere, and an unknown driver draws no mark at all.
-pub fn icon(driver_id: &str, dark: bool) -> Option<gio::Icon> {
-    let key = canonical_driver_id(driver_id)?;
+// The Qt magnifier and cylinder, on the same 16-grid proportions, as SVG source.
+const ELASTIC_TINT: &str = "#00BFB3";
+
+fn magnifier_svg(tint: &str) -> String {
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\">\
+         <g fill=\"none\" stroke=\"{tint}\" stroke-width=\"1.92\" stroke-linecap=\"round\">\
+         <circle cx=\"6.72\" cy=\"6.72\" r=\"4.48\"/>\
+         <path d=\"M10.24 10.24L14.08 14.08\"/></g></svg>"
+    )
+}
+
+fn cylinder_svg(dark: bool) -> String {
+    let tint = if dark { "#c0bfbc" } else { "#5e5c64" };
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\"><g fill=\"{tint}\">\
+         <ellipse cx=\"8\" cy=\"2.88\" rx=\"4.8\" ry=\"1.92\"/>\
+         <rect x=\"3.2\" y=\"2.88\" width=\"9.6\" height=\"10.24\"/>\
+         <ellipse cx=\"8\" cy=\"13.12\" rx=\"4.8\" ry=\"1.92\"/></g></svg>"
+    )
+}
+
+// Cache key for anything canonical folding does not recognise.
+const UNKNOWN: &str = "unknown";
+
+fn svg_source(key: &str, dark: bool) -> String {
     if key == "elasticsearch" {
-        return Some(gio::ThemedIcon::new("system-search-symbolic").into());
+        return magnifier_svg(ELASTIC_TINT);
     }
+    match art_for(key) {
+        // The fill sits once on the <svg> root; a failed replace leaves the light art.
+        Some(a) if dark => a.svg.replacen(
+            &format!("fill=\"{}\"", a.light_fill),
+            &format!("fill=\"{}\"", a.dark_fill),
+            1,
+        ),
+        Some(a) => a.svg.to_string(),
+        None => cylinder_svg(dark),
+    }
+}
+
+/// Brand mark as a `GIcon`; the magnifier is Elasticsearch everywhere, an unknown driver a tinted cylinder — never a blank.
+pub fn icon(driver_id: &str, dark: bool) -> gio::Icon {
+    let key = canonical_driver_id(driver_id).unwrap_or(UNKNOWN);
     thread_local! {
         static CACHE: RefCell<HashMap<(&'static str, bool), gio::Icon>> =
             RefCell::new(HashMap::new());
     }
     CACHE.with(|cache| {
         if let Some(icon) = cache.borrow().get(&(key, dark)) {
-            return Some(icon.clone());
+            return icon.clone();
         }
-        let a = art_for(key)?;
-        // The fill sits once on the <svg> root; a failed replace leaves the light art.
-        let svg = if dark {
-            a.svg.replacen(
-                &format!("fill=\"{}\"", a.light_fill),
-                &format!("fill=\"{}\"", a.dark_fill),
-                1,
-            )
-        } else {
-            a.svg.to_string()
-        };
-        let icon: gio::Icon = gio::BytesIcon::new(&glib::Bytes::from_owned(svg)).into();
+        let bytes = glib::Bytes::from_owned(svg_source(key, dark));
+        let icon: gio::Icon = gio::BytesIcon::new(&bytes).into();
         cache.borrow_mut().insert((key, dark), icon.clone());
-        Some(icon)
+        icon
+    })
+}
+
+mod paintable_imp {
+    use super::*;
+    use gtk::gdk_pixbuf::PixbufLoader;
+    use gtk::subclass::prelude::*;
+
+    #[derive(Default)]
+    pub struct EnginePaintable {
+        pub key: RefCell<&'static str>,
+        pub textures: RefCell<HashMap<bool, gdk::Texture>>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for EnginePaintable {
+        const NAME: &'static str = "DgEnginePaintable";
+        type Type = super::EnginePaintable;
+        type Interfaces = (gdk::Paintable,);
+    }
+
+    impl ObjectImpl for EnginePaintable {}
+
+    impl PaintableImpl for EnginePaintable {
+        fn flags(&self) -> gdk::PaintableFlags {
+            gdk::PaintableFlags::SIZE
+        }
+
+        fn intrinsic_width(&self) -> i32 {
+            16
+        }
+
+        fn intrinsic_height(&self) -> i32 {
+            16
+        }
+
+        // The Qt-icon-engine equivalent: light or dark is decided here, per paint.
+        fn snapshot(&self, snapshot: &gdk::Snapshot, width: f64, height: f64) {
+            let dark = adw::StyleManager::default().is_dark();
+            if let Some(texture) = self.texture(dark) {
+                texture.snapshot(snapshot, width, height);
+            }
+        }
+    }
+
+    impl EnginePaintable {
+        fn texture(&self, dark: bool) -> Option<gdk::Texture> {
+            if let Some(texture) = self.textures.borrow().get(&dark) {
+                return Some(texture.clone());
+            }
+            let svg = svg_source(*self.key.borrow(), dark);
+            // 64px so a 16px image stays crisp on 2x-4x displays.
+            let loader = PixbufLoader::new();
+            loader.connect_size_prepared(|loader, _, _| loader.set_size(64, 64));
+            loader.write(svg.as_bytes()).ok()?;
+            loader.close().ok()?;
+            let texture = gdk::Texture::for_pixbuf(&loader.pixbuf()?);
+            self.textures.borrow_mut().insert(dark, texture.clone());
+            Some(texture)
+        }
+    }
+}
+
+glib::wrapper! {
+    pub struct EnginePaintable(ObjectSubclass<paintable_imp::EnginePaintable>)
+        @implements gdk::Paintable;
+}
+
+/// Palette-aware brand mark for `GtkImage`; repaints itself on every effective palette change.
+pub fn paintable(driver_id: &str) -> gdk::Paintable {
+    let key = canonical_driver_id(driver_id).unwrap_or(UNKNOWN);
+    thread_local! {
+        static CACHE: RefCell<HashMap<&'static str, EnginePaintable>> =
+            RefCell::new(HashMap::new());
+    }
+    CACHE.with(|cache| {
+        if let Some(paintable) = cache.borrow().get(key) {
+            return paintable.clone().upcast();
+        }
+        let paintable: EnginePaintable = glib::Object::new();
+        *paintable.imp().key.borrow_mut() = key;
+        let weak = paintable.downgrade();
+        adw::StyleManager::default().connect_dark_notify(move |_| {
+            if let Some(paintable) = weak.upgrade() {
+                paintable.invalidate_contents();
+            }
+        });
+        cache.borrow_mut().insert(key, paintable.clone());
+        paintable.upcast()
     })
 }
 
@@ -131,6 +250,14 @@ mod tests {
     fn display_name_falls_back_to_the_stored_id() {
         assert_eq!(display_name("postgresql"), "PostgreSQL");
         assert_eq!(display_name("db2"), "db2");
+    }
+
+    #[test]
+    fn no_driver_is_ever_blank() {
+        assert!(svg_source("elasticsearch", false).contains(ELASTIC_TINT));
+        assert!(svg_source("db2-or-whatever", false).contains("ellipse"));
+        assert_ne!(svg_source("unknown", false), svg_source("unknown", true));
+        assert!(svg_source("postgres", true).contains("#7D9EF5"));
     }
 
     #[test]

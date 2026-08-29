@@ -2,6 +2,7 @@
 // Every entry point is an unsafe fn; this lint forces each raw deref into an unsafe block carrying its own SAFETY note.
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod browse;
 pub mod catalog;
 pub mod cells;
 pub mod core;
@@ -16,6 +17,7 @@ pub mod runtime;
 pub mod safety;
 
 pub use crate::core::{datagrep_core_free, datagrep_core_new, datagrep_string_free, DatagrepCore};
+pub use browse::datagrep_browse_statement;
 pub use catalog::{datagrep_catalog_children_json, datagrep_catalog_describe_json};
 pub use mutate::datagrep_mutate;
 pub use profiles::{datagrep_profiles_add, datagrep_profiles_list_json, datagrep_profiles_remove};

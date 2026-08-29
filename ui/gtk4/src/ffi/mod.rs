@@ -2,9 +2,9 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
 
 use datagrep_ffi::{
-    datagrep_catalog_children_json, datagrep_core_free, datagrep_core_new, datagrep_profiles_add,
-    datagrep_profiles_list_json, datagrep_query_cancel, datagrep_query_free,
-    datagrep_query_on_progress, datagrep_query_rows, datagrep_query_run,
+    datagrep_catalog_children_json, datagrep_catalog_describe_json, datagrep_core_free,
+    datagrep_core_new, datagrep_profiles_add, datagrep_profiles_list_json, datagrep_query_cancel,
+    datagrep_query_free, datagrep_query_on_progress, datagrep_query_rows, datagrep_query_run,
     datagrep_query_status_json, datagrep_rows_cell, datagrep_rows_cell_detail_json,
     datagrep_rows_cell_kind, datagrep_rows_columns, datagrep_rows_count,
     datagrep_rows_envelope_json, datagrep_rows_free, datagrep_rows_pending, datagrep_string_free,
@@ -112,6 +112,16 @@ impl Core {
         let mut err: *mut c_char = std::ptr::null_mut();
         let raw = unsafe {
             datagrep_catalog_children_json(self.raw, profile.as_ptr(), path.as_ptr(), &mut err)
+        };
+        owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+    }
+
+    /// Columns, indexes and stats for one object — fetched only when this is called.
+    pub fn catalog_describe_json(&self, profile: &str, path_json: &str) -> Result<String, Error> {
+        let (profile, path) = (nul_terminated(profile)?, nul_terminated(path_json)?);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let raw = unsafe {
+            datagrep_catalog_describe_json(self.raw, profile.as_ptr(), path.as_ptr(), &mut err)
         };
         owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
     }

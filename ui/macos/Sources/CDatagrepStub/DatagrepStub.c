@@ -379,6 +379,41 @@ char *datagrep_catalog_describe_json(DatagrepCore *c, const char *profile, const
     return s.buf;
 }
 
+/* A plausible mirror of crates/datagrep-ffi/src/browse.rs, close enough to
+ * drive the UI without a database. The real one owns the quoting rules. */
+char *datagrep_browse_statement(const char *driver_id, const char *path_json,
+                                const char *database, char **err_out) {
+    (void)database;
+    if (!driver_id) {
+        set_err(err_out, "driver_id must not be NULL");
+        return NULL;
+    }
+    Path path;
+    parse_path(path_json, &path);
+    if (path.n == 0) {
+        set_err(err_out, "a browse statement needs a path");
+        return NULL;
+    }
+    const char *leaf = path.seg[path.n - 1];
+    Sb s;
+    sb_init(&s);
+    if (strcmp(driver_id, "redis") == 0) {
+        set_err(err_out, "datagrep does not browse a Redis key from the sidebar");
+        free(s.buf);
+        return NULL;
+    }
+    if (strcmp(driver_id, "mongo") == 0 || strcmp(driver_id, "mongodb") == 0) {
+        sb_putf(&s, "# @limit 500\ndb.%s.find({})", leaf);
+    } else if (strcmp(driver_id, "elasticsearch") == 0) {
+        sb_putf(&s, "# @limit 500\nGET /%s/_search\n{ \"query\": { \"match_all\": {} } }", leaf);
+    } else if (path.n >= 2) {
+        sb_putf(&s, "-- @limit 500\nSELECT * FROM \"%s\".\"%s\";", path.seg[path.n - 2], leaf);
+    } else {
+        sb_putf(&s, "-- @limit 500\nSELECT * FROM \"%s\";", leaf);
+    }
+    return s.buf;
+}
+
 /* ------------------------------------------------------------------- query */
 
 enum { ST_STREAMING = 0, ST_PARKED, ST_CAPPED, ST_DONE, ST_CANCELLED, ST_FAILED };

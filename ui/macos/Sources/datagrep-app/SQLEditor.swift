@@ -299,14 +299,21 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
 
     // MARK: - external API (unchanged surface for AppModel)
 
-    func setText(_ text: String) {
+    func setText(_ text: String, markDirty: Bool = true) {
         loadViewIfNeeded()
         let tab = tabs.active ?? newTab()
         tab.text = text
         tab.selectedRange = NSRange(location: 0, length: 0)
-        tab.isDirty = true
+        tab.isDirty = markDirty
         load(tab)
         scheduleAutosave()
+    }
+
+    /// Bring an already-open tab forward without touching its buffer.
+    func focusTab(id: String) {
+        loadViewIfNeeded()
+        guard let tab = allTabs.first(where: { $0.id == id }) else { return }
+        activate(tab)
     }
 
     // MARK: - scope: which connection's editors are showing
@@ -716,7 +723,8 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         let loaded = store.load()
         for (record, text) in loaded.tabs {
             let tab = EditorTab(
-                id: record.id, name: record.name, connection: record.connection, text: text,
+                id: record.id, name: record.name, subject: record.subject,
+                connection: record.connection, text: text,
                 selectedRange: NSRange(
                     location: record.cursorLocation, length: record.cursorLength),
                 isDirty: record.isDirty)

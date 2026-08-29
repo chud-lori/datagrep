@@ -53,6 +53,13 @@ char *datagrep_catalog_children_json(DatagrepCore *, const char *profile, const 
 char *datagrep_catalog_describe_json(DatagrepCore *, const char *profile, const char *path_json,
                                 char **err_out);
 
+/* The statement that reads one catalog object, in that engine's own language.
+ * Pure: driver_id and the path are all it consults. `database` is the database
+ * the connection is open on, or NULL when unknown — an object the statement
+ * cannot reach returns NULL with *err_out saying which and why. */
+char *datagrep_browse_statement(const char *driver_id, const char *path_json,
+                                const char *database, char **err_out);
+
 DatagrepQuery *datagrep_query_run(DatagrepCore *, const char *profile, const char *sql, char **err_out);
 void      datagrep_query_free(DatagrepQuery *);
 void      datagrep_query_cancel(DatagrepQuery *, char **outcome_json_out);
