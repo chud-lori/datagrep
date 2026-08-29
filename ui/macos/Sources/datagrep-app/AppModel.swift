@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import DatagrepKit
 import Foundation
 import SwiftUI
@@ -256,6 +257,8 @@ final class AppModel: ObservableObject {
         SupportDirectory.ensured().appendingPathComponent("profiles.sqlite").path
     }
 
+    private var sinks: Set<AnyCancellable> = []
+
     private let queryQueue = DispatchQueue(label: "datagrep.query", qos: .userInitiated)
     private let catalogQueue = DispatchQueue(label: "datagrep.catalog", qos: .userInitiated)
     private var core: DatagrepCoreHandle?
@@ -305,6 +308,14 @@ final class AppModel: ObservableObject {
         editor.tabs.onNewConnection = { [weak self] in self?.showNewConnection = true }
         editor.tabs.onPickConnection = { [weak self] name in self?.selectProfile(name) }
 
+        // Every path that changes the active tab or closes one runs through these two.
+        editor.tabs.$activeID
+            .sink { [weak self] id in self?.activeTabChanged(to: id) }
+            .store(in: &sinks)
+        editor.tabs.$tabs
+            .sink { [weak self] tabs in self?.forgetResults(outside: Set(tabs.map(\.id))) }
+            .store(in: &sinks)
+
         history.onOpenInEditor = { [weak self] sql, connection in
             self?.openInNewEditorTab(sql: sql, connection: connection)
         }
@@ -332,8 +343,8 @@ final class AppModel: ObservableObject {
         refreshFootprint()
         refreshDirectives()
 
-        // The read-only / production chip at the trailing end of the toolbar.
-        DispatchQueue.main.async { ConnectionSafetyTitlebar.install(model: self) }
+        // The safety chip and the inspector toggle, pinned to the trailing edge.
+        DispatchQueue.main.async { TitlebarTrailingAccessory.install(model: self) }
 
         // Companion to DATAGREP_SAFETY_FIXTURE: opens the editor on one
         if let n = ProcessInfo.processInfo.environment["DATAGREP_EDIT_FIXTURE"], !n.isEmpty {
@@ -718,6 +729,7 @@ final class AppModel: ObservableObject {
         if scopeEditors { editor.setScope(name.isEmpty ? nil : name) }
         connectionInfo = nil
         refreshConnectionInfo()
+        syncVisibleResult(tab: editor.tabs.activeID)
     }
 
     // MARK: - catalog, one level per call
@@ -1072,6 +1084,9 @@ final class AppModel: ObservableObject {
 
     private func send(sql: String, profile: String) {
         guard let core else { return }
+        // A `-- @connection` directive may aim elsewhere; the badge follows the statement.
+        selectProfile(profile, scopeEditors: false)
+        resultProfile = profile
         results.allowsEditing = !safety(for: profile).readOnly
         message = "running on \(profile)…"
         isError = false
@@ -1088,6 +1103,9 @@ final class AppModel: ObservableObject {
                     self.state = .failed
                     self.message = "\(error)"
                     self.isError = true
+                    // Nothing ran, so nothing is owned: drop the previous handle too.
+                    self.query = nil
+                    self.resultTab = nil
                     self.results.clear()
                     self.history.executionFailedToStart("\(error)")
                 }
@@ -1097,6 +1115,7 @@ final class AppModel: ObservableObject {
 
     private func adopt(_ handle: DatagrepQueryHandle) {
         query = handle  // the previous handle deinits here -> datagrep_query_free
+        resultTab = editor.tabs.activeID
         edits.discardAll()
         stagingGeneration &+= 1
         results.beginNewResult(pager: RowPager(query: handle, pageSize: 512, maxPages: 4))
@@ -1111,6 +1130,10 @@ final class AppModel: ObservableObject {
     /// The only redraw trigger besides user input. Nothing polls this.
     private func refreshFromCore() {
         guard let query, let status = try? query.status() else { return }
+        apply(status, recordHistory: true)
+    }
+
+    private func apply(_ status: QueryStatus, recordHistory: Bool) {
         results.apply(status: status)
         resultGeneration &+= 1
         state = status.state
@@ -1124,9 +1147,11 @@ final class AppModel: ObservableObject {
             refreshConnectionInfo()
         }
         // Safe on every tick: this records once, when the query goes terminal.
-        history.executionProgressed(
-            state: status.state, rowsLoaded: status.rowsLoaded, elapsedMs: status.elapsedMs,
-            error: status.error)
+        if recordHistory {
+            history.executionProgressed(
+                state: status.state, rowsLoaded: status.rowsLoaded, elapsedMs: status.elapsedMs,
+                error: status.error)
+        }
         if let e = status.error {
             message = e
             isError = true
@@ -1136,6 +1161,108 @@ final class AppModel: ObservableObject {
             isError = false
         }
         refreshFootprint()
+    }
+
+    // MARK: - a result belongs to the editor tab that ran it
+
+    /// Everything needed to put one tab's result back on screen.
+    private struct TabResult {
+        let query: DatagrepQueryHandle
+        let profile: String
+        let sql: String
+        let filters: [(column: String, value: String)]
+        let sortColumn: String?
+        let sortAscending: Bool
+        let allowsEditing: Bool
+        let message: String
+        let isError: Bool
+        let edits: PendingEdits.Snapshot
+    }
+
+    /// The tab whose result is on screen, and the connection that produced it.
+    private var resultTab: String?
+    private var resultProfile: String = ""
+    private var resultsByTab: [String: TabResult] = [:]
+
+    /// Park the visible result under its own tab so switching back restores it.
+    private func parkVisibleResult() {
+        guard let query, let tab = resultTab else { return }
+        resultsByTab[tab] = TabResult(
+            query: query, profile: resultProfile, sql: baseSQL, filters: baseFilters,
+            sortColumn: sortColumn, sortAscending: sortAscending,
+            allowsEditing: results.allowsEditing, message: message, isError: isError,
+            edits: edits.snapshot())
+    }
+
+    /// Back to "No result yet" — nothing on screen is attributed to anything.
+    private func clearVisibleResult() {
+        let had = query != nil
+        query = nil
+        resultTab = nil
+        resultProfile = ""
+        results.clear()
+        edits.discardAll()
+        stagingGeneration &+= 1
+        baseSQL = ""
+        baseFilters = []
+        sortColumn = nil
+        sortAscending = true
+        results.sortColumn = nil
+        state = nil
+        rowsLoaded = 0
+        totalKnown = true
+        elapsedMs = 0
+        hiddenColumns = 0
+        resultGeneration &+= 1
+        if had {
+            isError = false
+            message = "no result in this tab yet"
+        }
+        refreshFootprint()
+    }
+
+    private func restore(_ saved: TabResult, forTab tab: String) {
+        query = saved.query
+        resultTab = tab
+        resultProfile = saved.profile
+        baseSQL = saved.sql
+        baseFilters = saved.filters
+        sortColumn = saved.sortColumn
+        sortAscending = saved.sortAscending
+        results.sortColumn = saved.sortColumn
+        results.sortAscending = saved.sortAscending
+        results.allowsEditing = saved.allowsEditing
+        edits.restore(saved.edits)
+        stagingGeneration &+= 1
+        results.beginNewResult(pager: RowPager(query: saved.query, pageSize: 512, maxPages: 4))
+        message = saved.message
+        isError = saved.isError
+        // Not refreshFromCore: this run was recorded in history when it first ran.
+        if let status = try? saved.query.status() { apply(status, recordHistory: false) }
+    }
+
+    /// The tab is the unit: its connection and its result arrive together.
+    private func activeTabChanged(to tab: String?) {
+        if let tab, let bound = editor.tabs.tabs.first(where: { $0.id == tab })?.connection,
+            !bound.isEmpty
+        {
+            selectProfile(bound, scopeEditors: false)
+        }
+        syncVisibleResult(tab: tab)
+    }
+
+    /// Put `tab`'s result on screen — and only if this connection produced it.
+    private func syncVisibleResult(tab: String?) {
+        if query != nil, resultTab == tab, resultProfile == activeProfile { return }
+        parkVisibleResult()
+        clearVisibleResult()
+        guard let tab, let saved = resultsByTab[tab], saved.profile == activeProfile else { return }
+        restore(saved, forTab: tab)
+    }
+
+    /// Closed tabs free their result — and with it the core-side result store.
+    private func forgetResults(outside live: Set<String>) {
+        resultsByTab = resultsByTab.filter { live.contains($0.key) }
     }
 
     // MARK: - committing staged edits

@@ -392,6 +392,57 @@ private struct ConnectionBadge: View {
 
 // MARK: - toolbar
 
+/// A toolbar flattens `.segmented` and `.palette` Pickers alike into loose icons.
+private struct ResultViewToggle: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        HStack(spacing: 0) {
+            segment("tablecells", "Grid", isOn: !model.showResultAsText) {
+                model.showResultAsText = false
+            }
+            segment("text.alignleft", "Text", isOn: model.showResultAsText) {
+                model.showResultAsText = true
+            }
+        }
+        .padding(1.5)
+        .background(
+            RoundedRectangle(cornerRadius: 7)
+                .fill(Color(nsColor: .quaternaryLabelColor).opacity(0.55)))
+        .fixedSize()
+        .disabled(!model.showsGrid)
+        .opacity(model.showsGrid ? 1 : 0.4)
+        .help("Show the result as a grid or as a copyable plain-text table")
+    }
+
+    private func segment(
+        _ symbol: String, _ label: String, isOn: Bool, act: @escaping () -> Void
+    ) -> some View {
+        Button(action: act) {
+            Image(systemName: symbol)
+                .font(.system(size: 12))
+                .frame(width: 26, height: 19)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 5.5)
+                .fill(isOn ? Color(nsColor: .controlColor) : .clear))
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(isOn ? [.isSelected] : [])
+    }
+}
+
+/// A toolbar item is its own view, so `Divider()` there draws horizontally.
+private struct ToolbarSeparator: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor))
+            .frame(width: 1, height: 18)
+            .accessibilityHidden(true)
+    }
+}
+
 private struct WorkbenchToolbar: ToolbarContent {
     @ObservedObject var model: AppModel
 
@@ -410,6 +461,8 @@ private struct WorkbenchToolbar: ToolbarContent {
                 Label("New Connection", systemImage: "powerplug")
             }
             .help("New connection (⌘N)")
+
+            ToolbarSeparator()
 
             Menu {
                 if model.roots.isEmpty {
@@ -442,6 +495,8 @@ private struct WorkbenchToolbar: ToolbarContent {
             .buttonStyle(.plain)
             .menuIndicator(.hidden)
 
+            ToolbarSeparator()
+
             Button {
                 if model.isRunning { model.cancel() } else { model.runStatementUnderCaret() }
             } label: {
@@ -455,14 +510,7 @@ private struct WorkbenchToolbar: ToolbarContent {
                     ? "Cancel — returns instantly, then reports what the server actually did  ⌘."
                     : "Run the statement under the caret  ⌘↩")
 
-            Picker("Result view", selection: $model.showResultAsText) {
-                Image(systemName: "tablecells").tag(false)
-                Image(systemName: "text.alignleft").tag(true)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .disabled(!model.showsGrid)
-            .help("Show the result as a grid or as a copyable plain-text table")
+            ResultViewToggle(model: model)
 
             Button {
                 model.clearDerived()
@@ -474,14 +522,65 @@ private struct WorkbenchToolbar: ToolbarContent {
 
             // ⌘Y is the Query menu's; not re-bound here.
             HistoryToolbarButton(history: model.history)
-
-            Button {
-                withAnimation(.smooth(duration: 0.22)) { model.showDetail.toggle() }
-            } label: {
-                Label("Inspector", systemImage: "sidebar.trailing")
-            }
-            .help("Show or hide the cell inspector  ⌘I")
         }
+    }
+}
+
+// MARK: - trailing titlebar accessory
+
+/// The inspector toggle, twin of the sidebar toggle, pinned to the trailing edge.
+private struct InspectorToggle: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        Button {
+            withAnimation(.smooth(duration: 0.22)) { model.showDetail.toggle() }
+        } label: {
+            Image(systemName: "sidebar.trailing")
+                .font(.system(size: 13, weight: .regular))
+                .frame(width: 26, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(model.showDetail ? Color.accentColor : Color.primary)
+        .accessibilityLabel("Inspector")
+        .help("Show or hide the cell inspector  ⌘I")
+    }
+}
+
+/// Accessories are never displaced, so the two things that must always be
+/// reachable — the connection's safety marks and the inspector — live here.
+private struct TitlebarTrailing: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            ConnectionSafetyChip(model: model)
+            Divider().frame(height: 16)
+            InspectorToggle(model: model)
+        }
+        .padding(.trailing, 10)
+        .frame(height: 28)
+    }
+}
+
+@MainActor
+enum TitlebarTrailingAccessory {
+    private static var controller: NSTitlebarAccessoryViewController?
+
+    static func install(model: AppModel) {
+        guard controller == nil else { return }
+        guard let window = NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible })
+        else { return }
+
+        let host = NSHostingView(rootView: TitlebarTrailing(model: model))
+        host.frame = NSRect(x: 0, y: 0, width: 260, height: 28)
+        let vc = NSTitlebarAccessoryViewController()
+        vc.view = host
+        vc.layoutAttribute = .right
+        window.addTitlebarAccessoryViewController(vc)
+        controller = vc
     }
 }
 
