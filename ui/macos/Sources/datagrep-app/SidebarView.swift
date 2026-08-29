@@ -202,8 +202,8 @@ private struct NodeLabel: View {
         .onTapGesture(count: 2) {
             if node.isProfile {
                 model.openSQLEditor(for: node.name)
-            } else if node.isPreviewable {
-                model.preview(node)
+            } else if node.isBrowsable {
+                model.browse(node)
             }
         }
         .contextMenu {
@@ -215,9 +215,9 @@ private struct NodeLabel: View {
                     Button("Refresh Schema") { model.showSchema(for: node, force: true) }
                         .help("Re-read the columns and indexes from the server")
                 }
-                if node.isPreviewable {
+                if node.isBrowsable {
                     if node.isDescribable { Divider() }
-                    Button("Preview 500 Rows") { model.preview(node) }
+                    Button("Browse Rows") { model.browse(node) }
                 }
             }
         }
