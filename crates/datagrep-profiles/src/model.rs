@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use datagrep_api::safety::SafetyLevel;
 use datagrep_api::ConnectionConfig;
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +39,8 @@ pub struct Profile {
     pub tunnel_id: Option<String>,
     pub color: Option<String>,
     pub read_only: bool,
-    pub confirm_writes: bool,
+    #[serde(default)]
+    pub safety: SafetyLevel,
     pub auto_limit: Option<i64>,
     pub idle_timeout_s: Option<i64>,
     pub last_used_at: Option<i64>,

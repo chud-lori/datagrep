@@ -81,6 +81,7 @@ impl CoreInner {
                 driver: Arc::from(profile.driver_id.as_str()),
                 config,
                 read_only: profile.read_only,
+                safety: profile.safety,
             })
             .await;
 
@@ -117,24 +118,20 @@ impl CoreInner {
         Ok(config)
     }
 
+    // Returns the DbError, not its text: a safety refusal carries the challenge the caller must clear.
     pub(crate) async fn run_request(
         &self,
         id: ProfileId,
         name: &str,
         read_only: bool,
         req: datagrep_api::Request,
-    ) -> Result<QueryId, String> {
-        let session = self.api.session(id).map_err(|e| e.to_string())?;
-        let lease = session.acquire().await.map_err(|e| e.to_string())?;
+    ) -> Result<QueryId, datagrep_api::DbError> {
+        let session = self.api.session(id)?;
+        let lease = session.acquire().await?;
         self.record_server_info(name, lease.server_info());
         self.record_caps(name, lease.capabilities().flags);
         if !read_only {
-            return self
-                .api
-                .queries()
-                .run(lease, req)
-                .await
-                .map_err(|e| e.to_string());
+            return self.api.queries().run(lease, req).await;
         }
         // set_read_only runs on this exact socket — read-only is per-connection, not per-request; on failure never keep claiming Enforcement::Server from an earlier connection.
         match lease.set_read_only(true).await {
@@ -147,11 +144,7 @@ impl CoreInner {
                     .insert(name.to_string(), Enforcement::Client);
             }
         }
-        self.api
-            .queries()
-            .run(lease, req)
-            .await
-            .map_err(|e| e.to_string())
+        self.api.queries().run(lease, req).await
     }
 
     pub(crate) async fn leased(

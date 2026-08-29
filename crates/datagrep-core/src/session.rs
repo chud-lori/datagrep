@@ -13,6 +13,7 @@ use datagrep_api::driver::{
 };
 use datagrep_api::error::DbError;
 use datagrep_api::request::Request;
+use datagrep_api::safety::SafetyLevel;
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -20,6 +21,7 @@ use tracing::Instrument;
 
 use crate::api::ProfileId;
 use crate::registry::DriverRegistry;
+use crate::safety::SafetyGate;
 use crate::timer::{TimerKey, TimerWheel};
 use crate::{lock, read, write};
 
@@ -67,6 +69,7 @@ enum ConnCmd {
 
 struct ConnInner {
     id: ConnId,
+    gate: Arc<SafetyGate>,
     caps: Capabilities,
     info: ServerInfo,
     canceller: Arc<dyn Canceller>,
@@ -86,6 +89,7 @@ impl ConnectionHandle {
         conn: Box<dyn Connection>,
         parent: &CancellationToken,
         id: ConnId,
+        gate: Arc<SafetyGate>,
     ) -> Result<Self, DbError> {
         let facts = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (
@@ -111,6 +115,7 @@ impl ConnectionHandle {
         Ok(Self {
             inner: Arc::new(ConnInner {
                 id,
+                gate,
                 caps,
                 info,
                 canceller,
@@ -124,6 +129,10 @@ impl ConnectionHandle {
 
     pub fn id(&self) -> ConnId {
         self.inner.id
+    }
+
+    pub fn gate(&self) -> &Arc<SafetyGate> {
+        &self.inner.gate
     }
 
     pub fn capabilities(&self) -> &Capabilities {
@@ -150,7 +159,9 @@ impl ConnectionHandle {
         self.inner.poisoned.load(Ordering::Acquire)
     }
 
+    // The one place every request — console, export, generated scan, generated write — becomes a wire message.
     pub async fn execute(&self, req: Request) -> Result<Box<dyn Cursor>, DbError> {
+        self.inner.gate.admit(&req)?;
         self.call(|reply| ConnCmd::Execute {
             req: Box::new(req),
             reply,
@@ -368,6 +379,7 @@ struct IdleConn {
 
 pub struct Session {
     profile: ProfileId,
+    gate: Arc<SafetyGate>,
     driver: Arc<dyn Driver>,
     config: ConnectionConfig,
     policy: PoolPolicy,
@@ -383,6 +395,7 @@ pub struct Session {
 impl Session {
     pub fn new(
         profile: ProfileId,
+        gate: Arc<SafetyGate>,
         driver: Arc<dyn Driver>,
         config: ConnectionConfig,
         policy: PoolPolicy,
@@ -391,6 +404,7 @@ impl Session {
     ) -> Arc<Self> {
         let session = Arc::new(Self {
             profile,
+            gate,
             driver,
             config,
             permits: Arc::new(Semaphore::new(policy.max_size.max(1))),
@@ -408,6 +422,10 @@ impl Session {
 
     pub fn profile(&self) -> ProfileId {
         self.profile
+    }
+
+    pub fn gate(&self) -> &Arc<SafetyGate> {
+        &self.gate
     }
 
     pub fn cancel_token(&self) -> &CancellationToken {
@@ -550,7 +568,7 @@ impl Session {
 
         self.connects.fetch_add(1, Ordering::SeqCst);
         tracing::debug!(%id, profile = self.profile.0, "connected");
-        ConnectionHandle::spawn(conn, &self.cancel, id)
+        ConnectionHandle::spawn(conn, &self.cancel, id, self.gate.clone())
     }
 }
 
@@ -615,8 +633,10 @@ impl SessionRegistry {
     pub fn open(
         &self,
         profile: ProfileId,
+        name: &str,
         driver_id: &str,
         config: ConnectionConfig,
+        level: SafetyLevel,
     ) -> Result<Arc<Session>, DbError> {
         if let Some(session) = read(&self.sessions).get(&profile) {
             return Ok(session.clone());
@@ -633,8 +653,10 @@ impl SessionRegistry {
         if let Some(session) = sessions.get(&profile) {
             return Ok(session.clone());
         }
+        let gate = SafetyGate::new(profile, name, driver.capabilities().language, level);
         let session = Session::new(
             profile,
+            gate,
             driver,
             config,
             self.policy,
@@ -737,7 +759,13 @@ mod tests {
         let counters = register(&h, "mock", MockPlan::default());
         let session = h
             .registry
-            .open(ProfileId(1), "mock", config("mock"))
+            .open(
+                ProfileId(1),
+                "mock",
+                "mock",
+                config("mock"),
+                SafetyLevel::Silent,
+            )
             .expect("open");
 
         assert_eq!(session.connect_count(), 0, "lazy connect violated");
@@ -765,7 +793,13 @@ mod tests {
         let counters = register(&h, "mock", MockPlan::default());
         let session = h
             .registry
-            .open(ProfileId(1), "mock", config("mock"))
+            .open(
+                ProfileId(1),
+                "mock",
+                "mock",
+                config("mock"),
+                SafetyLevel::Silent,
+            )
             .expect("open");
 
         {
@@ -795,7 +829,13 @@ mod tests {
         let counters = register(&h, "mock", MockPlan::default());
         let session = h
             .registry
-            .open(ProfileId(1), "mock", config("mock"))
+            .open(
+                ProfileId(1),
+                "mock",
+                "mock",
+                config("mock"),
+                SafetyLevel::Silent,
+            )
             .expect("open");
 
         let a = session.acquire().await.expect("a");
@@ -834,11 +874,23 @@ mod tests {
 
         let bad = h
             .registry
-            .open(ProfileId(1), "boom", config("boom"))
+            .open(
+                ProfileId(1),
+                "boom",
+                "boom",
+                config("boom"),
+                SafetyLevel::Silent,
+            )
             .expect("open");
         let good = h
             .registry
-            .open(ProfileId(2), "mock", config("mock"))
+            .open(
+                ProfileId(2),
+                "mock",
+                "mock",
+                config("mock"),
+                SafetyLevel::Silent,
+            )
             .expect("open");
 
         // A sibling connection, open and working before the panic.
@@ -888,7 +940,13 @@ mod tests {
         let counters = register(&h, "mock", MockPlan::default());
         let session = h
             .registry
-            .open(ProfileId(1), "mock", config("mock"))
+            .open(
+                ProfileId(1),
+                "mock",
+                "mock",
+                config("mock"),
+                SafetyLevel::Silent,
+            )
             .expect("open");
         let lease = session.acquire().await.expect("acquire");
         let conn_token = lease.cancel_token().clone();
@@ -915,7 +973,13 @@ mod tests {
         register(&h, "mock", MockPlan::default());
         let session = h
             .registry
-            .open(ProfileId(1), "mock", config("mock"))
+            .open(
+                ProfileId(1),
+                "mock",
+                "mock",
+                config("mock"),
+                SafetyLevel::Silent,
+            )
             .expect("open");
 
         let pinned = session.pin().await.expect("pin");
@@ -942,7 +1006,13 @@ mod tests {
         register(&h, "mock", MockPlan::default());
         let session = h
             .registry
-            .open(ProfileId(1), "mock", config("mock"))
+            .open(
+                ProfileId(1),
+                "mock",
+                "mock",
+                config("mock"),
+                SafetyLevel::Silent,
+            )
             .expect("open");
         let lease = session.acquire().await.expect("acquire");
 
@@ -958,7 +1028,13 @@ mod tests {
         let drivers = Arc::new(DriverRegistry::new());
         let registry = SessionRegistry::new(drivers, Arc::new(TimerWheel::new()));
         let err = registry
-            .open(ProfileId(1), "nope", config("nope"))
+            .open(
+                ProfileId(1),
+                "nope",
+                "nope",
+                config("nope"),
+                SafetyLevel::Silent,
+            )
             .expect_err("unregistered");
         assert!(matches!(err, DbError::Config(_)));
     }

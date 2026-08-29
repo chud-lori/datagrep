@@ -1,3 +1,4 @@
+use datagrep_api::safety::SafetyLevel;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::db::{hash_text, Db};
@@ -79,7 +80,7 @@ struct ProfileRow {
     tunnel_id: Option<String>,
     color: Option<String>,
     read_only: bool,
-    confirm_writes: bool,
+    safety: String,
     auto_limit: Option<i64>,
     idle_timeout_s: Option<i64>,
     last_used_at: Option<i64>,
@@ -98,7 +99,7 @@ fn profile_row_from_row(row: &Row<'_>) -> rusqlite::Result<ProfileRow> {
         tunnel_id: row.get("tunnel_id")?,
         color: row.get("color")?,
         read_only: row.get("read_only")?,
-        confirm_writes: row.get("confirm_writes")?,
+        safety: row.get("safety")?,
         auto_limit: row.get("auto_limit")?,
         idle_timeout_s: row.get("idle_timeout_s")?,
         last_used_at: row.get("last_used_at")?,
@@ -107,8 +108,21 @@ fn profile_row_from_row(row: &Row<'_>) -> rusqlite::Result<ProfileRow> {
     })
 }
 
+// Anything the CHECK constraint should have rejected fails closed, at the strictest rung.
+fn parse_safety(stored: &str, profile: &str) -> SafetyLevel {
+    SafetyLevel::parse(stored).unwrap_or_else(|| {
+        tracing::warn!(
+            profile,
+            stored,
+            "datagrep-profiles: unknown safety level; treating it as auth_all"
+        );
+        SafetyLevel::AuthAll
+    })
+}
+
 fn profile_from_row(row: ProfileRow) -> Result<Profile, ProfilesError> {
     let config = serde_json::from_str(&row.config_json)?;
+    let safety = parse_safety(&row.safety, &row.name);
     Ok(Profile {
         id: row.id,
         folder_id: row.folder_id,
@@ -119,7 +133,7 @@ fn profile_from_row(row: ProfileRow) -> Result<Profile, ProfilesError> {
         tunnel_id: row.tunnel_id,
         color: row.color,
         read_only: row.read_only,
-        confirm_writes: row.confirm_writes,
+        safety,
         auto_limit: row.auto_limit,
         idle_timeout_s: row.idle_timeout_s,
         last_used_at: row.last_used_at,
@@ -133,12 +147,24 @@ pub(crate) fn create_profile(conn: &Connection, p: Profile) -> Result<Profile, P
     conn.execute(
         "INSERT INTO profile (
             id, folder_id, name, driver_id, config_json, secret_ref, tunnel_id, color,
-            read_only, confirm_writes, auto_limit, idle_timeout_s, last_used_at, created_at, updated_at
+            read_only, safety, auto_limit, idle_timeout_s, last_used_at, created_at, updated_at
          ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         params![
-            p.id, p.folder_id, p.name, p.driver_id, config_json, p.secret_ref, p.tunnel_id,
-            p.color, p.read_only, p.confirm_writes, p.auto_limit,
-            p.idle_timeout_s, p.last_used_at, p.created_at, p.updated_at,
+            p.id,
+            p.folder_id,
+            p.name,
+            p.driver_id,
+            config_json,
+            p.secret_ref,
+            p.tunnel_id,
+            p.color,
+            p.read_only,
+            p.safety.as_str(),
+            p.auto_limit,
+            p.idle_timeout_s,
+            p.last_used_at,
+            p.created_at,
+            p.updated_at,
         ],
     )?;
     Ok(p)
@@ -183,7 +209,7 @@ pub(crate) fn update_profile(conn: &Connection, p: Profile) -> Result<Profile, P
     let changed = conn.execute(
         "UPDATE profile SET
             folder_id = ?2, name = ?3, driver_id = ?4, config_json = ?5, secret_ref = ?6,
-            tunnel_id = ?7, color = ?8, read_only = ?9, confirm_writes = ?10,
+            tunnel_id = ?7, color = ?8, read_only = ?9, safety = ?10,
             auto_limit = ?11, idle_timeout_s = ?12, updated_at = ?13
          WHERE id = ?1",
         params![
@@ -196,7 +222,7 @@ pub(crate) fn update_profile(conn: &Connection, p: Profile) -> Result<Profile, P
             p.tunnel_id,
             p.color,
             p.read_only,
-            p.confirm_writes,
+            p.safety.as_str(),
             p.auto_limit,
             p.idle_timeout_s,
             p.updated_at,
@@ -610,7 +636,7 @@ mod tests {
                 tunnel_id: None,
                 color: None,
                 read_only: false,
-                confirm_writes: false,
+                safety: datagrep_api::safety::SafetyLevel::Silent,
                 auto_limit: None,
                 idle_timeout_s: None,
                 last_used_at: None,

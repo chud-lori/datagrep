@@ -11,6 +11,9 @@ testing = []
 
 [dependencies]
 datagrep-api = { path = "../datagrep-api" }
+# The safety ladder's "except reads" rung IS datagrep-lang's Read classification; a second
+# classifier in the orchestrator would be a second answer to the same question.
+datagrep-lang = { path = "../datagrep-lang" }
 
 # datagrep-api declares its traits with #[async_trait]; implementing them (mocks,
 # adapters) requires the same macro. Already a workspace dependency.

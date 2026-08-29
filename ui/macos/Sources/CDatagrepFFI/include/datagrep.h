@@ -30,13 +30,17 @@ DatagrepCore *datagrep_core_new(const char *profiles_db_path, char **err_out);
 void     datagrep_core_free(DatagrepCore *);
 void     datagrep_string_free(char *);
 
-/* [{"name","driver","read_only","confirm_writes","color","has_secret"}] */
+/* [{"name","driver","read_only","safety","confirm_writes","color","has_secret"}]
+ * "safety" is this connection's rung on the query-safety ladder:
+ * "silent"|"warn_all"|"warn_writes"|"auth_all"|"auth_writes". "confirm_writes"
+ * is the boolean it replaced, still reported (true = the rung asks for
+ * something before a write) so an unmigrated caller keeps working. */
 char *datagrep_profiles_list_json(DatagrepCore *, char **err_out);
 bool  datagrep_profiles_add(DatagrepCore *, const char *name, const char *url, char **err_out);
 bool  datagrep_profiles_remove(DatagrepCore *, const char *name, char **err_out);
 
 /* {"profile","driver","database":str|null,
- *  "server":null|{"product","version"},
+ *  "server":null|{"product","version"},"safety":str,
  *  "read_only":null|{"enforcement":"server"|"client"|"none","server_confirmed":bool}}
  * "server" is what the engine reported at handshake, never a guess, and is
  * null until a connection of this profile has succeeded. */
@@ -55,11 +59,15 @@ void      datagrep_query_cancel(DatagrepQuery *, char **outcome_json_out);
 /* {"state":"streaming"|"parked"|"capped"|"done"|"cancelled"|"failed",
  *  "rows_loaded":u64,"elapsed_ms":u64,"error":str|null,
  *  "columns":[{"name","type"}],"total_known":bool,
+ *  "safety":null|{"profile","level","requires":"warn"|"authenticate",
+ *                 "challenge","statements":[{"text","class","requires"}]},
  *  "editable":null|{"identity":[str,..],"guard":[str,..],"root":str|null,
  *                   "atomic_batch":bool}}
  * "editable" is non-null only when the connection reports EDITABLE_RESULTS and
  * this result declared a row identity; `atomic_batch` false means a failing
- * batch can leave a prefix applied. */
+ * batch can leave a prefix applied.
+ * A non-null "safety" on state="failed" means the ladder refused this
+ * statement and NOTHING was sent: clear the challenge, then run it again. */
 char *datagrep_query_status_json(DatagrepQuery *, char **err_out);
 
 typedef void (*DatagrepProgressFn)(void *ctx);
@@ -111,6 +119,38 @@ char   *datagrep_mutate(DatagrepCore *, const char *profile, const char *mutatio
  * batch as a whole could not run. */
 char   *datagrep_reread_documents(DatagrepCore *, const char *profile,
                                   const char *addresses_json, char **err_out);
+
+/* ---- safe mode: the query-safety ladder, per connection ----------------
+ * Five rungs on the profile: silent / warn_all / warn_writes / auth_all /
+ * auth_writes, where "writes" means everything datagrep-lang does not classify
+ * Read. The engine decides and judges; the frontend only performs the ceremony.
+ * There is no "the user agreed" flag — the only way past a rung is a challenge
+ * the engine minted, cleared by evidence it checks, yielding a grant bound to
+ * that one statement, single-use and expiring. Not asking is a refusal. */
+
+/* What running `sql` would require, without running it:
+ * {"profile","level","requires":"none"|"warn"|"authenticate",
+ *  "challenge":str|null,
+ *  "statements":[{"text","class","requires"}]}
+ * Clearing the challenge clears exactly the statements listed. */
+char *datagrep_safety_evaluate_json(DatagrepCore *, const char *profile, const char *sql,
+                                    char **err_out);
+
+/* The challenges this connection has open — for a refusal from a SYNCHRONOUS
+ * call (datagrep_mutate, datagrep_reread_documents), where the challenge id is
+ * only named in *err_out. Same objects as _evaluate_json. */
+char *datagrep_safety_pending_json(DatagrepCore *, const char *profile, char **err_out);
+
+/* Report what the user did:
+ *   {"kind":"acknowledged"}               a warning was shown and dismissed
+ *   {"kind":"typed_phrase","typed":str}   what the user typed
+ *   {"kind":"system_auth","method":str}   Touch ID / LocalAuthentication
+ * "acknowledged" NEVER clears an "authenticate" rung. A typed phrase must equal
+ * the connection name, which the engine holds and never sends, so it has to
+ * come from the user. Prefer LocalAuthentication where it is available and fall
+ * back to the typed phrase. */
+bool datagrep_safety_satisfy(DatagrepCore *, const char *profile, const char *challenge,
+                             const char *attestation_json, char **err_out);
 
 #ifdef __cplusplus
 }

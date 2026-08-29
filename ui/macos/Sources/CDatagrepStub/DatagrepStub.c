@@ -182,7 +182,7 @@ char *datagrep_connection_info_json(DatagrepCore *c, const char *name, char **er
     sb_putf(&s,
             "{\"profile\":\"%s\",\"driver\":\"%s\",\"database\":\"stub\","
             "\"server\":{\"product\":\"%s\",\"version\":\"0.0.0-stub\"},"
-            "\"read_only\":null}",
+            "\"safety\":\"silent\",\"read_only\":null}",
             p->name, p->driver, p->driver);
     pthread_mutex_unlock(&c->lock);
     return s.buf;
@@ -820,4 +820,40 @@ char *datagrep_reread_documents(DatagrepCore *c, const char *profile, const char
     set_err(err_out,
             "this build has no datagrep engine linked in, so there is no server to read from");
     return NULL;
+}
+
+/* Safe mode over a stub: there is no engine and no socket, so nothing can be
+ * sent and nothing needs gating. Every rung answers "requires":"none". */
+char *datagrep_safety_evaluate_json(DatagrepCore *c, const char *profile, const char *sql,
+                                    char **err_out) {
+    if (!c || !profile || !sql) {
+        set_err(err_out, "null argument");
+        return NULL;
+    }
+    Sb s;
+    sb_init(&s);
+    sb_putf(&s,
+            "{\"profile\":\"%s\",\"level\":\"silent\",\"requires\":\"none\","
+            "\"challenge\":null,\"statements\":[]}",
+            profile);
+    return s.buf;
+}
+
+char *datagrep_safety_pending_json(DatagrepCore *c, const char *profile, char **err_out) {
+    if (!c || !profile) {
+        set_err(err_out, "null argument");
+        return NULL;
+    }
+    return dup_cstr("[]");
+}
+
+bool datagrep_safety_satisfy(DatagrepCore *c, const char *profile, const char *challenge,
+                             const char *attestation_json, char **err_out) {
+    (void)challenge;
+    (void)attestation_json;
+    if (!c || !profile) {
+        set_err(err_out, "null argument");
+        return false;
+    }
+    return true;
 }

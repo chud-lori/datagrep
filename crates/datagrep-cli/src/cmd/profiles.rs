@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use datagrep_api::safety::SafetyLevel;
 use datagrep_api::ConfigValue;
 use datagrep_secrets::SecretRef;
 
@@ -69,7 +70,7 @@ pub async fn add(ctx: &Context, name: &str, url: &str) -> Result<(), CliError> {
         tunnel_id: None,
         color: None,
         read_only: false,
-        confirm_writes: false,
+        safety: datagrep_api::safety::SafetyLevel::Silent,
         auto_limit: None,
         idle_timeout_s: None,
         last_used_at: None,
@@ -86,6 +87,25 @@ pub async fn add(ctx: &Context, name: &str, url: &str) -> Result<(), CliError> {
             ""
         }
     );
+    Ok(())
+}
+
+pub async fn safety(ctx: &Context, name: &str, level: Option<&str>) -> Result<(), CliError> {
+    let mut profile = ctx.find_profile(name).await?;
+    let Some(level) = level else {
+        println!("{}", profile.safety);
+        return Ok(());
+    };
+    let level = SafetyLevel::parse(level).ok_or_else(|| {
+        CliError::usage(format!(
+            "unknown safety level `{level}`; expected one of {}",
+            SafetyLevel::ALL.map(|l| l.as_str()).join(", ")
+        ))
+    })?;
+    profile.safety = level;
+    profile.updated_at = datagrep_profiles::now_ms();
+    ctx.store.update_profile(profile).await?;
+    println!("`{name}` is now {level}");
     Ok(())
 }
 
@@ -108,6 +128,7 @@ pub async fn show(ctx: &Context, name: &str) -> Result<(), CliError> {
     println!("name:       {}", p.name);
     println!("driver:     {}", p.driver_id);
     println!("read_only:  {}", p.read_only);
+    println!("safety:     {}", p.safety);
     println!(
         "secret:     {}",
         if p.secret_ref.is_some() {

@@ -68,7 +68,7 @@ pub(crate) fn open_and_prepare(
 
 type MigrationFn = fn(&Transaction<'_>) -> rusqlite::Result<()>;
 
-const MIGRATIONS: &[MigrationFn] = &[migrate_v1, migrate_v2];
+const MIGRATIONS: &[MigrationFn] = &[migrate_v1, migrate_v2, migrate_v3];
 
 pub(crate) fn migrate(
     conn: &mut Connection,
@@ -148,7 +148,8 @@ CREATE TABLE profile (
     tunnel_id       TEXT REFERENCES tunnel(id) ON DELETE SET NULL,
     color           TEXT,
     read_only       INTEGER NOT NULL DEFAULT 0,
-    confirm_writes  INTEGER NOT NULL DEFAULT 0,
+    safety          TEXT NOT NULL DEFAULT 'silent'
+                    CHECK (safety IN ('silent','warn_all','warn_writes','auth_all','auth_writes')),
     auto_limit      INTEGER,
     idle_timeout_s  INTEGER,
     last_used_at    INTEGER,
@@ -270,6 +271,48 @@ fn migrate_v2(tx: &Transaction<'_>) -> rusqlite::Result<()> {
             SELECT id, folder_id, name, driver_id, config_json, secret_ref,
                    tunnel_id, color, read_only, confirm_writes, auto_limit,
                    idle_timeout_s, last_used_at, created_at, updated_at
+            FROM profile;
+
+        DROP TABLE profile;
+        ALTER TABLE profile_new RENAME TO profile;
+        CREATE INDEX ix_profile_folder ON profile(folder_id);",
+    )
+}
+
+fn migrate_v3(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let has_confirm: bool = tx
+        .prepare("SELECT 1 FROM pragma_table_info('profile') WHERE name = 'confirm_writes'")?
+        .exists([])?;
+    if !has_confirm {
+        return Ok(());
+    }
+
+    // confirm_writes true was "warn before a write", which is the ladder's Alert 2 rung.
+    tx.execute_batch(
+        "CREATE TABLE profile_new (
+            id              TEXT PRIMARY KEY,
+            folder_id       TEXT REFERENCES folder(id) ON DELETE SET NULL,
+            name            TEXT NOT NULL,
+            driver_id       TEXT NOT NULL,
+            config_json     TEXT NOT NULL,
+            secret_ref      TEXT,
+            tunnel_id       TEXT REFERENCES tunnel(id) ON DELETE SET NULL,
+            color           TEXT,
+            read_only       INTEGER NOT NULL DEFAULT 0,
+            safety          TEXT NOT NULL DEFAULT 'silent'
+                            CHECK (safety IN ('silent','warn_all','warn_writes','auth_all','auth_writes')),
+            auto_limit      INTEGER,
+            idle_timeout_s  INTEGER,
+            last_used_at    INTEGER,
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL
+        );
+
+        INSERT INTO profile_new
+            SELECT id, folder_id, name, driver_id, config_json, secret_ref,
+                   tunnel_id, color, read_only,
+                   CASE WHEN confirm_writes THEN 'warn_writes' ELSE 'silent' END,
+                   auto_limit, idle_timeout_s, last_used_at, created_at, updated_at
             FROM profile;
 
         DROP TABLE profile;

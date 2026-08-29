@@ -1,3 +1,4 @@
+use datagrep_api::safety::SafetyLevel;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +30,27 @@ impl ExportBundle {
     }
 
     pub(crate) fn from_toml(text: &str) -> Result<ExportBundle, ProfilesError> {
-        toml::from_str(text).map_err(Into::into)
+        let mut doc: toml::Value = toml::from_str(text)?;
+        upgrade_confirm_writes(&mut doc);
+        doc.try_into().map_err(Into::into)
+    }
+}
+
+// A bundle exported before the safety ladder carries `confirm_writes`; read it as the rung it meant.
+fn upgrade_confirm_writes(doc: &mut toml::Value) {
+    let Some(profiles) = doc.get_mut("profile").and_then(toml::Value::as_array_mut) else {
+        return;
+    };
+    for profile in profiles {
+        let Some(table) = profile.as_table_mut() else {
+            continue;
+        };
+        let legacy = table.remove("confirm_writes").and_then(|v| v.as_bool());
+        if table.contains_key("safety") {
+            continue;
+        }
+        let level = SafetyLevel::from_confirm_writes(legacy.unwrap_or(false));
+        table.insert("safety".to_string(), toml::Value::String(level.to_string()));
     }
 }
 
@@ -113,7 +134,7 @@ pub(crate) fn apply_import(
         tx.execute(
             "INSERT INTO profile (
                 id, folder_id, name, driver_id, config_json, secret_ref, tunnel_id, color,
-                read_only, confirm_writes, auto_limit, idle_timeout_s, last_used_at, created_at, updated_at
+                read_only, safety, auto_limit, idle_timeout_s, last_used_at, created_at, updated_at
              ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
              ON CONFLICT(id) DO UPDATE SET
                 folder_id = excluded.folder_id,
@@ -124,14 +145,26 @@ pub(crate) fn apply_import(
                 tunnel_id = excluded.tunnel_id,
                 color = excluded.color,
                 read_only = excluded.read_only,
-                confirm_writes = excluded.confirm_writes,
+                safety = excluded.safety,
                 auto_limit = excluded.auto_limit,
                 idle_timeout_s = excluded.idle_timeout_s,
                 updated_at = excluded.updated_at",
             params![
-                p.id, p.folder_id, p.name, p.driver_id, config_json, p.secret_ref, p.tunnel_id,
-                p.color, p.read_only, p.confirm_writes, p.auto_limit,
-                p.idle_timeout_s, p.last_used_at, p.created_at, p.updated_at,
+                p.id,
+                p.folder_id,
+                p.name,
+                p.driver_id,
+                config_json,
+                p.secret_ref,
+                p.tunnel_id,
+                p.color,
+                p.read_only,
+                p.safety.as_str(),
+                p.auto_limit,
+                p.idle_timeout_s,
+                p.last_used_at,
+                p.created_at,
+                p.updated_at,
             ],
         )?;
         summary.profiles_upserted += 1;

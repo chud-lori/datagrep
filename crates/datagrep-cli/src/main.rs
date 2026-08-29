@@ -85,6 +85,9 @@ async fn run_command(ctx: &Context, command: Command) -> Result<(), CliError> {
             ProfilesCommand::Add { name, url } => cmd::profiles::add(ctx, &name, &url).await,
             ProfilesCommand::Remove { name } => cmd::profiles::remove(ctx, &name).await,
             ProfilesCommand::Show { name } => cmd::profiles::show(ctx, &name).await,
+            ProfilesCommand::Safety { name, level } => {
+                cmd::profiles::safety(ctx, &name, level.as_deref()).await
+            }
             ProfilesCommand::Export { out } => cmd::profiles::export(ctx, out.as_deref()).await,
             ProfilesCommand::Import {
                 file,

@@ -85,6 +85,7 @@ impl Context {
             driver: Arc::from(profile.driver_id.as_str()),
             config,
             read_only: profile.read_only,
+            safety: profile.safety,
         };
         let id = self.core.add_profile_full(core_profile).await;
         let _ = self.store.touch_profile_last_used(profile.id.clone()).await;

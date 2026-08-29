@@ -48,6 +48,8 @@ pub async fn run(ctx: &Context, args: &ExportArgs) -> Result<(), CliError> {
             continue;
         }
 
+        super::safety::clear(ctx, default_id, stmt_text, &args.safety)?;
+
         let opts = ExecOpts {
             timeout,
             row_limit: args.limit,
@@ -293,7 +295,7 @@ mod tests {
                 tunnel_id: None,
                 color: None,
                 read_only: false,
-                confirm_writes: false,
+                safety: datagrep_api::safety::SafetyLevel::Silent,
                 auto_limit: None,
                 idle_timeout_s: None,
                 last_used_at: None,
@@ -313,6 +315,7 @@ mod tests {
         let out_path = dir.path().join("out.csv");
 
         let args = ExportArgs {
+            safety: Default::default(),
             profile: "exporttest".to_string(),
             file: None,
             command: Some("SELECT 1 AS a, 'x' AS b UNION ALL SELECT 2, 'y'".to_string()),
@@ -338,6 +341,7 @@ mod tests {
         let out_path = dir.path().join("big.ndjson");
 
         let args = ExportArgs {
+            safety: Default::default(),
             profile: "bigexport".to_string(),
             file: None,
             command: Some(
@@ -374,6 +378,7 @@ mod tests {
         let out_path = dir.path().join("uncapped.ndjson");
 
         let args = ExportArgs {
+            safety: Default::default(),
             profile: "uncapped".to_string(),
             file: None,
             command: Some(
@@ -405,6 +410,7 @@ mod tests {
         let out_path = dir.path().join("limited.ndjson");
 
         let args = ExportArgs {
+            safety: Default::default(),
             profile: "limited".to_string(),
             file: None,
             command: Some(
@@ -438,6 +444,7 @@ mod tests {
         let out_path = dir.path().join("empty.csv");
 
         let args = ExportArgs {
+            safety: Default::default(),
             profile: "emptyexport".to_string(),
             file: None,
             command: Some("SELECT 1 AS a, 'x' AS b WHERE 1 = 0".to_string()),
@@ -464,6 +471,7 @@ mod tests {
         let out_path = dir.path().join("out2.csv");
 
         let args = ExportArgs {
+            safety: Default::default(),
             profile: "exporttest2".to_string(),
             file: None,
             command: Some("   ".to_string()),
