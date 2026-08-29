@@ -12,6 +12,8 @@ final class EditorTab: ObservableObject, Identifiable {
     let id: String
     /// `nil` until the tab is named with ⌘S. An untitled tab is still persisted.
     @Published var name: String?
+    /// The catalog object this tab browses, when it was opened by a click.
+    @Published var subject: String?
     /// The profile this tab runs against. `nil` = follow the window.
     @Published var connection: String?
     @Published var isDirty: Bool = false
@@ -22,6 +24,7 @@ final class EditorTab: ObservableObject, Identifiable {
     init(
         id: String = UUID().uuidString,
         name: String? = nil,
+        subject: String? = nil,
         connection: String? = nil,
         text: String = "",
         selectedRange: NSRange = NSRange(location: 0, length: 0),
@@ -29,6 +32,7 @@ final class EditorTab: ObservableObject, Identifiable {
     ) {
         self.id = id
         self.name = name
+        self.subject = subject
         self.connection = connection
         self.text = text
         self.selectedRange = selectedRange
@@ -39,12 +43,13 @@ final class EditorTab: ObservableObject, Identifiable {
 
     var displayTitle: String {
         if let name, !name.isEmpty { return name }
+        if let subject, !subject.isEmpty { return subject }
         return untitledNumber > 0 ? "Untitled \(untitledNumber)" : "Untitled"
     }
 
     var record: SavedQueryRecord {
         SavedQueryRecord(
-            id: id, name: name, connection: connection,
+            id: id, name: name, subject: subject, connection: connection,
             cursorLocation: selectedRange.location, cursorLength: selectedRange.length,
             isDirty: isDirty)
     }

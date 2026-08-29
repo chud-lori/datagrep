@@ -115,6 +115,21 @@ char* datagrep_catalog_children_json(DatagrepCore*, const char* profile, const c
 //  "extra":[[k,v],..]}                  // engine-specific display pairs
 char* datagrep_catalog_describe_json(DatagrepCore*, const char* profile, const char* path_json, char** err_out);
 
+// The statement that reads one catalog object, written in that engine's own
+// language and carrying its own comment marker on the @limit line. Pure: no
+// core, no connection, no I/O — driver_id and the path are all it consults.
+//
+// `database` is the database this connection is open on, or NULL when it is
+// not known. It is what lets the refusal be specific rather than a guess: the
+// catalog can list databases a statement cannot reach (a Mongo collection
+// outside the connection's database, a Postgres table in another database), and
+// those return NULL with *err_out naming the database and why it is unreachable.
+// A Redis key is refused too — the value's shape decides its command.
+//
+// Returns an OWNED char* the caller MUST datagrep_string_free().
+char* datagrep_browse_statement(const char* driver_id, const char* path_json,
+                                const char* database, char** err_out);
+
 // ---- query -----------------------------------------------------------
 // Non-blocking: returns immediately with a handle; rows stream in the background.
 DatagrepQuery* datagrep_query_run(DatagrepCore*, const char* profile, const char* sql, char** err_out);

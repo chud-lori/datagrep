@@ -87,8 +87,10 @@ final class CatalogNode: ObservableObject, Identifiable {
         return s
     }
 
-    var isPreviewable: Bool {
-        ["table", "collection", "view", "key", "hash", "string"].contains(kind)
+    /// Kinds whose rows a click can open. A Redis key is not one: the value's
+    /// shape decides the command, so the core refuses to guess.
+    var isBrowsable: Bool {
+        ["table", "collection", "view"].contains(kind)
     }
 
     var isDescribable: Bool {
@@ -313,7 +315,7 @@ final class AppModel: ObservableObject {
             .sink { [weak self] id in self?.activeTabChanged(to: id) }
             .store(in: &sinks)
         editor.tabs.$tabs
-            .sink { [weak self] tabs in self?.forgetResults(outside: Set(tabs.map(\.id))) }
+            .sink { [weak self] tabs in self?.forgetTabState(outside: Set(tabs.map(\.id))) }
             .store(in: &sinks)
 
         history.onOpenInEditor = { [weak self] sql, connection in
@@ -781,6 +783,7 @@ final class AppModel: ObservableObject {
     func select(_ node: CatalogNode) {
         selectProfile(node.profile)
         if node.isDescribable { showSchema(for: node) }
+        if node.isBrowsable { browse(node) }
     }
 
     // MARK: - editors, per connection
@@ -865,16 +868,64 @@ final class AppModel: ObservableObject {
         if !showDetail { withAnimation(.smooth(duration: 0.22)) { showDetail = true } }
     }
 
-    func preview(_ node: CatalogNode) {
-        select(node)
-        let sql = """
-            -- @limit 500
-            SELECT * FROM \(node.path.joined(separator: "."));
-            """
-        sqlText = sql
-        editor.setText(sql)
+    /// Open one catalog object's rows in a tab of their own.
+    func browse(_ node: CatalogNode) {
+        guard node.isBrowsable else { return }
+        // A double click fires the single-click handler too; one tab per object.
+        guard browsing.insert(node.schemaCacheKey).inserted else { return }
+        withConnectionDatabase(of: node.profile) { [weak self] database in
+            guard let self else { return }
+            self.browsing.remove(node.schemaCacheKey)
+            self.openBrowse(node, database: database)
+        }
+    }
+
+    private func openBrowse(_ node: CatalogNode, database: String?) {
+        let statement: String
+        do {
+            statement = try BrowseStatement.forObject(
+                driver: driverID(for: node.profile), path: node.path, database: database)
+        } catch {
+            message = "\(error)"
+            isError = true
+            return
+        }
+        if let open = browseTab(for: node, statement: statement) {
+            editor.focusTab(id: open)
+            message = "`\(node.name)` is already open — switched to its tab"
+            isError = false
+            return
+        }
+        let tab = editor.newTab(connection: node.profile)
+        tab.subject = node.name
+        browseTabs[node.schemaCacheKey] = tab.id
+        // Not dirty: a browse buffer nobody typed into closes without a prompt.
+        editor.setText(statement, markDirty: false)
+        sqlText = statement
+        // currentBlock() folds the tab's connection into the directives, so this
+        // runs where the object lives rather than wherever the window points.
         refreshDirectives()
-        run(sql: sql, directives: SQLBlocks.directives(in: sql))
+        run(sql: statement, directives: directives)
+    }
+
+    private func browseTab(for node: CatalogNode, statement: String) -> String? {
+        let live = editor.tabs.tabs
+        if let id = browseTabs[node.schemaCacheKey], live.contains(where: { $0.id == id }) {
+            return id
+        }
+        // The map does not survive a relaunch; an untouched buffer still names its tab.
+        return live.first { $0.connection == node.profile && $0.text == statement }?.id
+    }
+
+    /// The database a connection is open on — the core needs it to refuse a
+    /// browse its statement language cannot reach.
+    private func withConnectionDatabase(of profile: String, then: @escaping (String?) -> Void) {
+        if let info = connectionInfo, info.profile == profile { return then(info.database) }
+        guard let core else { return then(nil) }
+        catalogQueue.async {
+            let info = try? core.connectionInfo(profile: profile)
+            DispatchQueue.main.async { then(info?.database) }
+        }
     }
 
     // MARK: - history
@@ -1183,6 +1234,9 @@ final class AppModel: ObservableObject {
     private var resultTab: String?
     private var resultProfile: String = ""
     private var resultsByTab: [String: TabResult] = [:]
+    /// Which tab is browsing which object, so a second click focuses it.
+    private var browseTabs: [String: String] = [:]
+    private var browsing: Set<String> = []
 
     /// Park the visible result under its own tab so switching back restores it.
     private func parkVisibleResult() {
@@ -1261,8 +1315,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Closed tabs free their result — and with it the core-side result store.
-    private func forgetResults(outside live: Set<String>) {
+    private func forgetTabState(outside live: Set<String>) {
         resultsByTab = resultsByTab.filter { live.contains($0.key) }
+        browseTabs = browseTabs.filter { live.contains($0.value) }
     }
 
     // MARK: - committing staged edits

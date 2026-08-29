@@ -115,8 +115,11 @@ public enum SQLBlocks {
         var d = BlockDirectives()
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard line.hasPrefix("--") else { continue }
-            let body = line.dropFirst(2).trimmingCharacters(in: .whitespaces)
+            // `#` is MySQL's comment marker and the one MongoShell and the ES
+            // DSL use for directives, so a directive wears whichever fits.
+            let marker = line.hasPrefix("--") ? 2 : (line.hasPrefix("#") ? 1 : 0)
+            guard marker > 0 else { continue }
+            let body = line.dropFirst(marker).trimmingCharacters(in: .whitespaces)
             guard body.hasPrefix("@") else { continue }
             let parts = body.dropFirst().split(separator: " ", maxSplits: 1).map {
                 $0.trimmingCharacters(in: .whitespaces)
