@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use datagrep_api::safety::SafetyLevel;
 use datagrep_api::{ConfigValue, ConnectionConfig};
 use datagrep_profiles::{
     new_id, now_ms, Folder, HistoryStatus, ImportStrategy, NewHistoryEntry, ProfilesError,
@@ -42,7 +43,7 @@ fn sample_profile(id: &str, folder_id: Option<String>) -> datagrep_profiles::Pro
         tunnel_id: None,
         color: Some("#00ff00".to_string()),
         read_only: false,
-        confirm_writes: false,
+        safety: SafetyLevel::Silent,
         auto_limit: Some(1000),
         idle_timeout_s: Some(300),
         last_used_at: None,
@@ -103,7 +104,7 @@ async fn migration_brings_empty_db_to_current_version() {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        version, 2,
+        version, 3,
         "fresh db should land on the current schema version"
     );
 
@@ -169,7 +170,7 @@ async fn reopen_is_idempotent_and_does_not_reapply_migrations() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2, "version must not change on a no-op reopen");
+    assert_eq!(version, 3, "version must not change on a no-op reopen");
 
     let bak_len_after_second_open = std::fs::metadata(&bak).unwrap().len();
     assert_eq!(bak_len_after_first_open, bak_len_after_second_open);
@@ -632,7 +633,7 @@ async fn migrating_off_env_keeps_every_other_column() {
     profile.secret_ref = Some("keychain:datagrep:p1:password".to_string());
     profile.color = Some("red".to_string());
     profile.read_only = true;
-    profile.confirm_writes = true;
+    profile.safety = SafetyLevel::WarnAll;
     profile.auto_limit = Some(500);
     profile.idle_timeout_s = Some(30);
     {
@@ -640,12 +641,14 @@ async fn migrating_off_env_keeps_every_other_column() {
         store.create_profile(profile.clone()).await.unwrap();
     }
 
-    // Regress to the v1 shape.
+    // Regress to the real v1 shape: `env` present, the safety ladder still a bool.
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch(
             "ALTER TABLE profile ADD COLUMN env TEXT NOT NULL DEFAULT 'dev';
-             UPDATE profile SET env = 'prod';
+             ALTER TABLE profile ADD COLUMN confirm_writes INTEGER NOT NULL DEFAULT 0;
+             UPDATE profile SET env = 'prod', confirm_writes = 1;
+             ALTER TABLE profile DROP COLUMN safety;
              PRAGMA user_version = 1;",
         )
         .unwrap();
@@ -664,7 +667,11 @@ async fn migrating_off_env_keeps_every_other_column() {
     );
     assert_eq!(p.color.as_deref(), Some("red"));
     assert!(p.read_only);
-    assert!(p.confirm_writes);
+    assert_eq!(
+        p.safety,
+        SafetyLevel::WarnWrites,
+        "confirm_writes = true is the ladder's warn-before-a-write rung"
+    );
     assert_eq!(p.auto_limit, Some(500));
     assert_eq!(p.idle_timeout_s, Some(30));
     assert_eq!(p.config, profile.config);
@@ -676,4 +683,79 @@ async fn migrating_off_env_keeps_every_other_column() {
         .exists([])
         .unwrap();
     assert!(!has_env, "env should be gone");
+    let has_confirm: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('profile') WHERE name = 'confirm_writes'")
+        .unwrap()
+        .exists([])
+        .unwrap();
+    assert!(!has_confirm, "confirm_writes should be gone");
+}
+
+#[tokio::test]
+async fn a_v2_database_reads_its_confirm_writes_as_a_ladder_rung() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("profiles.db");
+
+    {
+        let store = Store::open(&path);
+        store
+            .create_profile(sample_profile("keep", None))
+            .await
+            .unwrap();
+        store
+            .create_profile(sample_profile("ask", None))
+            .await
+            .unwrap();
+    }
+
+    // Regress to v2: the bool is back, `ask` had it set.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE profile ADD COLUMN confirm_writes INTEGER NOT NULL DEFAULT 0;
+             UPDATE profile SET confirm_writes = 1 WHERE id = 'ask';
+             ALTER TABLE profile DROP COLUMN safety;
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&path);
+    let profiles = store.list_profiles(None).await.unwrap();
+    let level = |id: &str| {
+        profiles
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.safety)
+            .expect("profile survived")
+    };
+    assert_eq!(level("ask"), SafetyLevel::WarnWrites);
+    assert_eq!(level("keep"), SafetyLevel::Silent);
+}
+
+#[tokio::test]
+async fn a_bundle_exported_before_the_ladder_imports_at_the_rung_it_meant() {
+    let dest = Store::open_in_memory();
+    let toml = r#"
+version = 1
+
+[[profile]]
+id = "p1"
+name = "prod"
+driver_id = "postgres"
+read_only = false
+confirm_writes = true
+created_at = 0
+updated_at = 0
+
+[profile.config]
+driver = "postgres"
+
+[profile.config.values]
+"#;
+    dest.import_profiles(toml.to_string(), ImportStrategy::Merge)
+        .await
+        .unwrap();
+    let profiles = dest.list_profiles(None).await.unwrap();
+    assert_eq!(profiles[0].safety, SafetyLevel::WarnWrites);
 }

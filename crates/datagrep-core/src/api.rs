@@ -10,11 +10,13 @@ use datagrep_api::config::{ConfigError, ConnectionConfig};
 use datagrep_api::driver::Driver;
 use datagrep_api::error::DbError;
 use datagrep_api::request::Request;
+use datagrep_api::safety::{Attestation, SafetyLevel};
 use datagrep_api::shape::ObjectPath;
 use tokio::sync::broadcast;
 
 use crate::query::{CancelReport, QueryEvent, QueryId, QueryMgr};
 use crate::registry::DriverRegistry;
+use crate::safety::{SafetyDecision, SafetyGate};
 use crate::session::{guarded, PoolPolicy, Session, SessionRegistry};
 use crate::store::{GlobalBudget, MemoryPolicy, RowWindow};
 use crate::timer::TimerWheel;
@@ -36,6 +38,7 @@ pub struct Profile {
     pub driver: Arc<str>,
     pub config: ConnectionConfig,
     pub read_only: bool,
+    pub safety: SafetyLevel,
 }
 
 pub struct CoreApi {
@@ -98,6 +101,7 @@ impl CoreApi {
             driver: config.driver.clone(),
             config,
             read_only: false,
+            safety: SafetyLevel::default(),
         };
         write(&self.profiles).insert(id, profile);
         id
@@ -134,8 +138,48 @@ impl CoreApi {
             .get(&id)
             .cloned()
             .ok_or_else(|| unknown_profile(id))?;
-        self.sessions
-            .open(id, &profile.driver, profile.config.clone())
+        self.sessions.open(
+            id,
+            &profile.name,
+            &profile.driver,
+            profile.config.clone(),
+            profile.safety,
+        )
+    }
+
+    // ---- safety -------------------------------------------------------
+
+    pub fn safety_gate(&self, id: ProfileId) -> Result<Arc<SafetyGate>, DbError> {
+        Ok(self.session(id)?.gate().clone())
+    }
+
+    pub async fn safety(&self, id: ProfileId) -> Option<SafetyLevel> {
+        read(&self.profiles).get(&id).map(|p| p.safety)
+    }
+
+    pub async fn set_safety(&self, id: ProfileId, level: SafetyLevel) -> Result<(), DbError> {
+        {
+            let mut profiles = write(&self.profiles);
+            let profile = profiles.get_mut(&id).ok_or_else(|| unknown_profile(id))?;
+            profile.safety = level;
+        }
+        if let Some(session) = self.sessions.get(id) {
+            session.gate().set_level(level);
+        }
+        Ok(())
+    }
+
+    pub fn evaluate_safety(&self, id: ProfileId, sql: &str) -> Result<SafetyDecision, DbError> {
+        Ok(self.safety_gate(id)?.plan(sql))
+    }
+
+    pub fn satisfy_safety(
+        &self,
+        id: ProfileId,
+        challenge: &str,
+        attestation: &Attestation,
+    ) -> Result<(), DbError> {
+        self.safety_gate(id)?.satisfy(challenge, attestation)
     }
 
     pub async fn capabilities(&self, id: ProfileId) -> Result<Capabilities, DbError> {
@@ -253,6 +297,21 @@ mod tests {
     use crate::testing::{MockDriver, MockPlan};
     use std::time::{Duration, Instant};
 
+    struct RefusedSink;
+
+    impl crate::export::ExportSink for RefusedSink {
+        fn begin(&mut self, _shape: &datagrep_api::shape::Shape) -> Result<(), DbError> {
+            panic!("the export reached the driver")
+        }
+
+        fn chunk(
+            &mut self,
+            _batch: datagrep_api::driver::Batch,
+        ) -> Result<crate::export::SinkFlow, DbError> {
+            panic!("the export reached the driver")
+        }
+    }
+
     async fn until(deadline_ms: u64, mut cond: impl FnMut() -> bool) -> bool {
         let start = Instant::now();
         while start.elapsed() < Duration::from_millis(deadline_ms) {
@@ -351,6 +410,73 @@ mod tests {
             until(2_000, || core.result_bytes() == 0).await,
             "closing the tab did not return the memory"
         );
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_ladder_stops_a_write_before_the_driver_sees_it() {
+        let (core, counters) = core(MockPlan::default());
+        let id = core.add_profile("prod", mock_config()).await;
+        core.set_safety(id, SafetyLevel::AuthWrites)
+            .await
+            .expect("set the rung");
+
+        core.run_query(id, Request::native("select 1"))
+            .await
+            .expect("a read is exempt at this rung");
+        assert_eq!(counters.executes(), 1);
+
+        let err = core
+            .run_query(id, Request::native("delete from users"))
+            .await
+            .expect_err("the write must be refused");
+        let DbError::Safety { challenge, .. } = err else {
+            panic!("expected a safety refusal, got {err:?}");
+        };
+        assert_eq!(counters.executes(), 1, "the write reached the driver");
+
+        core.satisfy_safety(id, &challenge, &Attestation::Acknowledged)
+            .expect_err("an acknowledgement is not authentication");
+        assert!(core
+            .run_query(id, Request::native("delete from users"))
+            .await
+            .is_err());
+
+        let decision = core
+            .evaluate_safety(id, "delete from users")
+            .expect("evaluate");
+        let challenge = decision.challenge.expect("a challenge to clear");
+        core.satisfy_safety(
+            id,
+            &challenge,
+            &Attestation::TypedPhrase {
+                typed: "prod".to_string(),
+            },
+        )
+        .expect("the connection name clears the rung");
+
+        core.run_query(id, Request::native("delete from users"))
+            .await
+            .expect("the cleared statement runs");
+        assert_eq!(counters.executes(), 2);
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_export_is_gated_on_the_same_ladder_as_a_query() {
+        let (core, counters) = core(MockPlan::default());
+        let id = core.add_profile("prod", mock_config()).await;
+        core.set_safety(id, SafetyLevel::WarnAll)
+            .await
+            .expect("set the rung");
+
+        let mut sink = RefusedSink;
+        let err = core
+            .run_export(id, Request::native("select 1"), &mut sink)
+            .await
+            .expect_err("every-query rung gates the export too");
+        assert!(matches!(err, DbError::Safety { .. }));
+        assert_eq!(counters.executes(), 0);
         core.shutdown().await;
     }
 

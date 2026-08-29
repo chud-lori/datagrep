@@ -650,6 +650,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "datagrep-api",
+ "datagrep-lang",
  "thiserror",
  "tokio",
  "tokio-util",

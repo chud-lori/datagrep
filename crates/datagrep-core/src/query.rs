@@ -480,10 +480,12 @@ mod tests {
                 .open(
                     ProfileId(1),
                     "mock",
+                    "mock",
                     ConnectionConfig {
                         driver: Arc::from("mock"),
                         values: Default::default(),
                     },
+                    datagrep_api::safety::SafetyLevel::Silent,
                 )
                 .expect("open");
             session.acquire().await.expect("acquire")

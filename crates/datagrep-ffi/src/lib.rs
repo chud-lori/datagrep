@@ -14,6 +14,7 @@ pub mod query;
 pub mod reread;
 pub mod rows;
 pub mod runtime;
+pub mod safety;
 
 pub use crate::core::{datagrep_core_free, datagrep_core_new, datagrep_string_free, DatagrepCore};
 pub use browse::datagrep_browse_statement;
@@ -30,4 +31,7 @@ pub use rows::{
     datagrep_rows_cell_kind, datagrep_rows_column_names_json, datagrep_rows_columns,
     datagrep_rows_count, datagrep_rows_envelope_json, datagrep_rows_free, datagrep_rows_pending,
     DatagrepRows,
+};
+pub use safety::{
+    datagrep_safety_evaluate_json, datagrep_safety_pending_json, datagrep_safety_satisfy,
 };

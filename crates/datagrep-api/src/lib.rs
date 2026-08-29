@@ -7,6 +7,7 @@ pub mod config;
 pub mod driver;
 pub mod error;
 pub mod request;
+pub mod safety;
 pub mod shape;
 pub mod value;
 
@@ -28,6 +29,7 @@ pub use driver::{
 };
 pub use error::DbError;
 pub use request::{DdlOp, ExecOpts, Mutation, MutationBatch, Op, Predicate, Request, SortKey};
+pub use safety::{Attestation, Requirement, SafetyLevel};
 pub use shape::{
     FieldDef, FieldFlags, GraphChunk, GraphSchema, Identity, LogicalType, ObjectPath, RowSchema,
     SchemaDelta, Shape, ValueKind,

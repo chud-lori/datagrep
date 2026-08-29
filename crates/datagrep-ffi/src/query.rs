@@ -5,10 +5,10 @@ use std::time::Instant;
 use datagrep_api::caps::Caps;
 use datagrep_api::shape::Shape;
 use datagrep_api::value::PathSeg;
-use datagrep_api::{ExecOpts, LanguageId};
+use datagrep_api::{DbError, ExecOpts, LanguageId};
 use datagrep_core::query::CancelReport;
 use datagrep_core::store::{ChunkBody, StorePhase, StoreState};
-use datagrep_core::{QueryEvent, QueryId};
+use datagrep_core::{ProfileId, QueryEvent, QueryId, SafetyDecision};
 use datagrep_lang::StatementClass;
 use serde_json::json;
 use tokio::task::JoinHandle;
@@ -52,6 +52,7 @@ struct QueryInner {
     columns: Vec<(String, String)>,
     affected: Option<u64>,
     read_only: bool,
+    safety: Option<SafetyDecision>,
     driver_id: String,
     root: Option<String>,
     identity: Vec<String>,
@@ -78,6 +79,16 @@ impl QueryShared {
         self.lock().start_error = Some(message);
         self.notify();
     }
+}
+
+// A safety refusal is a UI state, not a dead end: keep the challenge the frontend has to clear.
+fn refusal(shared: &Arc<QueryShared>, id: ProfileId, err: DbError) -> String {
+    if let DbError::Safety { challenge, .. } = &err {
+        if let Ok(gate) = shared.core.api.safety_gate(id) {
+            shared.lock().safety = gate.decision(challenge);
+        }
+    }
+    err.to_string()
 }
 
 pub struct DatagrepQuery {
@@ -208,7 +219,7 @@ async fn drive(shared: Arc<QueryShared>, profile: String, sql: String) {
         .await
     {
         Ok(qid) => qid,
-        Err(e) => return shared.fail(e),
+        Err(e) => return shared.fail(refusal(&shared, id, e)),
     };
 
     let (root, identity) = shared
@@ -386,7 +397,8 @@ async fn run_to_completion(
     let qid = shared
         .core
         .run_request(id, profile, read_only, request_for(sql, read_only))
-        .await?;
+        .await
+        .map_err(|e| refusal(shared, id, e))?;
 
     let result = match shared.core.api.queries().store(qid) {
         Some(store) => {
@@ -660,6 +672,10 @@ pub unsafe extern "C" fn datagrep_query_status_json(
                     &inner.driver_id,
                     q.shared.core.caps_for(&q.shared.profile),
                 ),
+                "safety": inner
+                    .safety
+                    .as_ref()
+                    .map(crate::safety::decision_json),
             });
             drop(inner);
 

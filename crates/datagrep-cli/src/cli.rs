@@ -71,6 +71,19 @@ pub struct QueryArgs {
 
     #[arg(short = 'o', long = "out", value_name = "FILE")]
     pub out: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub safety: SafetyArgs,
+}
+
+// A terminal's ceremony for clearing a rung: typing the connection name, as the GUIs ask.
+#[derive(Debug, Default, Parser)]
+pub struct SafetyArgs {
+    #[arg(long)]
+    pub acknowledge: bool,
+
+    #[arg(long, value_name = "CONNECTION-NAME")]
+    pub confirm: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +125,9 @@ pub struct ExportArgs {
 
     #[arg(long)]
     pub timeout: Option<String>,
+
+    #[command(flatten)]
+    pub safety: SafetyArgs,
 }
 
 #[derive(Debug, Subcommand)]
@@ -126,6 +142,11 @@ pub enum ProfilesCommand {
     },
     Show {
         name: String,
+    },
+    Safety {
+        name: String,
+        #[arg(value_name = "LEVEL")]
+        level: Option<String>,
     },
     Export {
         #[arg(short = 'o', long = "out", value_name = "FILE")]

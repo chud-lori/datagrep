@@ -1,4 +1,5 @@
 use crate::config::ConfigError;
+use crate::safety::Requirement;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -48,6 +49,13 @@ pub enum DbError {
     #[error("resource exhausted: {0}")]
     ResourceExhausted(String),
 
+    #[error("`{profile}` is in safe mode: this statement requires {requirement} first (challenge {challenge})")]
+    Safety {
+        profile: String,
+        requirement: Requirement,
+        challenge: String,
+    },
+
     #[error("closed")]
     Closed,
 }
@@ -63,6 +71,7 @@ impl DbError {
                 | DbError::Conflict { .. }
                 | DbError::Config(_)
                 | DbError::ResourceExhausted(_)
+                | DbError::Safety { .. }
         )
     }
 }
@@ -88,6 +97,15 @@ mod tests {
         assert!(!DbError::Protocol("bad frame".into()).is_recoverable());
         assert!(!DbError::DriverPanic("index out of bounds".into()).is_recoverable());
         assert!(!DbError::Closed.is_recoverable());
+        assert!(
+            DbError::Safety {
+                profile: "prod".into(),
+                requirement: Requirement::Authenticate,
+                challenge: "c1".into(),
+            }
+            .is_recoverable(),
+            "a safety refusal must not poison the connection it never used"
+        );
     }
 
     #[test]

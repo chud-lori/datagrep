@@ -4,6 +4,7 @@ pub mod export;
 pub mod history;
 pub mod profiles;
 pub mod query;
+pub mod safety;
 mod streaming;
 
 use std::io::Write;

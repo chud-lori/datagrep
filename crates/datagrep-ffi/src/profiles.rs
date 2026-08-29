@@ -1,5 +1,6 @@
 use std::ffi::c_char;
 
+use datagrep_api::safety::SafetyLevel;
 use datagrep_api::ConfigValue;
 use datagrep_secrets::SecretRef;
 use serde::{Deserialize, Deserializer};
@@ -15,6 +16,8 @@ struct ProfilePatch {
     name: Option<String>,
     url: Option<String>,
     read_only: Option<bool>,
+    safety: Option<String>,
+    // Superseded by `safety`; kept so a frontend that has not migrated yet still sets a real rung.
     confirm_writes: Option<bool>,
     #[serde(default, deserialize_with = "nullable")]
     auto_limit: Option<Option<i64>>,
@@ -32,6 +35,21 @@ where
     Option::<T>::deserialize(de).map(Some)
 }
 
+impl ProfilePatch {
+    fn level(&self) -> Result<Option<SafetyLevel>, String> {
+        if let Some(name) = &self.safety {
+            let level = SafetyLevel::parse(name).ok_or_else(|| {
+                format!(
+                    "unknown safety level `{name}`; expected one of {}",
+                    SafetyLevel::ALL.map(|l| l.as_str()).join(", ")
+                )
+            })?;
+            return Ok(Some(level));
+        }
+        Ok(self.confirm_writes.map(SafetyLevel::from_confirm_writes))
+    }
+}
+
 fn parse_patch(text: &str) -> Result<ProfilePatch, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -40,7 +58,7 @@ fn parse_patch(text: &str) -> Result<ProfilePatch, String> {
     serde_json::from_str(trimmed).map_err(|e| {
         format!(
             "patch/options JSON is invalid ({e}); accepted keys: name, url, \
-             read_only, confirm_writes, auto_limit, idle_timeout_s, color"
+             read_only, safety, confirm_writes (legacy), auto_limit, idle_timeout_s, color"
         )
     })
 }
@@ -71,7 +89,8 @@ pub unsafe extern "C" fn datagrep_profiles_list_json(
                         "name": p.name,
                         "driver": p.driver_id,
                         "read_only": p.read_only,
-                        "confirm_writes": p.confirm_writes,
+                        "safety": p.safety,
+                        "confirm_writes": p.safety.confirms_writes(),
                         "color": p.color,
                         "has_secret": p.secret_ref.is_some(),
                     })
@@ -159,6 +178,7 @@ async fn add_profile(
     let id = datagrep_profiles::new_id();
     let (driver_id, config, secret_ref) = parse_and_split_url(core, &id, url).await?;
 
+    let safety = options.level()?.unwrap_or_default();
     let now = datagrep_profiles::now_ms();
     core.store
         .create_profile(datagrep_profiles::Profile {
@@ -171,7 +191,7 @@ async fn add_profile(
             tunnel_id: None,
             color: options.color.flatten(),
             read_only: options.read_only.unwrap_or(false),
-            confirm_writes: options.confirm_writes.unwrap_or(false),
+            safety,
             auto_limit: options.auto_limit.flatten(),
             idle_timeout_s: options.idle_timeout_s.flatten(),
             last_used_at: None,
@@ -284,8 +304,8 @@ async fn update_profile(core: &CoreInner, name: &str, patch: ProfilePatch) -> Re
     if let Some(read_only) = patch.read_only {
         profile.read_only = read_only;
     }
-    if let Some(confirm_writes) = patch.confirm_writes {
-        profile.confirm_writes = confirm_writes;
+    if let Some(level) = patch.level()? {
+        profile.safety = level;
     }
     if let Some(auto_limit) = patch.auto_limit {
         profile.auto_limit = auto_limit;
@@ -361,7 +381,8 @@ pub unsafe extern "C" fn datagrep_profiles_get_json(
                 "name": p.name,
                 "driver": p.driver_id,
                 "read_only": p.read_only,
-                "confirm_writes": p.confirm_writes,
+                "safety": p.safety,
+                "confirm_writes": p.safety.confirms_writes(),
                 "auto_limit": p.auto_limit,
                 "idle_timeout_s": p.idle_timeout_s,
                 "color": p.color,
@@ -408,6 +429,7 @@ pub unsafe extern "C" fn datagrep_connection_info_json(
                 "driver": p.driver_id,
                 "database": database,
                 "server": server,
+                "safety": p.safety,
                 "read_only": crate::core::read_only_json(
                     p.read_only,
                     &p.driver_id,
@@ -658,7 +680,11 @@ mod tests {
 
             let p = saved(core, "prod-db");
             assert!(p.read_only);
-            assert!(p.confirm_writes);
+            assert_eq!(
+                p.safety,
+                SafetyLevel::WarnWrites,
+                "the legacy confirm_writes key must land on a real rung"
+            );
             assert_eq!(p.auto_limit, Some(500));
 
             let list = take_json(
@@ -667,6 +693,10 @@ mod tests {
                 "datagrep_profiles_list_json",
             );
             assert!(list.contains(r#""read_only":true"#), "list was {list}");
+            assert!(
+                list.contains(r#""safety":"warn_writes""#),
+                "list was {list}"
+            );
             assert!(list.contains(r#""confirm_writes":true"#), "list was {list}");
             assert!(list.contains(r#""color":"red""#), "list was {list}");
 
@@ -678,12 +708,61 @@ mod tests {
             );
             let detail: serde_json::Value = serde_json::from_str(&detail).unwrap();
             assert_eq!(detail["read_only"], true);
+            assert_eq!(detail["safety"], "warn_writes");
             assert_eq!(detail["confirm_writes"], true);
             assert_eq!(detail["auto_limit"], 500);
             assert_eq!(detail["color"], "red");
             assert_eq!(detail["idle_timeout_s"], serde_json::Value::Null);
             assert_eq!(detail["secret"], serde_json::Value::Null);
             assert_eq!(detail["driver"], "sqlite");
+
+            datagrep_core_free(core);
+        }
+    }
+
+    #[test]
+    fn the_safety_level_is_set_and_read_back_by_name() {
+        let core = test_core();
+        let name = CString::new("prod").unwrap();
+        let url = CString::new(":memory:").unwrap();
+        let mut err: *mut c_char = std::ptr::null_mut();
+        unsafe {
+            expect_ok(
+                datagrep_profiles_add(core, name.as_ptr(), url.as_ptr(), &mut err),
+                err,
+                "add",
+            );
+            assert_eq!(saved(core, "prod").safety, SafetyLevel::Silent);
+
+            let patch = CString::new(r#"{"safety":"auth_writes"}"#).unwrap();
+            expect_ok(
+                datagrep_profiles_update(core, name.as_ptr(), patch.as_ptr(), &mut err),
+                err,
+                "update",
+            );
+            assert_eq!(saved(core, "prod").safety, SafetyLevel::AuthWrites);
+
+            let detail = take_json(
+                datagrep_profiles_get_json(core, name.as_ptr(), &mut err),
+                err,
+                "get",
+            );
+            let detail: serde_json::Value = serde_json::from_str(&detail).unwrap();
+            assert_eq!(detail["safety"], "auth_writes");
+            assert_eq!(detail["confirm_writes"], true, "the legacy view of it");
+
+            let patch = CString::new(r#"{"safety":"safe_2"}"#).unwrap();
+            let msg = expect_err(
+                datagrep_profiles_update(core, name.as_ptr(), patch.as_ptr(), &mut err),
+                err,
+                "update(bad level)",
+            );
+            assert!(msg.contains("auth_writes"), "{msg}");
+            assert_eq!(
+                saved(core, "prod").safety,
+                SafetyLevel::AuthWrites,
+                "a rejected patch must not lower the rung"
+            );
 
             datagrep_core_free(core);
         }

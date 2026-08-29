@@ -7,6 +7,7 @@ pub mod export;
 pub mod feeder;
 pub mod query;
 pub mod registry;
+pub mod safety;
 pub mod session;
 pub mod spill;
 pub mod store;
@@ -23,6 +24,7 @@ pub use feeder::{
 };
 pub use query::{CancelReport, QueryEvent, QueryId, QueryMgr, QueryStats};
 pub use registry::DriverRegistry;
+pub use safety::{SafetyDecision, SafetyGate, SafetyStatement};
 pub use session::{ConnectionHandle, PinnedConn, Session, SessionRegistry};
 pub use store::{
     DocSegment, GlobalBudget, MemoryPolicy, ResultStore, RowWindow, SpillPolicy, StorePhase,

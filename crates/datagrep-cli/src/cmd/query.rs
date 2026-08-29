@@ -83,6 +83,8 @@ pub async fn run(ctx: &Context, args: &QueryArgs) -> Result<(), CliError> {
             }
         }
 
+        super::safety::clear(ctx, profile_id, stmt_text, &args.safety)?;
+
         let limit = directives.limit.or(args.limit);
         let timeout = directives.timeout.or(cli_timeout);
         let deadline = timeout.map(|d| Instant::now() + d);
@@ -198,7 +200,7 @@ mod tests {
             tunnel_id: None,
             color: None,
             read_only: false,
-            confirm_writes: false,
+            safety: datagrep_api::safety::SafetyLevel::Silent,
             auto_limit: None,
             idle_timeout_s: None,
             last_used_at: None,
@@ -254,6 +256,7 @@ mod tests {
         let out_path = dir.path().join("empty.csv");
 
         let args = QueryArgs {
+            safety: Default::default(),
             profile: "emptyquery".to_string(),
             file: None,
             command: Some("SELECT 1 AS a, 'x' AS b WHERE 1 = 0".to_string()),
@@ -269,6 +272,50 @@ mod tests {
             written, "a,b\r\n",
             "a zero-row result must still name its columns"
         );
+    }
+
+    #[tokio::test]
+    async fn the_ladder_needs_a_flag_and_the_right_one() {
+        let ctx = crate::context::test_ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("ladder.db");
+        temp_sqlite_profile(&ctx.store, "prod", &db_path).await;
+        let mut profile = ctx.find_profile("prod").await.unwrap();
+        profile.safety = datagrep_api::safety::SafetyLevel::AuthWrites;
+        ctx.store.update_profile(profile).await.unwrap();
+
+        let mut args = QueryArgs {
+            safety: Default::default(),
+            profile: "prod".to_string(),
+            file: None,
+            command: Some("CREATE TABLE t (id INTEGER PRIMARY KEY)".to_string()),
+            stdin: None,
+            format: OutputFormat::Json,
+            limit: None,
+            timeout: None,
+            out: Some(dir.path().join("out.json")),
+        };
+
+        let err = run(&ctx, &args).await.expect_err("no flag, no write");
+        assert!(err.message.contains("--confirm prod"), "{}", err.message);
+
+        args.safety.acknowledge = true;
+        let err = run(&ctx, &args)
+            .await
+            .expect_err("acknowledging is not authenticating");
+        assert!(err.message.contains("authentication"), "{}", err.message);
+
+        args.safety.acknowledge = false;
+        args.safety.confirm = Some("staging".to_string());
+        assert!(
+            run(&ctx, &args).await.is_err(),
+            "another connection's name must not clear this one"
+        );
+
+        args.safety.confirm = Some("prod".to_string());
+        run(&ctx, &args)
+            .await
+            .expect("the connection name clears it");
     }
 
     #[test]
@@ -288,6 +335,7 @@ mod tests {
         temp_sqlite_profile(&ctx.store, "rotest", &db_path).await;
 
         let args = QueryArgs {
+            safety: Default::default(),
             profile: "rotest".to_string(),
             file: None,
             command: Some("-- @readonly\nCREATE TABLE t (id INTEGER PRIMARY KEY)".to_string()),
@@ -318,6 +366,7 @@ mod tests {
             .ok();
 
         let args = QueryArgs {
+            safety: Default::default(),
             profile: "limittest".to_string(),
             file: None,
             command: Some("-- @limit 3\nWITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x<100) SELECT x FROM cnt".to_string()),

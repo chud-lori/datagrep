@@ -16,7 +16,9 @@ void     datagrep_string_free(char*);            // frees any char* this API ret
 
 // ---- profiles --------------------------------------------------------
 // Returns JSON:
-// [{"name":..,"driver":..,"read_only":bool,"confirm_writes":bool,
+// [{"name":..,"driver":..,"read_only":bool,
+//   "safety":"silent"|"warn_all"|"warn_writes"|"auth_all"|"auth_writes",
+//   "confirm_writes":bool,          // legacy view of "safety": writes need something
 //   "color":str|null,"has_secret":bool}, ...]
 char* datagrep_profiles_list_json(DatagrepCore*, char** err_out);
 // Adds with default settings (writeable, no confirmation, no limits). Use
@@ -24,13 +26,19 @@ char* datagrep_profiles_list_json(DatagrepCore*, char** err_out);
 bool  datagrep_profiles_add(DatagrepCore*, const char* name, const char* url, char** err_out);
 // datagrep_profiles_add with initial settings. options_json is NULL, "", or any
 // subset of:
-// {"read_only":bool,"confirm_writes":bool,
+// {"read_only":bool,"safety":str,"confirm_writes":bool,
 //  "auto_limit":i64|null,"idle_timeout_s":i64|null,"color":str|null}
+// "safety" is the query-safety ladder for THIS connection, one of silent /
+// warn_all / warn_writes / auth_all / auth_writes; "confirm_writes" is the
+// boolean it replaced, still accepted (true = warn_writes) so a frontend can
+// migrate, and still reported so an unmigrated one keeps working. When both
+// are given, "safety" wins. It is orthogonal to "read_only": read-only REFUSES
+// writes, the ladder GATES them.
 bool  datagrep_profiles_add_json(DatagrepCore*, const char* name, const char* url,
                                  const char* options_json, char** err_out);
 // Edit an existing profile, keyed by its current name. patch_json is any
 // subset of:
-// {"name":str,"url":str,"read_only":bool,
+// {"name":str,"url":str,"read_only":bool,"safety":str,
 //  "confirm_writes":bool,"auto_limit":i64|null,"idle_timeout_s":i64|null,
 //  "color":str|null}
 // Absent key = leave alone; JSON null = clear (auto_limit/idle_timeout_s/
@@ -42,7 +50,7 @@ bool  datagrep_profiles_add_json(DatagrepCore*, const char* name, const char* ur
 bool  datagrep_profiles_update(DatagrepCore*, const char* name,
                                const char* patch_json, char** err_out);
 // Full detail for one profile — what an edit dialog populates from. JSON:
-// {"name":str,"driver":str,"read_only":bool,
+// {"name":str,"driver":str,"read_only":bool,"safety":str,
 //  "confirm_writes":bool,"auto_limit":i64|null,"idle_timeout_s":i64|null,
 //  "color":str|null,"folder_id":str|null,"has_secret":bool,
 //  "secret":"••••"|null,"config":{key:str|num|bool,...},
@@ -56,6 +64,7 @@ bool  datagrep_profiles_remove(DatagrepCore*, const char* name, char** err_out);
 // Read-only truth for one profile: say WHICH protection is in force, never
 // imply server enforcement that isn't there. Returns JSON:
 // {"profile":str,"driver":str,"env":"dev"|"staging"|"prod",
+//  "safety":"silent"|"warn_all"|"warn_writes"|"auth_all"|"auth_writes",
 //  "read_only": null                                    // profile is writeable
 //             | {"enforcement":"server"|"client"|"none",
 //                "server_confirmed":bool}}
@@ -146,6 +155,10 @@ void datagrep_query_cancel(DatagrepQuery*, char** outcome_json_out);
 //  "read_only": null | {"enforcement":"server"|"client"|"none",
 //                       "server_confirmed":bool},   // see datagrep_connection_info_json
 //  "columns":[{"name":..,"type":..}],"total_known":bool,
+//  "safety": null                         // nothing was refused
+//           | {"profile":str,"level":str,"requires":"warn"|"authenticate",
+//              "challenge":str,
+//              "statements":[{"text":str,"class":str,"requires":str}]},
 //  "editable": null                       // this result cannot be edited
 //            | {"identity":[str,..],      // fields naming ONE row, e.g.
 //                                         // ["_index","_id","_routing"]
@@ -168,6 +181,9 @@ void datagrep_query_cancel(DatagrepQuery*, char** outcome_json_out);
 // A statement that a read-only profile refuses (Write/Ddl/Admin, classified
 // client-side before dispatch) surfaces as state="failed" with an error
 // naming the profile — it never reaches the server.
+// A statement the SAFETY LADDER refuses surfaces the same way, plus a non-null
+// "safety" carrying the challenge to clear: warn or authenticate, then run the
+// same statement again. Nothing was sent.
 char* datagrep_query_status_json(DatagrepQuery*, char** err_out);
 
 // Registers a callback fired when the query makes progress. Called from a
@@ -249,6 +265,54 @@ char* datagrep_mutate(DatagrepCore*, const char* profile, const char* mutation_j
 // document lives in (only Elasticsearch has, today).
 char* datagrep_reread_documents(DatagrepCore*, const char* profile,
                                 const char* addresses_json, char** err_out);
+
+// ---- safe mode: the query-safety ladder, per connection ----------------
+// Five rungs, set per profile as "safety": silent (send everything) /
+// warn_all (warn before every query) / warn_writes (warn except reads) /
+// auth_all (authenticate before every query) / auth_writes (authenticate
+// except reads). "Reads" is datagrep-lang's Read classification — SELECT,
+// EXPLAIN, SHOW and their per-engine equivalents; anything it cannot classify
+// counts as a write.
+//
+// The engine decides, the frontend performs the ceremony, the engine judges
+// the result. There is no "the user said yes" flag: the ONLY way past a rung
+// is an engine-minted challenge, cleared by evidence the engine checks, which
+// yields a grant bound to that exact statement, single-use and expiring
+// (2 min). A frontend that does not ask gets a refusal, never a query — the
+// gate sits on the one path every request takes, below this ABI, so a new
+// entry point inherits it rather than having to remember it.
+//
+// What this statement would require, without running it. Returns JSON:
+// {"profile":str,"level":str,"requires":"none"|"warn"|"authenticate",
+//  "challenge":str|null,                // null iff requires == "none"
+//  "statements":[{"text":str,           // one entry per statement in `sql`
+//                 "class":"read"|"write"|"ddl"|"tcl"|"admin"|"unknown",
+//                 "requires":str}]}
+// Clearing the returned challenge clears every statement listed, and nothing
+// else. Caller frees.
+char* datagrep_safety_evaluate_json(DatagrepCore*, const char* profile, const char* sql,
+                                    char** err_out);
+
+// The challenges this connection has open, newest last — the same objects, for
+// a caller that hit a refusal from a SYNCHRONOUS entry point (datagrep_mutate,
+// datagrep_reread_documents) where the challenge is only named in *err_out.
+// Caller frees.
+char* datagrep_safety_pending_json(DatagrepCore*, const char* profile, char** err_out);
+
+// Report what the user actually did. attestation_json is one of:
+//   {"kind":"acknowledged"}                      // a warning was shown and dismissed
+//   {"kind":"typed_phrase","typed":str}          // the user typed something
+//   {"kind":"system_auth","method":str}          // Touch ID, polkit, ...
+// An "acknowledged" NEVER clears an "authenticate" rung — the engine refuses
+// it. A typed phrase must equal the CONNECTION NAME, which the engine holds
+// and never sends in a challenge, so the string has to come from the user.
+// System auth is the recommended path where the platform offers it; the typed
+// phrase is the fallback where it does not.
+//
+// true = cleared; the same statement now runs, once. false with *err_out set =
+// unknown/expired/already-used challenge, or evidence too weak for the rung.
+bool datagrep_safety_satisfy(DatagrepCore*, const char* profile, const char* challenge,
+                             const char* attestation_json, char** err_out);
 
 // ---- rows: the hot path ----------------------------------------------
 // Materialises ONLY [offset, offset+len). Returns NULL on error.
