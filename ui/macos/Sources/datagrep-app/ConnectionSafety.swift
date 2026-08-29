@@ -101,28 +101,7 @@ struct ConnectionSafetyChip: View {
                 ReadOnlyBadge(level: safety.enforcement)
             }
         }
-        .padding(.trailing, 10)
         .frame(height: 22)
         .fixedSize()
-    }
-}
-
-/// Installs `ConnectionSafetyChip` as a titlebar accessory.
-@MainActor
-enum ConnectionSafetyTitlebar {
-    private static var controller: NSTitlebarAccessoryViewController?
-
-    static func install(model: AppModel) {
-        guard controller == nil else { return }
-        guard let window = NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible })
-        else { return }
-
-        let host = NSHostingView(rootView: ConnectionSafetyChip(model: model))
-        host.frame = NSRect(x: 0, y: 0, width: 240, height: 24)
-        let vc = NSTitlebarAccessoryViewController()
-        vc.view = host
-        vc.layoutAttribute = .right
-        window.addTitlebarAccessoryViewController(vc)
-        controller = vc
     }
 }

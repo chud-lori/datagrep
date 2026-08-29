@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
@@ -129,7 +129,7 @@ mod imp {
     use std::sync::OnceLock;
 
     pub struct SchemaTree {
-        pub core: RefCell<Option<Rc<Core>>>,
+        pub core: RefCell<Option<Arc<Core>>>,
         pub profile: RefCell<String>,
         pub roots: gio::ListStore,
         pub view: gtk::ListView,
@@ -424,7 +424,7 @@ impl SchemaTree {
         glib::Object::new()
     }
 
-    pub fn set_core(&self, core: Rc<Core>) {
+    pub fn set_core(&self, core: Arc<Core>) {
         *self.imp().core.borrow_mut() = Some(core);
     }
 

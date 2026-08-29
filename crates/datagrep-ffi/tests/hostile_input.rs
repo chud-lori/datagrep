@@ -6,8 +6,8 @@ use datagrep_ffi::profiles::{
     datagrep_profiles_update,
 };
 use datagrep_ffi::{
-    datagrep_catalog_children_json, datagrep_catalog_describe_json, datagrep_core_free,
-    datagrep_core_new, datagrep_profiles_add, datagrep_profiles_list_json,
+    datagrep_browse_statement, datagrep_catalog_children_json, datagrep_catalog_describe_json,
+    datagrep_core_free, datagrep_core_new, datagrep_profiles_add, datagrep_profiles_list_json,
     datagrep_profiles_remove, datagrep_query_cancel, datagrep_query_free,
     datagrep_query_on_progress, datagrep_query_rows, datagrep_query_run,
     datagrep_query_status_json, datagrep_rows_cell, datagrep_rows_cell_detail_json,
@@ -103,6 +103,21 @@ fn null_string_arguments_are_errors_with_messages() {
         err = ptr::null_mut();
         assert!(datagrep_catalog_describe_json(c, ok.as_ptr(), ptr::null(), &mut err).is_null());
         assert!(take(err).is_some());
+
+        err = ptr::null_mut();
+        assert!(
+            datagrep_browse_statement(ptr::null(), ok.as_ptr(), ptr::null(), &mut err).is_null()
+        );
+        assert!(
+            take(err).is_some_and(|m| m.contains("driver_id")),
+            "driver_id NULL"
+        );
+
+        err = ptr::null_mut();
+        assert!(
+            datagrep_browse_statement(ok.as_ptr(), ptr::null(), ptr::null(), &mut err).is_null()
+        );
+        assert!(take(err).is_some(), "path_json NULL");
 
         datagrep_core_free(c);
     }

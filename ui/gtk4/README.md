@@ -145,6 +145,12 @@ all dialogs; on 1.4 the alternative is `AdwMessageDialog`, which was deprecated
 in 1.6. Raising the floor to what the CI runner already has costs nothing and
 avoids writing a deprecated idiom on day one. The Flatpak runtime is
 `org.gnome.Platform//50` (libadwaita 1.9), so shipping was never the constraint.
+The API floor is therefore **libadwaita 1.5 / GTK 4.12** (1.5 for
+`AdwDialog`, which the connection dialog is) — high enough for the
+window composition above, low enough to compile on a stock `ubuntu-24.04`
+runner, which is what keeps CI feedback fast. The CI job asserts it with
+`pkg-config --atleast-version`, so the floor is a build failure rather than a
+paragraph. Anything newer than 1.5 is used only behind a runtime version check.
 
 ## The utility pane
 
@@ -322,7 +328,7 @@ the result sorted is precisely the lie the macOS grid refuses to tell.
 ## Building
 
 ```
-sudo apt-get install libgtk-4-dev libadwaita-1-dev libdbus-1-dev pkg-config
+sudo apt-get install libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev libdbus-1-dev pkg-config
 cargo test --manifest-path ui/gtk4/Cargo.toml
 ```
 

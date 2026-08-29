@@ -140,6 +140,22 @@ final class PendingEdits: ObservableObject {
         rowIndex.removeAll()
     }
 
+    // MARK: - parking staging while another tab's result is on screen
+
+    struct Snapshot {
+        fileprivate let documents: [StagedDocument]
+        fileprivate let rowIndex: [Int: String]
+        static let empty = Snapshot(documents: [], rowIndex: [:])
+        var isEmpty: Bool { documents.isEmpty }
+    }
+
+    func snapshot() -> Snapshot { Snapshot(documents: documents, rowIndex: rowIndex) }
+
+    func restore(_ snapshot: Snapshot) {
+        documents = snapshot.documents
+        rowIndex = snapshot.rowIndex
+    }
+
     // MARK: - resolving a version conflict
 
     @discardableResult

@@ -12,6 +12,11 @@ use datagrep_ffi::{
     datagrep_rows_columns, datagrep_rows_count, datagrep_rows_envelope_json, datagrep_rows_free,
     datagrep_rows_pending, datagrep_string_free, DatagrepCore, DatagrepQuery, DatagrepRows,
 };
+// Not re-exported at the crate root, unlike the rest of the ABI surface.
+use datagrep_ffi::profiles::{
+    datagrep_connection_info_json, datagrep_connection_test_json, datagrep_profiles_add_json,
+    datagrep_profiles_get_json, datagrep_profiles_update,
+};
 
 use crate::model::WindowMeta;
 
@@ -84,6 +89,10 @@ pub struct Core {
     raw: Arc<Handle>,
 }
 
+// The ABI serialises internally; macOS and Qt already call it from arbitrary threads.
+unsafe impl Send for Core {}
+unsafe impl Sync for Core {}
+
 impl Core {
     pub fn open(profiles_db_path: &str) -> Result<Self, Error> {
         let path = nul_terminated(profiles_db_path)?;
@@ -131,6 +140,63 @@ impl Core {
         let mut err: *mut c_char = std::ptr::null_mut();
         let raw = unsafe {
             datagrep_catalog_describe_json(self.raw.0, profile.as_ptr(), path.as_ptr(), &mut err)
+        };
+        owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+    }
+
+    pub fn profile_json(&self, name: &str) -> Result<String, Error> {
+        let name = nul_terminated(name)?;
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let raw = unsafe { datagrep_profiles_get_json(self.raw.0, name.as_ptr(), &mut err) };
+        owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+    }
+
+    pub fn add_profile_json(&self, name: &str, url: &str, options_json: &str) -> Result<(), Error> {
+        let (name, url) = (nul_terminated(name)?, nul_terminated(url)?);
+        let options = nul_terminated(options_json)?;
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let added = unsafe {
+            datagrep_profiles_add_json(
+                self.raw.0,
+                name.as_ptr(),
+                url.as_ptr(),
+                options.as_ptr(),
+                &mut err,
+            )
+        };
+        if added {
+            Ok(())
+        } else {
+            Err(error_from_ffi(err))
+        }
+    }
+
+    pub fn update_profile(&self, name: &str, patch_json: &str) -> Result<(), Error> {
+        let (name, patch) = (nul_terminated(name)?, nul_terminated(patch_json)?);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let updated = unsafe {
+            datagrep_profiles_update(self.raw.0, name.as_ptr(), patch.as_ptr(), &mut err)
+        };
+        if updated {
+            Ok(())
+        } else {
+            Err(error_from_ffi(err))
+        }
+    }
+
+    pub fn connection_info_json(&self, name: &str) -> Result<String, Error> {
+        let name = nul_terminated(name)?;
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let raw = unsafe { datagrep_connection_info_json(self.raw.0, name.as_ptr(), &mut err) };
+        owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+    }
+
+    /// Opens one connection and closes it again; nothing is saved by testing.
+    pub fn test_connection_json(&self, name: &str, url: &str) -> Result<String, Error> {
+        let (name, url) = (nul_terminated(name)?, nul_terminated(url)?);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let raw = unsafe {
+            datagrep_connection_test_json(self.raw.0, name.as_ptr(), url.as_ptr(), &mut err)
         };
         owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
     }

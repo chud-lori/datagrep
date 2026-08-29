@@ -4,6 +4,8 @@ public struct SavedQueryRecord: Codable, Sendable, Equatable {
     /// Stable identity, and the sidecar/SQL basename for scratch tabs.
     public var id: String
     public var name: String?
+    /// What this tab is about when it has no ⌘S name — a browsed object's name.
+    public var subject: String?
     public var connection: String?
     public var cursorLocation: Int
     public var cursorLength: Int
@@ -13,6 +15,7 @@ public struct SavedQueryRecord: Codable, Sendable, Equatable {
     public init(
         id: String = UUID().uuidString,
         name: String? = nil,
+        subject: String? = nil,
         connection: String? = nil,
         cursorLocation: Int = 0,
         cursorLength: Int = 0,
@@ -20,6 +23,7 @@ public struct SavedQueryRecord: Codable, Sendable, Equatable {
     ) {
         self.id = id
         self.name = name
+        self.subject = subject
         self.connection = connection
         self.cursorLocation = cursorLocation
         self.cursorLength = cursorLength

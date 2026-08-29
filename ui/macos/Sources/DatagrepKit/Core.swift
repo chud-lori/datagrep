@@ -176,3 +176,28 @@ public final class DatagrepCoreHandle: @unchecked Sendable {
         return data.flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
     }
 }
+
+/// The statement that reads one catalog object. The engine's own language and
+/// quoting live in the core; nothing here assembles a dialect string.
+public enum BrowseStatement {
+    public static func forObject(driver: String, path: [String], database: String?) throws -> String
+    {
+        let pathJSON = DatagrepCoreHandle.encodePath(path)
+        return try driver.withCString { d in
+            try pathJSON.withCString { pj in
+                try withOptionalCString(database) { db in
+                    try datagrepTry { errOut in
+                        takeOwnedString(datagrep_browse_statement(d, pj, db, errOut))
+                    }
+                }
+            }
+        }
+    }
+}
+
+private func withOptionalCString<T>(
+    _ text: String?, _ body: (UnsafePointer<CChar>?) throws -> T
+) rethrows -> T {
+    guard let text else { return try body(nil) }
+    return try text.withCString { try body($0) }
+}

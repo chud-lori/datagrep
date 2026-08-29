@@ -1,7 +1,7 @@
 // Verification harness for the editing chain: seeds an index, stages, commits into a conflict
 // and resolves it, snapshotting the window at each step. DATAGREP_PREVIEW_ES names the cluster.
 use std::process::Command;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use adw::prelude::*;
@@ -23,7 +23,7 @@ fn main() {
         .build();
     app.connect_startup(|_| datagrep_gtk::ui::load_style());
     app.connect_activate(move |app| {
-        let core = Rc::new(Core::open(&format!("{dir}/profiles.sqlite")).expect("core"));
+        let core = Arc::new(Core::open(&format!("{dir}/profiles.sqlite")).expect("core"));
         let _ = core.profiles_add("events", &format!("{es}/events"));
         let window = Window::new(app, core);
         window.present();
