@@ -439,7 +439,7 @@ impl HistoryStore {
                 break;
             }
         }
-        entries.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.started_at_ms));
         *imp.entries.borrow_mut() = entries;
         self.prune();
         self.emit_by_name::<()>("changed", &[]);
@@ -478,7 +478,7 @@ impl HistoryStore {
                     entries.insert(0, entry);
                 }
             }
-            entries.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms));
+            entries.sort_by_key(|e| std::cmp::Reverse(e.started_at_ms));
         }
         self.prune();
         self.schedule_flush();
