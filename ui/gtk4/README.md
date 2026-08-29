@@ -127,11 +127,12 @@ Sandbox permissions this will need, each explicit rather than inherited:
 `--talk-name=org.freedesktop.secrets` (the engine stores passwords in the
 Secret Service), `--share=network`, and `--filesystem=~/.ssh:ro` for tunnels.
 
-The API floor is therefore **libadwaita 1.4 / GTK 4.12** — high enough for the
+The API floor is therefore **libadwaita 1.5 / GTK 4.12** (1.5 for
+`AdwDialog`, which the connection dialog is) — high enough for the
 window composition above, low enough to compile on a stock `ubuntu-24.04`
 runner, which is what keeps CI feedback fast. The CI job asserts it with
 `pkg-config --atleast-version`, so the floor is a build failure rather than a
-paragraph. Anything from 1.5/1.6 is used only behind a runtime version check.
+paragraph. Anything newer than 1.5 is used only behind a runtime version check.
 
 ## The utility pane
 
@@ -260,7 +261,7 @@ the result sorted is precisely the lie the macOS grid refuses to tell.
 ## Building
 
 ```
-sudo apt-get install libgtk-4-dev libadwaita-1-dev libdbus-1-dev pkg-config
+sudo apt-get install libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev libdbus-1-dev pkg-config
 cargo test --manifest-path ui/gtk4/Cargo.toml
 ```
 

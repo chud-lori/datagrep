@@ -1,6 +1,6 @@
 // Verification harness: seeds a profile, runs statements, snapshots the window to PNG.
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use adw::prelude::*;
 use datagrep_gtk::ffi::Core;
@@ -13,7 +13,7 @@ fn main() {
         .build();
     app.connect_startup(|_| datagrep_gtk::ui::load_style());
     app.connect_activate(move |app| {
-        let core = Rc::new(Core::open(&format!("{dir}/profiles.sqlite")).expect("core"));
+        let core = Arc::new(Core::open(&format!("{dir}/profiles.sqlite")).expect("core"));
         let _ = core.profiles_add("demo", &format!("sqlite://{dir}/demo.sqlite"));
         let window = Window::new(app, core);
         let pane = UtilityPane::mount(&window, PathBuf::from(&dir).join("history"));

@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
@@ -16,7 +16,7 @@ mod imp {
     use std::sync::OnceLock;
 
     pub struct Window {
-        pub core: RefCell<Option<Rc<Core>>>,
+        pub core: RefCell<Option<Arc<Core>>>,
         pub model: ResultModel,
         pub grid: ResultsGrid,
         pub sidebar: Sidebar,
@@ -27,6 +27,7 @@ mod imp {
         pub editor_slot: adw::Bin,
         pub utility_slot: adw::Bin,
         pub derived: RefCell<Derived>,
+        pub run_profile: RefCell<String>,
     }
 
     impl Default for Window {
@@ -44,6 +45,7 @@ mod imp {
                 editor_slot: adw::Bin::new(),
                 utility_slot: adw::Bin::new(),
                 derived: RefCell::new(Derived::default()),
+                run_profile: RefCell::new(String::new()),
             }
         }
     }
@@ -252,7 +254,8 @@ mod imp {
             let Some(core) = self.core.borrow().clone() else {
                 return;
             };
-            let profile = self.sidebar.selected_connection().unwrap_or_default();
+            // The profile the statement resolved to, not whatever the sidebar shows now.
+            let profile = self.run_profile.borrow().clone();
             if profile.is_empty() {
                 self.status.say("pick a connection first", true);
                 return;
@@ -288,7 +291,7 @@ glib::wrapper! {
 }
 
 impl Window {
-    pub fn new(app: &adw::Application, core: Rc<Core>) -> Self {
+    pub fn new(app: &adw::Application, core: Arc<Core>) -> Self {
         let window: Self = glib::Object::builder().property("application", app).build();
         let imp = window.imp();
         imp.sidebar.set_core(core.clone());
@@ -298,13 +301,38 @@ impl Window {
 
     /// The one run path, so the derived clauses cannot be bypassed by where the SQL came from.
     pub fn run(&self, sql: &str) {
-        let imp = self.imp();
-        imp.derived.borrow_mut().ask(
-            sql,
+        self.run_on(
+            &self.imp().sidebar.selected_connection().unwrap_or_default(),
             &self.imp().sidebar.selected_driver().unwrap_or_default(),
+            sql,
         );
+    }
+
+    /// The editor's entry: `profile` already resolved by directive > binding > window precedence.
+    pub fn run_on(&self, profile: &str, driver: &str, sql: &str) {
+        let imp = self.imp();
+        imp.run_profile.replace(profile.to_string());
+        imp.derived.borrow_mut().ask(sql, driver);
         imp.grid.clear_sort_indicator();
         imp.execute();
+    }
+
+    pub fn selected_connection(&self) -> Option<String> {
+        self.imp().sidebar.selected_connection()
+    }
+
+    pub fn connect_connection_selected<F: Fn(&Self, &str) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        let window = self.downgrade();
+        self.imp()
+            .sidebar
+            .connect_connection_selected(move |_, name| {
+                if let Some(window) = window.upgrade() {
+                    f(&window, name);
+                }
+            })
     }
 
     pub fn model(&self) -> ResultModel {
