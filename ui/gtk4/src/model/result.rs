@@ -7,13 +7,25 @@ use gio::prelude::*;
 use gio::subclass::prelude::*;
 
 use crate::ffi::{CellKind, Query, RowWindow};
+use crate::model::editing::{PendingEdits, StagedState};
+use crate::model::mutation::{Address, EditableResult, MutationValue};
 use crate::model::pager::Pager;
 use crate::model::row::ResultRow;
 use crate::model::status::{Column, QueryStatus};
 
+/// How one bound cell is standing relative to what has been staged over it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CellMark {
+    pub staged: bool,
+    pub edited: bool,
+    pub deleted: bool,
+    pub state: StagedState,
+}
+
 const PAGE_SIZE: u64 = 512;
 const MAX_RESIDENT_PAGES: usize = 4;
 const ROW_CACHE_LIMIT: usize = 256;
+const EDIT_REFUSED: &str = "this result is not editable on this connection";
 
 mod imp {
     use super::*;
@@ -72,6 +84,9 @@ mod imp {
         pub columns: RefCell<Vec<Column>>,
         pub status: RefCell<QueryStatus>,
         pub rows: RefCell<RowCache>,
+        pub editable: RefCell<Option<EditableResult>>,
+        pub allows_editing: Cell<bool>,
+        pub edits: PendingEdits,
     }
 
     #[glib::object_subclass]
@@ -187,6 +202,10 @@ mod imp {
             };
 
             self.loaded.set(next.rows_loaded);
+            *self.editable.borrow_mut() = match self.allows_editing.get() {
+                true => next.editable.clone(),
+                false => None,
+            };
             *self.status.borrow_mut() = next;
             StatusRefresh {
                 stale_rows,
@@ -205,6 +224,18 @@ mod imp {
                 .items_changed(exposed as u32, 0, (target - exposed) as u32);
         }
 
+        /// The flyweight goes first: GTK skips the bind when handed the object it already holds.
+        pub(super) fn repaint(&self, rows: &[u64]) {
+            let exposed = self.exposed.get();
+            for &row in rows {
+                if row >= exposed {
+                    continue;
+                }
+                self.rows.borrow_mut().forget(row..row + 1);
+                self.obj().items_changed(row as u32, 1, 1);
+            }
+        }
+
         pub(super) fn teardown(&self) {
             let removed = self.exposed.get() as u32;
             let had_columns = !self.columns.borrow().is_empty();
@@ -215,6 +246,8 @@ mod imp {
             self.columns.borrow_mut().clear();
             *self.status.borrow_mut() = QueryStatus::default();
             self.rows.borrow_mut().clear();
+            self.editable.borrow_mut().take();
+            self.edits.discard_all();
             if removed > 0 {
                 self.obj().items_changed(0, removed, 0);
             }
@@ -237,7 +270,9 @@ impl Default for ResultModel {
 
 impl ResultModel {
     pub fn new() -> Self {
-        glib::Object::new()
+        let model: Self = glib::Object::new();
+        model.imp().allows_editing.set(true);
+        model
     }
 
     pub fn set_query(&self, mut query: Query) {
@@ -271,17 +306,136 @@ impl ResultModel {
         self.emit_by_name::<()>("status-changed", &[]);
     }
 
-    pub fn with_cell<R>(&self, row: u64, col: u32, f: impl FnOnce(CellKind, &str) -> R) -> R {
+    /// The one read a bound cell makes: text and staging out of a single window lookup.
+    pub fn with_cell<R>(
+        &self,
+        row: u64,
+        col: u32,
+        f: impl FnOnce(CellKind, &str, CellMark) -> R,
+    ) -> R {
         let imp = self.imp();
+        let blank = CellMark::default();
         if row >= imp.exposed.get() || col >= imp.columns.borrow().len() as u32 {
-            return f(CellKind::Pending, "");
+            return f(CellKind::Pending, "", blank);
         }
-        match imp.window(row) {
-            Some(window) => match window.kind(row, col) {
-                Some(kind) => f(kind, window.cell(row, col).unwrap_or("")),
-                None => f(CellKind::Pending, ""),
-            },
-            None => f(CellKind::Pending, ""),
+        let (Some(window), editable) = (imp.window(row), imp.editable.borrow().is_some()) else {
+            return f(CellKind::Pending, "", blank);
+        };
+        let Some(kind) = window.kind(row, col) else {
+            return f(CellKind::Pending, "", blank);
+        };
+        if !editable {
+            return f(kind, window.cell(row, col).unwrap_or(""), blank);
+        }
+        let (mark, staged) = imp.edits.with_row(row, |document| match document {
+            Some(document) => {
+                let staged = window
+                    .column_name(col)
+                    .and_then(|field| document.value_of(field))
+                    .map(MutationValue::display);
+                (
+                    CellMark {
+                        staged: true,
+                        edited: staged.is_some(),
+                        deleted: document.is_delete,
+                        state: document.state,
+                    },
+                    staged,
+                )
+            }
+            None => (blank, None),
+        });
+        match &staged {
+            Some(text) => f(kind, text, mark),
+            None => f(kind, window.cell(row, col).unwrap_or(""), mark),
+        }
+    }
+
+    /// The window's veto on editing, decided per statement rather than per keystroke.
+    pub fn set_allows_editing(&self, allows: bool) {
+        self.imp().allows_editing.set(allows);
+    }
+
+    pub fn editable(&self) -> Option<EditableResult> {
+        self.imp().editable.borrow().clone()
+    }
+
+    pub fn edits(&self) -> PendingEdits {
+        self.imp().edits.clone()
+    }
+
+    /// A document or an array is edited in the inspector, not in a grid cell.
+    pub fn is_editable_cell(&self, row: u64, col: u32) -> bool {
+        self.imp().editable.borrow().is_some()
+            && self.with_cell(row, col, |kind, _, _| {
+                !matches!(kind, CellKind::Nested | CellKind::Pending)
+            })
+    }
+
+    pub fn field_name(&self, row: u64, col: u32) -> Option<String> {
+        Some(self.imp().window(row)?.column_name(col)?.to_owned())
+    }
+
+    /// What the cell held when it was loaded — the type a typed edit is coerced to.
+    pub fn loaded_value(&self, row: u64, col: u32) -> Option<MutationValue> {
+        let window = self.imp().window(row)?;
+        match window.kind(row, col)? {
+            CellKind::Nested | CellKind::Absent | CellKind::Pending => None,
+            _ => MutationValue::decode_fragment(&window.cell_detail_json(row, col)?),
+        }
+    }
+
+    pub fn stage_edit(&self, row: u64, col: u32, typed: &str) -> Result<(), String> {
+        let imp = self.imp();
+        if imp.editable.borrow().is_none() {
+            return Err(EDIT_REFUSED.to_owned());
+        }
+        let field = self
+            .field_name(row, col)
+            .ok_or("this column is not one of the fields the row was read under")?;
+        let loaded = self.loaded_value(row, col);
+        if loaded.as_ref().is_some_and(|v| v.display() == typed) {
+            imp.edits.unstage(row, &field);
+            self.refresh_staged_rows(&[row]);
+            return Ok(());
+        }
+        let value = MutationValue::typed_like(typed, loaded.as_ref())
+            .map_err(|why| format!("`{field}`: {why}"))?;
+        imp.edits
+            .stage(self.address_row(row)?, row, &field, value, loaded);
+        self.refresh_staged_rows(&[row]);
+        Ok(())
+    }
+
+    pub fn stage_delete(&self, row: u64) -> Result<(), String> {
+        let imp = self.imp();
+        if imp.editable.borrow().is_none() {
+            return Err(EDIT_REFUSED.to_owned());
+        }
+        imp.edits.stage_delete(self.address_row(row)?, row);
+        self.refresh_staged_rows(&[row]);
+        Ok(())
+    }
+
+    pub fn discard_staged_row(&self, row: u64) {
+        self.imp().edits.discard_row(row);
+        self.refresh_staged_rows(&[row]);
+    }
+
+    pub fn refresh_staged_rows(&self, rows: &[u64]) {
+        self.imp().repaint(rows);
+    }
+
+    fn address_row(&self, row: u64) -> Result<Address, String> {
+        let envelope = self.envelope_json(row).ok_or_else(|| {
+            "this row carries no document envelope, so datagrep cannot tell which document it is"
+                .to_owned()
+        })?;
+        let envelope: serde_json::Value = serde_json::from_str(&envelope)
+            .map_err(|e| format!("this row's document envelope did not decode: {e}"))?;
+        match self.imp().editable.borrow().as_ref() {
+            Some(editable) => editable.address(&envelope),
+            None => Err(EDIT_REFUSED.to_owned()),
         }
     }
 

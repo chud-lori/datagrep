@@ -1,5 +1,7 @@
 use serde::Deserialize;
 
+use crate::model::mutation::EditableResult;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(from = "String")]
 pub enum QueryState {
@@ -54,11 +56,23 @@ pub struct QueryStatus {
     pub columns: Vec<Column>,
     #[serde(default)]
     pub total_known: bool,
+    #[serde(default)]
+    pub editable: Option<EditableResult>,
 }
 
 impl QueryStatus {
     pub fn parse(json: &str) -> Self {
-        serde_json::from_str(json).unwrap_or_else(|e| Self::failed(e.to_string()))
+        let mut status: Self =
+            serde_json::from_str(json).unwrap_or_else(|e| Self::failed(e.to_string()));
+        // An editable block naming no identity field could not address a write.
+        if status
+            .editable
+            .as_ref()
+            .is_some_and(|e| e.identity.is_empty())
+        {
+            status.editable = None;
+        }
+        status
     }
 
     pub fn failed(error: String) -> Self {
@@ -97,6 +111,21 @@ mod tests {
         assert!(!QueryStatus::parse(r#"{"state":"capped"}"#).is_streaming());
         assert!(!QueryStatus::parse(r#"{"state":"cancelled"}"#).is_streaming());
         assert!(QueryStatus::parse(r#"{"state":"parked"}"#).is_streaming());
+    }
+
+    #[test]
+    fn the_editable_block_rides_along_and_an_identityless_one_is_dropped() {
+        let s = QueryStatus::parse(
+            r#"{"state":"done","editable":{"identity":["_index","_id"],
+                "guard":["_seq_no","_primary_term"],"root":"_source","atomic_batch":false}}"#,
+        );
+        let editable = s.editable.expect("an editable result");
+        assert_eq!(editable.guard, ["_seq_no", "_primary_term"]);
+        assert!(
+            QueryStatus::parse(r#"{"state":"done","editable":{"identity":[]}}"#)
+                .editable
+                .is_none()
+        );
     }
 
     #[test]

@@ -49,6 +49,10 @@ impl ConnectionEntry {
     pub fn driver(&self) -> String {
         self.imp().driver.borrow().clone()
     }
+
+    pub fn read_only(&self) -> bool {
+        self.imp().read_only.get()
+    }
 }
 
 mod imp {
@@ -316,6 +320,15 @@ impl Sidebar {
             }
         }
         false
+    }
+
+    /// Whether the selected connection refuses writes — the window's veto on editing.
+    pub fn selected_read_only(&self) -> bool {
+        self.imp()
+            .selection
+            .selected_item()
+            .and_downcast::<ConnectionEntry>()
+            .is_some_and(|entry| entry.read_only())
     }
 
     /// The engine behind the selected connection — what identifier quoting turns on.

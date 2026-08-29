@@ -26,7 +26,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio = { version = "1", features = ["rt"] }
 gtk = { version = "0.9.7", package = "gtk4", features = ["v4_12"] }
 adw = { version = "0.7", package = "libadwaita", features = ["v1_5"] }
+
 sourceview5 = "0.9"
+
+[dev-dependencies]
+# Already in the graph through datagrep-ffi: lets the tests parse what the grid encodes.
+datagrep-api = { path = "../../crates/datagrep-api" }
 
 [lints.clippy]
 uninlined_format_args = "allow"

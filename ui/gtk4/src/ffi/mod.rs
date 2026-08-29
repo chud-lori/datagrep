@@ -1,14 +1,16 @@
+use std::cell::OnceCell;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
+use std::sync::Arc;
 
 use datagrep_ffi::{
     datagrep_catalog_children_json, datagrep_catalog_describe_json, datagrep_core_free,
-    datagrep_core_new, datagrep_profiles_add, datagrep_profiles_list_json, datagrep_query_cancel,
-    datagrep_query_free, datagrep_query_on_progress, datagrep_query_rows, datagrep_query_run,
-    datagrep_query_status_json, datagrep_rows_cell, datagrep_rows_cell_detail_json,
-    datagrep_rows_cell_kind, datagrep_rows_columns, datagrep_rows_count,
-    datagrep_rows_envelope_json, datagrep_rows_free, datagrep_rows_pending, datagrep_string_free,
-    DatagrepCore, DatagrepQuery, DatagrepRows,
+    datagrep_core_new, datagrep_mutate, datagrep_profiles_add, datagrep_profiles_list_json,
+    datagrep_query_cancel, datagrep_query_free, datagrep_query_on_progress, datagrep_query_rows,
+    datagrep_query_run, datagrep_query_status_json, datagrep_reread_documents, datagrep_rows_cell,
+    datagrep_rows_cell_detail_json, datagrep_rows_cell_kind, datagrep_rows_column_names_json,
+    datagrep_rows_columns, datagrep_rows_count, datagrep_rows_envelope_json, datagrep_rows_free,
+    datagrep_rows_pending, datagrep_string_free, DatagrepCore, DatagrepQuery, DatagrepRows,
 };
 // Not re-exported at the crate root, unlike the rest of the ABI surface.
 use datagrep_ffi::profiles::{
@@ -69,8 +71,22 @@ impl CellKind {
     }
 }
 
+struct Handle(*mut DatagrepCore);
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        unsafe { datagrep_core_free(self.0) };
+    }
+}
+
+// SAFETY: entry points share one Mutex-guarded Arc<CoreInner>; Qt already calls this off-thread.
+unsafe impl Send for Handle {}
+unsafe impl Sync for Handle {}
+
+/// Cloning shares one engine handle, so a worker thread holding a clone keeps it alive.
+#[derive(Clone)]
 pub struct Core {
-    raw: *mut DatagrepCore,
+    raw: Arc<Handle>,
 }
 
 // The ABI serialises internally; macOS and Qt already call it from arbitrary threads.
@@ -85,14 +101,16 @@ impl Core {
         if raw.is_null() {
             return Err(error_from_ffi(err));
         }
-        Ok(Self { raw })
+        Ok(Self {
+            raw: Arc::new(Handle(raw)),
+        })
     }
 
     pub fn profiles_add(&self, name: &str, url: &str) -> Result<(), Error> {
         let (name, url) = (nul_terminated(name)?, nul_terminated(url)?);
         let mut err: *mut c_char = std::ptr::null_mut();
         let added =
-            unsafe { datagrep_profiles_add(self.raw, name.as_ptr(), url.as_ptr(), &mut err) };
+            unsafe { datagrep_profiles_add(self.raw.0, name.as_ptr(), url.as_ptr(), &mut err) };
         if added {
             Ok(())
         } else {
@@ -102,7 +120,7 @@ impl Core {
 
     pub fn profiles_list_json(&self) -> Result<String, Error> {
         let mut err: *mut c_char = std::ptr::null_mut();
-        let raw = unsafe { datagrep_profiles_list_json(self.raw, &mut err) };
+        let raw = unsafe { datagrep_profiles_list_json(self.raw.0, &mut err) };
         owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
     }
 
@@ -111,7 +129,7 @@ impl Core {
         let (profile, path) = (nul_terminated(profile)?, nul_terminated(path_json)?);
         let mut err: *mut c_char = std::ptr::null_mut();
         let raw = unsafe {
-            datagrep_catalog_children_json(self.raw, profile.as_ptr(), path.as_ptr(), &mut err)
+            datagrep_catalog_children_json(self.raw.0, profile.as_ptr(), path.as_ptr(), &mut err)
         };
         owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
     }
@@ -121,7 +139,7 @@ impl Core {
         let (profile, path) = (nul_terminated(profile)?, nul_terminated(path_json)?);
         let mut err: *mut c_char = std::ptr::null_mut();
         let raw = unsafe {
-            datagrep_catalog_describe_json(self.raw, profile.as_ptr(), path.as_ptr(), &mut err)
+            datagrep_catalog_describe_json(self.raw.0, profile.as_ptr(), path.as_ptr(), &mut err)
         };
         owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
     }
@@ -129,7 +147,7 @@ impl Core {
     pub fn profile_json(&self, name: &str) -> Result<String, Error> {
         let name = nul_terminated(name)?;
         let mut err: *mut c_char = std::ptr::null_mut();
-        let raw = unsafe { datagrep_profiles_get_json(self.raw, name.as_ptr(), &mut err) };
+        let raw = unsafe { datagrep_profiles_get_json(self.raw.0, name.as_ptr(), &mut err) };
         owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
     }
 
@@ -139,7 +157,7 @@ impl Core {
         let mut err: *mut c_char = std::ptr::null_mut();
         let added = unsafe {
             datagrep_profiles_add_json(
-                self.raw,
+                self.raw.0,
                 name.as_ptr(),
                 url.as_ptr(),
                 options.as_ptr(),
@@ -156,8 +174,9 @@ impl Core {
     pub fn update_profile(&self, name: &str, patch_json: &str) -> Result<(), Error> {
         let (name, patch) = (nul_terminated(name)?, nul_terminated(patch_json)?);
         let mut err: *mut c_char = std::ptr::null_mut();
-        let updated =
-            unsafe { datagrep_profiles_update(self.raw, name.as_ptr(), patch.as_ptr(), &mut err) };
+        let updated = unsafe {
+            datagrep_profiles_update(self.raw.0, name.as_ptr(), patch.as_ptr(), &mut err)
+        };
         if updated {
             Ok(())
         } else {
@@ -168,7 +187,7 @@ impl Core {
     pub fn connection_info_json(&self, name: &str) -> Result<String, Error> {
         let name = nul_terminated(name)?;
         let mut err: *mut c_char = std::ptr::null_mut();
-        let raw = unsafe { datagrep_connection_info_json(self.raw, name.as_ptr(), &mut err) };
+        let raw = unsafe { datagrep_connection_info_json(self.raw.0, name.as_ptr(), &mut err) };
         owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
     }
 
@@ -177,7 +196,7 @@ impl Core {
         let (name, url) = (nul_terminated(name)?, nul_terminated(url)?);
         let mut err: *mut c_char = std::ptr::null_mut();
         let raw = unsafe {
-            datagrep_connection_test_json(self.raw, name.as_ptr(), url.as_ptr(), &mut err)
+            datagrep_connection_test_json(self.raw.0, name.as_ptr(), url.as_ptr(), &mut err)
         };
         owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
     }
@@ -185,7 +204,8 @@ impl Core {
     pub fn query(&self, profile: &str, sql: &str) -> Result<Query, Error> {
         let (profile, sql) = (nul_terminated(profile)?, nul_terminated(sql)?);
         let mut err: *mut c_char = std::ptr::null_mut();
-        let raw = unsafe { datagrep_query_run(self.raw, profile.as_ptr(), sql.as_ptr(), &mut err) };
+        let raw =
+            unsafe { datagrep_query_run(self.raw.0, profile.as_ptr(), sql.as_ptr(), &mut err) };
         if raw.is_null() {
             return Err(error_from_ffi(err));
         }
@@ -194,11 +214,28 @@ impl Core {
             progress: None,
         })
     }
-}
 
-impl Drop for Core {
-    fn drop(&mut self) {
-        unsafe { datagrep_core_free(self.raw) };
+    /// Blocks on the write; the caller runs it off the main loop.
+    pub fn mutate_json(&self, profile: &str, batch_json: &str) -> Result<String, Error> {
+        let (profile, batch) = (nul_terminated(profile)?, nul_terminated(batch_json)?);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let raw =
+            unsafe { datagrep_mutate(self.raw.0, profile.as_ptr(), batch.as_ptr(), &mut err) };
+        owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+    }
+
+    /// What the server holds now for documents addressed by the very key their write used.
+    pub fn reread_documents_json(
+        &self,
+        profile: &str,
+        addresses_json: &str,
+    ) -> Result<String, Error> {
+        let (profile, addresses) = (nul_terminated(profile)?, nul_terminated(addresses_json)?);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let raw = unsafe {
+            datagrep_reread_documents(self.raw.0, profile.as_ptr(), addresses.as_ptr(), &mut err)
+        };
+        owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
     }
 }
 
@@ -264,6 +301,8 @@ pub struct RowWindow {
     count: u64,
     columns: u32,
     pending: bool,
+    // The fields the rows were read under; decoded at most once per window.
+    names: OnceCell<Vec<String>>,
 }
 
 impl RowWindow {
@@ -274,6 +313,7 @@ impl RowWindow {
                 count: datagrep_rows_count(raw),
                 columns: datagrep_rows_columns(raw),
                 pending: datagrep_rows_pending(raw),
+                names: OnceCell::new(),
                 raw,
             }
         }
@@ -314,6 +354,18 @@ impl RowWindow {
     pub fn cell_detail_json(&self, row: u64, col: u32) -> Option<String> {
         let local = self.local(row, col)?;
         owned_string_from_ffi(unsafe { datagrep_rows_cell_detail_json(self.raw, local, col) })
+    }
+
+    /// The field the grid's column `col` is projected from, which its title is not.
+    pub fn column_name(&self, col: u32) -> Option<&str> {
+        self.names
+            .get_or_init(|| {
+                owned_string_from_ffi(unsafe { datagrep_rows_column_names_json(self.raw) })
+                    .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+                    .unwrap_or_default()
+            })
+            .get(col as usize)
+            .map(String::as_str)
     }
 
     pub fn envelope_json(&self, row: u64) -> Option<String> {

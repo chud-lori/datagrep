@@ -156,7 +156,7 @@ impl UtilityPane {
 
     fn show_cell(&self, window: &Window, row: u64, column: u32) {
         let model = window.model();
-        let kind = model.with_cell(row, column, |kind, _| kind);
+        let kind = model.with_cell(row, column, |kind, _, _| kind);
         if kind == CellKind::Pending {
             return; // skeleton row — nothing truthful to show yet
         }

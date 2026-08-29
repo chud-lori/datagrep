@@ -77,7 +77,7 @@ fn await_terminal(query: &Query) -> QueryStatus {
 }
 
 fn text(model: &ResultModel, row: u64, col: u32) -> String {
-    model.with_cell(row, col, |_, s| s.to_owned())
+    model.with_cell(row, col, |_, s, _| s.to_owned())
 }
 
 #[test]
@@ -114,11 +114,11 @@ fn a_finished_result_is_exposed_in_full_and_read_without_materialising_it() {
         assert_eq!(row.index(), 512);
         assert!(model.item(5_000).is_none());
 
-        model.with_cell(9_999, 0, |kind, s| {
+        model.with_cell(9_999, 0, |kind, s, _| {
             assert_eq!(kind, CellKind::Pending);
             assert!(s.is_empty());
         });
-        model.with_cell(0, 99, |kind, _| assert_eq!(kind, CellKind::Pending));
+        model.with_cell(0, 99, |kind, _, _| assert_eq!(kind, CellKind::Pending));
     });
 }
 
