@@ -23,6 +23,10 @@ struct Workbench: View {
         // A connection marked production tints every accent in the window red.
         .tint(model.markColor)
         .sheet(isPresented: $model.showNewConnection) { NewConnectionSheet(model: model) }
+        // The ladder's ceremony: what the engine requires before this statement is sent.
+        .sheet(item: $model.safetyPrompt) { prompt in
+            SafetyPromptSheet(model: model, prompt: prompt)
+        }
         // What the commit did, per document.
         .sheet(isPresented: $model.showMutationReport) {
             if let report = model.mutationReport {
@@ -615,6 +619,8 @@ struct NewConnectionSheet: View {
             ConnectionTestRow(state: model.newTest, enabled: form.isComplete) {
                 model.testNewConnection()
             }
+
+            SafetyLevelPicker(level: $model.newSafety, compact: true)
 
             if let err = model.newError {
                 Callout(symbol: "exclamationmark.triangle.fill", tone: .error, text: err)

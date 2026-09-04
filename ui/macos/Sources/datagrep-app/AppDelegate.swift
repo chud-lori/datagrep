@@ -141,7 +141,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 self?.writeScreenshot(to: path)
                 if args.contains("--quit-after-shot") {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { NSApp.terminate(nil) }
+                    // An open sheet outlives NSApp.terminate, and a shot harness must not hang.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exit(EXIT_SUCCESS) }
                 }
             }
         }
@@ -204,13 +205,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             colorName == nil ? "datagrep" : "datagrep — \(model.activeProfile)"
     }
 
+    private static func capture(_ w: NSWindow) -> CGImage? {
+        CGWindowListCreateImage(
+            .null, .optionIncludingWindow, CGWindowID(w.windowNumber),
+            [.boundsIgnoreFraming, .bestResolution])
+    }
+
+    /// A sheet is its own window, so it has to be drawn back onto the one it covers.
+    private static func capturedWithSheet(_ w: NSWindow) -> CGImage? {
+        guard let base = capture(w) else { return nil }
+        guard let sheet = w.attachedSheet, let top = capture(sheet),
+            let space = CGColorSpace(name: CGColorSpace.sRGB),
+            let ctx = CGContext(
+                data: nil, width: base.width, height: base.height, bitsPerComponent: 8,
+                bytesPerRow: 0, space: space,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return base }
+        let scale = CGFloat(base.width) / w.frame.width
+        ctx.draw(base, in: CGRect(x: 0, y: 0, width: base.width, height: base.height))
+        ctx.draw(
+            top,
+            in: CGRect(
+                x: (sheet.frame.minX - w.frame.minX) * scale,
+                y: (sheet.frame.minY - w.frame.minY) * scale,
+                width: CGFloat(top.width), height: CGFloat(top.height)))
+        return ctx.makeImage() ?? base
+    }
+
     /// Writes a PNG of the app's own window for headless verification.
     private func writeScreenshot(to path: String) {
-        if let w = window,
-            let cg = CGWindowListCreateImage(
-                .null, .optionIncludingWindow, CGWindowID(w.windowNumber),
-                [.boundsIgnoreFraming, .bestResolution])
-        {
+        if let w = window, let cg = Self.capturedWithSheet(w) {
             let rep = NSBitmapImageRep(cgImage: cg)
             if let data = rep.representation(using: .png, properties: [:]) {
                 try? data.write(to: URL(fileURLWithPath: path))
@@ -451,17 +475,22 @@ final class Autopilot {
     private let sql: String?
     private let bench: Bool
     private let selectPath: [String]
+    private let safety: (profile: String, level: SafetyLevel)?
+    private let newConnection: Bool
     private var settleTicks = 0
 
     init(
         model: AppModel?, profile: (name: String, url: String)?, sql: String?, bench: Bool,
-        selectPath: [String] = []
+        selectPath: [String] = [], safety: (profile: String, level: SafetyLevel)? = nil,
+        newConnection: Bool = false
     ) {
         self.model = model
         self.profile = profile
         self.sql = sql
         self.bench = bench
         self.selectPath = selectPath
+        self.safety = safety
+        self.newConnection = newConnection
     }
 
     static func fromArguments(model: AppModel?) -> Autopilot? {
@@ -478,13 +507,25 @@ final class Autopilot {
         let bench = args.contains("--bench")
         let selectPath =
             value("--select-path")?.split(separator: "/").map(String.init) ?? []
-        guard profile != nil || sql != nil || bench || !selectPath.isEmpty else { return nil }
+        var safety: (String, SafetyLevel)?
+        if let spec = value("--set-safety"), let eq = spec.firstIndex(of: "="),
+            let level = SafetyLevel(abi: String(spec[spec.index(after: eq)...]))
+        {
+            safety = (String(spec[spec.startIndex..<eq]), level)
+        }
+        let newConnection = args.contains("--new-connection")
+        guard profile != nil || sql != nil || bench || !selectPath.isEmpty || safety != nil
+            || newConnection
+        else { return nil }
         return Autopilot(
-            model: model, profile: profile, sql: sql, bench: bench, selectPath: selectPath)
+            model: model, profile: profile, sql: sql, bench: bench, selectPath: selectPath,
+            safety: safety, newConnection: newConnection)
     }
 
     func start() {
         guard let model else { return }
+        if let safety { model.setSafetyLevel(safety.level, for: safety.profile) }
+        if newConnection { model.showNewConnection = true }
         if let profile {
             if model.roots.contains(where: { $0.name == profile.name }) {
                 model.selectProfile(profile.name)

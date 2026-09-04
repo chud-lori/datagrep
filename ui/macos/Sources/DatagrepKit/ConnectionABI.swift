@@ -97,6 +97,11 @@ public enum ProfileABI {
         return unsafeBitCast(p, to: T.self)
     }
 
+    public typealias AddJSONFn = @convention(c) (
+        OpaquePointer?, UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafePointer<CChar>?,
+        UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+    ) -> Bool
+
     public typealias TestFn = @convention(c) (
         OpaquePointer?, UnsafePointer<CChar>?, UnsafePointer<CChar>?,
         UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
@@ -105,6 +110,7 @@ public enum ProfileABI {
     static let update: UpdateFn? = lookup("datagrep_profiles_update", as: UpdateFn.self)
     static let fetch: GetFn? = lookup("datagrep_profiles_get_json", as: GetFn.self)
     static let test: TestFn? = lookup("datagrep_connection_test_json", as: TestFn.self)
+    static let addJSON: AddJSONFn? = lookup("datagrep_profiles_add_json", as: AddJSONFn.self)
 
     /// Can this build save an edited connection at all?
     public static var canEdit: Bool { update != nil }
@@ -128,7 +134,7 @@ public struct ProfileDetail: Sendable, Hashable {
     public var url: String
     public var driver: String
     public var readOnly: Bool
-    public var confirmWrites: Bool
+    public var safety: SafetyLevel
     public var autoLimit: Int?
     public var idleTimeoutS: Int?
     public var color: String?
@@ -139,7 +145,7 @@ public struct ProfileDetail: Sendable, Hashable {
 
     public init(
         name: String, url: String = "", driver: String = "",
-        readOnly: Bool = false, confirmWrites: Bool = false, autoLimit: Int? = nil,
+        readOnly: Bool = false, safety: SafetyLevel = .silent, autoLimit: Int? = nil,
         idleTimeoutS: Int? = nil, color: String? = nil, hasSecret: Bool = false,
         enforcement: ReadOnlyEnforcement = .unknown, reported: Set<String> = [],
         fields: ConnectionFields? = nil
@@ -148,7 +154,7 @@ public struct ProfileDetail: Sendable, Hashable {
         self.url = url
         self.driver = driver
         self.readOnly = readOnly
-        self.confirmWrites = confirmWrites
+        self.safety = safety
         self.autoLimit = autoLimit
         self.idleTimeoutS = idleTimeoutS
         self.color = color
@@ -165,7 +171,7 @@ public struct ProfileDetail: Sendable, Hashable {
         d.driver =
             ProfileDetail.string(dict, "driver") ?? ProfileDetail.string(dict, "driver_id") ?? ""
         d.readOnly = dict["read_only"] as? Bool ?? false
-        d.confirmWrites = dict["confirm_writes"] as? Bool ?? false
+        d.safety = SafetyLevel(abi: dict["safety"] as? String) ?? .silent
         d.autoLimit = ProfileDetail.int(dict, "auto_limit")
         d.idleTimeoutS = ProfileDetail.int(dict, "idle_timeout_s")
         d.color = ProfileDetail.string(dict, "color")
@@ -295,7 +301,7 @@ extension DatagrepCoreHandle {
         }
         return ProfileDetail(
             name: p.name, url: "", driver: p.driver, readOnly: p.readOnly,
-            confirmWrites: p.confirmWrites, color: p.color, hasSecret: p.hasSecret,
+            safety: p.safety, color: p.color, hasSecret: p.hasSecret,
             enforcement: p.enforcement, reported: ["name", "driver"])
     }
 
