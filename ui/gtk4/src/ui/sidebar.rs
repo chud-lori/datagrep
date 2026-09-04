@@ -270,6 +270,7 @@ fn connection_factory() -> gtk::SignalListItemFactory {
 
         let marker = gtk::Box::new(gtk::Orientation::Vertical, 0);
         marker.add_css_class("dg-marker");
+        marker.set_vexpand(true);
         marker.set_visible(false);
 
         let lock = gtk::Image::from_icon_name("changes-prevent-symbolic");

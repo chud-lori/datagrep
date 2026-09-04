@@ -359,6 +359,12 @@ mod imp {
                     window.imp().status.say(message, true);
                 }
             });
+            let window = self.obj().downgrade();
+            self.grid.connect_copied(move |_, message| {
+                if let Some(window) = window.upgrade() {
+                    window.imp().status.say(message, false);
+                }
+            });
             for (signal, action) in [
                 ("commit-requested", Action::Commit),
                 ("discard-requested", Action::Discard),

@@ -142,6 +142,9 @@ mod imp {
         pub view: gtk::ListView,
         pub selection: gtk::SingleSelection,
         pub watched: RefCell<HashMap<gtk::ListItem, glib::SignalHandlerId>>,
+        // Bumped whenever the tree changes what it is showing, so an answer that
+        // arrives for a connection nobody is looking at any more is dropped.
+        pub generation: Cell<u64>,
     }
 
     impl Default for SchemaTree {
@@ -160,6 +163,7 @@ mod imp {
                 view: gtk::ListView::new(Some(selection.clone()), None::<gtk::ListItemFactory>),
                 selection,
                 watched: RefCell::new(HashMap::new()),
+                generation: Cell::new(0),
             }
         }
     }
@@ -339,13 +343,17 @@ mod imp {
                     .emit_by_name::<()>("object-described", &[&"", &"", &""]);
                 return;
             };
-            let imp = node.imp();
-            if !imp.described.replace(true) {
-                match self.describe(&node.path_json()) {
-                    Ok(json) => *imp.describe_json.borrow_mut() = json,
-                    Err(error) => *imp.describe_error.borrow_mut() = error,
-                }
+            if node.imp().described.replace(true) {
+                return self.announce(&node);
             }
+            // An empty detail with no error is the reading state, not a failure.
+            self.obj()
+                .emit_by_name::<()>("object-described", &[&node.path_json(), &"", &""]);
+            self.describe(&node);
+        }
+
+        fn announce(&self, node: &SchemaNode) {
+            let imp = node.imp();
             self.obj().emit_by_name::<()>(
                 "object-described",
                 &[
@@ -356,12 +364,45 @@ mod imp {
             );
         }
 
-        fn describe(&self, path_json: &str) -> Result<String, String> {
+        /// Off the main loop: a describe is a round trip, and the window must
+        /// stay answerable while it is in flight.
+        fn describe(&self, node: &SchemaNode) {
             let Some(core) = self.core.borrow().clone() else {
-                return Err(String::new());
+                return;
             };
-            core.catalog_describe_json(&self.profile.borrow(), path_json)
-                .map_err(|e| e.0)
+            let (profile, path_json) = (self.profile.borrow().clone(), node.path_json());
+            let (tree, node) = (self.obj().downgrade(), node.clone());
+            let generation = self.generation.get();
+            glib::spawn_future_local(async move {
+                let described = gio::spawn_blocking(move || {
+                    core.catalog_describe_json(&profile, &path_json)
+                        .map_err(|e| e.0)
+                })
+                .await;
+                let Some(tree) = tree.upgrade() else {
+                    return;
+                };
+                let imp = node.imp();
+                match described {
+                    Ok(Ok(json)) => *imp.describe_json.borrow_mut() = json,
+                    Ok(Err(error)) => *imp.describe_error.borrow_mut() = error,
+                    Err(_) => *imp.describe_error.borrow_mut() =
+                        "the describe did not finish".to_owned(),
+                }
+                // Only the selection this answer is about gets to redraw the inspector.
+                if tree.imp().generation.get() == generation && tree.imp().is_selected(&node) {
+                    tree.imp().announce(&node);
+                }
+            });
+        }
+
+        fn is_selected(&self, node: &SchemaNode) -> bool {
+            self.selection
+                .selected_item()
+                .and_downcast::<gtk::TreeListRow>()
+                .and_then(|row| row.item())
+                .and_downcast::<SchemaNode>()
+                .is_some_and(|selected| selected == *node)
         }
 
         fn consent(&self, consent_row: &gtk::TreeListRow) {
@@ -394,24 +435,46 @@ mod imp {
             self.fetch(&store, &imp.path.borrow(), &imp.path_json.borrow());
         }
 
+        /// Off the main loop: listing a level is the unbounded call, and it sits
+        /// on the click path of every expander.
         pub(super) fn fetch(&self, store: &gio::ListStore, path: &[String], path_json: &str) {
             let Some(core) = self.core.borrow().clone() else {
                 return;
             };
             let profile = self.profile.borrow().clone();
-            let children = core
-                .catalog_children_json(&profile, path_json)
-                .map_err(|e| e.0)
-                .and_then(|json| CatalogNode::parse_list(&json));
-            match children {
-                Ok(nodes) if nodes.is_empty() => store.append(&SchemaNode::notice("Empty")),
-                Ok(nodes) => {
-                    for node in &nodes {
-                        store.append(&SchemaNode::object(path, node));
-                    }
+            let generation = self.generation.get();
+            store.remove_all();
+            store.append(&SchemaNode::notice("Listing…"));
+            let (tree, store, path) = (self.obj().downgrade(), store.clone(), path.to_vec());
+            let path_json = path_json.to_owned();
+            glib::spawn_future_local(async move {
+                let listed = gio::spawn_blocking(move || {
+                    core.catalog_children_json(&profile, &path_json)
+                        .map_err(|e| e.0)
+                        .and_then(|json| CatalogNode::parse_list(&json))
+                })
+                .await;
+                let Some(tree) = tree.upgrade() else {
+                    return;
+                };
+                // A level listed for a connection nobody is looking at any more is dropped.
+                if tree.imp().generation.get() != generation {
+                    return;
                 }
-                Err(message) => store.append(&SchemaNode::notice(&message)),
-            }
+                store.remove_all();
+                match listed {
+                    Ok(Ok(nodes)) if nodes.is_empty() => {
+                        store.append(&SchemaNode::notice("Empty"))
+                    }
+                    Ok(Ok(nodes)) => {
+                        for node in &nodes {
+                            store.append(&SchemaNode::object(&path, node));
+                        }
+                    }
+                    Ok(Err(message)) => store.append(&SchemaNode::notice(&message)),
+                    Err(_) => store.append(&SchemaNode::notice("the listing did not finish")),
+                }
+            });
         }
     }
 }
@@ -440,6 +503,7 @@ impl SchemaTree {
     /// One cheap query on connect — the top level and nothing under it.
     pub fn show_profile(&self, profile: &str) {
         let imp = self.imp();
+        imp.generation.set(imp.generation.get() + 1);
         *imp.profile.borrow_mut() = profile.to_owned();
         imp.roots.remove_all();
         if profile.is_empty() {

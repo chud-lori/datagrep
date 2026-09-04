@@ -57,6 +57,7 @@ columnview.data-table > listview > row > cell .dg-staged-delete {
    Never the only channel: the row also carries the name and a read-only lock. */
 .dg-marker {
   min-width: 4px;
+  min-height: 20px;
   border-radius: 2px;
 }
 

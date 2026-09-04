@@ -220,3 +220,52 @@ fn a_new_result_replaces_the_old_one_and_reset_empties_the_model() {
         assert_eq!(columns.get(), 4);
     });
 }
+
+#[test]
+fn a_copied_row_is_its_cells_and_never_its_row_number() {
+    on_main(|_| {
+        let fixture = Fixture::new("copy");
+        let query = fixture.generate(3);
+        await_terminal(&query);
+        let model = ResultModel::new();
+        model.set_query(query);
+
+        assert_eq!(model.row_text(0), "1\trow 1");
+        assert_eq!(model.row_text(2), "3\trow 3");
+        assert_eq!(model.cell_text(1, 1), "row 2");
+        // The gutter is a second view over the same model; nothing in the text is its.
+        for row in 0..3u64 {
+            let text = model.row_text(row);
+            assert_eq!(text.matches('\t').count(), model.column_count() as usize - 1);
+        }
+    });
+}
+
+#[test]
+fn a_parked_result_comes_back_whole_and_the_other_one_is_untouched() {
+    on_main(|_| {
+        let fixture = Fixture::new("park");
+        let first = fixture.generate(4);
+        await_terminal(&first);
+        let model = ResultModel::new();
+        model.set_query(first);
+        assert_eq!(model.n_items(), 4);
+
+        let parked = model.park().expect("a live result parks");
+        assert_eq!(model.n_items(), 0, "nothing of it is on screen");
+        assert_eq!(model.column_count(), 0);
+
+        let second = fixture
+            .core
+            .query("t", "SELECT 'x' AS only_one")
+            .expect("the second query starts");
+        await_terminal(&second);
+        model.set_query(second);
+        assert_eq!(model.column_count(), 1, "the second result has the screen");
+
+        model.adopt(parked);
+        assert_eq!(model.n_items(), 4, "the first result is back whole");
+        assert_eq!(model.column_count(), 2);
+        assert_eq!(model.row_text(3), "4\trow 4");
+    });
+}

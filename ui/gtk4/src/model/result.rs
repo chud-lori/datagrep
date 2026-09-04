@@ -408,6 +408,24 @@ impl ResultModel {
         }
     }
 
+    /// One cell as it reads on screen, staged value included.
+    pub fn cell_text(&self, row: u64, col: u32) -> String {
+        self.with_cell(row, col, |kind, text, _| match kind {
+            CellKind::Null => "NULL".to_owned(),
+            CellKind::Absent | CellKind::Pending => String::new(),
+            _ => text.to_owned(),
+        })
+    }
+
+    /// One row as tab-separated cells, the shape the Qt grid puts on the
+    /// clipboard. Built from the columns alone, so a row number cannot be in it.
+    pub fn row_text(&self, row: u64) -> String {
+        (0..self.column_count())
+            .map(|col| self.cell_text(row, col))
+            .collect::<Vec<_>>()
+            .join("\t")
+    }
+
     /// The window's veto on editing, decided per statement rather than per keystroke.
     pub fn set_allows_editing(&self, allows: bool) {
         self.imp().allows_editing.set(allows);

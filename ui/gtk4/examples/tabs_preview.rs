@@ -13,11 +13,22 @@ fn main() {
     let app = adw::Application::builder()
         .application_id("io.github.chud_lori.datagrep.TabsPreview")
         .build();
+    // Without this every render is unstyled and understates the real window.
+    app.connect_startup(|_| datagrep_gtk::ui::load_style());
     app.connect_activate(move |app| {
         adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceLight);
         let core = Arc::new(Core::open(&format!("{dir}/profiles.sqlite")).expect("core"));
-        let _ = core.profiles_add("left", &format!("sqlite://{dir}/left.sqlite"));
-        let _ = core.profiles_add("right", &format!("sqlite://{dir}/right.sqlite"));
+        // Marked and read-only, so a render shows both channels on the row.
+        let _ = core.add_profile_json(
+            "left",
+            &format!("sqlite://{dir}/left.sqlite"),
+            r#"{"color":"red"}"#,
+        );
+        let _ = core.add_profile_json(
+            "right",
+            &format!("sqlite://{dir}/right.sqlite"),
+            r#"{"color":"blue","read_only":true}"#,
+        );
 
         let window = datagrep_gtk::ui::mount(app, core);
         let tabs = window
