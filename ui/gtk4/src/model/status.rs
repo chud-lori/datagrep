@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
 use crate::model::mutation::EditableResult;
+use crate::model::SafetyDecision;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(from = "String")]
@@ -58,6 +59,9 @@ pub struct QueryStatus {
     pub total_known: bool,
     #[serde(default)]
     pub editable: Option<EditableResult>,
+    // Non-null on a failed state means the ladder refused and nothing was sent.
+    #[serde(default)]
+    pub safety: Option<SafetyDecision>,
 }
 
 impl QueryStatus {
@@ -126,6 +130,20 @@ mod tests {
                 .editable
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_safety_refusal_rides_along_on_a_failed_state() {
+        let s = QueryStatus::parse(
+            r#"{"state":"failed","error":"`prod` is in safe mode",
+                "safety":{"profile":"prod","level":"warn_writes","requires":"warn",
+                          "challenge":"c-9","statements":[{"text":"delete from t","class":"write","requires":"warn"}]}}"#,
+        );
+        let refusal = s.safety.expect("the refusal");
+        assert_eq!(refusal.challenge.as_deref(), Some("c-9"));
+        assert!(QueryStatus::parse(r#"{"state":"done","safety":null}"#)
+            .safety
+            .is_none());
     }
 
     #[test]

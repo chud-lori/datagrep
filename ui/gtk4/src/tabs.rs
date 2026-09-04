@@ -660,7 +660,7 @@ impl EditorTabs {
             tooltip.push_str("\nUnsaved changes");
         }
 
-        // Colour is never the only channel: marked/read-only also gets an icon and words.
+        // Colour is never the only channel: marked/read-only/gated also gets an icon and words.
         let (indicator, indicator_tip) = match &info {
             Some(i) if i.color.is_some() => {
                 let colour = i.color.clone().unwrap_or_default();
@@ -671,13 +671,31 @@ impl EditorTabs {
                 if i.read_only {
                     tip.push_str(" — read-only");
                 }
+                if i.safety.gates() {
+                    tip.push_str(&format!(" — {}", i.safety.badge()));
+                }
                 (Some("emblem-important-symbolic"), tip)
             }
-            Some(i) if i.read_only => (
-                Some("changes-prevent-symbolic"),
-                format!(
+            Some(i) if i.read_only => {
+                let mut tip = format!(
                     "Read-only connection: {} refuses writes",
                     glib::markup_escape_text(&i.name)
+                );
+                if i.safety.gates() {
+                    tip.push_str(&format!(" — {}", i.safety.badge()));
+                }
+                (Some("changes-prevent-symbolic"), tip)
+            }
+            Some(i) if i.safety.gates() => (
+                Some(if i.safety.authenticates() {
+                    "security-high-symbolic"
+                } else {
+                    "dialog-warning-symbolic"
+                }),
+                format!(
+                    "{} {}",
+                    glib::markup_escape_text(&i.name),
+                    i.safety.phrase()
                 ),
             ),
             _ => (None, String::new()),

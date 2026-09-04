@@ -8,6 +8,7 @@ mod pager;
 mod profile;
 mod result;
 mod row;
+pub mod safety;
 mod status;
 pub mod update;
 
@@ -24,4 +25,5 @@ pub use pager::{Pager, WindowMeta};
 pub use profile::Profile;
 pub use result::{CellMark, ParkedResult, ResultModel};
 pub use row::ResultRow;
+pub use safety::{Requirement, SafetyDecision, SafetyLevel};
 pub use status::{Column, QueryState, QueryStatus};

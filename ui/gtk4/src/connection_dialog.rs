@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 
 use crate::engine;
 use crate::ffi::Core;
+use crate::model::SafetyLevel;
 
 struct Engine {
     id: &'static str,
@@ -346,7 +347,7 @@ mod imp {
         pub limit_row: adw::SpinRow,
         pub idle_row: adw::SpinRow,
         pub read_only_row: adw::SwitchRow,
-        pub confirm_row: adw::SwitchRow,
+        pub safety_row: adw::ComboRow,
         pub enforcement_row: adw::ActionRow,
         pub save_button: gtk::Button,
         pub error_label: gtk::Label,
@@ -363,7 +364,7 @@ mod imp {
         pub original_url_no_password: RefCell<String>,
         pub have_original: Cell<bool>,
         pub orig_read_only: Cell<bool>,
-        pub orig_confirm_writes: Cell<bool>,
+        pub orig_safety: Cell<SafetyLevel>,
         pub orig_color: RefCell<String>,
         pub orig_auto_limit: Cell<i64>,
         pub orig_idle_timeout: Cell<i64>,
@@ -582,16 +583,22 @@ impl ConnectionDialog {
 
         let safety_group = adw::PreferencesGroup::new();
         safety_group.set_title("Safety");
+        // Read-only REFUSES writes; the ladder GATES statements — the two compose, so neither hides the other.
         let read_only_row = adw::SwitchRow::new();
         read_only_row.set_title("Read-only");
         read_only_row.set_subtitle(
             "Refuses writes on this connection even when the database account is allowed to make them",
         );
         safety_group.add(&read_only_row);
-        let confirm_row = adw::SwitchRow::new();
-        confirm_row.set_title("Ask before running a write");
-        confirm_row.set_subtitle("Shows a confirmation before INSERT / UPDATE / DELETE / DROP");
-        safety_group.add(&confirm_row);
+        let safety_row = adw::ComboRow::new();
+        safety_row.set_title("Safety level");
+        let titles: Vec<&str> = SafetyLevel::ALL.iter().map(|l| l.title()).collect();
+        safety_row.set_model(Some(&gtk::StringList::new(&titles)));
+        safety_row.set_subtitle(SafetyLevel::Silent.blurb());
+        safety_row.connect_selected_notify(|row| {
+            row.set_subtitle(level_at(row.selected()).blurb());
+        });
+        safety_group.add(&safety_row);
         let enforcement_row = adw::ActionRow::new();
         enforcement_row.set_title("Check read-only enforcement");
         enforcement_row.set_subtitle(
@@ -657,12 +664,6 @@ impl ConnectionDialog {
             self,
             move |_| dialog.on_url_edited()
         ));
-        read_only_row.connect_active_notify(glib::clone!(
-            #[weak(rename_to = dialog)]
-            self,
-            move |row| dialog.on_read_only_toggled(row.is_active())
-        ));
-
         self.imp()
             .widgets
             .set(imp::Widgets {
@@ -682,7 +683,7 @@ impl ConnectionDialog {
                 limit_row,
                 idle_row,
                 read_only_row,
-                confirm_row,
+                safety_row,
                 enforcement_row,
                 save_button,
                 error_label,
@@ -786,16 +787,6 @@ impl ConnectionDialog {
         }
     }
 
-    fn on_read_only_toggled(&self, on: bool) {
-        let w = self.widgets();
-        w.confirm_row.set_sensitive(!on);
-        w.confirm_row.set_subtitle(if on {
-            "Not needed while read-only is on — writes are refused"
-        } else {
-            "Shows a confirmation before INSERT / UPDATE / DELETE / DROP"
-        });
-    }
-
     fn on_browse_file(&self) {
         let chooser = gtk::FileDialog::new();
         chooser.set_title("Choose a SQLite database file");
@@ -815,6 +806,10 @@ impl ConnectionDialog {
                 }
             ),
         );
+    }
+
+    fn current_safety(&self) -> SafetyLevel {
+        level_at(self.widgets().safety_row.selected())
     }
 
     fn current_color(&self) -> Option<String> {
@@ -990,8 +985,9 @@ impl ConnectionDialog {
         let o: Value = serde_json::from_str(&json).unwrap_or_default();
         imp.orig_read_only
             .set(o["read_only"].as_bool().unwrap_or(false));
-        imp.orig_confirm_writes
-            .set(o["confirm_writes"].as_bool().unwrap_or(false));
+        imp.orig_safety.set(SafetyLevel::from(
+            o["safety"].as_str().unwrap_or("silent").to_string(),
+        ));
         imp.orig_color
             .replace(o["color"].as_str().unwrap_or_default().to_string());
         imp.orig_auto_limit
@@ -1006,10 +1002,10 @@ impl ConnectionDialog {
         self.apply_fields_to_ui(&fields);
         self.set_color(&imp.orig_color.borrow());
         w.read_only_row.set_active(imp.orig_read_only.get());
-        w.confirm_row.set_active(imp.orig_confirm_writes.get());
+        w.safety_row
+            .set_selected(level_index(imp.orig_safety.get()));
         w.limit_row.set_value(imp.orig_auto_limit.get() as f64);
         w.idle_row.set_value(imp.orig_idle_timeout.get() as f64);
-        self.on_read_only_toggled(imp.orig_read_only.get());
         let url = build_url(&self.fields_from_ui(), false);
         w.url_row.set_text(&url);
         imp.syncing.set(false);
@@ -1026,7 +1022,7 @@ impl ConnectionDialog {
         let w = self.widgets();
         let mut o = json!({
             "read_only": w.read_only_row.is_active(),
-            "confirm_writes": w.confirm_row.is_active(),
+            "safety": self.current_safety().as_str(),
         });
         let limit = w.limit_row.value() as i64;
         if limit > 0 {
@@ -1068,8 +1064,8 @@ impl ConnectionDialog {
         if w.read_only_row.is_active() != imp.orig_read_only.get() {
             p.insert("read_only".into(), json!(w.read_only_row.is_active()));
         }
-        if w.confirm_row.is_active() != imp.orig_confirm_writes.get() {
-            p.insert("confirm_writes".into(), json!(w.confirm_row.is_active()));
+        if self.current_safety() != imp.orig_safety.get() {
+            p.insert("safety".into(), json!(self.current_safety().as_str()));
         }
         let color = self.current_color().unwrap_or_default();
         if color != *imp.orig_color.borrow() {
@@ -1136,6 +1132,20 @@ impl ConnectionDialog {
         self.emit_by_name::<()>("saved", &[&name]);
         self.close();
     }
+}
+
+fn level_at(index: u32) -> SafetyLevel {
+    SafetyLevel::ALL
+        .get(index as usize)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn level_index(level: SafetyLevel) -> u32 {
+    SafetyLevel::ALL
+        .iter()
+        .position(|l| *l == level)
+        .unwrap_or(0) as u32
 }
 
 fn engine_factory() -> gtk::SignalListItemFactory {

@@ -25,10 +25,13 @@ public struct QueryStatus: Sendable {
     public let columns: [ColumnSpec]
     public let totalKnown: Bool
     public let editable: EditableResult?
+    /// Non-null only when the ladder refused this statement, which means nothing was sent.
+    public let safety: SafetyDecision?
 
     public init(
         state: QueryState, rowsLoaded: UInt64, elapsedMs: UInt64, error: String?,
-        columns: [ColumnSpec], totalKnown: Bool, editable: EditableResult? = nil
+        columns: [ColumnSpec], totalKnown: Bool, editable: EditableResult? = nil,
+        safety: SafetyDecision? = nil
     ) {
         self.state = state
         self.rowsLoaded = rowsLoaded
@@ -37,6 +40,7 @@ public struct QueryStatus: Sendable {
         self.columns = columns
         self.totalKnown = totalKnown
         self.editable = editable
+        self.safety = safety
     }
 
     public static let empty = QueryStatus(
@@ -102,7 +106,8 @@ public final class DatagrepQueryHandle: @unchecked Sendable {
             error: d["error"] as? String,
             columns: cols,
             totalKnown: d["total_known"] as? Bool ?? false,
-            editable: EditableResult.decode(d["editable"]))
+            editable: EditableResult.decode(d["editable"]),
+            safety: SafetyDecision.decode(d["safety"]))
     }
 
     public func cancel() -> String? {

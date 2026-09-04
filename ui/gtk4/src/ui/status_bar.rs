@@ -175,8 +175,14 @@ impl StatusBar {
         if let Some(button) = imp.cancel.borrow().as_ref() {
             button.set_visible(status.is_streaming());
         }
-        if let Some(error) = &status.error {
-            self.say(error, true);
+        match (&status.safety, &status.error) {
+            // The ladder refused and nothing was sent; a raw challenge id helps nobody.
+            (Some(refusal), _) => self.say(
+                &format!("{} Run it again to be asked.", refusal.body()),
+                true,
+            ),
+            (None, Some(error)) => self.say(error, true),
+            _ => {}
         }
     }
 

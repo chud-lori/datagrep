@@ -1,5 +1,7 @@
 use serde::Deserialize;
 
+use crate::model::SafetyLevel;
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Profile {
     pub name: String,
@@ -8,7 +10,7 @@ pub struct Profile {
     #[serde(default)]
     pub read_only: bool,
     #[serde(default)]
-    pub confirm_writes: bool,
+    pub safety: SafetyLevel,
     #[serde(default)]
     pub color: Option<String>,
     #[serde(default)]
@@ -28,13 +30,24 @@ mod tests {
     #[test]
     fn the_safety_settings_survive_the_decode() {
         let profiles = Profile::parse_list(
-            r#"[{"name":"prod","driver":"postgres","read_only":true,"confirm_writes":true,
-                 "color":"red","has_secret":true}]"#,
+            r#"[{"name":"prod","driver":"postgres","read_only":true,"safety":"auth_writes",
+                 "confirm_writes":true,"color":"red","has_secret":true}]"#,
         )
         .expect("valid list");
         assert!(profiles[0].read_only);
-        assert!(profiles[0].confirm_writes);
+        assert_eq!(profiles[0].safety, SafetyLevel::AuthWrites);
         assert_eq!(profiles[0].color.as_deref(), Some("red"));
+    }
+
+    #[test]
+    fn a_missing_safety_key_reads_as_silent_and_an_unknown_one_fails_closed() {
+        let profiles = Profile::parse_list(
+            r#"[{"name":"old","driver":"sqlite"},
+                 {"name":"new","driver":"sqlite","safety":"safe_9"}]"#,
+        )
+        .expect("valid list");
+        assert_eq!(profiles[0].safety, SafetyLevel::Silent);
+        assert_eq!(profiles[1].safety, SafetyLevel::AuthAll);
     }
 
     #[test]

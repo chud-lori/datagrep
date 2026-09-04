@@ -6,7 +6,7 @@ use adw::subclass::prelude::*;
 use gtk::glib;
 
 use crate::ffi::Core;
-use crate::model::Profile;
+use crate::model::{Profile, SafetyLevel};
 use crate::ui::SchemaTree;
 
 mod entry_imp {
@@ -18,6 +18,7 @@ mod entry_imp {
         pub driver: RefCell<String>,
         pub read_only: Cell<bool>,
         pub color: RefCell<Option<String>>,
+        pub safety: Cell<SafetyLevel>,
     }
 
     #[glib::object_subclass]
@@ -41,6 +42,7 @@ impl ConnectionEntry {
         *imp.driver.borrow_mut() = profile.driver.clone();
         imp.read_only.set(profile.read_only);
         *imp.color.borrow_mut() = profile.color.clone();
+        imp.safety.set(profile.safety);
         entry
     }
 
@@ -54,6 +56,10 @@ impl ConnectionEntry {
 
     pub fn color(&self) -> Option<String> {
         self.imp().color.borrow().clone()
+    }
+
+    pub fn safety(&self) -> SafetyLevel {
+        self.imp().safety.get()
     }
 }
 
@@ -269,6 +275,7 @@ fn connection_factory() -> gtk::SignalListItemFactory {
 
         let lock = gtk::Image::from_icon_name("changes-prevent-symbolic");
         lock.set_tooltip_text(Some("read-only"));
+        let safety = gtk::Image::new();
 
         let menu = gtk::MenuButton::new();
         menu.set_icon_name("view-more-symbolic");
@@ -288,6 +295,7 @@ fn connection_factory() -> gtk::SignalListItemFactory {
         row.append(&marker);
         row.append(&gtk::Image::new());
         row.append(&text);
+        row.append(&safety);
         row.append(&lock);
         row.append(&menu);
         item.set_child(Some(&row));
@@ -343,6 +351,26 @@ fn connection_factory() -> gtk::SignalListItemFactory {
             .and_downcast::<gtk::Image>()
         {
             lock.set_visible(imp.read_only.get());
+        }
+        if let Some(safety) = row
+            .last_child()
+            .and_then(|menu| menu.prev_sibling())
+            .and_then(|lock| lock.prev_sibling())
+            .and_downcast::<gtk::Image>()
+        {
+            let level = entry.safety();
+            safety.set_visible(level.gates());
+            safety.set_icon_name(Some(if level.authenticates() {
+                "security-high-symbolic"
+            } else {
+                "dialog-warning-symbolic"
+            }));
+            safety.set_tooltip_text(
+                level
+                    .gates()
+                    .then(|| format!("{} — {}", level.title(), level.blurb()))
+                    .as_deref(),
+            );
         }
     });
     factory
@@ -418,6 +446,18 @@ impl Sidebar {
             }
         }
         false
+    }
+
+    /// The ladder rung of `name`, as the last profile reload reported it.
+    pub fn safety_of(&self, name: &str) -> Option<SafetyLevel> {
+        let imp = self.imp();
+        (0..imp.profiles.n_items()).find_map(|index| {
+            imp.profiles
+                .item(index)
+                .and_downcast::<ConnectionEntry>()
+                .filter(|entry| entry.name() == name)
+                .map(|entry| entry.safety())
+        })
     }
 
     /// The engine behind the selected connection — what identifier quoting turns on.
