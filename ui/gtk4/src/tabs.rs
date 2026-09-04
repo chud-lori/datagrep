@@ -405,8 +405,7 @@ impl EditorTabs {
         self.editor_of(&page).grab_editor_focus();
     }
 
-    /// One catalog object's rows, in a tab of their own. A second click on the
-    /// same object focuses its tab and touches neither the buffer nor the server.
+    /// One object's rows in a tab of their own; a second click focuses it.
     pub fn open_browse(&self, connection: &str, subject: &str, sql: &str) {
         if let Some(editor) = self.editors().iter().find(|e| {
             e.subject().as_deref() == Some(subject)
@@ -477,8 +476,7 @@ impl EditorTabs {
         self.emit_by_name::<()>("run-requested", &[&profile, &sql_text.to_string()]);
     }
 
-    /// The tab in front and the connection it runs on — one signal for both, so
-    /// a result can never be shown under a connection that did not produce it.
+    /// The tab in front and the connection it runs on: one signal for both.
     pub fn announce_active(&self) {
         let (id, connection) = match self.active_editor() {
             Some(editor) => (editor.id(), self.target_of(&editor, None)),
@@ -487,7 +485,6 @@ impl EditorTabs {
         self.emit_by_name::<()>("tab-activated", &[&id, &connection]);
     }
 
-    /// Every tab still open, so a closed one's result can be freed.
     pub fn live_ids(&self) -> Vec<String> {
         self.editors().iter().map(EditorPage::id).collect()
     }

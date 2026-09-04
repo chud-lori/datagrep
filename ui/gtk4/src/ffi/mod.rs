@@ -252,8 +252,7 @@ impl Core {
     }
 }
 
-/// The statement one catalog object is read with, in that engine's own language.
-/// Pure: no core, no connection — the driver and the path are all it consults.
+/// The statement one catalog object is read with, in its engine's own language.
 pub fn browse_statement(
     driver_id: &str,
     path_json: &str,
@@ -291,8 +290,7 @@ impl Query {
         self.progress = Some(next);
     }
 
-    /// Stops the ticks without freeing the query: a parked result keeps loading
-    /// in the background, but drives nothing on screen.
+    /// A parked result keeps loading in the background and drives nothing.
     pub fn detach_progress(&mut self) {
         unsafe { datagrep_query_on_progress(self.raw, None, std::ptr::null_mut()) };
         self.progress = None;

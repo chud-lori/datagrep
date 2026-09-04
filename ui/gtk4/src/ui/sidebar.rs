@@ -52,10 +52,6 @@ impl ConnectionEntry {
         self.imp().driver.borrow().clone()
     }
 
-    pub fn read_only(&self) -> bool {
-        self.imp().read_only.get()
-    }
-
     pub fn color(&self) -> Option<String> {
         self.imp().color.borrow().clone()
     }
@@ -244,8 +240,7 @@ mod imp {
     }
 }
 
-/// The per-row menu: the only way to edit or remove a connection, so it is on
-/// the selected row rather than behind a right-click alone.
+/// On the selected row, so editing a connection is not behind a right-click.
 fn row_menu() -> gio::Menu {
     let menu = gio::Menu::new();
     menu.append(Some("Edit Connection…"), Some("connections.edit"));
@@ -423,15 +418,6 @@ impl Sidebar {
             }
         }
         false
-    }
-
-    /// Whether the selected connection refuses writes — the window's veto on editing.
-    pub fn selected_read_only(&self) -> bool {
-        self.imp()
-            .selection
-            .selected_item()
-            .and_downcast::<ConnectionEntry>()
-            .is_some_and(|entry| entry.read_only())
     }
 
     /// The engine behind the selected connection — what identifier quoting turns on.

@@ -1,5 +1,4 @@
-// Verification harness for per-tab results and browse-on-click: drives the real
-// wiring in ui::mount, asserts what is on screen, and snapshots each state.
+// Verification harness: drives ui::mount, asserts what is on screen, snapshots it.
 use std::sync::Arc;
 
 use adw::prelude::*;
@@ -7,7 +6,6 @@ use datagrep_gtk::ffi::Core;
 use datagrep_gtk::ui::Window;
 use datagrep_gtk::{EditorPage, EditorTabs};
 
-/// One turn of the harness: assert what is on screen, then do the next thing.
 type Step = Box<dyn Fn(&Window, &EditorTabs)>;
 
 fn main() {
@@ -208,5 +206,4 @@ fn find<T: IsA<gtk::Widget>>(widget: &gtk::Widget) -> Option<T> {
     None
 }
 
-// Keeps the unused-import check honest about what this harness drives.
 const _: fn(&EditorPage) -> String = EditorPage::text;

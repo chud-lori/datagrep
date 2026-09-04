@@ -259,8 +259,7 @@ impl PendingEdits {
         self.changed();
     }
 
-    /// Lifted out whole, so another tab's result can take the screen without
-    /// this one's edits landing on it.
+    /// Lifted out whole, so these edits cannot land on another tab's result.
     pub fn take_all(&self) -> Vec<StagedDocument> {
         let imp = self.imp();
         let documents = std::mem::take(&mut *imp.documents.borrow_mut());

@@ -44,8 +44,7 @@ impl CatalogNode {
         serde_json::from_str(json).map_err(|e| format!("the catalog page did not decode: {e}"))
     }
 
-    /// Kinds whose rows a click can open. A Redis key is not one: the value's
-    /// shape decides the command, so the engine refuses to guess.
+    /// Kinds whose rows a click can open; a Redis key's shape is not one.
     pub fn browsable_kind(kind: &str) -> bool {
         matches!(kind, "table" | "collection" | "view")
     }

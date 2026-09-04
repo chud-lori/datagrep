@@ -142,8 +142,7 @@ mod imp {
         pub view: gtk::ListView,
         pub selection: gtk::SingleSelection,
         pub watched: RefCell<HashMap<gtk::ListItem, glib::SignalHandlerId>>,
-        // Bumped whenever the tree changes what it is showing, so an answer that
-        // arrives for a connection nobody is looking at any more is dropped.
+        // Bumped on every connection switch, so a late answer can be dropped.
         pub generation: Cell<u64>,
     }
 
@@ -363,8 +362,7 @@ mod imp {
             );
         }
 
-        /// Off the main loop: a describe is a round trip, and the window must
-        /// stay answerable while it is in flight.
+        /// Off the main loop: a describe is a round trip to the server.
         fn describe(&self, node: &SchemaNode) {
             let Some(core) = self.core.borrow().clone() else {
                 return;
@@ -435,8 +433,7 @@ mod imp {
             self.fetch(&store, &imp.path.borrow(), &imp.path_json.borrow());
         }
 
-        /// Off the main loop: listing a level is the unbounded call, and it sits
-        /// on the click path of every expander.
+        /// Off the main loop: the unbounded call, on every expander's click path.
         pub(super) fn fetch(&self, store: &gio::ListStore, path: &[String], path_json: &str) {
             let Some(core) = self.core.borrow().clone() else {
                 return;

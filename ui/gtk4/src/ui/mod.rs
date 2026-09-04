@@ -195,8 +195,7 @@ pub fn mount(app: &adw::Application, core: Arc<Core>) -> Window {
         move |window, name| confirm_remove(window, core.clone(), reload.clone(), name)
     });
 
-    // A click on a table opens its rows in a tab of their own, through the
-    // ordinary run path — the statement is the engine's, not the UI's.
+    // The statement a click runs is the engine's, not the UI's.
     window.connect_object_activated({
         let core = core.clone();
         let tabs = tabs.clone();
@@ -265,9 +264,7 @@ pub fn mount(app: &adw::Application, core: Arc<Core>) -> Window {
     window
 }
 
-/// The database this connection opens to, read from the saved profile rather
-/// than by dialling the server: the engine needs it to refuse a browse its
-/// statement language cannot reach.
+/// From the saved profile, not the server: what lets a browse refuse by name.
 fn profile_database(core: &Core, profile: &str) -> Option<String> {
     let json = core.profile_json(profile).ok()?;
     let value: serde_json::Value = serde_json::from_str(&json).ok()?;
@@ -277,7 +274,6 @@ fn profile_database(core: &Core, profile: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Reloads the profile list everywhere it is held, and selects one by name.
 type Reload = Rc<dyn Fn(&Window, &str)>;
 
 /// Removing a connection also drops its saved secret, so it asks first and says so.

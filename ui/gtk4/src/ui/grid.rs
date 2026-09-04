@@ -427,8 +427,7 @@ mod imp {
             }
         }
 
-        /// Every selected row, tab-separated like the Qt grid's Ctrl+C. The row
-        /// numbers live in their own view, so they cannot be in this text.
+        /// Every selected row, tab-separated like the Qt grid's Ctrl+C.
         fn copy_selection(&self) {
             let Some(model) = self.model.borrow().clone() else {
                 return;

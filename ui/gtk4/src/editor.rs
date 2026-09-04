@@ -186,7 +186,6 @@ impl EditorPage {
         self.imp().pending_save.replace(false)
     }
 
-    /// The catalog object this tab browses, when a click opened it.
     pub fn subject(&self) -> Option<String> {
         self.imp()
             .record
@@ -194,11 +193,6 @@ impl EditorPage {
             .subject
             .clone()
             .filter(|s| !s.is_empty())
-    }
-
-    pub fn set_subject(&self, subject: &str) {
-        self.imp().record.borrow_mut().subject = Some(subject.to_string());
-        self.imp().pending_save.set(true);
     }
 
     pub fn display_title(&self) -> String {

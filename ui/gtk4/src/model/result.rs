@@ -40,8 +40,7 @@ mod imp {
         pub query: Query,
     }
 
-    /// One tab's result, off screen and still owned: the handle, the columns it
-    /// was read under, and everything staged over it.
+    /// One tab's result off screen: its handle, columns and staged edits.
     pub struct ParkedResult {
         pub(super) live: Live,
         pub(super) columns: Vec<Column>,
@@ -247,7 +246,6 @@ mod imp {
             }
         }
 
-        /// Lift the visible result off screen without freeing it.
         pub(super) fn park(&self) -> Option<ParkedResult> {
             let mut live = self.live.borrow_mut().take()?;
             live.query.detach_progress();
@@ -339,7 +337,6 @@ impl ResultModel {
         });
     }
 
-    /// Take the visible result off screen, still owned, so its tab can have it back.
     pub fn park(&self) -> Option<ParkedResult> {
         self.imp().park()
     }
@@ -408,7 +405,6 @@ impl ResultModel {
         }
     }
 
-    /// One cell as it reads on screen, staged value included.
     pub fn cell_text(&self, row: u64, col: u32) -> String {
         self.with_cell(row, col, |kind, text, _| match kind {
             CellKind::Null => "NULL".to_owned(),

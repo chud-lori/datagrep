@@ -51,8 +51,7 @@ mod imp {
         pub active_connection: RefCell<String>,
     }
 
-    /// One tab's result off screen: the rows, the clauses they were derived
-    /// under, and the line the status bar was showing about them.
+    /// One tab's result off screen, with the clauses and the line about it.
     pub struct TabResult {
         pub parked: ParkedResult,
         pub profile: String,
@@ -650,8 +649,6 @@ mod imp {
             dialog.present(Some(self.obj().as_ref()));
         }
 
-        // ---- a result belongs to the tab that ran it ---------------------
-
         /// Park the visible result under its own tab, so switching back restores it.
         fn park_visible(&self) {
             let tab = self.result_tab.borrow().clone();
@@ -672,8 +669,7 @@ mod imp {
             );
         }
 
-        /// Back to "no result in this tab yet" — nothing on screen is attributed
-        /// to anything.
+        /// Back to "no result in this tab yet": nothing is attributed to anything.
         fn clear_visible(&self) {
             let had = !self.result_tab.borrow().is_empty();
             self.model.reset();
@@ -715,8 +711,7 @@ mod imp {
             self.status.say(&saved.message, saved.is_error);
         }
 
-        /// The saved profile's own flag, not the sidebar's copy of it. Unknown
-        /// reads as read-only: the veto errs towards refusing.
+        /// The saved profile's own flag; unknown reads as read-only.
         fn profile_refuses_writes(&self, profile: &str) -> bool {
             let Some(core) = self.core.borrow().clone() else {
                 return true;
@@ -744,9 +739,8 @@ mod imp {
             }
             // Announced before the engine is asked, so a statement refused was never a run.
             let driver = self.derived.borrow().driver().to_owned();
-            // Set before the result exists, so no window of rows is ever editable
-            // for an instant — and read from the connection the statement
-            // resolved to, which a bound tab makes different from the sidebar's.
+            // Set before the result exists, and read from the connection the
+            // statement resolved to rather than whatever the sidebar shows.
             self.model
                 .set_allows_editing(!self.profile_refuses_writes(&profile));
             let obj = self.obj();
@@ -834,8 +828,7 @@ impl Window {
         imp.execute();
     }
 
-    /// The tab now in front and the connection it would run on. A result that
-    /// belongs to neither goes off screen rather than reading as this tab's.
+    /// The tab in front and its connection; a result of neither goes off screen.
     pub fn set_active_tab(&self, tab: &str, connection: &str) {
         let imp = self.imp();
         imp.active_tab.replace(tab.to_string());
@@ -869,8 +862,7 @@ impl Window {
             })
     }
 
-    /// The selected connection is to be edited — the only route to its colour,
-    /// its read-only flag and the enforcement check.
+    /// The only route to a connection's colour, read-only flag and enforcement.
     pub fn connect_edit_connection<F: Fn(&Self, &str) + 'static>(
         &self,
         f: F,
