@@ -42,6 +42,7 @@ ui/gtk4/
       editing.rs            # the staged-edits bar and the commit report
       conflict.rs           # the 409 review: loaded / on the server now / typed
   examples/preview.rs       # snapshots the realised window to PNG (see "Building")
+  examples/tabs_preview.rs  # drives ui::mount: per-tab results and browse-on-click
   examples/editing_preview.rs # the same, driving the editing chain against a live Elasticsearch
   tests/streaming.rs        # the model against the real engine, headless
   tests/catalog.rs          # the sidebar's data path against the real engine, headless
@@ -207,6 +208,31 @@ remembering to guard the second entry point. `run-started` is emitted after
 every guard and before the engine is asked, so a statement that gets refused is
 never recorded as one that ran.
 
+## A result belongs to the tab that ran it
+
+One `ResultModel` feeds the grid, so the question is which tab's result it is
+holding. Switching tabs parks the visible one under its own id — the query
+handle, the pager, the columns it was read under, the derived clauses, the sort
+arrow and everything staged over it — and restores that tab's, if this
+connection is the one that produced it. A tab that never ran shows "no result
+in this tab yet"; a connection switch takes a foreign result off screen rather
+than letting it read as the new connection's; closing a tab frees its handle.
+
+Two things make that safe rather than merely tidy. A parked query has its
+progress callback **detached**, so a result still streaming in the background
+cannot tick the model that is now showing something else; it is re-attached and
+caught up on restore. And the tab is the unit that carries the connection:
+`EditorTabs` emits one signal with the tab in front and the connection it would
+run on, resolved by the same directive > binding > window precedence a run uses,
+so there is no second place where "which connection is this?" is decided.
+
+Clicking a table, view or collection opens its rows in a tab of its own through
+that same run path. The statement is `datagrep_browse_statement`'s — the
+engine's language, the engine's quoting, the engine's refusals (a Redis key, a
+database this connection cannot reach) — never SQL synthesised here. A second
+click focuses the tab; the buffer is not marked dirty, so a browse tab nobody
+typed into closes without a prompt.
+
 ## The editing chain
 
 Peer of `ui/macos/Sources/datagrep-app/{GridEditing,EditingSurface,ConflictResolution}.swift`
@@ -243,10 +269,12 @@ Six behaviours are contracts, not preferences:
 - **A partly returned guard is no guard.** If the re-read does not carry every
   field in `editable.guard`, "Re-apply" is insensitive, because the edit could
   then only be re-sent unguarded.
-- **The read-only veto applies at send time.** `set_allows_editing` is called
-  before the query handle exists, so no window of rows is ever editable for an
-  instant; and it is re-read when Commit is pressed, so a result that stopped
-  being editable cannot still write.
+- **The read-only veto applies at send time, and reads the statement's own
+  connection.** `set_allows_editing` is called before the query handle exists,
+  so no window of rows is ever editable for an instant; it takes the flag from
+  the saved profile the statement resolved to rather than from the sidebar,
+  which a bound tab makes a different connection; unknown reads as read-only;
+  and it is re-read when Commit is pressed.
 - **Notices are shown, never swallowed** — including the `es.bulk.partial`
   warning that says the bulk path attempted every item rather than stopping at
   the first failure.
@@ -297,9 +325,9 @@ factory renders `GtkListItem::position() + 1` and reads no result data at all.
 1. **Excluded from copy by construction.** Nothing in `ResultModel` can produce
    a row number. The only row-addressed text it returns comes from
    `with_cell(row, col)`, and `col` indexes the result's own columns — there is
-   no column index that yields the gutter. A copy path serialises selected
-   cells through that one call, so the number is not filtered out of the
-   clipboard; it never had a route to it.
+   no column index that yields the gutter. `row_text` — what Ctrl+C, Copy Row
+   and Copy Cell all serialise through — is built from those columns alone, so
+   the number is not filtered out of the clipboard; it never had a route to it.
 2. **Pinned by construction.** It lives outside the horizontal scroller, so
    horizontal scrolling cannot move it. `GtkColumnView` has no frozen columns,
    so a leading *column* could not have this property.
@@ -355,6 +383,12 @@ streams 5,000 rows), clicks a cell, describes a table, and writes three PNGs:
 page and its detail strip, and `window-rerun.png` after driving `history.rerun`
 — where the entry reads `×2`, which is the replay having gone through the run
 path rather than around it.
+
+`examples/tabs_preview.rs` drives the real `ui::mount` wiring instead of a
+hand-built window, and asserts rather than only rendering: two bound tabs keep
+their own results across four switches, an unbound tab's result leaves the
+screen when the connection changes, and a click on a table opens one tab
+holding that engine's browse statement with its rows loaded.
 
 `examples/editing_preview.rs` does the same for the editing chain, and needs a
 real Elasticsearch because that is the only way `status_json.editable` is ever

@@ -104,6 +104,13 @@ impl EditorTabs {
         tab_bar.set_view(Some(&imp.tab_view));
         tab_bar.set_autohide(false);
 
+        // Ctrl+Return is the gesture; this is the affordance that says so.
+        let run = gtk::Button::from_icon_name("media-playback-start-symbolic");
+        run.set_tooltip_text(Some("Run the statement under the caret (Ctrl+Return)"));
+        run.add_css_class("flat");
+        run.set_action_name(Some("tabs.run"));
+        tab_bar.set_start_action_widget(Some(&run));
+
         let plus = adw::SplitButton::new();
         plus.set_icon_name("list-add-symbolic");
         plus.set_tooltip_text(Some(
@@ -201,6 +208,18 @@ impl EditorTabs {
             move |_, _| tabs.save_target()
         ));
         group.add_action(&save);
+
+        let run = gio::SimpleAction::new("run", None);
+        run.connect_activate(glib::clone!(
+            #[weak(rename_to = tabs)]
+            self,
+            move |_, _| {
+                if let Some(editor) = tabs.active_editor() {
+                    editor.run_statement();
+                }
+            }
+        ));
+        group.add_action(&run);
 
         let close = gio::SimpleAction::new("close", None);
         close.connect_activate(glib::clone!(

@@ -778,6 +778,9 @@ fn primary_menu() -> gtk::MenuButton {
         item.set_action_and_target_value(Some("win.appearance"), Some(&value.to_variant()));
         appearance.append_item(&item);
     }
+    let view = gio::Menu::new();
+    view.append(Some("Query History"), Some("win.history"));
+
     let updates = gio::Menu::new();
     updates.append(Some("Check for Updates…"), Some("win.check-updates"));
     updates.append(
@@ -786,6 +789,7 @@ fn primary_menu() -> gtk::MenuButton {
     );
     let menu = gio::Menu::new();
     menu.append_submenu(Some("Appearance"), &appearance);
+    menu.append_section(None, &view);
     menu.append_section(None, &updates);
     gtk::MenuButton::builder()
         .icon_name("open-menu-symbolic")
