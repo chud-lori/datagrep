@@ -3,6 +3,7 @@ pub mod editing;
 mod grid;
 mod history;
 mod inspector;
+pub mod safety;
 mod schema;
 mod sidebar;
 mod status_bar;

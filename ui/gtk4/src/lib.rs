@@ -1,4 +1,5 @@
 pub mod appearance;
+pub mod auth;
 pub mod connection_dialog;
 pub mod editor;
 pub mod engine;
