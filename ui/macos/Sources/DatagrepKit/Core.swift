@@ -7,20 +7,20 @@ public struct Profile: Sendable, Hashable {
     public let driver: String
     public let hasSecret: Bool
     public let readOnly: Bool
-    public let confirmWrites: Bool
+    public let safety: SafetyLevel
     public let enforcement: ReadOnlyEnforcement
     public let color: String?
 
     public init(
         name: String, driver: String, hasSecret: Bool, readOnly: Bool = false,
-        confirmWrites: Bool = false, enforcement: ReadOnlyEnforcement = .unknown,
+        safety: SafetyLevel = .silent, enforcement: ReadOnlyEnforcement = .unknown,
         color: String? = nil
     ) {
         self.name = name
         self.driver = driver
         self.hasSecret = hasSecret
         self.readOnly = readOnly
-        self.confirmWrites = confirmWrites
+        self.safety = safety
         self.enforcement = enforcement
         self.color = color
     }
@@ -69,7 +69,7 @@ public final class DatagrepCoreHandle: @unchecked Sendable {
                 driver: d["driver"] as? String ?? "?",
                 hasSecret: d["has_secret"] as? Bool ?? false,
                 readOnly: d["read_only"] as? Bool ?? false,
-                confirmWrites: d["confirm_writes"] as? Bool ?? false,
+                safety: SafetyLevel(abi: d["safety"] as? String) ?? .silent,
                 enforcement: ReadOnlyEnforcement(
                     abi: d["enforcement"] as? String ?? d["read_only_enforcement"] as? String),
                 color: (d["color"] as? String).flatMap { $0.isEmpty ? nil : $0 })
@@ -112,12 +112,23 @@ public final class DatagrepCoreHandle: @unchecked Sendable {
             version: (server?["version"] as? String).flatMap { $0.isEmpty ? nil : $0 })
     }
 
-    public func addProfile(name: String, url: String) throws {
+    public func addProfile(name: String, url: String, safety: SafetyLevel = .silent) throws {
+        let options = #"{"safety":"\#(safety.rawValue)"}"#
+        if let add = ProfileABI.addJSON {
+            return try name.withCString { n in
+                try url.withCString { u in
+                    try options.withCString { o in
+                        try datagrepTryBool { errOut in add(raw, n, u, o, errOut) }
+                    }
+                }
+            }
+        }
         try name.withCString { n in
             try url.withCString { u in
                 try datagrepTryBool { errOut in datagrep_profiles_add(raw, n, u, errOut) }
             }
         }
+        if safety != .silent { try updateProfile(name: name, patchJSON: options) }
     }
 
     public func removeProfile(name: String) throws {

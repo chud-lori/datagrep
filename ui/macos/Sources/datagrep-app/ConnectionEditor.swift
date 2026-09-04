@@ -180,7 +180,7 @@ final class ConnectionDraft: ObservableObject, Identifiable {
 
     @Published var name: String
     @Published var readOnly: Bool
-    @Published var confirmWrites: Bool
+    @Published var safety: SafetyLevel
     @Published var autoLimitText: String
     @Published var idleTimeoutText: String
     @Published var color: String?
@@ -204,7 +204,7 @@ final class ConnectionDraft: ObservableObject, Identifiable {
         self.original = detail
         self.name = detail.name
         self.readOnly = detail.readOnly
-        self.confirmWrites = detail.confirmWrites
+        self.safety = detail.safety
         self.autoLimitText = detail.autoLimit.map(String.init) ?? ""
         self.idleTimeoutText = detail.idleTimeoutS.map(String.init) ?? ""
         self.color = detail.color
@@ -223,7 +223,7 @@ final class ConnectionDraft: ObservableObject, Identifiable {
         original = detail
         name = detail.name
         readOnly = detail.readOnly
-        confirmWrites = detail.confirmWrites
+        safety = detail.safety
         autoLimitText = detail.autoLimit.map(String.init) ?? ""
         idleTimeoutText = detail.idleTimeoutS.map(String.init) ?? ""
         color = detail.color
@@ -309,7 +309,7 @@ final class ConnectionDraft: ObservableObject, Identifiable {
         if trimmedName != original.name { p.set("name", trimmedName) }
         if let u = urlToSend { p.set("url", u) }
         if readOnly != original.readOnly { p.set("read_only", readOnly) }
-        if confirmWrites != original.confirmWrites { p.set("confirm_writes", confirmWrites) }
+        if safety != original.safety { p.set("safety", safety.rawValue) }
         if autoLimit != original.autoLimit { p.set("auto_limit", autoLimit) }
         if idleTimeout != original.idleTimeoutS { p.set("idle_timeout_s", idleTimeout) }
         if color != original.color { p.set("color", color) }
@@ -688,18 +688,7 @@ struct ConnectionEditorSheet: View {
 
             Divider().padding(.vertical, 2)
 
-            Toggle(isOn: $draft.confirmWrites) {
-                HStack(spacing: 6) {
-                    Image(systemName: "hand.raised.fill")
-                    Text("Ask before running a write")
-                }
-            }
-            .toggleStyle(.switch)
-            .disabled(draft.readOnly)
-            .help(
-                draft.readOnly
-                    ? "Not needed while read-only is on — writes are refused outright"
-                    : "Show a confirmation before INSERT / UPDATE / DELETE / DROP")
+            SafetyLevelPicker(level: $draft.safety)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)

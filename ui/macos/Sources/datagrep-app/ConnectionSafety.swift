@@ -8,16 +8,16 @@ struct ConnectionSafety: Equatable {
     var name: String
     var readOnly: Bool
     var enforcement: ReadOnlyEnforcement
-    var confirmWrites: Bool
+    var level: SafetyLevel
     var color: String?
 
     static let empty = ConnectionSafety(
-        name: "", readOnly: false, enforcement: .unknown, confirmWrites: false,
+        name: "", readOnly: false, enforcement: .unknown, level: .silent,
         color: nil)
 
     var isMarked: Bool { color != nil }
 
-    var hasAnything: Bool { isMarked || readOnly }
+    var hasAnything: Bool { isMarked || readOnly || level.asksForAnything }
 }
 
 // MARK: - read-only badge
@@ -97,11 +97,89 @@ struct ConnectionSafetyChip: View {
                     .overlay(Circle().strokeBorder(Color.primary.opacity(0.25), lineWidth: 0.5))
                     .help("This connection is marked \(color).")
             }
+            if !model.activeProfile.isEmpty {
+                SafetyLevelMenu(model: model)
+            }
             if safety.readOnly {
                 ReadOnlyBadge(level: safety.enforcement)
             }
         }
         .frame(height: 22)
         .fixedSize()
+    }
+}
+
+// MARK: - the padlock: what rung this connection is on, and how to change it
+
+struct SafetyLevelMenu: View {
+    @ObservedObject var model: AppModel
+
+    private var level: SafetyLevel { model.activeSafety.level }
+
+    private var tone: Color {
+        switch level {
+        case .silent: return Color(nsColor: .tertiaryLabelColor)
+        case .warnAll, .warnWrites: return Color(nsColor: .systemOrange)
+        case .authAll, .authWrites: return Color(nsColor: .systemRed)
+        }
+    }
+
+    var body: some View {
+        Menu {
+            Section("Safety for “\(model.activeProfile)”") {
+                ForEach(SafetyLevel.allCases, id: \.self) { option in
+                    Button {
+                        model.setSafetyLevel(option, for: model.activeProfile)
+                    } label: {
+                        Label {
+                            Text("\(option.title) — \(option.detail)")
+                        } icon: {
+                            Image(systemName: option == level ? "checkmark" : option.symbol)
+                        }
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: level.symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(tone)
+                .frame(width: 22, height: 20)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel("Safety level: \(level.title)")
+        .help("\(level.title) — \(level.detail)\n\nClick to change it for “\(model.activeProfile)”.")
+    }
+}
+
+// MARK: - the rung, in a connection form
+
+struct SafetyLevelPicker: View {
+    @Binding var level: SafetyLevel
+    var compact = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Image(systemName: level.symbol)
+                Text(compact ? "Safety" : "Safety ladder")
+                Spacer(minLength: 12)
+                Picker("", selection: $level) {
+                    ForEach(SafetyLevel.allCases, id: \.self) { option in
+                        Text(option.title).tag(option)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+            Text(level.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .animation(.smooth(duration: 0.18), value: level)
     }
 }

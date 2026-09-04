@@ -36,6 +36,7 @@ var targets: [Target] = [
         swiftSettings: [.swiftLanguageMode(.v5)],
         linkerSettings: [
             .linkedFramework("AppKit"),
+            .linkedFramework("LocalAuthentication"),
             .linkedFramework("SwiftUI"),
             .linkedFramework("QuartzCore"),
         ]
@@ -43,7 +44,17 @@ var targets: [Target] = [
 ]
 
 if !useRealFFI {
-    targets.insert(.target(name: "CDatagrepStub", dependencies: ["CDatagrepFFI"]), at: 1)
+    targets.insert(
+        .target(
+            name: "CDatagrepStub", dependencies: ["CDatagrepFFI"],
+            // No Swift call site, so a link root is what stops these being dead-stripped.
+            linkerSettings: [
+                .unsafeFlags(
+                    [
+                        "datagrep_profiles_update", "datagrep_profiles_get_json",
+                        "datagrep_profiles_add_json",
+                    ].flatMap { ["-Xlinker", "-u", "-Xlinker", "_\($0)"] })
+            ]), at: 1)
 }
 
 let package = Package(

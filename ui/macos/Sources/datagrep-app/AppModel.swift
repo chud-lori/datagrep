@@ -174,12 +174,19 @@ final class AppModel: ObservableObject {
     @Published var schemaLoad: SchemaLoad = .idle
 
     @Published var showNewConnection = false
+    @Published var newSafety: SafetyLevel = .silent
     let newForm = ConnectionForm()
     let newTest = ConnectionTestState()
     @Published var newError: String?
 
     /// The Edit Connection sheet, or nil when it is closed.
     @Published var editDraft: ConnectionDraft?
+
+    /// The open safety ceremony, and what runs once the engine accepts it.
+    @Published var safetyPrompt: SafetyPrompt?
+    private var safetyProceed: (() -> Void)?
+    private var lastSent: (sql: String, profile: String)?
+    private var safetyReasked: String?
 
     @Published private(set) var profilesByName: [String: Profile] = [:]
 
@@ -238,7 +245,7 @@ final class AppModel: ObservableObject {
             name: name,
             readOnly: p?.readOnly ?? false,
             enforcement: p?.enforcement ?? .unknown,
-            confirmWrites: p?.confirmWrites ?? false,
+            level: p?.safety ?? .silent,
             color: p?.color)
     }
 
@@ -437,10 +444,10 @@ final class AppModel: ObservableObject {
     }
 
     func addProfileFromForm() {
-        addProfile(name: newForm.name, url: newForm.urlWithPassword)
+        addProfile(name: newForm.name, url: newForm.urlWithPassword, safety: newSafety)
     }
 
-    func addProfile(name: String, url: String) {
+    func addProfile(name: String, url: String, safety: SafetyLevel = .silent) {
         guard let core else { return }
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let u = url.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -451,7 +458,9 @@ final class AppModel: ObservableObject {
         newError = nil
         queryQueue.async { [weak self] in
             var failure: String?
-            do { try core.addProfile(name: n, url: u) } catch { failure = "\(error)" }
+            do { try core.addProfile(name: n, url: u, safety: safety) } catch {
+                failure = "\(error)"
+            }
             DispatchQueue.main.async {
                 guard let self else { return }
                 if let failure {
@@ -461,6 +470,7 @@ final class AppModel: ObservableObject {
                 self.showNewConnection = false
                 self.newForm.apply(ConnectionFields(engineID: "postgres"))
                 self.newForm.name = ""
+                self.newSafety = .silent
                 self.newTest.clear()
                 self.reloadProfiles()
                 self.selectProfile(n)
@@ -513,7 +523,7 @@ final class AppModel: ObservableObject {
                 name: p.name, driver: p.driver,
                 hasSecret: o["has_secret"] as? Bool ?? p.hasSecret,
                 readOnly: o["read_only"] as? Bool ?? p.readOnly,
-                confirmWrites: o["confirm_writes"] as? Bool ?? p.confirmWrites,
+                safety: SafetyLevel(abi: o["safety"] as? String) ?? p.safety,
                 enforcement: (o["enforcement"] as? String).map { ReadOnlyEnforcement(abi: $0) }
                     ?? p.enforcement,
                 color: o["color"] as? String ?? p.color)
@@ -528,7 +538,7 @@ final class AppModel: ObservableObject {
             profilesByName[name].map {
                 ProfileDetail(
                     name: $0.name, url: "", driver: $0.driver, readOnly: $0.readOnly,
-                    confirmWrites: $0.confirmWrites, color: $0.color, hasSecret: $0.hasSecret,
+                    safety: $0.safety, color: $0.color, hasSecret: $0.hasSecret,
                     enforcement: $0.enforcement, reported: ["name", "driver", "read_only"])
             } ?? ProfileDetail(name: name)
         let draft = ConnectionDraft(detail: seed)
@@ -1078,14 +1088,30 @@ final class AppModel: ObservableObject {
                 sql: sql, connection: profile, engine: driverID(for: profile), reason: message)
             return
         }
-        if safety.confirmWrites, SQLBlocks.isWriteStatement(sql) {
-            confirmWrite(verb: Self.statementVerb(sql), profile: profile, safety: safety) {
-                [weak self] in
-                self?.send(sql: sql, profile: profile)
-            }
+        gate(sql: sql, profile: profile)
+    }
+
+    // The engine says what this statement needs; nothing here decides a statement is safe.
+    private func gate(sql: String, profile: String) {
+        safetyReasked = nil
+        // A silent connection skips the round trip; if that record is stale the engine still refuses.
+        guard let core, safety(for: profile).level.asksForAnything else {
+            send(sql: sql, profile: profile)
             return
         }
-        send(sql: sql, profile: profile)
+        queryQueue.async { [weak self] in
+            let decision = try? core.evaluateSafety(profile: profile, sql: sql)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard let decision, decision.requires != .none, decision.challenge != nil else {
+                    self.send(sql: sql, profile: profile)
+                    return
+                }
+                self.present(decision, profile: profile) { [weak self] in
+                    self?.send(sql: sql, profile: profile)
+                }
+            }
+        }
     }
 
     /// The first word of the statement, for a refusal that says what it refused.
@@ -1107,34 +1133,127 @@ final class AppModel: ObservableObject {
         return head.isEmpty ? "statement" : head
     }
 
-    /// The `confirm_writes` profile setting, as a real window-modal sheet.
-    private func confirmWrite(
-        verb: String, profile: String, safety: ConnectionSafety, proceed: @escaping () -> Void
+    // MARK: - the safety ceremony
+
+    private func present(
+        _ decision: SafetyDecision, profile: String, proceed: @escaping () -> Void
     ) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Run a \(verb) against `\(profile)`?"
-        alert.informativeText =
-            "This connection is set to ask before every write. The statement has not been sent yet."
-        alert.addButton(withTitle: "Run \(verb)")
-        alert.addButton(withTitle: "Cancel")
-        guard let window = NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) else {
-            if alert.runModal() == .alertFirstButtonReturn { proceed() }
-            return
+        safetyProceed = proceed
+        safetyPrompt = SafetyPrompt(decision: decision, profile: profile)
+        state = nil
+        isError = false
+        message =
+            decision.requires == .authenticate
+            ? "`\(profile)` needs authentication before this runs — nothing has been sent"
+            : "`\(profile)` asks before this runs — nothing has been sent"
+    }
+
+    /// The engine mints the challenge and judges the evidence; a cleared one is all that runs.
+    func answerSafetyPrompt(_ prompt: SafetyPrompt, with attestation: Attestation) {
+        guard let core, let challenge = prompt.decision.challenge, !prompt.working else { return }
+        prompt.working = true
+        prompt.error = nil
+        let profile = prompt.profile
+        queryQueue.async { [weak self] in
+            var failure: String?
+            do {
+                try core.satisfySafety(profile: profile, challenge: challenge, with: attestation)
+            } catch {
+                failure = "\(error)"
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                prompt.working = false
+                if let failure {
+                    prompt.error = failure
+                    return
+                }
+                let proceed = self.safetyProceed
+                self.safetyProceed = nil
+                self.safetyPrompt = nil
+                proceed?()
+            }
         }
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn else {
-                self?.message = "not sent — `\(profile)` asks before every write"
-                self?.isError = false
-                self?.state = nil
+    }
+
+    func authenticateWithTouchID(_ prompt: SafetyPrompt) {
+        guard !prompt.working else { return }
+        prompt.working = true
+        prompt.error = nil
+        SystemAuth.authenticate(reason: "run this statement on “\(prompt.profile)”") {
+            [weak self] method, failure in
+            guard let self else { return }
+            prompt.working = false
+            guard let method else {
+                prompt.error =
+                    (failure ?? "Touch ID did not confirm it")
+                    + " — type the connection name instead."
                 return
             }
-            proceed()
+            self.answerSafetyPrompt(prompt, with: .systemAuth(method: method))
+        }
+    }
+
+    func cancelSafetyPrompt(_ prompt: SafetyPrompt) {
+        safetyProceed = nil
+        safetyPrompt = nil
+        state = nil
+        isError = false
+        message = "not sent — `\(prompt.profile)` is on \(prompt.decision.level.title.lowercased())"
+    }
+
+    /// A synchronous refusal names its challenge only in the message; the decision comes from the engine.
+    private func offerSafetyRetry(
+        after failure: String, profile: String, retry: @escaping () -> Void,
+        otherwise: @escaping () -> Void
+    ) {
+        guard let core, let id = SafetyDecision.challengeID(inRefusal: failure) else {
+            return otherwise()
+        }
+        queryQueue.async { [weak self] in
+            let decision = (try? core.pendingSafety(profile: profile))?.first {
+                $0.challenge == id
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard let decision else { return otherwise() }
+                self.present(decision, profile: profile, proceed: retry)
+            }
+        }
+    }
+
+    func setSafetyLevel(_ level: SafetyLevel, for profile: String) {
+        guard let core, !profile.isEmpty, safety(for: profile).level != level else { return }
+        guard ProfileABI.canEdit else {
+            message = ProfileABI.unavailableReason ?? "this engine build cannot edit connections"
+            isError = true
+            return
+        }
+        var patch = ProfilePatch()
+        patch.set("safety", level.rawValue)
+        let json = patch.json
+        queryQueue.async { [weak self] in
+            var failure: String?
+            do { try core.updateProfile(name: profile, patchJSON: json) } catch {
+                failure = "\(error)"
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let failure {
+                    self.message = "could not change the safety level of `\(profile)`: \(failure)"
+                    self.isError = true
+                    return
+                }
+                self.reloadProfiles()
+                self.message = "`\(profile)` is now on \(level.title.lowercased())"
+                self.isError = false
+            }
         }
     }
 
     private func send(sql: String, profile: String) {
         guard let core else { return }
+        lastSent = (sql, profile)
         // A `-- @connection` directive may aim elsewhere; the badge follows the statement.
         selectProfile(profile, scopeEditors: false)
         resultProfile = profile
@@ -1211,7 +1330,20 @@ final class AppModel: ObservableObject {
                 "statement completed; this ABI carries no Shape::Ack, so an affected-row count is not available (datagrep-cli README gap #3)"
             isError = false
         }
+        if status.state == .failed, let decision = status.safety { reask(decision) }
         refreshFootprint()
+    }
+
+    /// The gate refused after dispatch — an expired grant, or a path that never asked. Nothing was sent.
+    private func reask(_ decision: SafetyDecision) {
+        guard decision.challenge != nil, let sent = lastSent, sent.profile == decision.profile
+        else { return }
+        let key = "\(sent.profile)\u{0}\(sent.sql)"
+        guard safetyReasked != key else { return }
+        safetyReasked = key
+        present(decision, profile: sent.profile) { [weak self] in
+            self?.send(sql: sent.sql, profile: sent.profile)
+        }
     }
 
     // MARK: - a result belongs to the editor tab that ran it
@@ -1390,8 +1522,13 @@ final class AppModel: ObservableObject {
                 guard let self else { return }
                 self.isCommitting = false
                 guard let report else {
-                    self.message = failure ?? "the commit failed without a message"
-                    self.isError = true
+                    let refused = failure ?? "the commit failed without a message"
+                    self.offerSafetyRetry(after: refused, profile: profile) { [weak self] in
+                        self?.send(mutations: mutations, profile: profile, core: core)
+                    } otherwise: { [weak self] in
+                        self?.message = refused
+                        self?.isError = true
+                    }
                     return
                 }
                 let linedUp = self.edits.apply(report, committed: ids)
@@ -1453,8 +1590,13 @@ final class AppModel: ObservableObject {
                 guard let self else { return }
                 self.isRereading = false
                 guard let server else {
-                    self.message = failure ?? "the re-read failed without a message"
-                    self.isError = true
+                    let refused = failure ?? "the re-read failed without a message"
+                    self.offerSafetyRetry(after: refused, profile: profile) { [weak self] in
+                        self?.reviewConflicts()
+                    } otherwise: { [weak self] in
+                        self?.message = refused
+                        self?.isError = true
+                    }
                     return
                 }
                 guard server.count == conflicted.count else {

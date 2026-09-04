@@ -76,8 +76,21 @@ typedef struct {
     char *name;
     char *driver;
     char *env;
+    char *color;
+    char *safety;
+    char *url;
+    int   read_only;
     int   has_secret;
 } StubProfile;
+
+/* An open challenge, minted here exactly as the engine mints one. */
+typedef struct {
+    char *id;
+    char *profile;
+    char *requires;
+} StubChallenge;
+
+#define STUB_MAX_PENDING 16
 
 struct DatagrepCore {
     pthread_mutex_t lock;
@@ -85,6 +98,9 @@ struct DatagrepCore {
     size_t          n;
     size_t          cap;
     char           *db_path;
+    StubChallenge   pending[STUB_MAX_PENDING];
+    size_t          pending_n;
+    uint64_t        next_challenge;
 };
 
 static void core_push(DatagrepCore *c, const char *name, const char *driver, const char *env,
@@ -97,7 +113,109 @@ static void core_push(DatagrepCore *c, const char *name, const char *driver, con
     p->name = dup_cstr(name);
     p->driver = dup_cstr(driver);
     p->env = dup_cstr(env);
+    p->color = NULL;
+    p->safety = dup_cstr("silent");
+    p->url = dup_cstr("");
+    p->read_only = 0;
     p->has_secret = has_secret;
+}
+
+static void set_field(char **slot, const char *value) {
+    free(*slot);
+    *slot = value ? dup_cstr(value) : NULL;
+}
+
+/* ---------------------------------------------------- the safety ladder */
+
+static int level_is_known(const char *level) {
+    return strcmp(level, "silent") == 0 || strcmp(level, "warn_all") == 0 ||
+           strcmp(level, "warn_writes") == 0 || strcmp(level, "auth_all") == 0 ||
+           strcmp(level, "auth_writes") == 0;
+}
+
+static const char *level_requirement(const char *level, int is_read) {
+    if (strcmp(level, "warn_all") == 0) return "warn";
+    if (strcmp(level, "auth_all") == 0) return "authenticate";
+    if (is_read) return "none";
+    if (strcmp(level, "warn_writes") == 0) return "warn";
+    if (strcmp(level, "auth_writes") == 0) return "authenticate";
+    return "none";
+}
+
+static int level_confirms_writes(const char *level) {
+    return strcmp(level_requirement(level, 0), "none") != 0;
+}
+
+static const char *stronger(const char *a, const char *b) {
+    if (strcmp(a, "authenticate") == 0 || strcmp(b, "authenticate") == 0) return "authenticate";
+    if (strcmp(a, "warn") == 0 || strcmp(b, "warn") == 0) return "warn";
+    return "none";
+}
+
+/* Anything this does not recognise is a write, exactly like the engine. */
+static const char *classify(const char *stmt) {
+    static const char *reads[] = {"select", "with",   "show", "explain",
+                                  "desc",   "values", "table", NULL};
+    while (*stmt && (*stmt == ' ' || *stmt == '\n' || *stmt == '\t' || *stmt == '\r')) stmt++;
+    if (!*stmt) return "unknown";
+    for (size_t i = 0; reads[i]; i++) {
+        size_t n = strlen(reads[i]);
+        if (strncasecmp(stmt, reads[i], n) == 0 &&
+            (stmt[n] == '\0' || stmt[n] == ' ' || stmt[n] == '\n' || stmt[n] == '\t'))
+            return "read";
+    }
+    if (strncasecmp(stmt, "create", 6) == 0 || strncasecmp(stmt, "drop", 4) == 0 ||
+        strncasecmp(stmt, "alter", 5) == 0 || strncasecmp(stmt, "truncate", 8) == 0)
+        return "ddl";
+    if (strncasecmp(stmt, "insert", 6) == 0 || strncasecmp(stmt, "update", 6) == 0 ||
+        strncasecmp(stmt, "delete", 6) == 0)
+        return "write";
+    return "unknown";
+}
+
+static void sb_put_escaped(Sb *s, const char *text) {
+    for (const char *p = text; *p; p++) {
+        if (*p == '"' || *p == '\\') sb_putf(s, "\\%c", *p);
+        else if (*p == '\n') sb_put(s, "\\n");
+        else if (*p == '\t') sb_put(s, "\\t");
+        else if ((unsigned char)*p < 0x20) sb_putf(s, "\\u%04x", *p);
+        else sb_putf(s, "%c", *p);
+    }
+}
+
+/* Enough JSON for the patch objects the UI sends; the stub never sees anything else. */
+static int json_string(const char *json, const char *key, char *out, size_t cap) {
+    char needle[64];
+    snprintf(needle, sizeof needle, "\"%s\"", key);
+    const char *at = strstr(json, needle);
+    if (!at) return 0;
+    at = strchr(at + strlen(needle), ':');
+    if (!at) return 0;
+    at++;
+    while (*at == ' ') at++;
+    if (*at != '"') return 0;
+    at++;
+    size_t i = 0;
+    while (*at && *at != '"' && i + 1 < cap) {
+        if (*at == '\\' && at[1]) at++;
+        out[i++] = *at++;
+    }
+    out[i] = '\0';
+    return 1;
+}
+
+static int json_bool(const char *json, const char *key, int *out) {
+    char needle[64];
+    snprintf(needle, sizeof needle, "\"%s\"", key);
+    const char *at = strstr(json, needle);
+    if (!at) return 0;
+    at = strchr(at + strlen(needle), ':');
+    if (!at) return 0;
+    at++;
+    while (*at == ' ') at++;
+    if (strncmp(at, "true", 4) == 0) { *out = 1; return 1; }
+    if (strncmp(at, "false", 5) == 0) { *out = 0; return 1; }
+    return 0;
 }
 
 DatagrepCore *datagrep_core_new(const char *profiles_db_path, char **err_out) {
@@ -117,6 +235,10 @@ DatagrepCore *datagrep_core_new(const char *profiles_db_path, char **err_out) {
     core_push(c, "app_sqlite", "sqlite", "dev", 0);
     core_push(c, "sessions_redis", "redis", "prod", 1);
     core_push(c, "events_mongo", "mongo", "staging", 1);
+    /* Two of them sit on a rung, so the ladder has something to draw. */
+    set_field(&c->profiles[2].safety, "auth_writes");
+    set_field(&c->profiles[2].color, "red");
+    set_field(&c->profiles[3].safety, "warn_writes");
     return c;
 }
 
@@ -126,6 +248,14 @@ void datagrep_core_free(DatagrepCore *c) {
         free(c->profiles[i].name);
         free(c->profiles[i].driver);
         free(c->profiles[i].env);
+        free(c->profiles[i].color);
+        free(c->profiles[i].safety);
+        free(c->profiles[i].url);
+    }
+    for (size_t i = 0; i < c->pending_n; i++) {
+        free(c->pending[i].id);
+        free(c->pending[i].profile);
+        free(c->pending[i].requires);
     }
     free(c->profiles);
     free(c->db_path);
@@ -145,9 +275,15 @@ char *datagrep_profiles_list_json(DatagrepCore *c, char **err_out) {
     sb_put(&s, "[");
     pthread_mutex_lock(&c->lock);
     for (size_t i = 0; i < c->n; i++) {
-        sb_putf(&s, "%s{\"name\":\"%s\",\"driver\":\"%s\",\"env\":\"%s\",\"has_secret\":%s}",
-                i ? "," : "", c->profiles[i].name, c->profiles[i].driver, c->profiles[i].env,
-                c->profiles[i].has_secret ? "true" : "false");
+        const StubProfile *p = &c->profiles[i];
+        sb_putf(&s,
+                "%s{\"name\":\"%s\",\"driver\":\"%s\",\"env\":\"%s\",\"read_only\":%s,"
+                "\"safety\":\"%s\",\"confirm_writes\":%s,\"has_secret\":%s",
+                i ? "," : "", p->name, p->driver, p->env, p->read_only ? "true" : "false",
+                p->safety, level_confirms_writes(p->safety) ? "true" : "false",
+                p->has_secret ? "true" : "false");
+        if (p->color) sb_putf(&s, ",\"color\":\"%s\"", p->color);
+        sb_put(&s, "}");
     }
     pthread_mutex_unlock(&c->lock);
     sb_put(&s, "]");
@@ -159,7 +295,7 @@ char *datagrep_profiles_list_json(DatagrepCore *c, char **err_out) {
  * this build exists to let us look at without a database in the room. */
 char *datagrep_connection_info_json(DatagrepCore *c, const char *name, char **err_out);
 
-static const StubProfile *find_profile(DatagrepCore *c, const char *name) {
+static StubProfile *find_profile(DatagrepCore *c, const char *name) {
     for (size_t i = 0; i < c->n; i++)
         if (strcmp(c->profiles[i].name, name) == 0) return &c->profiles[i];
     return NULL;
@@ -182,8 +318,8 @@ char *datagrep_connection_info_json(DatagrepCore *c, const char *name, char **er
     sb_putf(&s,
             "{\"profile\":\"%s\",\"driver\":\"%s\",\"database\":\"stub\","
             "\"server\":{\"product\":\"%s\",\"version\":\"0.0.0-stub\"},"
-            "\"safety\":\"silent\",\"read_only\":null}",
-            p->name, p->driver, p->driver);
+            "\"safety\":\"%s\",\"read_only\":null}",
+            p->name, p->driver, p->driver, p->safety);
     pthread_mutex_unlock(&c->lock);
     return s.buf;
 }
@@ -206,6 +342,7 @@ bool datagrep_profiles_add(DatagrepCore *c, const char *name, const char *url, c
     /* a password in the URL would be split out to the keychain by the real core */
     int has_secret = strchr(url, '@') != NULL;
     core_push(c, name, driver, "dev", has_secret);
+    set_field(&c->profiles[c->n - 1].url, url);
     pthread_mutex_unlock(&c->lock);
     return true;
 }
@@ -857,21 +994,80 @@ char *datagrep_reread_documents(DatagrepCore *c, const char *profile, const char
     return NULL;
 }
 
-/* Safe mode over a stub: there is no engine and no socket, so nothing can be
- * sent and nothing needs gating. Every rung answers "requires":"none". */
+/* No server to send to, so nothing is dispatched; the rungs and the judging are the engine's. */
+
+static char *mint_challenge(DatagrepCore *c, const char *profile, const char *requires) {
+    if (c->pending_n == STUB_MAX_PENDING) {
+        free(c->pending[0].id);
+        free(c->pending[0].profile);
+        free(c->pending[0].requires);
+        memmove(&c->pending[0], &c->pending[1], (STUB_MAX_PENDING - 1) * sizeof(StubChallenge));
+        c->pending_n--;
+    }
+    char id[64];
+    snprintf(id, sizeof id, "stub-%llu", (unsigned long long)++c->next_challenge);
+    StubChallenge *ch = &c->pending[c->pending_n++];
+    ch->id = dup_cstr(id);
+    ch->profile = dup_cstr(profile);
+    ch->requires = dup_cstr(requires);
+    return dup_cstr(id);
+}
+
+/* Caller holds the lock. */
+static char *decide(DatagrepCore *c, const StubProfile *p, const char *sql, int mint) {
+    Sb body;
+    sb_init(&body);
+    const char *requires = "none";
+    char *copy = dup_cstr(sql);
+    int first = 1;
+    char *save = NULL;
+    for (char *stmt = strtok_r(copy, ";", &save); stmt; stmt = strtok_r(NULL, ";", &save)) {
+        char *end = stmt + strlen(stmt);
+        while (end > stmt && (end[-1] == ' ' || end[-1] == '\n' || end[-1] == '\t')) *--end = '\0';
+        while (*stmt == ' ' || *stmt == '\n' || *stmt == '\t') stmt++;
+        if (!*stmt) continue;
+        const char *kind = classify(stmt);
+        const char *one = level_requirement(p->safety, strcmp(kind, "read") == 0);
+        requires = stronger(requires, one);
+        sb_put(&body, first ? "{\"text\":\"" : ",{\"text\":\"");
+        sb_put_escaped(&body, stmt);
+        sb_putf(&body, "\",\"class\":\"%s\",\"requires\":\"%s\"}", kind, one);
+        first = 0;
+    }
+    free(copy);
+
+    Sb s;
+    sb_init(&s);
+    sb_putf(&s, "{\"profile\":\"%s\",\"level\":\"%s\",\"requires\":\"%s\",\"challenge\":",
+            p->name, p->safety, requires);
+    if (strcmp(requires, "none") == 0 || !mint) {
+        sb_put(&s, "null");
+    } else {
+        char *id = mint_challenge(c, p->name, requires);
+        sb_putf(&s, "\"%s\"", id);
+        free(id);
+    }
+    sb_putf(&s, ",\"statements\":[%s]}", body.buf ? body.buf : "");
+    free(body.buf);
+    return s.buf;
+}
+
 char *datagrep_safety_evaluate_json(DatagrepCore *c, const char *profile, const char *sql,
                                     char **err_out) {
     if (!c || !profile || !sql) {
         set_err(err_out, "null argument");
         return NULL;
     }
-    Sb s;
-    sb_init(&s);
-    sb_putf(&s,
-            "{\"profile\":\"%s\",\"level\":\"silent\",\"requires\":\"none\","
-            "\"challenge\":null,\"statements\":[]}",
-            profile);
-    return s.buf;
+    pthread_mutex_lock(&c->lock);
+    const StubProfile *p = find_profile(c, profile);
+    if (!p) {
+        pthread_mutex_unlock(&c->lock);
+        set_err(err_out, "no such profile");
+        return NULL;
+    }
+    char *json = decide(c, p, sql, 1);
+    pthread_mutex_unlock(&c->lock);
+    return json;
 }
 
 char *datagrep_safety_pending_json(DatagrepCore *c, const char *profile, char **err_out) {
@@ -879,16 +1075,150 @@ char *datagrep_safety_pending_json(DatagrepCore *c, const char *profile, char **
         set_err(err_out, "null argument");
         return NULL;
     }
-    return dup_cstr("[]");
+    Sb s;
+    sb_init(&s);
+    sb_put(&s, "[");
+    pthread_mutex_lock(&c->lock);
+    int first = 1;
+    for (size_t i = 0; i < c->pending_n; i++) {
+        if (strcmp(c->pending[i].profile, profile) != 0) continue;
+        sb_putf(&s,
+                "%s{\"profile\":\"%s\",\"level\":\"\",\"requires\":\"%s\",\"challenge\":\"%s\","
+                "\"statements\":[]}",
+                first ? "" : ",", profile, c->pending[i].requires, c->pending[i].id);
+        first = 0;
+    }
+    pthread_mutex_unlock(&c->lock);
+    sb_put(&s, "]");
+    return s.buf;
 }
 
 bool datagrep_safety_satisfy(DatagrepCore *c, const char *profile, const char *challenge,
                              const char *attestation_json, char **err_out) {
-    (void)challenge;
-    (void)attestation_json;
-    if (!c || !profile) {
+    if (!c || !profile || !challenge || !attestation_json) {
         set_err(err_out, "null argument");
         return false;
     }
+    char kind[32] = "";
+    if (!json_string(attestation_json, "kind", kind, sizeof kind)) {
+        set_err(err_out, "attestation JSON has no \"kind\"");
+        return false;
+    }
+    pthread_mutex_lock(&c->lock);
+    size_t at = c->pending_n;
+    for (size_t i = 0; i < c->pending_n; i++)
+        if (strcmp(c->pending[i].id, challenge) == 0 &&
+            strcmp(c->pending[i].profile, profile) == 0)
+            at = i;
+    if (at == c->pending_n) {
+        pthread_mutex_unlock(&c->lock);
+        set_err(err_out, "no open safety challenge — it expired, was already used, or was never issued");
+        return false;
+    }
+
+    int authenticating = strcmp(c->pending[at].requires, "authenticate") == 0;
+    char detail[256] = "";
+    int ok = 0;
+    if (strcmp(kind, "acknowledged") == 0) {
+        ok = !authenticating;
+        if (!ok) snprintf(detail, sizeof detail, "`%s` requires authentication and this did not provide it", profile);
+    } else if (strcmp(kind, "typed_phrase") == 0) {
+        char typed[128] = "";
+        json_string(attestation_json, "typed", typed, sizeof typed);
+        ok = strcmp(typed, profile) == 0;
+        if (!ok) snprintf(detail, sizeof detail, "that is not the name of this connection");
+    } else if (strcmp(kind, "system_auth") == 0) {
+        char method[64] = "";
+        json_string(attestation_json, "method", method, sizeof method);
+        ok = method[0] != '\0';
+        if (!ok) snprintf(detail, sizeof detail, "system authentication reported no method");
+    } else {
+        snprintf(detail, sizeof detail, "unknown attestation kind `%s`", kind);
+    }
+
+    if (ok) {
+        free(c->pending[at].id);
+        free(c->pending[at].profile);
+        free(c->pending[at].requires);
+        memmove(&c->pending[at], &c->pending[at + 1],
+                (c->pending_n - at - 1) * sizeof(StubChallenge));
+        c->pending_n--;
+    }
+    pthread_mutex_unlock(&c->lock);
+    if (!ok) set_err(err_out, detail);
+    return ok != 0;
+}
+
+/* ---- editing a profile, so the ladder can be set from the UI ---------- */
+
+bool datagrep_profiles_add_json(DatagrepCore *c, const char *name, const char *url,
+                                const char *options_json, char **err_out) {
+    if (!datagrep_profiles_add(c, name, url, err_out)) return false;
+    if (!options_json || !*options_json) return true;
+    pthread_mutex_lock(&c->lock);
+    StubProfile *p = find_profile(c, name);
+    char text[128];
+    int flag = 0;
+    if (p && json_string(options_json, "safety", text, sizeof text) && level_is_known(text))
+        set_field(&p->safety, text);
+    if (p && json_string(options_json, "color", text, sizeof text)) set_field(&p->color, text);
+    if (p && json_bool(options_json, "read_only", &flag)) p->read_only = flag;
+    pthread_mutex_unlock(&c->lock);
     return true;
+}
+
+bool datagrep_profiles_update(DatagrepCore *c, const char *name, const char *patch_json,
+                              char **err_out) {
+    if (!c || !name || !patch_json) {
+        set_err(err_out, "null argument");
+        return false;
+    }
+    pthread_mutex_lock(&c->lock);
+    StubProfile *p = find_profile(c, name);
+    if (!p) {
+        pthread_mutex_unlock(&c->lock);
+        set_err(err_out, "no such profile");
+        return false;
+    }
+    char text[512];
+    int flag = 0;
+    if (json_string(patch_json, "safety", text, sizeof text)) {
+        if (!level_is_known(text)) {
+            pthread_mutex_unlock(&c->lock);
+            set_err(err_out, "unknown safety level");
+            return false;
+        }
+        set_field(&p->safety, text);
+    }
+    if (json_string(patch_json, "color", text, sizeof text)) set_field(&p->color, text);
+    if (json_string(patch_json, "url", text, sizeof text)) set_field(&p->url, text);
+    if (json_bool(patch_json, "read_only", &flag)) p->read_only = flag;
+    if (json_string(patch_json, "name", text, sizeof text)) set_field(&p->name, text);
+    pthread_mutex_unlock(&c->lock);
+    return true;
+}
+
+char *datagrep_profiles_get_json(DatagrepCore *c, const char *name, char **err_out) {
+    if (!c || !name) {
+        set_err(err_out, "null argument");
+        return NULL;
+    }
+    pthread_mutex_lock(&c->lock);
+    const StubProfile *p = find_profile(c, name);
+    if (!p) {
+        pthread_mutex_unlock(&c->lock);
+        set_err(err_out, "no such profile");
+        return NULL;
+    }
+    Sb s;
+    sb_init(&s);
+    sb_putf(&s,
+            "{\"name\":\"%s\",\"driver\":\"%s\",\"url\":\"%s\",\"read_only\":%s,\"safety\":\"%s\","
+            "\"confirm_writes\":%s,\"auto_limit\":null,\"idle_timeout_s\":null,\"has_secret\":%s",
+            p->name, p->driver, p->url, p->read_only ? "true" : "false", p->safety,
+            level_confirms_writes(p->safety) ? "true" : "false", p->has_secret ? "true" : "false");
+    if (p->color) sb_putf(&s, ",\"color\":\"%s\"", p->color);
+    sb_put(&s, "}");
+    pthread_mutex_unlock(&c->lock);
+    return s.buf;
 }
