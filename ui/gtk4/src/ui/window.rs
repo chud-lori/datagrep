@@ -11,11 +11,13 @@ use crate::ffi::Core;
 use crate::model::mutation::{
     document_address_batch_json, mutation_batch_json, MutationReport, ServerDocument,
 };
+use crate::model::safety::challenge_in_error;
 use crate::model::update::UpdateCheck;
-use crate::model::{ResultModel, StagedDocument};
+use crate::model::{Requirement, ResultModel, SafetyDecision, StagedDocument};
 use crate::sql::Derived;
 use crate::ui::conflict::{ConflictDialog, ConflictReview};
 use crate::ui::editing::{commit_warning, confirm, report_dialog, report_headline};
+use crate::ui::safety::clear_challenge;
 use crate::ui::{ResultsGrid, Sidebar, StagedEditsBar, StatusBar};
 
 mod imp {
@@ -32,6 +34,7 @@ mod imp {
         pub staged: StagedEditsBar,
         pub committing: Cell<bool>,
         pub rereading: Cell<bool>,
+        pub gating: Cell<bool>,
         // The connection the loaded result came from, which the selected one may no longer be.
         pub ran_profile: RefCell<String>,
         pub review: RefCell<ConflictReview>,
@@ -57,6 +60,7 @@ mod imp {
                 staged: StagedEditsBar::new(),
                 committing: Cell::new(false),
                 rereading: Cell::new(false),
+                gating: Cell::new(false),
                 ran_profile: RefCell::new(String::new()),
                 review: RefCell::new(ConflictReview::default()),
                 title: adw::WindowTitle::new("datagrep", ""),
@@ -277,11 +281,17 @@ mod imp {
             self.obj().add_action(&new_connection);
 
             let window = self.obj().downgrade();
-            self.sidebar.connect_connection_selected(move |_, name| {
-                if let Some(window) = window.upgrade() {
-                    window.imp().title.set_subtitle(name);
-                }
-            });
+            self.sidebar
+                .connect_connection_selected(move |sidebar, name| {
+                    if let Some(window) = window.upgrade() {
+                        let level = sidebar.safety_of(name).unwrap_or_default();
+                        window.imp().title.set_subtitle(&if level.gates() {
+                            format!("{name} — {}", level.badge())
+                        } else {
+                            name.to_string()
+                        });
+                    }
+                });
 
             let window = self.obj().downgrade();
             self.sidebar
@@ -411,12 +421,17 @@ mod imp {
                     .map(StagedDocument::mutation)
                     .collect::<Vec<_>>(),
             );
+            let staged = pending.to_vec();
             let (window, core, profile) =
                 (self.obj().downgrade(), (*core).clone(), profile.to_owned());
             glib::spawn_future_local(async move {
-                let sent = gio::spawn_blocking(move || core.mutate_json(&profile, &batch)).await;
+                let mutate_profile = profile.clone();
+                let sent =
+                    gio::spawn_blocking(move || core.mutate_json(&mutate_profile, &batch)).await;
                 if let Some(window) = window.upgrade() {
-                    window.imp().finish_commit(sent.ok(), &ids, &rows);
+                    window
+                        .imp()
+                        .finish_commit(sent.ok(), &ids, &rows, &staged, &profile);
                 }
             });
         }
@@ -426,12 +441,24 @@ mod imp {
             sent: Option<Result<String, crate::ffi::Error>>,
             ids: &[String],
             rows: &[u64],
+            staged: &[StagedDocument],
+            profile: &str,
         ) {
             self.committing.set(false);
             self.staged.set_committing(false);
             let report = match sent {
                 // The batch never ran: nothing was written, and everything stays staged.
-                Some(Err(error)) => return self.status.say(&error.0, true),
+                Some(Err(error)) => {
+                    let staged = staged.to_vec();
+                    let retry_profile = profile.to_string();
+                    let recovered = self.recover_refusal(profile, &error.0, move |window| {
+                        window.imp().send_mutations(&staged, &retry_profile)
+                    });
+                    if !recovered {
+                        self.status.say(&error.0, true);
+                    }
+                    return;
+                }
                 None => return self.status.say("the commit did not finish", true),
                 Some(Ok(json)) => match MutationReport::decode(&json) {
                     Ok(report) => report,
@@ -507,7 +534,16 @@ mod imp {
             self.rereading.set(false);
             self.staged.set_rereading(false);
             let server = match read {
-                Some(Err(error)) => return self.status.say(&error.0, true),
+                Some(Err(error)) => {
+                    let profile = self.ran_profile.borrow().clone();
+                    let recovered = self.recover_refusal(&profile, &error.0, |window| {
+                        window.imp().review_conflicts()
+                    });
+                    if !recovered {
+                        self.status.say(&error.0, true);
+                    }
+                    return;
+                }
                 None => return self.status.say("the re-read did not finish", true),
                 Some(Ok(json)) => match ServerDocument::decode_all(&json) {
                     Ok(documents) => documents,
@@ -633,6 +669,111 @@ mod imp {
             if sql.trim().is_empty() {
                 return;
             }
+            // A silent connection skips the pre-flight; the engine's own gate still stands behind it.
+            if !self.sidebar.safety_of(&profile).unwrap_or_default().gates() {
+                return self.launch();
+            }
+            if self.gating.replace(true) {
+                return;
+            }
+            let worker = (*core).clone();
+            let (eval_profile, eval_sql) = (profile.clone(), sql.clone());
+            let window = self.obj().downgrade();
+            glib::spawn_future_local(async move {
+                let evaluated = gio::spawn_blocking(move || {
+                    worker.safety_evaluate_json(&eval_profile, &eval_sql)
+                })
+                .await;
+                let Some(window) = window.upgrade() else {
+                    return;
+                };
+                window.imp().gating.set(false);
+                let decision = evaluated
+                    .ok()
+                    .and_then(Result::ok)
+                    .and_then(|json| SafetyDecision::parse(&json));
+                match decision {
+                    Some(decision) if decision.requires != Requirement::None => window
+                        .imp()
+                        .perform_ceremony(decision, |window| window.imp().launch()),
+                    // An unanswerable pre-flight still launches: the gate below fails closed.
+                    _ => window.imp().launch(),
+                }
+            });
+        }
+
+        // The ceremony a decision asks for; `and_then` runs only once the engine granted it.
+        fn perform_ceremony(
+            &self,
+            decision: SafetyDecision,
+            and_then: impl Fn(&super::Window) + 'static,
+        ) {
+            let Some(core) = self.core.borrow().clone() else {
+                return;
+            };
+            let cleared = self.obj().downgrade();
+            let refused = self.obj().downgrade();
+            clear_challenge(
+                self.obj().upcast_ref(),
+                (*core).clone(),
+                decision,
+                move || {
+                    if let Some(window) = cleared.upgrade() {
+                        and_then(&window);
+                    }
+                },
+                move |why| {
+                    if let Some(window) = refused.upgrade() {
+                        window.imp().status.say(why, true);
+                    }
+                },
+            );
+        }
+
+        // A synchronous refusal names its challenge in the error; clear it and retry once granted.
+        fn recover_refusal(
+            &self,
+            profile: &str,
+            error: &str,
+            retry: impl Fn(&super::Window) + 'static,
+        ) -> bool {
+            let Some(challenge) = challenge_in_error(error) else {
+                return false;
+            };
+            let Some(core) = self.core.borrow().clone() else {
+                return false;
+            };
+            let (challenge, error) = (challenge.to_string(), error.to_string());
+            let worker = (*core).clone();
+            let pending_profile = profile.to_string();
+            let window = self.obj().downgrade();
+            glib::spawn_future_local(async move {
+                let pending =
+                    gio::spawn_blocking(move || worker.safety_pending_json(&pending_profile)).await;
+                let Some(window) = window.upgrade() else {
+                    return;
+                };
+                let decision = pending
+                    .ok()
+                    .and_then(Result::ok)
+                    .map(|json| SafetyDecision::parse_pending(&json))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|d| d.challenge.as_deref() == Some(challenge.as_str()));
+                match decision {
+                    Some(decision) => window.imp().perform_ceremony(decision, retry),
+                    None => window.imp().status.say(&error, true),
+                }
+            });
+            true
+        }
+
+        fn launch(&self) {
+            let Some(core) = self.core.borrow().clone() else {
+                return;
+            };
+            let profile = self.run_profile.borrow().clone();
+            let sql = self.derived.borrow().sql();
             // Announced before the engine is asked, so a statement refused was never a run.
             let driver = self.sidebar.selected_driver().unwrap_or_default();
             // Set before the result exists, so no window of rows is ever editable for an instant.

@@ -10,7 +10,8 @@ use datagrep_ffi::{
     datagrep_query_run, datagrep_query_status_json, datagrep_reread_documents, datagrep_rows_cell,
     datagrep_rows_cell_detail_json, datagrep_rows_cell_kind, datagrep_rows_column_names_json,
     datagrep_rows_columns, datagrep_rows_count, datagrep_rows_envelope_json, datagrep_rows_free,
-    datagrep_rows_pending, datagrep_string_free, DatagrepCore, DatagrepQuery, DatagrepRows,
+    datagrep_rows_pending, datagrep_safety_evaluate_json, datagrep_safety_pending_json,
+    datagrep_safety_satisfy, datagrep_string_free, DatagrepCore, DatagrepQuery, DatagrepRows,
 };
 // Not re-exported at the crate root, unlike the rest of the ABI surface.
 use datagrep_ffi::profiles::{
@@ -222,6 +223,50 @@ impl Core {
         let raw =
             unsafe { datagrep_mutate(self.raw.0, profile.as_ptr(), batch.as_ptr(), &mut err) };
         owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+    }
+
+    /// What running `sql` would require of the user, without running it; mints the challenge.
+    pub fn safety_evaluate_json(&self, profile: &str, sql: &str) -> Result<String, Error> {
+        let (profile, sql) = (nul_terminated(profile)?, nul_terminated(sql)?);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let raw = unsafe {
+            datagrep_safety_evaluate_json(self.raw.0, profile.as_ptr(), sql.as_ptr(), &mut err)
+        };
+        owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+    }
+
+    /// The challenges this connection has open — how a synchronous refusal is looked up.
+    pub fn safety_pending_json(&self, profile: &str) -> Result<String, Error> {
+        let profile = nul_terminated(profile)?;
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let raw = unsafe { datagrep_safety_pending_json(self.raw.0, profile.as_ptr(), &mut err) };
+        owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+    }
+
+    /// Reports what the user did; the engine judges it and either grants one run or refuses.
+    pub fn safety_satisfy(
+        &self,
+        profile: &str,
+        challenge: &str,
+        attestation_json: &str,
+    ) -> Result<(), Error> {
+        let (profile, challenge) = (nul_terminated(profile)?, nul_terminated(challenge)?);
+        let attestation = nul_terminated(attestation_json)?;
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let cleared = unsafe {
+            datagrep_safety_satisfy(
+                self.raw.0,
+                profile.as_ptr(),
+                challenge.as_ptr(),
+                attestation.as_ptr(),
+                &mut err,
+            )
+        };
+        if cleared {
+            Ok(())
+        } else {
+            Err(error_from_ffi(err))
+        }
     }
 
     /// What the server holds now for documents addressed by the very key their write used.
