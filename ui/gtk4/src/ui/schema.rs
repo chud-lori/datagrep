@@ -27,6 +27,7 @@ mod node_imp {
         pub icon: Cell<&'static str>,
         pub path: RefCell<Vec<String>>,
         pub path_json: RefCell<String>,
+        pub browsable: Cell<bool>,
         pub enumeration: Cell<Enumeration>,
         pub role: Cell<Role>,
         pub children: RefCell<Option<gio::ListStore>>,
@@ -63,6 +64,7 @@ impl SchemaNode {
         *imp.path.borrow_mut() = path;
         imp.enumeration.set(node.enumeration);
         imp.expandable.set(node.has_children);
+        imp.browsable.set(CatalogNode::browsable_kind(&node.kind));
         this
     }
 
@@ -102,6 +104,11 @@ impl SchemaNode {
 
     pub fn path_json(&self) -> String {
         self.imp().path_json.borrow().clone()
+    }
+
+    /// Whether activating this node has rows to open — a schema or a Redis key has not.
+    pub fn browsable(&self) -> bool {
+        self.imp().browsable.get()
     }
 
     /// Empty until the row is expanded, so drawing an arrow costs no catalog call.
@@ -170,7 +177,7 @@ mod imp {
             SIGNALS.get_or_init(|| {
                 vec![
                     Signal::builder("object-activated")
-                        .param_types([String::static_type()])
+                        .param_types([String::static_type(), String::static_type()])
                         .build(),
                     Signal::builder("object-described")
                         .param_types([
@@ -311,9 +318,11 @@ mod imp {
             match node.role() {
                 Role::Consent => self.consent(&row),
                 Role::Notice => (),
-                Role::Object => self
-                    .obj()
-                    .emit_by_name::<()>("object-activated", &[&node.path_json()]),
+                Role::Object if node.browsable() => self.obj().emit_by_name::<()>(
+                    "object-activated",
+                    &[&node.path_json(), &node.name()],
+                ),
+                Role::Object => (),
             }
         }
 
@@ -439,7 +448,7 @@ impl SchemaTree {
         imp.fetch(&imp.roots, &[], "[]");
     }
 
-    pub fn connect_object_activated<F: Fn(&Self, &str) + 'static>(
+    pub fn connect_object_activated<F: Fn(&Self, &str, &str) + 'static>(
         &self,
         f: F,
     ) -> glib::SignalHandlerId {
@@ -448,7 +457,8 @@ impl SchemaTree {
                 .get::<Self>()
                 .expect("the signal carries the tree");
             let path = values[1].get::<String>().unwrap_or_default();
-            f(&tree, &path);
+            let name = values[2].get::<String>().unwrap_or_default();
+            f(&tree, &path, &name);
             None
         })
     }

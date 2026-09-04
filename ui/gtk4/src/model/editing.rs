@@ -259,6 +259,31 @@ impl PendingEdits {
         self.changed();
     }
 
+    /// Lifted out whole, so another tab's result can take the screen without
+    /// this one's edits landing on it.
+    pub fn take_all(&self) -> Vec<StagedDocument> {
+        let imp = self.imp();
+        let documents = std::mem::take(&mut *imp.documents.borrow_mut());
+        imp.rows.borrow_mut().clear();
+        if !documents.is_empty() {
+            self.changed();
+        }
+        documents
+    }
+
+    pub fn restore_all(&self, documents: Vec<StagedDocument>) {
+        let imp = self.imp();
+        *imp.rows.borrow_mut() = documents
+            .iter()
+            .map(|d| (d.row, d.id.clone()))
+            .collect();
+        let empty = documents.is_empty();
+        *imp.documents.borrow_mut() = documents;
+        if !empty {
+            self.changed();
+        }
+    }
+
     /// The rows every staged document sits on, for the one redraw a discard needs.
     pub fn rows(&self) -> Vec<u64> {
         self.imp()

@@ -4,10 +4,11 @@ use std::fmt;
 use std::sync::Arc;
 
 use datagrep_ffi::{
-    datagrep_catalog_children_json, datagrep_catalog_describe_json, datagrep_core_free,
-    datagrep_core_new, datagrep_mutate, datagrep_profiles_add, datagrep_profiles_list_json,
-    datagrep_query_cancel, datagrep_query_free, datagrep_query_on_progress, datagrep_query_rows,
-    datagrep_query_run, datagrep_query_status_json, datagrep_reread_documents, datagrep_rows_cell,
+    datagrep_browse_statement, datagrep_catalog_children_json, datagrep_catalog_describe_json,
+    datagrep_core_free, datagrep_core_new, datagrep_mutate, datagrep_profiles_add,
+    datagrep_profiles_list_json, datagrep_profiles_remove, datagrep_query_cancel,
+    datagrep_query_free, datagrep_query_on_progress, datagrep_query_rows, datagrep_query_run,
+    datagrep_query_status_json, datagrep_reread_documents, datagrep_rows_cell,
     datagrep_rows_cell_detail_json, datagrep_rows_cell_kind, datagrep_rows_column_names_json,
     datagrep_rows_columns, datagrep_rows_count, datagrep_rows_envelope_json, datagrep_rows_free,
     datagrep_rows_pending, datagrep_string_free, DatagrepCore, DatagrepQuery, DatagrepRows,
@@ -112,6 +113,18 @@ impl Core {
         let added =
             unsafe { datagrep_profiles_add(self.raw.0, name.as_ptr(), url.as_ptr(), &mut err) };
         if added {
+            Ok(())
+        } else {
+            Err(error_from_ffi(err))
+        }
+    }
+
+    /// Nothing else forgets a connection: the secret and the saved row go together.
+    pub fn remove_profile(&self, name: &str) -> Result<(), Error> {
+        let name = nul_terminated(name)?;
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let removed = unsafe { datagrep_profiles_remove(self.raw.0, name.as_ptr(), &mut err) };
+        if removed {
             Ok(())
         } else {
             Err(error_from_ffi(err))
@@ -239,6 +252,27 @@ impl Core {
     }
 }
 
+/// The statement one catalog object is read with, in that engine's own language.
+/// Pure: no core, no connection — the driver and the path are all it consults.
+pub fn browse_statement(
+    driver_id: &str,
+    path_json: &str,
+    database: Option<&str>,
+) -> Result<String, Error> {
+    let (driver, path) = (nul_terminated(driver_id)?, nul_terminated(path_json)?);
+    let database = database.map(nul_terminated).transpose()?;
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let raw = unsafe {
+        datagrep_browse_statement(
+            driver.as_ptr(),
+            path.as_ptr(),
+            database.as_ref().map_or(std::ptr::null(), |d| d.as_ptr()),
+            &mut err,
+        )
+    };
+    owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+}
+
 type ProgressFn = Box<dyn Fn() + Send + Sync>;
 
 pub struct Query {
@@ -255,6 +289,13 @@ impl Query {
         // the lock it fires from.
         unsafe { datagrep_query_on_progress(self.raw, Some(trampoline), ctx) };
         self.progress = Some(next);
+    }
+
+    /// Stops the ticks without freeing the query: a parked result keeps loading
+    /// in the background, but drives nothing on screen.
+    pub fn detach_progress(&mut self) {
+        unsafe { datagrep_query_on_progress(self.raw, None, std::ptr::null_mut()) };
+        self.progress = None;
     }
 
     pub fn status_json(&self) -> Result<String, Error> {

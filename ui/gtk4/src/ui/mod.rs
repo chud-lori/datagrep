@@ -65,7 +65,7 @@ fn open(app: &adw::Application) {
 /// The full wiring — window, editor tabs, dialog, run path — in one place.
 pub fn mount(app: &adw::Application, core: Arc<Core>) -> Window {
     let window = Window::new(app, core.clone());
-    UtilityPane::mount(&window, history_dir());
+    let utility = UtilityPane::mount(&window, history_dir());
     let tabs = EditorTabs::new();
     window.editor_slot().set_child(Some(&tabs));
 
@@ -80,6 +80,30 @@ pub fn mount(app: &adw::Application, core: Arc<Core>) -> Window {
         let tabs = tabs.clone();
         move |_, name| tabs.set_window_connection(Some(name))
     });
+
+    // A result belongs to the tab that ran it and to the connection it ran on.
+    tabs.connect_local("tab-activated", false, {
+        let window = window.downgrade();
+        move |values| {
+            let tab = values[1].get::<String>().unwrap_or_default();
+            let connection = values[2].get::<String>().unwrap_or_default();
+            if let Some(window) = window.upgrade() {
+                window.set_active_tab(&tab, &connection);
+            }
+            None
+        }
+    });
+    tabs.connect_local("tabs-closed", false, {
+        let window = window.downgrade();
+        let tabs = tabs.downgrade();
+        move |_| {
+            if let (Some(window), Some(tabs)) = (window.upgrade(), tabs.upgrade()) {
+                window.forget_results(&tabs.live_ids());
+            }
+            None
+        }
+    });
+    tabs.announce_active();
 
     tabs.connect_local("run-requested", false, {
         let window = window.downgrade();
@@ -100,35 +124,49 @@ pub fn mount(app: &adw::Application, core: Arc<Core>) -> Window {
         }
     });
 
-    let open_dialog = Rc::new({
+    // Adding, editing and removing a connection all end in the same reload.
+    let reload = Rc::new({
         let core = core.clone();
         let profiles = profiles.clone();
-        let window = window.downgrade();
         let tabs = tabs.downgrade();
-        move || {
-            let Some(window) = window.upgrade() else {
-                return;
-            };
-            let dialog = ConnectionDialog::for_new(core.clone());
+        move |window: &Window, select: &str| {
+            profiles.replace(load_profiles(&core));
+            window.reload_connections();
+            if !select.is_empty() {
+                window.select_connection(select);
+            }
+            if let Some(tabs) = tabs.upgrade() {
+                tabs.set_connections(&profiles.borrow());
+            }
+        }
+    });
+
+    let present_dialog = Rc::new({
+        let reload = reload.clone();
+        move |window: &Window, dialog: ConnectionDialog| {
             dialog.connect_local("saved", false, {
-                let core = core.clone();
-                let profiles = profiles.clone();
+                let reload = reload.clone();
                 let window = window.downgrade();
-                let tabs = tabs.clone();
                 move |values| {
                     let name = values[1].get::<String>().unwrap_or_default();
-                    profiles.replace(load_profiles(&core));
                     if let Some(window) = window.upgrade() {
-                        window.reload_connections();
-                        window.select_connection(&name);
-                    }
-                    if let Some(tabs) = tabs.upgrade() {
-                        tabs.set_connections(&profiles.borrow());
+                        reload(&window, &name);
                     }
                     None
                 }
             });
-            dialog.present(Some(&window));
+            dialog.present(Some(window));
+        }
+    });
+
+    let open_dialog = Rc::new({
+        let core = core.clone();
+        let present_dialog = present_dialog.clone();
+        let window = window.downgrade();
+        move || {
+            if let Some(window) = window.upgrade() {
+                present_dialog(&window, ConnectionDialog::for_new(core.clone()));
+            }
         }
     });
     window.connect_new_connection({
@@ -141,6 +179,47 @@ pub fn mount(app: &adw::Application, core: Arc<Core>) -> Window {
             open_dialog();
             None
         }
+    });
+
+    window.connect_edit_connection({
+        let core = core.clone();
+        let present_dialog = present_dialog.clone();
+        move |window, name| {
+            present_dialog(window, ConnectionDialog::for_editing(core.clone(), name));
+        }
+    });
+
+    window.connect_remove_connection({
+        let core = core.clone();
+        let reload = reload.clone();
+        move |window, name| confirm_remove(window, core.clone(), reload.clone(), name)
+    });
+
+    // A click on a table opens its rows in a tab of their own, through the
+    // ordinary run path — the statement is the engine's, not the UI's.
+    window.connect_object_activated({
+        let core = core.clone();
+        let tabs = tabs.clone();
+        let profiles = profiles.clone();
+        move |window, profile, path_json, name| {
+            let driver = profiles
+                .borrow()
+                .iter()
+                .find(|p| &p.name == profile)
+                .map(|p| p.driver.clone())
+                .unwrap_or_default();
+            let database = profile_database(&core, profile);
+            match crate::ffi::browse_statement(&driver, path_json, database.as_deref()) {
+                Ok(sql) => tabs.open_browse(profile, name, &sql),
+                Err(error) => window.status_bar().say(&error.0, true),
+            }
+        }
+    });
+
+    // "Open in Editor" puts the statement back in a tab; only Run re-runs it.
+    utility.history().connect_open_requested({
+        let tabs = tabs.clone();
+        move |_, sql, connection| tabs.open_with_sql(sql, Some(connection))
     });
 
     window.connect_close_request({
@@ -184,6 +263,56 @@ pub fn mount(app: &adw::Application, core: Arc<Core>) -> Window {
 
     window.present();
     window
+}
+
+/// The database this connection opens to, read from the saved profile rather
+/// than by dialling the server: the engine needs it to refuse a browse its
+/// statement language cannot reach.
+fn profile_database(core: &Core, profile: &str) -> Option<String> {
+    let json = core.profile_json(profile).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&json).ok()?;
+    value["config"]["database"]
+        .as_str()
+        .filter(|db| !db.is_empty())
+        .map(str::to_owned)
+}
+
+/// Removing a connection also drops its saved secret, so it asks first and says so.
+fn confirm_remove(
+    window: &Window,
+    core: Arc<Core>,
+    reload: Rc<dyn Fn(&Window, &str)>,
+    name: &str,
+) {
+    let dialog = adw::AlertDialog::new(
+        Some(&format!("Remove ‘{name}’?")),
+        Some(
+            "datagrep forgets this connection and the password it saved in the keyring. \
+             Nothing on the server is touched, and the queries you saved stay on disk.",
+        ),
+    );
+    dialog.add_responses(&[("cancel", "Cancel"), ("remove", "Remove")]);
+    dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    let name = name.to_owned();
+    dialog.choose(
+        window,
+        gio::Cancellable::NONE,
+        glib::clone!(
+            #[weak]
+            window,
+            move |response: glib::GString| {
+                if response != "remove" {
+                    return;
+                }
+                match core.remove_profile(&name) {
+                    Ok(()) => reload(&window, ""),
+                    Err(error) => window.status_bar().say(&error.0, true),
+                }
+            }
+        ),
+    );
 }
 
 fn load_profiles(core: &Core) -> Vec<Profile> {

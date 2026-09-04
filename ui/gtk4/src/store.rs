@@ -10,6 +10,9 @@ pub struct SavedQueryRecord {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// What this tab is about when it has no name — a browsed object's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection: Option<String>,
     #[serde(default, rename = "cursorLocation")]
@@ -298,6 +301,18 @@ mod tests {
         );
         let scratch = serde_json::to_value(record("abc", None)).unwrap();
         assert!(!scratch.as_object().unwrap().contains_key("name"));
+        assert!(!scratch.as_object().unwrap().contains_key("subject"));
+    }
+
+    /// macOS writes `subject` on a browse tab; the shared store must not drop it.
+    #[test]
+    fn a_browse_tab_keeps_its_subject_through_the_sidecar() {
+        let mut browsed = record("abc", None);
+        browsed.subject = Some("users".into());
+        let json = serde_json::to_string(&browsed).unwrap();
+        assert!(json.contains(r#""subject":"users""#), "{json}");
+        let back: SavedQueryRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.subject.as_deref(), Some("users"));
     }
 
     #[test]

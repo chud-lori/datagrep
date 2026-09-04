@@ -186,10 +186,25 @@ impl EditorPage {
         self.imp().pending_save.replace(false)
     }
 
+    /// The catalog object this tab browses, when a click opened it.
+    pub fn subject(&self) -> Option<String> {
+        self.imp()
+            .record
+            .borrow()
+            .subject
+            .clone()
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn set_subject(&self, subject: &str) {
+        self.imp().record.borrow_mut().subject = Some(subject.to_string());
+        self.imp().pending_save.set(true);
+    }
+
     pub fn display_title(&self) -> String {
-        match self.name() {
-            Some(name) if !name.is_empty() => name,
-            _ => match self.imp().untitled_number.get() {
+        match self.name().filter(|n| !n.is_empty()).or_else(|| self.subject()) {
+            Some(title) => title,
+            None => match self.imp().untitled_number.get() {
                 0 => "Untitled".to_string(),
                 n => format!("Untitled {n}"),
             },
@@ -198,6 +213,17 @@ impl EditorPage {
 
     pub fn set_text(&self, text: &str) {
         self.buffer().set_text(text);
+    }
+
+    /// A buffer nobody typed into: it closes without a discard prompt.
+    pub fn set_text_unmodified(&self, text: &str) {
+        let imp = self.imp();
+        imp.loading.set(true);
+        self.buffer().set_text(text);
+        imp.loading.set(false);
+        imp.dirty.set(false);
+        imp.pending_save.set(true);
+        self.emit_by_name::<()>("modified", &[]);
     }
 
     pub fn text(&self) -> String {

@@ -707,6 +707,16 @@ impl ResultsGrid {
         popover.popup();
     }
 
+    /// The header arrow's column and direction, parked with its result.
+    pub fn sort_indicator(&self) -> Option<(String, bool)> {
+        self.imp().sort.borrow().clone()
+    }
+
+    /// Set before the columns rebuild: that rebuild is what re-draws the arrow.
+    pub fn set_sort_indicator(&self, sort: Option<(String, bool)>) {
+        *self.imp().sort.borrow_mut() = sort;
+    }
+
     pub fn clear_sort_indicator(&self) {
         let imp = self.imp();
         *imp.sort.borrow_mut() = None;

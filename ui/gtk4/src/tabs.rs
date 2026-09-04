@@ -51,6 +51,11 @@ mod imp {
                         .param_types([String::static_type(), String::static_type()])
                         .build(),
                     Signal::builder("new-connection-requested").build(),
+                    // (tab id or "", the connection that tab runs on or "")
+                    Signal::builder("tab-activated")
+                        .param_types([String::static_type(), String::static_type()])
+                        .build(),
+                    Signal::builder("tabs-closed").build(),
                 ]
             })
         }
@@ -224,6 +229,7 @@ impl EditorTabs {
                     let editor = tabs.editor_of(&page);
                     editor.set_connection_binding((!name.is_empty()).then_some(name));
                     tabs.update_page_chrome(&editor);
+                    tabs.announce_active();
                     tabs.schedule_flush();
                 }
             }
@@ -268,6 +274,8 @@ impl EditorTabs {
                 tabs.update_empty_state();
                 tabs.rebuild_saved_menu();
                 tabs.schedule_flush();
+                tabs.emit_by_name::<()>("tabs-closed", &[]);
+                tabs.announce_active();
             }
         ));
         view.connect_page_reordered(glib::clone!(
@@ -282,6 +290,7 @@ impl EditorTabs {
                 if let Some(page) = view.selected_page() {
                     tabs.editor_of(&page).grab_editor_focus();
                 }
+                tabs.announce_active();
                 tabs.schedule_flush();
             }
         ));
@@ -396,6 +405,41 @@ impl EditorTabs {
         self.editor_of(&page).grab_editor_focus();
     }
 
+    /// One catalog object's rows, in a tab of their own. A second click on the
+    /// same object focuses its tab and touches neither the buffer nor the server.
+    pub fn open_browse(&self, connection: &str, subject: &str, sql: &str) {
+        if let Some(editor) = self.editors().iter().find(|e| {
+            e.subject().as_deref() == Some(subject)
+                && e.connection_binding().as_deref() == Some(connection)
+        }) {
+            self.imp().tab_view.set_selected_page(&self.page_of(editor));
+            editor.grab_editor_focus();
+            return;
+        }
+        let mut record = SavedQueryRecord::scratch();
+        record.connection = Some(connection.to_string());
+        record.subject = Some(subject.to_string());
+        let page = self.add_editor_page(record, "");
+        let editor = self.editor_of(&page);
+        editor.set_text_unmodified(sql);
+        self.imp().tab_view.set_selected_page(&page);
+        editor.run_statement();
+    }
+
+    /// A statement out of history, in a tab of its own rather than over what is open.
+    pub fn open_with_sql(&self, sql: &str, connection: Option<&str>) {
+        let mut record = SavedQueryRecord::scratch();
+        record.connection = connection
+            .filter(|c| !c.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.imp().window_connection.borrow().clone());
+        let page = self.add_editor_page(record, "");
+        let editor = self.editor_of(&page);
+        editor.set_text_unmodified(sql);
+        self.imp().tab_view.set_selected_page(&page);
+        editor.grab_editor_focus();
+    }
+
     pub fn open_saved(&self, id: &str) {
         if let Some(editor) = self.editors().iter().find(|e| e.id() == id) {
             self.imp().tab_view.set_selected_page(&self.page_of(editor));
@@ -419,17 +463,33 @@ impl EditorTabs {
 
     // ---- run: the one precedence rule ------------------------------------
 
-    fn run(&self, editor: &EditorPage, sql_text: &str, directive: &str) {
+    /// Where this editor's statements go when no `-- @connection` overrides it.
+    fn target_of(&self, editor: &EditorPage, directive: Option<&str>) -> String {
         let binding = editor.connection_binding();
         let window = self.imp().window_connection.borrow().clone();
-        let profile = sql::effective_connection(
-            (!directive.is_empty()).then_some(directive),
-            binding.as_deref(),
-            window.as_deref(),
-        )
-        .unwrap_or_default()
-        .to_string();
+        sql::effective_connection(directive, binding.as_deref(), window.as_deref())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    fn run(&self, editor: &EditorPage, sql_text: &str, directive: &str) {
+        let profile = self.target_of(editor, (!directive.is_empty()).then_some(directive));
         self.emit_by_name::<()>("run-requested", &[&profile, &sql_text.to_string()]);
+    }
+
+    /// The tab in front and the connection it runs on — one signal for both, so
+    /// a result can never be shown under a connection that did not produce it.
+    pub fn announce_active(&self) {
+        let (id, connection) = match self.active_editor() {
+            Some(editor) => (editor.id(), self.target_of(&editor, None)),
+            None => (String::new(), String::new()),
+        };
+        self.emit_by_name::<()>("tab-activated", &[&id, &connection]);
+    }
+
+    /// Every tab still open, so a closed one's result can be freed.
+    pub fn live_ids(&self) -> Vec<String> {
+        self.editors().iter().map(EditorPage::id).collect()
     }
 
     // ---- close -----------------------------------------------------------
@@ -445,6 +505,11 @@ impl EditorTabs {
             return glib::Propagation::Proceed;
         }
         if editor.text().trim().is_empty() {
+            self.store().delete(&editor.snapshot_record());
+            return glib::Propagation::Proceed;
+        }
+        // A browse buffer nobody typed into holds nothing a click cannot regenerate.
+        if editor.subject().is_some() && !editor.is_dirty() {
             self.store().delete(&editor.snapshot_record());
             return glib::Propagation::Proceed;
         }
@@ -710,6 +775,7 @@ impl EditorTabs {
             }
         }
         self.update_welcome();
+        self.announce_active();
         self.schedule_flush();
     }
 

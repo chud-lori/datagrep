@@ -44,6 +44,12 @@ impl CatalogNode {
         serde_json::from_str(json).map_err(|e| format!("the catalog page did not decode: {e}"))
     }
 
+    /// Kinds whose rows a click can open. A Redis key is not one: the value's
+    /// shape decides the command, so the engine refuses to guess.
+    pub fn browsable_kind(kind: &str) -> bool {
+        matches!(kind, "table" | "collection" | "view")
+    }
+
     pub fn icon_name(&self) -> &'static str {
         match self.kind.as_str() {
             "database" => "drive-harddisk-symbolic",
@@ -73,6 +79,16 @@ mod tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[0].enumeration, Enumeration::Cheap);
         assert!(nodes[1].has_children);
+    }
+
+    #[test]
+    fn only_the_kinds_with_rows_are_browsable() {
+        for kind in ["table", "collection", "view"] {
+            assert!(CatalogNode::browsable_kind(kind), "{kind}");
+        }
+        for kind in ["database", "schema", "key", "column", "function", ""] {
+            assert!(!CatalogNode::browsable_kind(kind), "{kind}");
+        }
     }
 
     #[test]
