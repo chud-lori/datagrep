@@ -2,11 +2,10 @@ name: Linux Flatpak (GTK4 UI)
 
 # The only build verification the GTK4/Flatpak route gets — the same role the
 # debian container leg in linux-qt.yml plays for the KF6 highlighter path.
-# ui/gtk4 does not exist yet, so today this proves the infrastructure the
-# issue #36 architecture decision rests on: the full engine dependency graph
-# compiling offline inside org.gnome.Sdk//50 with the rust-stable extension,
-# and a finished, installable .flatpak (uploaded as an artifact) coming out
-# the other end. The moment ui/gtk4 lands, this job is its first compiler.
+# It builds the shipping artifact: ui/gtk4 compiling offline inside
+# org.gnome.Sdk//50 against the runtime's own GTK, libadwaita and
+# GtkSourceView, installed as the app the manifest's `command:` names, in a
+# finished .flatpak uploaded as an artifact.
 #
 # Run the same thing locally (Linux only): packaging/flatpak/README.md.
 
@@ -47,9 +46,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # flatpak-builder cuts the network before build commands run; this
-      # turns Cargo.lock into sources it downloads up front. Generated fresh
-      # every run so it can never go stale against the lockfile.
+      # flatpak-builder cuts the network before build commands run; this turns
+      # both lockfiles — the workspace's and ui/gtk4's — into sources it
+      # downloads up front, generated fresh so they cannot go stale.
       - name: Generate cargo offline sources
         run: |
           dnf install -y python3-aiohttp python3-tomlkit || \
@@ -64,4 +63,4 @@ jobs:
         with:
           manifest-path: packaging/flatpak/io.github.chud_lori.datagrep.yml
           bundle: datagrep-gtk4.flatpak
-          cache-key: flatpak-builder-${{ hashFiles('Cargo.lock') }}
+          cache-key: flatpak-builder-${{ hashFiles('Cargo.lock', 'ui/gtk4/Cargo.lock') }}

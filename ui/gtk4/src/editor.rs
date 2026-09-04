@@ -202,7 +202,11 @@ impl EditorPage {
     }
 
     pub fn display_title(&self) -> String {
-        match self.name().filter(|n| !n.is_empty()).or_else(|| self.subject()) {
+        match self
+            .name()
+            .filter(|n| !n.is_empty())
+            .or_else(|| self.subject())
+        {
             Some(title) => title,
             None => match self.imp().untitled_number.get() {
                 0 => "Untitled".to_string(),

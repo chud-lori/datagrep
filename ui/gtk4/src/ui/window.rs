@@ -320,10 +320,7 @@ mod imp {
             self.sidebar
                 .connect_object_activated(move |_, profile, path, name| {
                     if let Some(window) = window.upgrade() {
-                        window.emit_by_name::<()>(
-                            "object-activated",
-                            &[&profile, &path, &name],
-                        );
+                        window.emit_by_name::<()>("object-activated", &[&profile, &path, &name]);
                     }
                 });
 
@@ -684,10 +681,8 @@ mod imp {
             self.ran_profile.borrow_mut().clear();
             *self.derived.borrow_mut() = Derived::default();
             self.grid.clear_sort_indicator();
-            self.status.say(
-                if had { "no result in this tab yet" } else { "" },
-                false,
-            );
+            self.status
+                .say(if had { "no result in this tab yet" } else { "" }, false);
         }
 
         /// Put `tab`'s result on screen — and only if this connection produced it.

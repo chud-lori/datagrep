@@ -391,8 +391,7 @@ mod imp {
             let copy_row = gio::SimpleAction::new("copy-row", Some(&u64::static_variant_type()));
             let grid = self.obj().downgrade();
             copy_row.connect_activate(move |_, target| {
-                let (Some(grid), Some(row)) =
-                    (grid.upgrade(), target.and_then(|t| t.get::<u64>()))
+                let (Some(grid), Some(row)) = (grid.upgrade(), target.and_then(|t| t.get::<u64>()))
                 else {
                     return;
                 };
@@ -617,7 +616,9 @@ impl ResultsGrid {
     /// What a copy just put on the clipboard, for the status line.
     pub fn connect_copied<F: Fn(&Self, &str) + 'static>(&self, f: F) -> glib::SignalHandlerId {
         self.connect_local("copied", false, move |values| {
-            let grid = values[0].get::<Self>().expect("the signal carries the grid");
+            let grid = values[0]
+                .get::<Self>()
+                .expect("the signal carries the grid");
             let message = values[1].get::<String>().unwrap_or_default();
             f(&grid, &message);
             None
@@ -777,7 +778,11 @@ impl ResultsGrid {
 
         // Reading is never gated on the result being writable.
         let copy = gio::Menu::new();
-        copy.append_item(&item("Copy Cell", "results.copy-cell", (row, col).to_variant()));
+        copy.append_item(&item(
+            "Copy Cell",
+            "results.copy-cell",
+            (row, col).to_variant(),
+        ));
         copy.append_item(&item("Copy Row", "results.copy-row", row.to_variant()));
         copy.append(Some("Copy Selected Rows"), Some("results.copy-selection"));
         menu.append_section(None, &copy);
@@ -785,11 +790,7 @@ impl ResultsGrid {
         if model.editable().is_some() {
             let editing = gio::Menu::new();
             if model.is_editable_cell(row, col) {
-                editing.append_item(&item(
-                    "Edit Cell…",
-                    "results.edit",
-                    (row, col).to_variant(),
-                ));
+                editing.append_item(&item("Edit Cell…", "results.edit", (row, col).to_variant()));
             }
             if edits.is_deleted(row) {
                 editing.append_item(&item(
@@ -798,11 +799,7 @@ impl ResultsGrid {
                     row.to_variant(),
                 ));
             } else {
-                editing.append_item(&item(
-                    "Delete Document",
-                    "results.delete",
-                    row.to_variant(),
-                ));
+                editing.append_item(&item("Delete Document", "results.delete", row.to_variant()));
                 if edits.is_staged(row) {
                     editing.append_item(&item(
                         "Discard Staged Changes",

@@ -168,15 +168,14 @@ mod imp {
                 });
 
             let sidebar = self.obj().downgrade();
-            self.schema.connect_object_activated(move |_, path_json, name| {
-                if let Some(sidebar) = sidebar.upgrade() {
-                    let profile = sidebar.selected_connection().unwrap_or_default();
-                    sidebar.emit_by_name::<()>(
-                        "object-activated",
-                        &[&profile, &path_json, &name],
-                    );
-                }
-            });
+            self.schema
+                .connect_object_activated(move |_, path_json, name| {
+                    if let Some(sidebar) = sidebar.upgrade() {
+                        let profile = sidebar.selected_connection().unwrap_or_default();
+                        sidebar
+                            .emit_by_name::<()>("object-activated", &[&profile, &path_json, &name]);
+                    }
+                });
 
             let sidebar = self.obj().downgrade();
             self.schema

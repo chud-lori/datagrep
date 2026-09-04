@@ -236,7 +236,10 @@ fn a_copied_row_is_its_cells_and_never_its_row_number() {
         // The gutter is a second view over the same model; nothing in the text is its.
         for row in 0..3u64 {
             let text = model.row_text(row);
-            assert_eq!(text.matches('\t').count(), model.column_count() as usize - 1);
+            assert_eq!(
+                text.matches('\t').count(),
+                model.column_count() as usize - 1
+            );
         }
     });
 }

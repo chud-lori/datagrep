@@ -7,11 +7,17 @@ composition needs libadwaita ≥ 1.7 and the Ubuntu 22.04 packaging floor ships
 two-line install instead of the AppImage contortion. The Qt UI's
 AppImage/.deb/.rpm route (`packaging/README.md`) is untouched.
 
-Until `ui/gtk4` exists the manifest builds the engine (`datagrep-ffi` — the
-full driver graph — plus `datagrep-cli` as the runnable command), which is
-what proves the sandbox toolchain. The UI is settled as gtk4-rs in its own
-workspace (`ui/gtk4`); its swap points are marked in the manifest under
-`build-commands`.
+The manifest builds two cargo workspaces: the root one for `datagrep-cli`,
+installed as `/app/bin/datagrep-cli`, and `ui/gtk4` — its own workspace, which
+links `datagrep-ffi` and so compiles the full driver graph — installed as
+`/app/bin/datagrep`, which is what `command:` and the `.desktop` `Exec` both
+name. `flatpak run io.github.chud_lori.datagrep` opens the GTK4 window;
+`flatpak run --command=datagrep-cli io.github.chud_lori.datagrep` gets the CLI.
+
+`generate-cargo-sources.sh` runs the generator over BOTH lockfiles and merges
+the results, de-duplicated: the two workspaces share most of their graph, and
+one crate unpacked twice into the same vendor directory is not something to
+find out about inside a network-less sandbox.
 
 ## CI
 

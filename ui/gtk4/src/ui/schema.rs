@@ -322,10 +322,9 @@ mod imp {
             match node.role() {
                 Role::Consent => self.consent(&row),
                 Role::Notice => (),
-                Role::Object if node.browsable() => self.obj().emit_by_name::<()>(
-                    "object-activated",
-                    &[&node.path_json(), &node.name()],
-                ),
+                Role::Object if node.browsable() => self
+                    .obj()
+                    .emit_by_name::<()>("object-activated", &[&node.path_json(), &node.name()]),
                 Role::Object => (),
             }
         }
@@ -386,8 +385,9 @@ mod imp {
                 match described {
                     Ok(Ok(json)) => *imp.describe_json.borrow_mut() = json,
                     Ok(Err(error)) => *imp.describe_error.borrow_mut() = error,
-                    Err(_) => *imp.describe_error.borrow_mut() =
-                        "the describe did not finish".to_owned(),
+                    Err(_) => {
+                        *imp.describe_error.borrow_mut() = "the describe did not finish".to_owned()
+                    }
                 }
                 // Only the selection this answer is about gets to redraw the inspector.
                 if tree.imp().generation.get() == generation && tree.imp().is_selected(&node) {
@@ -463,9 +463,7 @@ mod imp {
                 }
                 store.remove_all();
                 match listed {
-                    Ok(Ok(nodes)) if nodes.is_empty() => {
-                        store.append(&SchemaNode::notice("Empty"))
-                    }
+                    Ok(Ok(nodes)) if nodes.is_empty() => store.append(&SchemaNode::notice("Empty")),
                     Ok(Ok(nodes)) => {
                         for node in &nodes {
                             store.append(&SchemaNode::object(&path, node));

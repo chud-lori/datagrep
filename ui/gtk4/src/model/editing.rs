@@ -273,10 +273,7 @@ impl PendingEdits {
 
     pub fn restore_all(&self, documents: Vec<StagedDocument>) {
         let imp = self.imp();
-        *imp.rows.borrow_mut() = documents
-            .iter()
-            .map(|d| (d.row, d.id.clone()))
-            .collect();
+        *imp.rows.borrow_mut() = documents.iter().map(|d| (d.row, d.id.clone())).collect();
         let empty = documents.is_empty();
         *imp.documents.borrow_mut() = documents;
         if !empty {

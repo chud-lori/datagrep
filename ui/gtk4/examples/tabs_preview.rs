@@ -7,6 +7,9 @@ use datagrep_gtk::ffi::Core;
 use datagrep_gtk::ui::Window;
 use datagrep_gtk::{EditorPage, EditorTabs};
 
+/// One turn of the harness: assert what is on screen, then do the next thing.
+type Step = Box<dyn Fn(&Window, &EditorTabs)>;
+
 fn main() {
     let dir = std::env::var("PREVIEW_DIR").expect("PREVIEW_DIR");
     std::env::set_var("DATAGREP_CONFIG_DIR", &dir);
@@ -39,7 +42,7 @@ fn main() {
         assert!(window.select_connection("left"), "left is listed");
 
         let out = std::env::var("PREVIEW_PNG").expect("PREVIEW_PNG");
-        let steps: Vec<Box<dyn Fn(&Window, &EditorTabs)>> = vec![
+        let steps: Vec<Step> = vec![
             Box::new(|_, tabs| {
                 tabs.new_scratch_tab();
                 bind(tabs, "left");

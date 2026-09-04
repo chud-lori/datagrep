@@ -205,7 +205,7 @@ pub fn mount(app: &adw::Application, core: Arc<Core>) -> Window {
             let driver = profiles
                 .borrow()
                 .iter()
-                .find(|p| &p.name == profile)
+                .find(|p| p.name == profile)
                 .map(|p| p.driver.clone())
                 .unwrap_or_default();
             let database = profile_database(&core, profile);
@@ -277,13 +277,11 @@ fn profile_database(core: &Core, profile: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Reloads the profile list everywhere it is held, and selects one by name.
+type Reload = Rc<dyn Fn(&Window, &str)>;
+
 /// Removing a connection also drops its saved secret, so it asks first and says so.
-fn confirm_remove(
-    window: &Window,
-    core: Arc<Core>,
-    reload: Rc<dyn Fn(&Window, &str)>,
-    name: &str,
-) {
+fn confirm_remove(window: &Window, core: Arc<Core>, reload: Reload, name: &str) {
     let dialog = adw::AlertDialog::new(
         Some(&format!("Remove ‘{name}’?")),
         Some(
