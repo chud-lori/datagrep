@@ -214,6 +214,13 @@ impl Inspector {
             return;
         }
 
+        // No detail and no error is the state between the click and the answer.
+        if detail_json.is_empty() {
+            group.set_description(Some("reading this object…"));
+            self.imp().schema_slot.set_child(Some(&group));
+            return;
+        }
+
         let detail = match ObjectDetail::parse(detail_json) {
             Ok(detail) => detail,
             Err(message) => {

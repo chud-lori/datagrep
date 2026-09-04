@@ -27,6 +27,7 @@ mod node_imp {
         pub icon: Cell<&'static str>,
         pub path: RefCell<Vec<String>>,
         pub path_json: RefCell<String>,
+        pub browsable: Cell<bool>,
         pub enumeration: Cell<Enumeration>,
         pub role: Cell<Role>,
         pub children: RefCell<Option<gio::ListStore>>,
@@ -63,6 +64,7 @@ impl SchemaNode {
         *imp.path.borrow_mut() = path;
         imp.enumeration.set(node.enumeration);
         imp.expandable.set(node.has_children);
+        imp.browsable.set(CatalogNode::browsable_kind(&node.kind));
         this
     }
 
@@ -104,6 +106,11 @@ impl SchemaNode {
         self.imp().path_json.borrow().clone()
     }
 
+    /// Whether activating this node has rows to open — a schema or a Redis key has not.
+    pub fn browsable(&self) -> bool {
+        self.imp().browsable.get()
+    }
+
     /// Empty until the row is expanded, so drawing an arrow costs no catalog call.
     pub fn children_store(&self) -> Option<gio::ListStore> {
         let imp = self.imp();
@@ -135,6 +142,8 @@ mod imp {
         pub view: gtk::ListView,
         pub selection: gtk::SingleSelection,
         pub watched: RefCell<HashMap<gtk::ListItem, glib::SignalHandlerId>>,
+        // Bumped on every connection switch, so a late answer can be dropped.
+        pub generation: Cell<u64>,
     }
 
     impl Default for SchemaTree {
@@ -153,6 +162,7 @@ mod imp {
                 view: gtk::ListView::new(Some(selection.clone()), None::<gtk::ListItemFactory>),
                 selection,
                 watched: RefCell::new(HashMap::new()),
+                generation: Cell::new(0),
             }
         }
     }
@@ -170,7 +180,7 @@ mod imp {
             SIGNALS.get_or_init(|| {
                 vec![
                     Signal::builder("object-activated")
-                        .param_types([String::static_type()])
+                        .param_types([String::static_type(), String::static_type()])
                         .build(),
                     Signal::builder("object-described")
                         .param_types([
@@ -311,9 +321,10 @@ mod imp {
             match node.role() {
                 Role::Consent => self.consent(&row),
                 Role::Notice => (),
-                Role::Object => self
+                Role::Object if node.browsable() => self
                     .obj()
-                    .emit_by_name::<()>("object-activated", &[&node.path_json()]),
+                    .emit_by_name::<()>("object-activated", &[&node.path_json(), &node.name()]),
+                Role::Object => (),
             }
         }
 
@@ -330,13 +341,17 @@ mod imp {
                     .emit_by_name::<()>("object-described", &[&"", &"", &""]);
                 return;
             };
-            let imp = node.imp();
-            if !imp.described.replace(true) {
-                match self.describe(&node.path_json()) {
-                    Ok(json) => *imp.describe_json.borrow_mut() = json,
-                    Err(error) => *imp.describe_error.borrow_mut() = error,
-                }
+            if node.imp().described.replace(true) {
+                return self.announce(&node);
             }
+            // An empty detail with no error is the reading state, not a failure.
+            self.obj()
+                .emit_by_name::<()>("object-described", &[&node.path_json(), &"", &""]);
+            self.describe(&node);
+        }
+
+        fn announce(&self, node: &SchemaNode) {
+            let imp = node.imp();
             self.obj().emit_by_name::<()>(
                 "object-described",
                 &[
@@ -347,12 +362,45 @@ mod imp {
             );
         }
 
-        fn describe(&self, path_json: &str) -> Result<String, String> {
+        /// Off the main loop: a describe is a round trip to the server.
+        fn describe(&self, node: &SchemaNode) {
             let Some(core) = self.core.borrow().clone() else {
-                return Err(String::new());
+                return;
             };
-            core.catalog_describe_json(&self.profile.borrow(), path_json)
-                .map_err(|e| e.0)
+            let (profile, path_json) = (self.profile.borrow().clone(), node.path_json());
+            let (tree, node) = (self.obj().downgrade(), node.clone());
+            let generation = self.generation.get();
+            glib::spawn_future_local(async move {
+                let described = gio::spawn_blocking(move || {
+                    core.catalog_describe_json(&profile, &path_json)
+                        .map_err(|e| e.0)
+                })
+                .await;
+                let Some(tree) = tree.upgrade() else {
+                    return;
+                };
+                let imp = node.imp();
+                match described {
+                    Ok(Ok(json)) => *imp.describe_json.borrow_mut() = json,
+                    Ok(Err(error)) => *imp.describe_error.borrow_mut() = error,
+                    Err(_) => {
+                        *imp.describe_error.borrow_mut() = "the describe did not finish".to_owned()
+                    }
+                }
+                // Only the selection this answer is about gets to redraw the inspector.
+                if tree.imp().generation.get() == generation && tree.imp().is_selected(&node) {
+                    tree.imp().announce(&node);
+                }
+            });
+        }
+
+        fn is_selected(&self, node: &SchemaNode) -> bool {
+            self.selection
+                .selected_item()
+                .and_downcast::<gtk::TreeListRow>()
+                .and_then(|row| row.item())
+                .and_downcast::<SchemaNode>()
+                .is_some_and(|selected| selected == *node)
         }
 
         fn consent(&self, consent_row: &gtk::TreeListRow) {
@@ -385,24 +433,43 @@ mod imp {
             self.fetch(&store, &imp.path.borrow(), &imp.path_json.borrow());
         }
 
+        /// Off the main loop: the unbounded call, on every expander's click path.
         pub(super) fn fetch(&self, store: &gio::ListStore, path: &[String], path_json: &str) {
             let Some(core) = self.core.borrow().clone() else {
                 return;
             };
             let profile = self.profile.borrow().clone();
-            let children = core
-                .catalog_children_json(&profile, path_json)
-                .map_err(|e| e.0)
-                .and_then(|json| CatalogNode::parse_list(&json));
-            match children {
-                Ok(nodes) if nodes.is_empty() => store.append(&SchemaNode::notice("Empty")),
-                Ok(nodes) => {
-                    for node in &nodes {
-                        store.append(&SchemaNode::object(path, node));
-                    }
+            let generation = self.generation.get();
+            store.remove_all();
+            store.append(&SchemaNode::notice("Listing…"));
+            let (tree, store, path) = (self.obj().downgrade(), store.clone(), path.to_vec());
+            let path_json = path_json.to_owned();
+            glib::spawn_future_local(async move {
+                let listed = gio::spawn_blocking(move || {
+                    core.catalog_children_json(&profile, &path_json)
+                        .map_err(|e| e.0)
+                        .and_then(|json| CatalogNode::parse_list(&json))
+                })
+                .await;
+                let Some(tree) = tree.upgrade() else {
+                    return;
+                };
+                // A level listed for a connection nobody is looking at any more is dropped.
+                if tree.imp().generation.get() != generation {
+                    return;
                 }
-                Err(message) => store.append(&SchemaNode::notice(&message)),
-            }
+                store.remove_all();
+                match listed {
+                    Ok(Ok(nodes)) if nodes.is_empty() => store.append(&SchemaNode::notice("Empty")),
+                    Ok(Ok(nodes)) => {
+                        for node in &nodes {
+                            store.append(&SchemaNode::object(&path, node));
+                        }
+                    }
+                    Ok(Err(message)) => store.append(&SchemaNode::notice(&message)),
+                    Err(_) => store.append(&SchemaNode::notice("the listing did not finish")),
+                }
+            });
         }
     }
 }
@@ -431,6 +498,7 @@ impl SchemaTree {
     /// One cheap query on connect — the top level and nothing under it.
     pub fn show_profile(&self, profile: &str) {
         let imp = self.imp();
+        imp.generation.set(imp.generation.get() + 1);
         *imp.profile.borrow_mut() = profile.to_owned();
         imp.roots.remove_all();
         if profile.is_empty() {
@@ -439,7 +507,7 @@ impl SchemaTree {
         imp.fetch(&imp.roots, &[], "[]");
     }
 
-    pub fn connect_object_activated<F: Fn(&Self, &str) + 'static>(
+    pub fn connect_object_activated<F: Fn(&Self, &str, &str) + 'static>(
         &self,
         f: F,
     ) -> glib::SignalHandlerId {
@@ -448,7 +516,8 @@ impl SchemaTree {
                 .get::<Self>()
                 .expect("the signal carries the tree");
             let path = values[1].get::<String>().unwrap_or_default();
-            f(&tree, &path);
+            let name = values[2].get::<String>().unwrap_or_default();
+            f(&tree, &path, &name);
             None
         })
     }

@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use crate::model::mutation::{
 };
 use crate::model::safety::challenge_in_error;
 use crate::model::update::UpdateCheck;
-use crate::model::{Requirement, ResultModel, SafetyDecision, StagedDocument};
+use crate::model::{ParkedResult, Requirement, ResultModel, SafetyDecision, StagedDocument};
 use crate::sql::Derived;
 use crate::ui::conflict::{ConflictDialog, ConflictReview};
 use crate::ui::editing::{commit_warning, confirm, report_dialog, report_headline};
@@ -46,6 +47,21 @@ mod imp {
         pub notice_slot: adw::Bin,
         pub derived: RefCell<Derived>,
         pub run_profile: RefCell<String>,
+        // A result belongs to the editor tab that ran it and to the connection it ran on.
+        pub results: RefCell<HashMap<String, TabResult>>,
+        pub result_tab: RefCell<String>,
+        pub active_tab: RefCell<String>,
+        pub active_connection: RefCell<String>,
+    }
+
+    /// One tab's result off screen, with the clauses and the line about it.
+    pub struct TabResult {
+        pub parked: ParkedResult,
+        pub profile: String,
+        pub derived: Derived,
+        pub sort: Option<(String, bool)>,
+        pub message: String,
+        pub is_error: bool,
     }
 
     impl Default for Window {
@@ -71,6 +87,10 @@ mod imp {
                 notice_slot: adw::Bin::new(),
                 derived: RefCell::new(Derived::default()),
                 run_profile: RefCell::new(String::new()),
+                results: RefCell::new(HashMap::new()),
+                result_tab: RefCell::new(String::new()),
+                active_tab: RefCell::new(String::new()),
+                active_connection: RefCell::new(String::new()),
             }
         }
     }
@@ -90,7 +110,11 @@ mod imp {
                     Signal::builder("new-connection").build(),
                     Signal::builder("check-updates").build(),
                     Signal::builder("object-activated")
-                        .param_types([String::static_type(), String::static_type()])
+                        .param_types([
+                            String::static_type(),
+                            String::static_type(),
+                            String::static_type(),
+                        ])
                         .build(),
                     Signal::builder("object-described")
                         .param_types([
@@ -303,9 +327,9 @@ mod imp {
 
             let window = self.obj().downgrade();
             self.sidebar
-                .connect_object_activated(move |_, profile, path| {
+                .connect_object_activated(move |_, profile, path, name| {
                     if let Some(window) = window.upgrade() {
-                        window.emit_by_name::<()>("object-activated", &[&profile, &path]);
+                        window.emit_by_name::<()>("object-activated", &[&profile, &path, &name]);
                     }
                 });
 
@@ -339,6 +363,12 @@ mod imp {
             self.grid.connect_edit_refused(move |_, message| {
                 if let Some(window) = window.upgrade() {
                     window.imp().status.say(message, true);
+                }
+            });
+            let window = self.obj().downgrade();
+            self.grid.connect_copied(move |_, message| {
+                if let Some(window) = window.upgrade() {
+                    window.imp().status.say(message, false);
                 }
             });
             for (signal, action) in [
@@ -655,6 +685,80 @@ mod imp {
             dialog.present(Some(self.obj().as_ref()));
         }
 
+        /// Park the visible result under its own tab, so switching back restores it.
+        fn park_visible(&self) {
+            let tab = self.result_tab.borrow().clone();
+            let Some(parked) = (!tab.is_empty()).then(|| self.model.park()).flatten() else {
+                return;
+            };
+            let (message, is_error) = self.status.spoken();
+            self.results.borrow_mut().insert(
+                tab,
+                TabResult {
+                    parked,
+                    profile: self.ran_profile.borrow().clone(),
+                    derived: self.derived.borrow().clone(),
+                    sort: self.grid.sort_indicator(),
+                    message,
+                    is_error,
+                },
+            );
+        }
+
+        /// Back to "no result in this tab yet": nothing is attributed to anything.
+        fn clear_visible(&self) {
+            let had = !self.result_tab.borrow().is_empty();
+            self.model.reset();
+            self.result_tab.borrow_mut().clear();
+            self.ran_profile.borrow_mut().clear();
+            *self.derived.borrow_mut() = Derived::default();
+            self.grid.clear_sort_indicator();
+            self.status
+                .say(if had { "no result in this tab yet" } else { "" }, false);
+        }
+
+        /// Put `tab`'s result on screen — and only if this connection produced it.
+        pub(super) fn sync_visible(&self) {
+            let (tab, connection) = (
+                self.active_tab.borrow().clone(),
+                self.active_connection.borrow().clone(),
+            );
+            if *self.result_tab.borrow() == tab && *self.ran_profile.borrow() == connection {
+                return;
+            }
+            self.park_visible();
+            self.clear_visible();
+            let restorable = self
+                .results
+                .borrow()
+                .get(&tab)
+                .is_some_and(|saved| saved.profile == connection && !connection.is_empty());
+            if !restorable {
+                return;
+            }
+            let Some(saved) = self.results.borrow_mut().remove(&tab) else {
+                return;
+            };
+            *self.ran_profile.borrow_mut() = saved.profile;
+            *self.derived.borrow_mut() = saved.derived;
+            *self.result_tab.borrow_mut() = tab;
+            self.grid.set_sort_indicator(saved.sort);
+            self.model.adopt(saved.parked);
+            self.status.say(&saved.message, saved.is_error);
+        }
+
+        /// The saved profile's own flag; unknown reads as read-only.
+        fn profile_refuses_writes(&self, profile: &str) -> bool {
+            let Some(core) = self.core.borrow().clone() else {
+                return true;
+            };
+            core.profile_json(profile)
+                .ok()
+                .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+                .and_then(|profile| profile["read_only"].as_bool())
+                .unwrap_or(true)
+        }
+
         pub(super) fn execute(&self) {
             let Some(core) = self.core.borrow().clone() else {
                 return;
@@ -775,20 +879,27 @@ mod imp {
             let profile = self.run_profile.borrow().clone();
             let sql = self.derived.borrow().sql();
             // Announced before the engine is asked, so a statement refused was never a run.
-            let driver = self.sidebar.selected_driver().unwrap_or_default();
-            // Set before the result exists, so no window of rows is ever editable for an instant.
+            let driver = self.derived.borrow().driver().to_owned();
+            // Set before the result exists, and read from the connection the
+            // statement resolved to rather than whatever the sidebar shows.
             self.model
-                .set_allows_editing(!self.sidebar.selected_read_only());
+                .set_allows_editing(!self.profile_refuses_writes(&profile));
             let obj = self.obj();
             obj.emit_by_name::<()>("run-started", &[&profile, &driver, &sql]);
             match core.query(&profile, &sql) {
                 Ok(query) => {
                     self.status.say("", false);
+                    // The run is what this tab is pointed at now, directive included.
+                    *self.active_connection.borrow_mut() = profile.clone();
                     *self.ran_profile.borrow_mut() = profile;
+                    *self.result_tab.borrow_mut() = self.active_tab.borrow().clone();
                     self.model.set_query(query);
                 }
                 Err(error) => {
+                    // Nothing ran, so nothing is owned: the previous handle goes too.
                     self.model.reset();
+                    self.result_tab.borrow_mut().clear();
+                    self.ran_profile.borrow_mut().clear();
                     self.status.say(&error.0, true);
                     obj.emit_by_name::<()>("run-failed", &[&error.0]);
                 }
@@ -808,6 +919,9 @@ fn primary_menu() -> gtk::MenuButton {
         item.set_action_and_target_value(Some("win.appearance"), Some(&value.to_variant()));
         appearance.append_item(&item);
     }
+    let view = gio::Menu::new();
+    view.append(Some("Query History"), Some("win.history"));
+
     let updates = gio::Menu::new();
     updates.append(Some("Check for Updates…"), Some("win.check-updates"));
     updates.append(
@@ -816,6 +930,7 @@ fn primary_menu() -> gtk::MenuButton {
     );
     let menu = gio::Menu::new();
     menu.append_submenu(Some("Appearance"), &appearance);
+    menu.append_section(None, &view);
     menu.append_section(None, &updates);
     gtk::MenuButton::builder()
         .icon_name("open-menu-symbolic")
@@ -858,6 +973,22 @@ impl Window {
         imp.execute();
     }
 
+    /// The tab in front and its connection; a result of neither goes off screen.
+    pub fn set_active_tab(&self, tab: &str, connection: &str) {
+        let imp = self.imp();
+        imp.active_tab.replace(tab.to_string());
+        imp.active_connection.replace(connection.to_string());
+        imp.sync_visible();
+    }
+
+    /// Closed tabs free their result, and with it the engine-side result store.
+    pub fn forget_results(&self, live: &[String]) {
+        self.imp()
+            .results
+            .borrow_mut()
+            .retain(|tab, _| live.iter().any(|id| id == tab));
+    }
+
     pub fn selected_connection(&self) -> Option<String> {
         self.imp().sidebar.selected_connection()
     }
@@ -873,6 +1004,38 @@ impl Window {
                 if let Some(window) = window.upgrade() {
                     f(&window, name);
                 }
+            })
+    }
+
+    /// The only route to a connection's colour, read-only flag and enforcement.
+    pub fn connect_edit_connection<F: Fn(&Self, &str) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.forward_from_sidebar("edit-requested", f)
+    }
+
+    pub fn connect_remove_connection<F: Fn(&Self, &str) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.forward_from_sidebar("remove-requested", f)
+    }
+
+    fn forward_from_sidebar<F: Fn(&Self, &str) + 'static>(
+        &self,
+        signal: &str,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        let window = self.downgrade();
+        self.imp()
+            .sidebar
+            .connect_local(signal, false, move |values| {
+                let name = values[1].get::<String>().unwrap_or_default();
+                if let Some(window) = window.upgrade() {
+                    f(&window, &name);
+                }
+                None
             })
     }
 
@@ -987,7 +1150,8 @@ impl Window {
         })
     }
 
-    pub fn connect_object_activated<F: Fn(&Self, &str, &str) + 'static>(
+    /// A catalog object was activated: its connection, its path and its leaf name.
+    pub fn connect_object_activated<F: Fn(&Self, &str, &str, &str) + 'static>(
         &self,
         f: F,
     ) -> glib::SignalHandlerId {
@@ -997,7 +1161,8 @@ impl Window {
                 .expect("the signal carries the window");
             let profile = values[1].get::<String>().unwrap_or_default();
             let path = values[2].get::<String>().unwrap_or_default();
-            f(&window, &profile, &path);
+            let name = values[3].get::<String>().unwrap_or_default();
+            f(&window, &profile, &path, &name);
             None
         })
     }

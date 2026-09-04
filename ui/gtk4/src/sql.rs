@@ -22,6 +22,11 @@ impl Derived {
         &self.base
     }
 
+    /// The engine the statement was asked under, which the sidebar may since have left.
+    pub fn driver(&self) -> &str {
+        &self.driver
+    }
+
     pub fn sort_by(&mut self, column: &str, ascending: bool) {
         self.sort = Some((column.to_owned(), ascending));
     }

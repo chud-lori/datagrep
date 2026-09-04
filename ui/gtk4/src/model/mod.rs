@@ -23,7 +23,7 @@ pub use mutation::{
 };
 pub use pager::{Pager, WindowMeta};
 pub use profile::Profile;
-pub use result::{CellMark, ResultModel};
+pub use result::{CellMark, ParkedResult, ResultModel};
 pub use row::ResultRow;
 pub use safety::{Requirement, SafetyDecision, SafetyLevel};
 pub use status::{Column, QueryState, QueryStatus};

@@ -46,7 +46,25 @@ columnview.data-table > listview > row > cell .dg-staged-written {
 
 columnview.data-table > listview > row > cell .dg-staged-delete {
   background: alpha(@error_color, 0.18);
+}
+
 .dg-update-notice > box {
   background: alpha(@accent_bg_color, 0.12);
   padding: 2px 6px;
 }
+
+/* The connection's colour marker, as a caution stripe down the row's leading edge.
+   Never the only channel: the row also carries the name and a read-only lock. */
+.dg-marker {
+  min-width: 4px;
+  min-height: 20px;
+  border-radius: 2px;
+}
+
+.dg-marker-red { background: #e01b24; }
+.dg-marker-orange { background: #ff7800; }
+.dg-marker-yellow { background: #f5c211; }
+.dg-marker-green { background: #2ec27e; }
+.dg-marker-blue { background: #3584e4; }
+.dg-marker-purple { background: #9141ac; }
+.dg-marker-graphite { background: #77767b; }

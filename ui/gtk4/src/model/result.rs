@@ -7,11 +7,13 @@ use gio::prelude::*;
 use gio::subclass::prelude::*;
 
 use crate::ffi::{CellKind, Query, RowWindow};
-use crate::model::editing::{PendingEdits, StagedState};
+use crate::model::editing::{PendingEdits, StagedDocument, StagedState};
 use crate::model::mutation::{Address, EditableResult, MutationValue};
 use crate::model::pager::Pager;
 use crate::model::row::ResultRow;
 use crate::model::status::{Column, QueryStatus};
+
+pub use imp::ParkedResult;
 
 /// How one bound cell is standing relative to what has been staged over it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -36,6 +38,14 @@ mod imp {
         // Declared before `query`, so every DatagrepRows is freed before it.
         pub pager: Pager<RowWindow>,
         pub query: Query,
+    }
+
+    /// One tab's result off screen: its handle, columns and staged edits.
+    pub struct ParkedResult {
+        pub(super) live: Live,
+        pub(super) columns: Vec<Column>,
+        pub(super) allows_editing: bool,
+        pub(super) edits: Vec<StagedDocument>,
     }
 
     pub struct StatusRefresh {
@@ -236,6 +246,30 @@ mod imp {
             }
         }
 
+        pub(super) fn park(&self) -> Option<ParkedResult> {
+            let mut live = self.live.borrow_mut().take()?;
+            live.query.detach_progress();
+            let parked = ParkedResult {
+                live,
+                columns: std::mem::take(&mut *self.columns.borrow_mut()),
+                allows_editing: self.allows_editing.get(),
+                edits: self.edits.take_all(),
+            };
+            let removed = self.exposed.replace(0) as u32;
+            self.loaded.set(0);
+            *self.status.borrow_mut() = QueryStatus::default();
+            self.rows.borrow_mut().clear();
+            self.editable.borrow_mut().take();
+            let obj = self.obj();
+            if removed > 0 {
+                obj.items_changed(0, removed, 0);
+            }
+            if !parked.columns.is_empty() {
+                obj.emit_by_name::<()>("columns-changed", &[]);
+            }
+            Some(parked)
+        }
+
         pub(super) fn teardown(&self) {
             let removed = self.exposed.get() as u32;
             let had_columns = !self.columns.borrow().is_empty();
@@ -278,7 +312,15 @@ impl ResultModel {
     pub fn set_query(&self, mut query: Query) {
         let imp = self.imp();
         imp.teardown();
+        self.attach_progress(&mut query);
+        *imp.live.borrow_mut() = Some(imp::Live {
+            pager: Pager::new(PAGE_SIZE, MAX_RESIDENT_PAGES),
+            query,
+        });
+        imp.on_progress_tick();
+    }
 
+    fn attach_progress(&self, query: &mut Query) {
         // bounded(1) coalesces: a full channel means a tick is already queued.
         let (tx, rx) = async_channel::bounded::<()>(1);
         let weak = self.downgrade();
@@ -293,11 +335,23 @@ impl ResultModel {
         query.on_progress(move || {
             let _ = tx.try_send(());
         });
+    }
 
-        *imp.live.borrow_mut() = Some(imp::Live {
-            pager: Pager::new(PAGE_SIZE, MAX_RESIDENT_PAGES),
-            query,
-        });
+    pub fn park(&self) -> Option<ParkedResult> {
+        self.imp().park()
+    }
+
+    /// Put a parked result back: the same handle, the same columns, the same staging.
+    pub fn adopt(&self, mut parked: ParkedResult) {
+        let imp = self.imp();
+        imp.teardown();
+        imp.allows_editing.set(parked.allows_editing);
+        *imp.columns.borrow_mut() = std::mem::take(&mut parked.columns);
+        imp.edits.restore_all(std::mem::take(&mut parked.edits));
+        self.attach_progress(&mut parked.live.query);
+        *imp.live.borrow_mut() = Some(parked.live);
+        // The columns are restored whole, so the grid must rebuild before any row binds.
+        self.emit_by_name::<()>("columns-changed", &[]);
         imp.on_progress_tick();
     }
 
@@ -349,6 +403,23 @@ impl ResultModel {
             Some(text) => f(kind, text, mark),
             None => f(kind, window.cell(row, col).unwrap_or(""), mark),
         }
+    }
+
+    pub fn cell_text(&self, row: u64, col: u32) -> String {
+        self.with_cell(row, col, |kind, text, _| match kind {
+            CellKind::Null => "NULL".to_owned(),
+            CellKind::Absent | CellKind::Pending => String::new(),
+            _ => text.to_owned(),
+        })
+    }
+
+    /// One row as tab-separated cells, the shape the Qt grid puts on the
+    /// clipboard. Built from the columns alone, so a row number cannot be in it.
+    pub fn row_text(&self, row: u64) -> String {
+        (0..self.column_count())
+            .map(|col| self.cell_text(row, col))
+            .collect::<Vec<_>>()
+            .join("\t")
     }
 
     /// The window's veto on editing, decided per statement rather than per keystroke.

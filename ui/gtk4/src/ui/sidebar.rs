@@ -17,6 +17,7 @@ mod entry_imp {
         pub name: RefCell<String>,
         pub driver: RefCell<String>,
         pub read_only: Cell<bool>,
+        pub color: RefCell<Option<String>>,
         pub safety: Cell<SafetyLevel>,
     }
 
@@ -40,6 +41,7 @@ impl ConnectionEntry {
         *imp.name.borrow_mut() = profile.name.clone();
         *imp.driver.borrow_mut() = profile.driver.clone();
         imp.read_only.set(profile.read_only);
+        *imp.color.borrow_mut() = profile.color.clone();
         imp.safety.set(profile.safety);
         entry
     }
@@ -52,8 +54,8 @@ impl ConnectionEntry {
         self.imp().driver.borrow().clone()
     }
 
-    pub fn read_only(&self) -> bool {
-        self.imp().read_only.get()
+    pub fn color(&self) -> Option<String> {
+        self.imp().color.borrow().clone()
     }
 
     pub fn safety(&self) -> SafetyLevel {
@@ -111,7 +113,11 @@ mod imp {
                         .param_types([String::static_type()])
                         .build(),
                     Signal::builder("object-activated")
-                        .param_types([String::static_type(), String::static_type()])
+                        .param_types([
+                            String::static_type(),
+                            String::static_type(),
+                            String::static_type(),
+                        ])
                         .build(),
                     Signal::builder("object-described")
                         .param_types([
@@ -119,6 +125,12 @@ mod imp {
                             String::static_type(),
                             String::static_type(),
                         ])
+                        .build(),
+                    Signal::builder("edit-requested")
+                        .param_types([String::static_type()])
+                        .build(),
+                    Signal::builder("remove-requested")
+                        .param_types([String::static_type()])
                         .build(),
                 ]
             })
@@ -139,6 +151,15 @@ mod imp {
 
             self.connections.add_css_class("navigation-sidebar");
             self.connections.set_factory(Some(&connection_factory()));
+            self.install_actions();
+
+            // The Qt gesture for the same thing, and what a double-click means everywhere else.
+            let sidebar = self.obj().downgrade();
+            self.connections.connect_activate(move |_, _| {
+                if let Some(sidebar) = sidebar.upgrade() {
+                    sidebar.imp().request("edit-requested");
+                }
+            });
 
             let sidebar = self.obj().downgrade();
             self.selection
@@ -149,12 +170,14 @@ mod imp {
                 });
 
             let sidebar = self.obj().downgrade();
-            self.schema.connect_object_activated(move |_, path_json| {
-                if let Some(sidebar) = sidebar.upgrade() {
-                    let profile = sidebar.selected_connection().unwrap_or_default();
-                    sidebar.emit_by_name::<()>("object-activated", &[&profile, &path_json]);
-                }
-            });
+            self.schema
+                .connect_object_activated(move |_, path_json, name| {
+                    if let Some(sidebar) = sidebar.upgrade() {
+                        let profile = sidebar.selected_connection().unwrap_or_default();
+                        sidebar
+                            .emit_by_name::<()>("object-activated", &[&profile, &path_json, &name]);
+                    }
+                });
 
             let sidebar = self.obj().downgrade();
             self.schema
@@ -187,6 +210,29 @@ mod imp {
     impl NavigationPageImpl for Sidebar {}
 
     impl Sidebar {
+        fn install_actions(&self) {
+            let actions = gio::SimpleActionGroup::new();
+            for (name, signal) in [("edit", "edit-requested"), ("remove", "remove-requested")] {
+                let action = gio::SimpleAction::new(name, None);
+                let sidebar = self.obj().downgrade();
+                action.connect_activate(move |_, _| {
+                    if let Some(sidebar) = sidebar.upgrade() {
+                        sidebar.imp().request(signal);
+                    }
+                });
+                actions.add_action(&action);
+            }
+            self.obj()
+                .insert_action_group("connections", Some(&actions));
+        }
+
+        /// Both actions read the selection, so nothing can act on a row nobody picked.
+        pub(super) fn request(&self, signal: &str) {
+            if let Some(name) = self.obj().selected_connection().filter(|n| !n.is_empty()) {
+                self.obj().emit_by_name::<()>(signal, &[&name]);
+            }
+        }
+
         fn on_connection_selected(&self, selection: &gtk::SingleSelection) {
             let name = selection
                 .selected_item()
@@ -198,6 +244,14 @@ mod imp {
                 .emit_by_name::<()>("connection-selected", &[&name]);
         }
     }
+}
+
+/// On the selected row, so editing a connection is not behind a right-click.
+fn row_menu() -> gio::Menu {
+    let menu = gio::Menu::new();
+    menu.append(Some("Edit Connection…"), Some("connections.edit"));
+    menu.append(Some("Remove Connection…"), Some("connections.remove"));
+    menu
 }
 
 fn connection_factory() -> gtk::SignalListItemFactory {
@@ -214,15 +268,36 @@ fn connection_factory() -> gtk::SignalListItemFactory {
         driver.add_css_class("dim-label");
         text.append(&driver);
 
+        let marker = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        marker.add_css_class("dg-marker");
+        marker.set_vexpand(true);
+        marker.set_visible(false);
+
         let lock = gtk::Image::from_icon_name("changes-prevent-symbolic");
         lock.set_tooltip_text(Some("read-only"));
         let safety = gtk::Image::new();
 
+        let menu = gtk::MenuButton::new();
+        menu.set_icon_name("view-more-symbolic");
+        menu.set_valign(gtk::Align::Center);
+        menu.add_css_class("flat");
+        menu.set_tooltip_text(Some("Connection actions"));
+        menu.set_menu_model(Some(&row_menu()));
+        // Only on the row the actions read, so the menu can never mean another connection.
+        menu.set_visible(item.is_selected());
+        item.connect_selected_notify(glib::clone!(
+            #[weak]
+            menu,
+            move |item| menu.set_visible(item.is_selected())
+        ));
+
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.append(&marker);
         row.append(&gtk::Image::new());
         row.append(&text);
         row.append(&safety);
         row.append(&lock);
+        row.append(&menu);
         item.set_child(Some(&row));
     });
     factory.connect_bind(|_, item| {
@@ -236,11 +311,30 @@ fn connection_factory() -> gtk::SignalListItemFactory {
             return;
         };
         let imp = entry.imp();
-        if let Some(mark) = row.first_child().and_downcast::<gtk::Image>() {
+        let marker = row.first_child();
+        if let Some(marker) = marker.as_ref() {
+            for name in crate::engine::MARKER_NAMES {
+                marker.remove_css_class(&format!("dg-marker-{name}"));
+            }
+            match imp.color.borrow().as_deref().filter(|c| !c.is_empty()) {
+                Some(color) => {
+                    marker.add_css_class(&format!("dg-marker-{color}"));
+                    marker.set_tooltip_text(Some(&format!("Marked connection ({color})")));
+                    marker.set_visible(true);
+                }
+                None => marker.set_visible(false),
+            }
+        }
+        if let Some(mark) = marker
+            .as_ref()
+            .and_then(|m| m.next_sibling())
+            .and_downcast::<gtk::Image>()
+        {
             mark.set_paintable(Some(&crate::engine::paintable(&imp.driver.borrow())));
         }
         if let Some(text) = row
             .first_child()
+            .and_then(|c| c.next_sibling())
             .and_then(|c| c.next_sibling())
             .and_downcast::<gtk::Box>()
         {
@@ -251,11 +345,16 @@ fn connection_factory() -> gtk::SignalListItemFactory {
                 driver.set_text(Some(&crate::engine::display_name(&imp.driver.borrow())));
             }
         }
-        if let Some(lock) = row.last_child() {
+        if let Some(lock) = row
+            .last_child()
+            .and_then(|c| c.prev_sibling())
+            .and_downcast::<gtk::Image>()
+        {
             lock.set_visible(imp.read_only.get());
         }
         if let Some(safety) = row
             .last_child()
+            .and_then(|menu| menu.prev_sibling())
             .and_then(|lock| lock.prev_sibling())
             .and_downcast::<gtk::Image>()
         {
@@ -349,15 +448,6 @@ impl Sidebar {
         false
     }
 
-    /// Whether the selected connection refuses writes — the window's veto on editing.
-    pub fn selected_read_only(&self) -> bool {
-        self.imp()
-            .selection
-            .selected_item()
-            .and_downcast::<ConnectionEntry>()
-            .is_some_and(|entry| entry.read_only())
-    }
-
     /// The ladder rung of `name`, as the last profile reload reported it.
     pub fn safety_of(&self, name: &str) -> Option<SafetyLevel> {
         let imp = self.imp();
@@ -409,7 +499,7 @@ impl Sidebar {
         })
     }
 
-    pub fn connect_object_activated<F: Fn(&Self, &str, &str) + 'static>(
+    pub fn connect_object_activated<F: Fn(&Self, &str, &str, &str) + 'static>(
         &self,
         f: F,
     ) -> glib::SignalHandlerId {
@@ -419,7 +509,8 @@ impl Sidebar {
                 .expect("the signal carries the sidebar");
             let profile = values[1].get::<String>().unwrap_or_default();
             let path = values[2].get::<String>().unwrap_or_default();
-            f(&sidebar, &profile, &path);
+            let name = values[3].get::<String>().unwrap_or_default();
+            f(&sidebar, &profile, &path, &name);
             None
         })
     }

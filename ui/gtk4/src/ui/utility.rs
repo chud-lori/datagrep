@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
-use gtk::glib;
+use gtk::{gio, glib};
 
 use crate::ffi::CellKind;
 use crate::model::HistoryStore;
@@ -136,6 +136,25 @@ impl UtilityPane {
                 }
                 window.run(sql);
             });
+
+        // Ctrl+H is the Qt shortcut for the same pane, on the same page.
+        let action = gio::SimpleAction::new("history", None);
+        let (owner, watched) = (pane.downgrade(), window.downgrade());
+        action.connect_activate(move |_, _| {
+            let (Some(pane), Some(window)) = (owner.upgrade(), watched.upgrade()) else {
+                return;
+            };
+            pane.show_page("history");
+            window.reveal_utility();
+        });
+        window.add_action(&action);
+        let shortcuts = gtk::ShortcutController::new();
+        shortcuts.set_scope(gtk::ShortcutScope::Global);
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("<Control>h"),
+            Some(gtk::NamedAction::new("win.history")),
+        ));
+        window.add_controller(shortcuts);
 
         store.load();
         window.utility_slot().set_child(Some(&pane));

@@ -153,6 +153,14 @@ impl StatusBar {
         }
     }
 
+    /// What `say` last put on the line, so a tab switch can put it back.
+    pub fn spoken(&self) -> (String, bool) {
+        match self.imp().message.borrow().as_ref() {
+            Some(label) => (label.text().to_string(), label.has_css_class("error")),
+            None => (String::new(), false),
+        }
+    }
+
     fn render(&self, status: &QueryStatus) {
         let imp = self.imp();
         if let Some(label) = imp.state.borrow().as_ref() {

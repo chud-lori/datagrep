@@ -264,6 +264,9 @@ mod imp {
                     Signal::builder("edit-refused")
                         .param_types([String::static_type()])
                         .build(),
+                    Signal::builder("copied")
+                        .param_types([String::static_type()])
+                        .build(),
                 ]
             })
         }
@@ -371,7 +374,91 @@ mod imp {
                 });
                 group.add_action(&action);
             }
+            let copy_cell =
+                gio::SimpleAction::new("copy-cell", Some(&<(u64, u32)>::static_variant_type()));
+            let grid = self.obj().downgrade();
+            copy_cell.connect_activate(move |_, target| {
+                let (Some(grid), Some((row, col))) =
+                    (grid.upgrade(), target.and_then(|t| t.get::<(u64, u32)>()))
+                else {
+                    return;
+                };
+                let text = grid.imp().model_text(|model| model.cell_text(row, col));
+                grid.imp().copy(&text, "cell copied");
+            });
+            group.add_action(&copy_cell);
+
+            let copy_row = gio::SimpleAction::new("copy-row", Some(&u64::static_variant_type()));
+            let grid = self.obj().downgrade();
+            copy_row.connect_activate(move |_, target| {
+                let (Some(grid), Some(row)) = (grid.upgrade(), target.and_then(|t| t.get::<u64>()))
+                else {
+                    return;
+                };
+                let text = grid.imp().model_text(|model| model.row_text(row));
+                grid.imp().copy(&text, "row copied");
+            });
+            group.add_action(&copy_row);
+
+            let copy_selection = gio::SimpleAction::new("copy-selection", None);
+            let grid = self.obj().downgrade();
+            copy_selection.connect_activate(move |_, _| {
+                if let Some(grid) = grid.upgrade() {
+                    grid.imp().copy_selection();
+                }
+            });
+            group.add_action(&copy_selection);
+
             self.obj().insert_action_group("results", Some(&group));
+
+            let shortcuts = gtk::ShortcutController::new();
+            shortcuts.set_scope(gtk::ShortcutScope::Local);
+            shortcuts.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string("<Control>c"),
+                Some(gtk::NamedAction::new("results.copy-selection")),
+            ));
+            self.view.add_controller(shortcuts);
+        }
+
+        fn model_text(&self, read: impl Fn(&ResultModel) -> String) -> String {
+            match self.model.borrow().as_ref() {
+                Some(model) => read(model),
+                None => String::new(),
+            }
+        }
+
+        /// Every selected row, tab-separated like the Qt grid's Ctrl+C.
+        fn copy_selection(&self) {
+            let Some(model) = self.model.borrow().clone() else {
+                return;
+            };
+            let Some(selection) = self.view.model().map(|model| model.selection()) else {
+                return;
+            };
+            let mut lines = Vec::new();
+            for i in 0..selection.size() {
+                lines.push(model.row_text(u64::from(selection.nth(i as u32))));
+            }
+            if lines.is_empty() {
+                return self.obj().emit_by_name::<()>(
+                    "copied",
+                    &[&"select a row first — nothing was copied".to_string()],
+                );
+            }
+            let said = match lines.len() {
+                1 => "1 row copied".to_owned(),
+                n => format!("{n} rows copied"),
+            };
+            self.copy(&lines.join("\n"), &said);
+        }
+
+        fn copy(&self, text: &str, said: &str) {
+            let Some(display) = gtk::gdk::Display::default() else {
+                return;
+            };
+            display.clipboard().set_text(text);
+            self.obj()
+                .emit_by_name::<()>("copied", &[&said.to_string()]);
         }
 
         fn stage_row(&self, row: u64, delete: bool) {
@@ -525,6 +612,18 @@ impl ResultsGrid {
     }
 
     /// A refused staging attempt, in the words the status bar shows.
+    /// What a copy just put on the clipboard, for the status line.
+    pub fn connect_copied<F: Fn(&Self, &str) + 'static>(&self, f: F) -> glib::SignalHandlerId {
+        self.connect_local("copied", false, move |values| {
+            let grid = values[0]
+                .get::<Self>()
+                .expect("the signal carries the grid");
+            let message = values[1].get::<String>().unwrap_or_default();
+            f(&grid, &message);
+            None
+        })
+    }
+
     pub fn connect_edit_refused<F: Fn(&Self, &str) + 'static>(
         &self,
         f: F,
@@ -664,7 +763,7 @@ impl ResultsGrid {
         let Some(model) = self.imp().model.borrow().clone() else {
             return;
         };
-        if model.editable().is_none() {
+        if model.column_count() == 0 {
             return;
         }
         let edits = model.edits();
@@ -675,27 +774,40 @@ impl ResultsGrid {
             item.set_action_and_target_value(Some(action), Some(&target));
             item
         };
-        if model.is_editable_cell(row, col) {
-            menu.append_item(&item("Edit Cell…", "results.edit", (row, col).to_variant()));
-        }
-        if edits.is_deleted(row) {
-            menu.append_item(&item(
-                "Keep This Document",
-                "results.discard",
-                row.to_variant(),
-            ));
-        } else {
-            menu.append_item(&item("Delete Document", "results.delete", row.to_variant()));
-            if edits.is_staged(row) {
-                menu.append_item(&item(
-                    "Discard Staged Changes",
+
+        // Reading is never gated on the result being writable.
+        let copy = gio::Menu::new();
+        copy.append_item(&item(
+            "Copy Cell",
+            "results.copy-cell",
+            (row, col).to_variant(),
+        ));
+        copy.append_item(&item("Copy Row", "results.copy-row", row.to_variant()));
+        copy.append(Some("Copy Selected Rows"), Some("results.copy-selection"));
+        menu.append_section(None, &copy);
+
+        if model.editable().is_some() {
+            let editing = gio::Menu::new();
+            if model.is_editable_cell(row, col) {
+                editing.append_item(&item("Edit Cell…", "results.edit", (row, col).to_variant()));
+            }
+            if edits.is_deleted(row) {
+                editing.append_item(&item(
+                    "Keep This Document",
                     "results.discard",
                     row.to_variant(),
                 ));
+            } else {
+                editing.append_item(&item("Delete Document", "results.delete", row.to_variant()));
+                if edits.is_staged(row) {
+                    editing.append_item(&item(
+                        "Discard Staged Changes",
+                        "results.discard",
+                        row.to_variant(),
+                    ));
+                }
             }
-        }
-        if menu.n_items() == 0 {
-            return;
+            menu.append_section(None, &editing);
         }
         *self.imp().menu_anchor.borrow_mut() = Some(anchor.clone());
         let popover = gtk::PopoverMenu::from_model(Some(&menu));
@@ -705,6 +817,16 @@ impl ResultsGrid {
         popover.set_parent(anchor);
         popover.connect_closed(|popover| popover.unparent());
         popover.popup();
+    }
+
+    /// The header arrow's column and direction, parked with its result.
+    pub fn sort_indicator(&self) -> Option<(String, bool)> {
+        self.imp().sort.borrow().clone()
+    }
+
+    /// Set before the columns rebuild: that rebuild is what re-draws the arrow.
+    pub fn set_sort_indicator(&self, sort: Option<(String, bool)>) {
+        *self.imp().sort.borrow_mut() = sort;
     }
 
     pub fn clear_sort_indicator(&self) {
