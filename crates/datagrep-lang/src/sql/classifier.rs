@@ -63,12 +63,27 @@ fn significant_lexemes(stmt: &str) -> Vec<Lexeme<'_>> {
 
 pub fn classify(stmt: &str) -> StatementClass {
     let toks = significant_lexemes(stmt);
-    classify_from(&toks, 0).0
+    match classify_from(&toks, 0).0 {
+        StatementClass::Read if has_executable_comment(stmt) => StatementClass::Unknown,
+        class => class,
+    }
+}
+
+// MySQL runs `/*! */` and `/*M! */` bodies; raw text is searched since its quoting rules differ from the lexer's.
+fn has_executable_comment(stmt: &str) -> bool {
+    stmt.as_bytes()
+        .windows(3)
+        .enumerate()
+        .any(|(i, w)| match w {
+            b"/*!" => true,
+            [b'/', b'*', b'M' | b'm'] => stmt.as_bytes().get(i + 3) == Some(&b'!'),
+            _ => false,
+        })
 }
 
 fn classify_keyword(word: &str) -> Option<StatementClass> {
     use StatementClass::*;
-    const READ: &[&str] = &["SHOW", "EXPLAIN"];
+    const READ: &[&str] = &["SHOW"];
     const WRITE: &[&str] = &[
         "INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", "COPY",
     ];
@@ -102,9 +117,44 @@ fn classify_from(toks: &[Lexeme<'_>], idx: usize) -> (StatementClass, usize) {
     if first.eq_ignore_ascii_case("SELECT") || first.eq_ignore_ascii_case("VALUES") {
         return (prove_read(&toks[idx..]), idx + 1);
     }
+    if first.eq_ignore_ascii_case("EXPLAIN") {
+        return (classify_explain(toks, idx + 1), toks.len());
+    }
     match classify_keyword(first) {
         Some(class) => (class, idx + 1),
         None => (StatementClass::Unknown, idx + 1),
+    }
+}
+
+// EXPLAIN ANALYZE executes its statement, so it takes that statement's class.
+fn classify_explain(toks: &[Lexeme<'_>], mut idx: usize) -> StatementClass {
+    const OPTIONS: &[&str] = &[
+        "ANALYZE",
+        "ANALYSE",
+        "VERBOSE",
+        "FORMAT",
+        "TREE",
+        "JSON",
+        "TRADITIONAL",
+        "EXTENDED",
+        "PARTITIONS",
+    ];
+    let is_analyze = |t: &Lexeme<'_>| matches!(t, Lexeme::Word(w) if w.eq_ignore_ascii_case("ANALYZE") || w.eq_ignore_ascii_case("ANALYSE"));
+    let start = idx;
+    if matches!(toks.get(idx), Some(Lexeme::Open)) {
+        idx = match skip_balanced(toks, idx) {
+            Some(i) => i,
+            None => return StatementClass::Unknown,
+        };
+    }
+    while matches!(toks.get(idx), Some(Lexeme::Word(w)) if OPTIONS.iter().any(|o| w.eq_ignore_ascii_case(o)))
+    {
+        idx += 1;
+    }
+    if toks[start..idx].iter().any(is_analyze) {
+        classify_from(toks, idx).0
+    } else {
+        StatementClass::Read
     }
 }
 
@@ -580,10 +630,33 @@ mod tests {
     }
 
     #[test]
-    fn explain_variants_are_always_read() {
+    fn explain_is_read_unless_analyze_runs_a_non_read() {
         assert_eq!(classify("EXPLAIN SELECT 1"), Read);
+        assert_eq!(classify("EXPLAIN DELETE FROM t"), Read);
+        assert_eq!(classify("EXPLAIN VERBOSE UPDATE t SET x = 1"), Read);
+        assert_eq!(classify("EXPLAIN FORMAT=TREE DELETE FROM t"), Read);
         assert_eq!(classify("EXPLAIN ANALYZE SELECT 1"), Read);
         assert_eq!(classify("EXPLAIN (FORMAT JSON) SELECT 1"), Read);
+        assert_eq!(classify("EXPLAIN (ANALYZE, BUFFERS) SELECT 1"), Read);
+        assert_eq!(classify("EXPLAIN ANALYZE DELETE FROM t"), Write);
+        assert_eq!(classify("explain analyse verbose delete from t"), Write);
+        assert_eq!(
+            classify("EXPLAIN (ANALYZE, BUFFERS) UPDATE t SET x = 1"),
+            Write
+        );
+        assert_eq!(
+            classify("EXPLAIN (FORMAT JSON, ANALYZE) INSERT INTO t VALUES (1)"),
+            Write
+        );
+        assert_eq!(classify("EXPLAIN ANALYZE FORMAT=TREE DELETE FROM t"), Write);
+        assert_eq!(classify("EXPLAIN ANALYZE CREATE TABLE t AS SELECT 1"), Ddl);
+        assert_eq!(classify("EXPLAIN ANALYZE SELECT * INTO t FROM u"), Write);
+        assert_eq!(classify("EXPLAIN ANALYZE SELECT pg_sleep(10)"), Unknown);
+        assert_eq!(
+            classify("EXPLAIN ANALYZE WITH x AS (SELECT 1) DELETE FROM t"),
+            Write
+        );
+        assert_eq!(classify("EXPLAIN (ANALYZE"), Unknown);
         assert_eq!(classify("explain select 1"), Read);
     }
 
@@ -676,6 +749,26 @@ mod tests {
         ] {
             assert_eq!(classify(stmt), Unknown, "{stmt}");
         }
+    }
+
+    #[test]
+    fn mysql_executable_comments_are_not_provable() {
+        for stmt in [
+            "SELECT 1 /*!, (SELECT 1 INTO OUTFILE '/tmp/x') */",
+            "SELECT 1 /*!50000 INTO OUTFILE '/tmp/x' */",
+            "SELECT 1 /*M!100000 INTO OUTFILE '/tmp/x' */",
+            "SELECT 1 /* /* */ /*!, (SELECT 1 INTO OUTFILE '/tmp/x') */ # */",
+            "SHOW TABLES /*! , sleep(5) */",
+            "EXPLAIN SELECT 1 /*! INTO OUTFILE '/tmp/x' */",
+        ] {
+            assert_eq!(classify(stmt), Unknown, "{stmt}");
+        }
+        assert_eq!(
+            classify("SELECT /*+ MAX_EXECUTION_TIME(1000) */ * FROM t"),
+            Read
+        );
+        assert_eq!(classify("SELECT /* ! not executable */ 1"), Read);
+        assert_eq!(classify("DELETE FROM t /*! LIMIT 1 */"), Write);
     }
 
     #[test]
