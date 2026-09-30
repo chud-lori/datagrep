@@ -36,7 +36,7 @@ impl Language for SqlLanguage {
     }
 
     fn classify(&self, stmt: &str) -> StatementClass {
-        classifier::classify(stmt)
+        classifier::classify(stmt, self.dialect)
     }
 
     fn context_at(&self, src: &str, byte_offset: usize) -> EditContext {
