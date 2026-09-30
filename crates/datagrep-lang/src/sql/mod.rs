@@ -1,6 +1,7 @@
 pub mod classifier;
 pub mod highlight;
 pub mod lexer;
+pub mod references;
 pub mod splitter;
 
 use datagrep_api::{LanguageId, SqlDialect};
