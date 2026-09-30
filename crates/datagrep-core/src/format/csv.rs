@@ -2,6 +2,7 @@ use std::io::{self, Write};
 
 use super::{Row, RowSink, Summary};
 
+#[derive(Debug)]
 pub struct CsvSink<W: Write> {
     out: W,
     delim: u8,
@@ -69,7 +70,7 @@ fn write_csv_field<W: Write>(out: &mut W, delim: u8, field: &str, first: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::value_text::CellText;
+    use crate::format::CellText;
 
     fn render(rows: &[Vec<&str>]) -> String {
         let mut out = Vec::new();

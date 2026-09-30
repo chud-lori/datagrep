@@ -756,6 +756,127 @@ void datagrep_query_on_progress(DatagrepQuery *q, DatagrepProgressFn cb, void *c
     pthread_mutex_unlock(&q->lock);
 }
 
+/* ------------------------------------------------------------------ export */
+
+enum { EX_RUNNING = 0, EX_DONE, EX_CANCELLED, EX_FAILED };
+static const char *EXPORT_STATES[] = {"running", "done", "cancelled", "failed"};
+
+struct DatagrepExport {
+    pthread_mutex_t lock;
+    pthread_t       thread;
+    int             has_thread;
+    int             cancel_flag;
+    int             state;
+    uint64_t        rows;
+    char           *path;
+    char           *format;
+    char           *error;
+};
+
+char *datagrep_export_formats_json(const char *driver_id) {
+    int sql = driver_id && (strcmp(driver_id, "postgres") == 0 ||
+                            strcmp(driver_id, "mysql") == 0 || strcmp(driver_id, "sqlite") == 0);
+    return dup_cstr(sql ? "[\"csv\",\"json\",\"markdown\",\"sql\"]"
+                        : "[\"csv\",\"json\",\"markdown\"]");
+}
+
+static void *export_thread(void *arg) {
+    DatagrepExport *e = (DatagrepExport *)arg;
+    for (int t = 1; t <= 40; t++) {
+        struct timespec ts = {0, 25 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+        pthread_mutex_lock(&e->lock);
+        int cancelled = e->cancel_flag;
+        if (cancelled) e->state = EX_CANCELLED;
+        else e->rows = 25000ull * (uint64_t)t;
+        pthread_mutex_unlock(&e->lock);
+        if (cancelled) return NULL;
+    }
+    FILE *f = fopen(e->path, "w");
+    pthread_mutex_lock(&e->lock);
+    if (f) {
+        fprintf(f, "stub export (%s): %llu synthetic rows\n", e->format,
+                (unsigned long long)e->rows);
+        fclose(f);
+        e->state = EX_DONE;
+    } else {
+        e->error = dup_cstr("could not create the export file (stub)");
+        e->state = EX_FAILED;
+    }
+    pthread_mutex_unlock(&e->lock);
+    return NULL;
+}
+
+DatagrepExport *datagrep_export_start(DatagrepCore *c, const char *profile, const char *sql,
+                                      const char *format, const char *table, const char *path,
+                                      char **err_out) {
+    if (!c || !profile || !sql || !format || !path) {
+        set_err(err_out, "null argument");
+        return NULL;
+    }
+    if (strcmp(format, "sql") == 0 && (!table || !*table)) {
+        set_err(err_out, "an SQL INSERT export needs a table name");
+        return NULL;
+    }
+    pthread_mutex_lock(&c->lock);
+    const StubProfile *p = find_profile(c, profile);
+    pthread_mutex_unlock(&c->lock);
+    if (!p) {
+        set_err(err_out, "no such profile");
+        return NULL;
+    }
+    DatagrepExport *e = (DatagrepExport *)calloc(1, sizeof(DatagrepExport));
+    pthread_mutex_init(&e->lock, NULL);
+    e->path = dup_cstr(path);
+    e->format = dup_cstr(format);
+    if (!sql_is_select(sql)) {
+        e->error = dup_cstr("export re-runs the statement, and this one would change data again");
+        e->state = EX_FAILED;
+        return e;
+    }
+    if (pthread_create(&e->thread, NULL, export_thread, e) == 0) e->has_thread = 1;
+    else {
+        e->error = dup_cstr("could not start the export (stub)");
+        e->state = EX_FAILED;
+    }
+    return e;
+}
+
+char *datagrep_export_status_json(DatagrepExport *e, char **err_out) {
+    if (!e) {
+        set_err(err_out, "export is null");
+        return NULL;
+    }
+    Sb s;
+    sb_init(&s);
+    pthread_mutex_lock(&e->lock);
+    sb_putf(&s, "{\"state\":\"%s\",\"rows_written\":%llu,\"error\":", EXPORT_STATES[e->state],
+            (unsigned long long)e->rows);
+    if (e->error) sb_putf(&s, "\"%s\"", e->error);
+    else sb_put(&s, "null");
+    pthread_mutex_unlock(&e->lock);
+    sb_put(&s, ",\"safety\":null}");
+    return s.buf;
+}
+
+void datagrep_export_cancel(DatagrepExport *e) {
+    if (!e) return;
+    pthread_mutex_lock(&e->lock);
+    e->cancel_flag = 1;
+    pthread_mutex_unlock(&e->lock);
+}
+
+void datagrep_export_free(DatagrepExport *e) {
+    if (!e) return;
+    datagrep_export_cancel(e);
+    if (e->has_thread) pthread_join(e->thread, NULL);
+    free(e->path);
+    free(e->format);
+    free(e->error);
+    pthread_mutex_destroy(&e->lock);
+    free(e);
+}
+
 /* -------------------------------------------------------------------- rows */
 
 struct DatagrepRows {

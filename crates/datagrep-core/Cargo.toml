@@ -21,6 +21,8 @@ async-trait = { workspace = true }
 # Value::Bytes and ResumeToken are bytes::Bytes; already a workspace dependency.
 bytes = { workspace = true }
 thiserror = { workspace = true }
+# The JSON export format; already a workspace dependency.
+serde_json = { workspace = true }
 
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 tokio-util = { version = "0.7", features = ["time"] }
@@ -37,6 +39,3 @@ arrow-buffer = "59.1"
 # arrow-ipc: the spill format is an append-only Arrow IPC stream per result
 # set; this is the writer/reader for it, not a compute kernel.
 arrow-ipc = "59.1"
-
-[dev-dependencies]
-serde_json = { workspace = true }

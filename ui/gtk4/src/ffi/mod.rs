@@ -5,14 +5,16 @@ use std::sync::Arc;
 
 use datagrep_ffi::{
     datagrep_browse_statement, datagrep_catalog_children_json, datagrep_catalog_describe_json,
-    datagrep_core_free, datagrep_core_new, datagrep_mutate, datagrep_profiles_add,
-    datagrep_profiles_list_json, datagrep_profiles_remove, datagrep_query_cancel,
-    datagrep_query_free, datagrep_query_on_progress, datagrep_query_rows, datagrep_query_run,
-    datagrep_query_status_json, datagrep_reread_documents, datagrep_rows_cell,
+    datagrep_core_free, datagrep_core_new, datagrep_export_cancel, datagrep_export_formats_json,
+    datagrep_export_free, datagrep_export_start, datagrep_export_status_json, datagrep_mutate,
+    datagrep_profiles_add, datagrep_profiles_list_json, datagrep_profiles_remove,
+    datagrep_query_cancel, datagrep_query_free, datagrep_query_on_progress, datagrep_query_rows,
+    datagrep_query_run, datagrep_query_status_json, datagrep_reread_documents, datagrep_rows_cell,
     datagrep_rows_cell_detail_json, datagrep_rows_cell_kind, datagrep_rows_column_names_json,
     datagrep_rows_columns, datagrep_rows_count, datagrep_rows_envelope_json, datagrep_rows_free,
     datagrep_rows_pending, datagrep_safety_evaluate_json, datagrep_safety_pending_json,
-    datagrep_safety_satisfy, datagrep_string_free, DatagrepCore, DatagrepQuery, DatagrepRows,
+    datagrep_safety_satisfy, datagrep_string_free, DatagrepCore, DatagrepExport, DatagrepQuery,
+    DatagrepRows,
 };
 // Not re-exported at the crate root, unlike the rest of the ABI surface.
 use datagrep_ffi::profiles::{
@@ -229,6 +231,36 @@ impl Core {
         })
     }
 
+    /// Returns at once; every row streams into `path` on the engine's own runtime.
+    pub fn export(
+        &self,
+        profile: &str,
+        sql: &str,
+        format: &str,
+        table: Option<&str>,
+        path: &str,
+    ) -> Result<Export, Error> {
+        let (profile, sql) = (nul_terminated(profile)?, nul_terminated(sql)?);
+        let (format, path) = (nul_terminated(format)?, nul_terminated(path)?);
+        let table = table.map(nul_terminated).transpose()?;
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let raw = unsafe {
+            datagrep_export_start(
+                self.raw.0,
+                profile.as_ptr(),
+                sql.as_ptr(),
+                format.as_ptr(),
+                table.as_ref().map_or(std::ptr::null(), |t| t.as_ptr()),
+                path.as_ptr(),
+                &mut err,
+            )
+        };
+        if raw.is_null() {
+            return Err(error_from_ffi(err));
+        }
+        Ok(Export { raw })
+    }
+
     /// Blocks on the write; the caller runs it off the main loop.
     pub fn mutate_json(&self, profile: &str, batch_json: &str) -> Result<String, Error> {
         let (profile, batch) = (nul_terminated(profile)?, nul_terminated(batch_json)?);
@@ -315,6 +347,35 @@ pub fn browse_statement(
         )
     };
     owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+}
+
+/// The formats this engine can export, as the engine's JSON list.
+pub fn export_formats_json(driver_id: &str) -> Result<String, Error> {
+    let driver = nul_terminated(driver_id)?;
+    owned_string_from_ffi(unsafe { datagrep_export_formats_json(driver.as_ptr()) })
+        .ok_or_else(|| Error("the engine listed no export formats".to_owned()))
+}
+
+pub struct Export {
+    raw: *mut DatagrepExport,
+}
+
+impl Export {
+    pub fn status_json(&self) -> Result<String, Error> {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let raw = unsafe { datagrep_export_status_json(self.raw, &mut err) };
+        owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+    }
+
+    pub fn cancel(&self) {
+        unsafe { datagrep_export_cancel(self.raw) };
+    }
+}
+
+impl Drop for Export {
+    fn drop(&mut self) {
+        unsafe { datagrep_export_free(self.raw) };
+    }
 }
 
 type ProgressFn = Box<dyn Fn() + Send + Sync>;

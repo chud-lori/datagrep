@@ -1,7 +1,6 @@
 use std::io::{self, Write};
 
-use super::{Row, RowSink, Summary};
-use crate::value_text::CellText;
+use super::{CellText, Row, RowSink, Summary};
 
 fn write_row_object<W: Write>(out: &mut W, columns: &[String], row: &Row) -> io::Result<()> {
     out.write_all(b"{")?;
@@ -40,6 +39,7 @@ fn write_cell<W: Write>(out: &mut W, cell: &CellText) -> io::Result<()> {
     }
 }
 
+#[derive(Debug)]
 pub struct JsonArraySink<W: Write> {
     out: W,
     columns: Vec<String>,
@@ -79,6 +79,7 @@ impl<W: Write + Send> RowSink for JsonArraySink<W> {
     }
 }
 
+#[derive(Debug)]
 pub struct NdjsonSink<W: Write> {
     out: W,
     columns: Vec<String>,

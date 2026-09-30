@@ -524,6 +524,19 @@ private struct WorkbenchToolbar: ToolbarContent {
             .disabled(!model.hasDerivedClauses)
             .help("Remove the ORDER BY / WHERE datagrep added by clicking headers and cells")
 
+            Button {
+                if model.isExporting { model.cancelExport() } else { model.exportResult() }
+            } label: {
+                Label(
+                    model.isExporting ? "Cancel Export" : "Export",
+                    systemImage: model.isExporting ? "xmark.circle" : "square.and.arrow.up")
+            }
+            .disabled(!model.canExport && !model.isExporting)
+            .help(
+                model.isExporting
+                    ? "Stop the export; no partial file is left behind"
+                    : "Export every row of this result as CSV, JSON, Markdown or SQL  ⇧⌘E")
+
             // ⌘Y is the Query menu's; not re-bound here.
             HistoryToolbarButton(history: model.history)
         }

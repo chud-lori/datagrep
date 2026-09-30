@@ -185,10 +185,15 @@ final class AppModel: ObservableObject {
     /// The open safety ceremony, and what runs once the engine accepts it.
     @Published var safetyPrompt: SafetyPrompt?
     private var safetyProceed: (() -> Void)?
+    private var safetyKeepsResult = false
     private var lastSent: (sql: String, profile: String)?
     private var safetyReasked: String?
 
     @Published private(set) var profilesByName: [String: Profile] = [:]
+
+    @Published private(set) var isExporting = false
+    private var exportHandle: DatagrepExportHandle?
+    private var exportPoll: Timer?
 
     @Published var sidebarVisible = true {
         didSet { UserDefaults.standard.set(sidebarVisible, forKey: Self.sidebarKey) }
@@ -1136,11 +1141,13 @@ final class AppModel: ObservableObject {
     // MARK: - the safety ceremony
 
     private func present(
-        _ decision: SafetyDecision, profile: String, proceed: @escaping () -> Void
+        _ decision: SafetyDecision, profile: String, keepsResult: Bool = false,
+        proceed: @escaping () -> Void
     ) {
         safetyProceed = proceed
+        safetyKeepsResult = keepsResult
         safetyPrompt = SafetyPrompt(decision: decision, profile: profile)
-        state = nil
+        if !keepsResult { state = nil }
         isError = false
         message =
             decision.requires == .authenticate
@@ -1197,7 +1204,7 @@ final class AppModel: ObservableObject {
     func cancelSafetyPrompt(_ prompt: SafetyPrompt) {
         safetyProceed = nil
         safetyPrompt = nil
-        state = nil
+        if !safetyKeepsResult { state = nil }
         isError = false
         message = "not sent — `\(prompt.profile)` is on \(prompt.decision.level.title.lowercased())"
     }
@@ -1450,6 +1457,104 @@ final class AppModel: ObservableObject {
     private func forgetTabState(outside live: Set<String>) {
         resultsByTab = resultsByTab.filter { live.contains($0.key) }
         browseTabs = browseTabs.filter { live.contains($0.value) }
+    }
+
+    // MARK: - exporting the result
+
+    var canExport: Bool { query != nil && !resultProfile.isEmpty && !isExporting }
+
+    /// The visible result's statement, re-run in full into a file; the grid's window is never the source.
+    func exportResult() {
+        guard canExport else { return }
+        let profile = resultProfile
+        let sql = effectiveSQL
+        let formats = DatagrepCoreHandle.exportFormats(driver: driverID(for: profile))
+        ExportPanel.present(formats: formats, suggestedName: profile) { [weak self] choice in
+            guard let self, let choice else { return }
+            self.gateExport(ExportRequest(profile: profile, sql: sql, choice: choice))
+        }
+    }
+
+    func cancelExport() { exportHandle?.cancel() }
+
+    private func gateExport(_ request: ExportRequest) {
+        guard let core, safety(for: request.profile).level.asksForAnything else {
+            startExport(request)
+            return
+        }
+        queryQueue.async { [weak self] in
+            let decision = try? core.evaluateSafety(profile: request.profile, sql: request.sql)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard let decision, decision.requires != .none, decision.challenge != nil else {
+                    self.startExport(request)
+                    return
+                }
+                self.present(decision, profile: request.profile, keepsResult: true) {
+                    [weak self] in self?.startExport(request)
+                }
+            }
+        }
+    }
+
+    private func startExport(_ request: ExportRequest) {
+        guard let core, !isExporting else { return }
+        isExporting = true
+        message = "exporting to \(request.choice.url.lastPathComponent)…"
+        isError = false
+        queryQueue.async { [weak self] in
+            do {
+                let handle = try core.export(
+                    profile: request.profile, sql: request.sql, format: request.choice.format,
+                    table: request.choice.table, to: request.choice.url.path)
+                DispatchQueue.main.async { self?.watchExport(handle, request) }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isExporting = false
+                    self.message = "export failed: \(error)"
+                    self.isError = true
+                }
+            }
+        }
+    }
+
+    private func watchExport(_ handle: DatagrepExportHandle, _ request: ExportRequest) {
+        exportHandle = handle
+        exportPoll = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pollExport(request) }
+        }
+    }
+
+    private func pollExport(_ request: ExportRequest) {
+        guard let handle = exportHandle, let status = try? handle.status() else { return }
+        let name = request.choice.url.lastPathComponent
+        let rows = status.rowsWritten.formatted()
+        if status.state == .running {
+            message = "exporting to \(name)… \(rows) rows"
+            return
+        }
+        exportPoll?.invalidate()
+        exportPoll = nil
+        exportHandle = nil
+        isExporting = false
+        switch status.state {
+        case .running, .done:
+            message = "exported \(rows) rows to \(name)"
+            isError = false
+        case .cancelled:
+            message = "export cancelled — \(name) was not written"
+            isError = false
+        case .failed:
+            if let decision = status.safety, decision.challenge != nil {
+                present(decision, profile: request.profile, keepsResult: true) { [weak self] in
+                    self?.startExport(request)
+                }
+                return
+            }
+            message = "export failed: \(status.error ?? "unknown error")"
+            isError = true
+        }
     }
 
     // MARK: - committing staged edits
