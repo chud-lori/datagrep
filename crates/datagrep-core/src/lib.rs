@@ -5,6 +5,7 @@ pub mod api;
 pub mod convert;
 pub mod export;
 pub mod feeder;
+pub mod format;
 pub mod query;
 pub mod registry;
 pub mod safety;

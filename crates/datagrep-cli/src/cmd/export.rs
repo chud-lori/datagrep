@@ -2,18 +2,17 @@ use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 use std::time::Instant;
 
-use datagrep_api::driver::{Batch, Payload};
+use datagrep_api::driver::Batch;
 use datagrep_api::error::DbError;
 use datagrep_api::request::ExecOpts;
 use datagrep_api::shape::Shape;
-use datagrep_api::{Request, Value};
-use datagrep_core::{ExportSink, SinkFlow};
+use datagrep_api::Request;
+use datagrep_core::{format, ExportSink, SinkFlow};
 
 use crate::cli::ExportArgs;
 use crate::context::Context;
 use crate::exit::CliError;
-use crate::format::{Row, RowSink, Summary};
-use crate::value_text::CellText;
+use crate::format::{RowSink, Summary};
 
 pub async fn run(ctx: &Context, args: &ExportArgs) -> Result<(), CliError> {
     let text = super::read_source(args.file.as_deref(), args.command.as_deref())?;
@@ -144,7 +143,7 @@ impl<'w> ExportRowSink<'w> {
             return Ok(());
         }
         if self.columns.is_empty() && width_hint > 0 {
-            self.columns = (0..width_hint).map(|i| format!("col{i}")).collect();
+            self.columns = format::placeholder_columns(width_hint);
         }
         self.inner.start(&self.columns)?;
         self.started = true;
@@ -193,19 +192,10 @@ impl<'w> ExportRowSink<'w> {
 
 impl ExportSink for ExportRowSink<'_> {
     fn begin(&mut self, shape: &Shape) -> Result<(), DbError> {
-        match shape {
-            Shape::Table(schema) => {
-                self.columns = schema.fields.iter().map(|f| f.name.to_string()).collect();
-            }
-            Shape::Documents { .. } => self.columns = vec!["doc".to_string()],
-            Shape::Pairs { .. } => {
-                self.columns = vec!["key".to_string(), "value".to_string()];
-            }
-            Shape::Ack { affected, message } => {
-                self.ack = Some((*affected, message.as_ref().map(|m| m.to_string())));
-            }
-            Shape::Graph(_) | Shape::Unknown => {}
+        if let Shape::Ack { affected, message } = shape {
+            self.ack = Some((*affected, message.as_ref().map(|m| m.to_string())));
         }
+        self.columns = format::shape_columns(shape);
         Ok(())
     }
 
@@ -219,18 +209,7 @@ impl ExportSink for ExportRowSink<'_> {
                 return Ok(SinkFlow::Stop);
             }
         }
-        let mut rows: Vec<Row> = match batch.payload {
-            Payload::Rows(rows) => rows
-                .iter()
-                .map(|row| row.iter().map(CellText::from_value).collect())
-                .collect(),
-            Payload::Docs(docs) => docs.iter().map(|d| vec![doc_cell(d)]).collect(),
-            Payload::Pairs(pairs) => pairs
-                .iter()
-                .map(|(k, v)| vec![CellText::from_value(k), CellText::from_value(v)])
-                .collect(),
-            Payload::Graph(_) | Payload::Empty => Vec::new(),
-        };
+        let mut rows = format::payload_rows(batch.payload);
         let mut hit_limit = false;
         if let Some(limit) = self.limit {
             let remaining = limit.saturating_sub(self.rows_written);
@@ -254,17 +233,6 @@ impl ExportSink for ExportRowSink<'_> {
             return Ok(SinkFlow::Stop);
         }
         Ok(SinkFlow::Continue)
-    }
-}
-
-fn doc_cell(v: &Value) -> CellText {
-    match v {
-        Value::Null => CellText::Null,
-        Value::Absent => CellText::Absent,
-        other => match serde_json::to_string(&crate::value_text::value_to_json(other)) {
-            Ok(json) => CellText::Json(json),
-            Err(_) => CellText::Text(String::from("<unserializable document>")),
-        },
     }
 }
 
