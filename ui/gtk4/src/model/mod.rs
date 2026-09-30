@@ -1,6 +1,7 @@
 mod catalog;
 mod detail;
 pub mod editing;
+mod export;
 pub mod format;
 pub mod history;
 pub mod mutation;
@@ -15,6 +16,7 @@ pub mod update;
 pub use catalog::{CatalogNode, Enumeration};
 pub use detail::{pretty_json, DetailColumn, DetailIndex, ObjectDetail};
 pub use editing::{PendingEdits, StagedCounts, StagedDocument, StagedField, StagedState};
+pub use export::{ExportFormat, ExportState, ExportStatus};
 pub use history::{HistoryEntry, HistoryFilter, HistoryStore, Outcome, Retention};
 pub use mutation::{
     document_address_batch_json, mutation_batch_json, DocumentAddress, DocumentMutation,

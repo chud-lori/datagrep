@@ -651,6 +651,7 @@ dependencies = [
  "bytes",
  "datagrep-api",
  "datagrep-lang",
+ "serde_json",
  "thiserror",
  "tokio",
  "tokio-util",

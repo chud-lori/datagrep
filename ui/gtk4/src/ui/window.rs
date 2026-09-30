@@ -14,10 +14,14 @@ use crate::model::mutation::{
 };
 use crate::model::safety::challenge_in_error;
 use crate::model::update::UpdateCheck;
-use crate::model::{ParkedResult, Requirement, ResultModel, SafetyDecision, StagedDocument};
+use crate::model::{
+    ExportFormat, ExportState, ExportStatus, ParkedResult, Requirement, ResultModel,
+    SafetyDecision, StagedDocument,
+};
 use crate::sql::Derived;
 use crate::ui::conflict::{ConflictDialog, ConflictReview};
 use crate::ui::editing::{commit_warning, confirm, report_dialog, report_headline};
+use crate::ui::export::ExportChoice;
 use crate::ui::safety::clear_challenge;
 use crate::ui::{ResultsGrid, Sidebar, StagedEditsBar, StatusBar};
 
@@ -52,6 +56,16 @@ mod imp {
         pub result_tab: RefCell<String>,
         pub active_tab: RefCell<String>,
         pub active_connection: RefCell<String>,
+        pub exporting: RefCell<Option<crate::ffi::Export>>,
+        pub export_button: gtk::Button,
+        pub toasts: adw::ToastOverlay,
+    }
+
+    #[derive(Clone)]
+    pub struct ExportJob {
+        pub profile: String,
+        pub sql: String,
+        pub choice: ExportChoice,
     }
 
     /// One tab's result off screen, with the clauses and the line about it.
@@ -91,6 +105,9 @@ mod imp {
                 result_tab: RefCell::new(String::new()),
                 active_tab: RefCell::new(String::new()),
                 active_connection: RefCell::new(String::new()),
+                exporting: RefCell::new(None),
+                export_button: gtk::Button::from_icon_name(EXPORT_ICON),
+                toasts: adw::ToastOverlay::new(),
             }
         }
     }
@@ -146,7 +163,8 @@ mod imp {
             let toolbar = adw::ToolbarView::new();
             toolbar.add_top_bar(&self.header());
             toolbar.add_top_bar(&self.notice_slot);
-            toolbar.set_content(Some(&self.navigation));
+            self.toasts.set_child(Some(&self.navigation));
+            toolbar.set_content(Some(&self.toasts));
             toolbar.add_bottom_bar(&self.status);
             obj.set_content(Some(&toolbar));
 
@@ -211,6 +229,15 @@ mod imp {
                 .sync_create()
                 .build();
             header.pack_end(&utility_toggle);
+
+            self.export_button.set_tooltip_text(Some(EXPORT_TOOLTIP));
+            let window = self.obj().downgrade();
+            self.export_button.connect_clicked(move |_| {
+                if let Some(window) = window.upgrade() {
+                    window.imp().export_or_cancel();
+                }
+            });
+            header.pack_end(&self.export_button);
             header
         }
 
@@ -303,6 +330,15 @@ mod imp {
                 }
             });
             self.obj().add_action(&new_connection);
+
+            let export = gio::SimpleAction::new("export", None);
+            let window = self.obj().downgrade();
+            export.connect_activate(move |_, _| {
+                if let Some(window) = window.upgrade() {
+                    window.imp().export_or_cancel();
+                }
+            });
+            self.obj().add_action(&export);
 
             let window = self.obj().downgrade();
             self.sidebar
@@ -872,6 +908,162 @@ mod imp {
             true
         }
 
+        fn export_or_cancel(&self) {
+            if let Some(export) = self.exporting.borrow().as_ref() {
+                export.cancel();
+                return;
+            }
+            let profile = self.ran_profile.borrow().clone();
+            let sql = self.derived.borrow().sql();
+            if profile.is_empty() || self.derived.borrow().base().trim().is_empty() {
+                self.status.say(
+                    "run a query first — export re-runs the result on screen",
+                    true,
+                );
+                return;
+            }
+            let formats = crate::ffi::export_formats_json(self.derived.borrow().driver())
+                .map(|json| ExportFormat::parse_list(&json))
+                .unwrap_or_default();
+            let window = self.obj().downgrade();
+            let name = profile.clone();
+            crate::ui::export::choose(self.obj().upcast_ref(), formats, &name, move |choice| {
+                if let Some(window) = window.upgrade() {
+                    window.imp().gate_export(ExportJob {
+                        profile: profile.clone(),
+                        sql: sql.clone(),
+                        choice,
+                    });
+                }
+            });
+        }
+
+        // The same pre-flight a run gets; the engine's gate stands behind it either way.
+        fn gate_export(&self, job: ExportJob) {
+            let Some(core) = self.core.borrow().clone() else {
+                return;
+            };
+            if !self
+                .sidebar
+                .safety_of(&job.profile)
+                .unwrap_or_default()
+                .gates()
+            {
+                return self.start_export(job);
+            }
+            let worker = (*core).clone();
+            let (eval_profile, eval_sql) = (job.profile.clone(), job.sql.clone());
+            let window = self.obj().downgrade();
+            glib::spawn_future_local(async move {
+                let evaluated = gio::spawn_blocking(move || {
+                    worker.safety_evaluate_json(&eval_profile, &eval_sql)
+                })
+                .await;
+                let Some(window) = window.upgrade() else {
+                    return;
+                };
+                let decision = evaluated
+                    .ok()
+                    .and_then(Result::ok)
+                    .and_then(|json| SafetyDecision::parse(&json));
+                match decision {
+                    Some(decision) if decision.requires != Requirement::None => {
+                        window.imp().perform_ceremony(decision, move |window| {
+                            window.imp().start_export(job.clone())
+                        })
+                    }
+                    _ => window.imp().start_export(job),
+                }
+            });
+        }
+
+        fn start_export(&self, job: ExportJob) {
+            let Some(core) = self.core.borrow().clone() else {
+                return;
+            };
+            if self.exporting.borrow().is_some() {
+                return;
+            }
+            let path = job.choice.path.to_string_lossy().into_owned();
+            let started = core.export(
+                &job.profile,
+                &job.sql,
+                job.choice.format.as_str(),
+                job.choice.table.as_deref(),
+                &path,
+            );
+            match started {
+                Ok(export) => {
+                    *self.exporting.borrow_mut() = Some(export);
+                    self.export_button.set_icon_name("process-stop-symbolic");
+                    self.export_button.set_tooltip_text(Some("Cancel Export"));
+                    let window = self.obj().downgrade();
+                    glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+                        match window.upgrade() {
+                            Some(window) => window.imp().poll_export(&job),
+                            None => glib::ControlFlow::Break,
+                        }
+                    });
+                }
+                Err(error) => self
+                    .status
+                    .say(&format!("export failed: {}", error.0), true),
+            }
+        }
+
+        fn poll_export(&self, job: &ExportJob) -> glib::ControlFlow {
+            let status = match self.exporting.borrow().as_ref() {
+                Some(export) => match export.status_json() {
+                    Ok(json) => ExportStatus::parse(&json),
+                    Err(error) => ExportStatus {
+                        state: ExportState::Failed,
+                        error: Some(error.0),
+                        ..ExportStatus::default()
+                    },
+                },
+                None => return glib::ControlFlow::Break,
+            };
+            let name = job
+                .choice
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let rows = status.rows_written;
+            if status.state == ExportState::Running {
+                self.status
+                    .say(&format!("exporting to {name}… {rows} rows"), false);
+                return glib::ControlFlow::Continue;
+            }
+            self.exporting.borrow_mut().take();
+            self.export_button.set_icon_name(EXPORT_ICON);
+            self.export_button.set_tooltip_text(Some(EXPORT_TOOLTIP));
+            match (status.state, status.safety) {
+                (ExportState::Done, _) => {
+                    let line = format!("exported {rows} rows to {name}");
+                    self.status.say(&line, false);
+                    self.toasts.add_toast(adw::Toast::new(&line));
+                }
+                (ExportState::Cancelled, _) => self
+                    .status
+                    .say(&format!("export cancelled — {name} was not written"), false),
+                (_, Some(decision)) if decision.challenge.is_some() => {
+                    let job = job.clone();
+                    self.perform_ceremony(decision, move |window| {
+                        window.imp().start_export(job.clone())
+                    });
+                }
+                _ => self.status.say(
+                    &format!(
+                        "export failed: {}",
+                        status.error.as_deref().unwrap_or("unknown error")
+                    ),
+                    true,
+                ),
+            }
+            glib::ControlFlow::Break
+        }
+
         fn launch(&self) {
             let Some(core) = self.core.borrow().clone() else {
                 return;
@@ -908,6 +1100,9 @@ mod imp {
     }
 }
 
+const EXPORT_ICON: &str = "document-save-as-symbolic";
+const EXPORT_TOOLTIP: &str = "Export Result — every row, as CSV, JSON, Markdown or SQL";
+
 fn primary_menu() -> gtk::MenuButton {
     let appearance = gio::Menu::new();
     for (label, value) in [
@@ -921,6 +1116,7 @@ fn primary_menu() -> gtk::MenuButton {
     }
     let view = gio::Menu::new();
     view.append(Some("Query History"), Some("win.history"));
+    view.append(Some("Export Result…"), Some("win.export"));
 
     let updates = gio::Menu::new();
     updates.append(Some("Check for Updates…"), Some("win.check-updates"));
