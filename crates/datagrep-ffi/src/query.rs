@@ -421,7 +421,7 @@ async fn run_to_completion(
     result
 }
 
-fn request_for(sql: &str, read_only: bool) -> datagrep_api::Request {
+pub(crate) fn request_for(sql: &str, read_only: bool) -> datagrep_api::Request {
     datagrep_api::Request::Native {
         text: Arc::from(sql),
         params: Vec::new(),
@@ -461,7 +461,7 @@ fn preview(stmt: &str) -> String {
     }
 }
 
-fn split_statements(driver_id: &str, sql: &str) -> Vec<String> {
+pub(crate) fn split_statements(driver_id: &str, sql: &str) -> Vec<String> {
     let Some(language) = language_for_driver(driver_id) else {
         return vec![sql.to_string()];
     };

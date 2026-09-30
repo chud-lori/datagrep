@@ -7,6 +7,7 @@
 typedef struct DatagrepCore  DatagrepCore;    // opaque
 typedef struct DatagrepQuery DatagrepQuery;   // opaque
 typedef struct DatagrepRows  DatagrepRows;    // opaque, one materialised window
+typedef struct DatagrepExport DatagrepExport; // opaque, one running export
 
 // ---- lifecycle -------------------------------------------------------
 // Creates the engine + its own tokio runtime thread. Never blocks.
@@ -313,6 +314,30 @@ char* datagrep_safety_pending_json(DatagrepCore*, const char* profile, char** er
 // unknown/expired/already-used challenge, or evidence too weak for the rung.
 bool datagrep_safety_satisfy(DatagrepCore*, const char* profile, const char* challenge,
                              const char* attestation_json, char** err_out);
+
+// ---- export: one statement's full result to a file ---------------------
+// Formats this engine can export, as a JSON array drawn from
+// ["csv","json","markdown","sql"]. "sql" (INSERT statements) is offered only
+// where an INSERT can recreate the rows. Caller frees.
+char* datagrep_export_formats_json(const char* driver_id);
+
+// Non-blocking, like datagrep_query_run: re-runs `sql` on `profile` and streams
+// every row, never just the loaded window, into `path`. It takes the same gated
+// path as a run, so the safety ladder and read-only apply; a refusal surfaces
+// in the status exactly as it does for a query. Exactly one statement, and one
+// that only reads — export never re-runs a write. `table` names the INSERT
+// target for "sql" (dots qualify it) and is ignored otherwise; NULL is allowed.
+// The file appears only on success: rows go to `path`.part, renamed when done.
+DatagrepExport* datagrep_export_start(DatagrepCore*, const char* profile, const char* sql,
+                                      const char* format, const char* table,
+                                      const char* path, char** err_out);
+// {"state":"running"|"done"|"cancelled"|"failed","rows_written":u64,
+//  "error":str|null,"safety":null|{...same object as datagrep_query_status_json}}
+char* datagrep_export_status_json(DatagrepExport*, char** err_out);
+// Returns instantly; the server is asked to stop and the partial file removed.
+void  datagrep_export_cancel(DatagrepExport*);
+// Cancels a running export.
+void  datagrep_export_free(DatagrepExport*);
 
 // ---- rows: the hot path ----------------------------------------------
 // Materialises ONLY [offset, offset+len). Returns NULL on error.
