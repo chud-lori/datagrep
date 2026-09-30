@@ -8,8 +8,8 @@ Every claim about datagrep cites `file:line` on that commit. Size and memory fig
 binaries are **estimates** until Phase 0 measures them; they are marked as such.
 
 A reference client ships this pattern (per-engine driver processes over stdio, roughly 50 engines,
-Go and Java). It was studied for protocol, lifecycle, packaging and recovery. It is AGPL-3.0 and
-datagrep is Apache-2.0, so nothing is copied; section 10 lists what we take as lessons and what we
+Go and Java). It was studied for protocol, lifecycle, packaging and recovery. Both projects are
+Apache-2.0, but nothing is copied: the structures differ, and section 10 lists what we take as lessons and what we
 deliberately do differently.
 
 Jump to: [0. Decisions](#0-decisions-at-a-glance) · [1. Plug-in point](#1-where-the-sidecar-plugs-in)
@@ -449,8 +449,7 @@ allows. Against malice, the control is the supply chain.
 - `govulncheck ./...` per engine module. It fails on reachable vulnerabilities, which is the same
   bar as `cargo audit --deny warnings`.
 - A licence check with the same allowlist spirit as `deny.toml [licenses]` (for example
-  `go-licenses check`). The drivers above are Apache-2.0, BSD-3 or MIT. **AGPL/GPL is banned**,
-  which keeps the reference client's code out by construction too.
+  `go-licenses check`). The drivers above are Apache-2.0, BSD-3 or MIT. **AGPL/GPL is banned**.
 - `go.sum` is committed, `-mod=readonly` is set, the toolchain is pinned, and Dependabot is enabled
   for `gomod`.
 - The CI job installs Go in `.github/workflows/ci.yml`. The gate fails in CI and warns locally when
