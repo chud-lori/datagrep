@@ -262,6 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func runStatement(_ sender: Any?) { model.runStatementUnderCaret() }
     @objc func cancelQuery(_ sender: Any?) { model.cancel() }
+    @objc func exportResult(_ sender: Any?) { model.exportResult() }
     @objc func newConnection(_ sender: Any?) { model.showNewConnection = true }
     @objc func focusEditor(_ sender: Any?) { model.editor.focus() }
     @objc func reportFootprint(_ sender: Any?) { model.reportFootprint() }
@@ -333,6 +334,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let fileItem = NSMenuItem()
         let fileMenu = NSMenu(title: "File")
         add(fileMenu, "New Connection…", #selector(newConnection(_:)), "n")
+        add(fileMenu, "Export Result…", #selector(exportResult(_:)), "E")
         fileMenu.addItem(.separator())
         add(fileMenu, "Close Window", #selector(NSWindow.performClose(_:)), "w")
         fileItem.submenu = fileMenu

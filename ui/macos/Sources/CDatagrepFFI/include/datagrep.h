@@ -25,6 +25,7 @@ extern "C" {
 typedef struct DatagrepCore  DatagrepCore;
 typedef struct DatagrepQuery DatagrepQuery;
 typedef struct DatagrepRows  DatagrepRows;
+typedef struct DatagrepExport DatagrepExport;
 
 DatagrepCore *datagrep_core_new(const char *profiles_db_path, char **err_out);
 void     datagrep_core_free(DatagrepCore *);
@@ -80,6 +81,22 @@ char *datagrep_query_status_json(DatagrepQuery *, char **err_out);
 typedef void (*DatagrepProgressFn)(void *ctx);
 /* NOTE: cb is invoked on a BACKGROUND THREAD. */
 void datagrep_query_on_progress(DatagrepQuery *, DatagrepProgressFn cb, void *ctx);
+
+/* ---- export: one statement's full result to a file ----
+ * Formats for this engine, from ["csv","json","markdown","sql"]; "sql" only
+ * where an INSERT can recreate the rows. */
+char *datagrep_export_formats_json(const char *driver_id);
+/* Non-blocking. Re-runs `sql` through the same gated path as a run and streams
+ * every row into `path` (via `path`.part, renamed on success). One statement
+ * that only reads. `table` is the INSERT target for "sql"; NULL otherwise. */
+DatagrepExport *datagrep_export_start(DatagrepCore *, const char *profile, const char *sql,
+                                      const char *format, const char *table, const char *path,
+                                      char **err_out);
+/* {"state":"running"|"done"|"cancelled"|"failed","rows_written":u64,
+ *  "error":str|null,"safety":null|{same as datagrep_query_status_json}} */
+char *datagrep_export_status_json(DatagrepExport *, char **err_out);
+void  datagrep_export_cancel(DatagrepExport *);
+void  datagrep_export_free(DatagrepExport *);
 
 DatagrepRows *datagrep_query_rows(DatagrepQuery *, uint64_t offset, uint64_t len, char **err_out);
 void     datagrep_rows_free(DatagrepRows *);
