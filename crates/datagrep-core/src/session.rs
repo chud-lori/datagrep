@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use datagrep_api::caps::Capabilities;
 use datagrep_api::catalog::Catalog;
-use datagrep_api::config::{ConnectionConfig, ResolvedConfig};
+use datagrep_api::config::{ConfigValue, ConnectionConfig, ResolvedConfig};
 use datagrep_api::driver::{
     CancelFlag, Canceller, ConnectCtx, Connection, Cursor, Driver, Enforcement, ServerInfo,
 };
@@ -653,7 +653,17 @@ impl SessionRegistry {
         if let Some(session) = sessions.get(&profile) {
             return Ok(session.clone());
         }
-        let gate = SafetyGate::new(profile, name, driver.capabilities().language, level);
+        let database = match config.values.get("database") {
+            Some(ConfigValue::Str(db)) if !db.is_empty() => Some(Arc::from(db.as_str())),
+            _ => None,
+        };
+        let gate = SafetyGate::new(
+            profile,
+            name,
+            driver.capabilities().language,
+            database,
+            level,
+        );
         let session = Session::new(
             profile,
             gate,

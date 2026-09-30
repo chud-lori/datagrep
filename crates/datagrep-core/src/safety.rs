@@ -66,6 +66,7 @@ pub struct SafetyGate {
     profile: ProfileId,
     name: Arc<str>,
     language: LanguageId,
+    database: Option<Arc<str>>,
     state: Mutex<GateState>,
     seed: u64,
     next: AtomicU64,
@@ -76,12 +77,14 @@ impl SafetyGate {
         profile: ProfileId,
         name: impl Into<Arc<str>>,
         language: LanguageId,
+        database: Option<Arc<str>>,
         level: SafetyLevel,
     ) -> Arc<Self> {
         Arc::new(Self {
             profile,
             name: name.into(),
             language,
+            database,
             state: Mutex::new(GateState {
                 level,
                 pending: Vec::new(),
@@ -131,7 +134,8 @@ impl SafetyGate {
                 continue;
             }
             let class = language.classify(&text);
-            let stmt = self.level().requirement(class == StatementClass::Read);
+            let read = class == StatementClass::Read && !self.leaves_database(&text);
+            let stmt = self.level().requirement(read);
             requirement = requirement.max(stmt);
             bindings.push(text.clone());
             statements.push(SafetyStatement {
@@ -301,7 +305,8 @@ impl SafetyGate {
                     if stmt.is_empty() {
                         continue;
                     }
-                    if language.classify(stmt) != StatementClass::Read {
+                    if language.classify(stmt) != StatementClass::Read || self.leaves_database(stmt)
+                    {
                         return false;
                     }
                     seen = true;
@@ -310,6 +315,14 @@ impl SafetyGate {
             }
             Request::Op(op) => self.op_is_read(op),
         }
+    }
+
+    // A read of another database is held to the write rung.
+    fn leaves_database(&self, stmt: &str) -> bool {
+        let (Some(current), LanguageId::Sql(dialect)) = (&self.database, self.language) else {
+            return false;
+        };
+        !datagrep_lang::sql::references::foreign_databases(stmt, dialect, current).is_empty()
     }
 
     fn op_is_read(&self, op: &Op) -> bool {
@@ -365,7 +378,18 @@ mod tests {
             ProfileId(1),
             "prod",
             LanguageId::Sql(SqlDialect::Postgres),
+            None,
             level,
+        )
+    }
+
+    fn pointed_at(dialect: SqlDialect, database: Option<&str>) -> Arc<SafetyGate> {
+        SafetyGate::new(
+            ProfileId(1),
+            "staging",
+            LanguageId::Sql(dialect),
+            database.map(Arc::from),
+            SafetyLevel::WarnWrites,
         )
     }
 
@@ -530,5 +554,34 @@ mod tests {
         gate.satisfy(&id, &Attestation::Acknowledged).unwrap();
         gate.set_level(SafetyLevel::AuthWrites);
         assert!(gate.admit(&native("delete from users")).is_err());
+    }
+
+    #[test]
+    fn a_read_of_another_database_is_held_to_the_write_rung() {
+        let gate = pointed_at(SqlDialect::Mysql, Some("staging"));
+        assert!(gate.admit(&native("select * from prod.users")).is_err());
+        assert!(gate.admit(&native("select * from `Staging`.users")).is_ok());
+        assert!(gate.admit(&native("select * from users")).is_ok());
+
+        let decision = gate.plan("select 1; select * from prod.users");
+        assert_eq!(decision.statements[0].requirement, Requirement::None);
+        assert_eq!(decision.statements[1].requirement, Requirement::Warn);
+        assert_eq!(decision.statements[1].class, StatementClass::Read);
+    }
+
+    #[test]
+    fn schemas_and_unconfigured_databases_are_left_alone() {
+        let pg = pointed_at(SqlDialect::Postgres, Some("staging"));
+        assert!(pg.admit(&native("select * from prod.users")).is_ok());
+        let unset = pointed_at(SqlDialect::Mysql, None);
+        assert!(unset.admit(&native("select * from prod.users")).is_ok());
+        let silent = SafetyGate::new(
+            ProfileId(1),
+            "staging",
+            LanguageId::Sql(SqlDialect::Mysql),
+            Some(Arc::from("staging")),
+            SafetyLevel::Silent,
+        );
+        assert!(silent.admit(&native("select * from prod.users")).is_ok());
     }
 }
