@@ -20,14 +20,14 @@ fn is_word_continue(b: u8) -> bool {
     is_word_start(b) || b.is_ascii_digit()
 }
 
-fn significant_lexemes(stmt: &str) -> Vec<Lexeme<'_>> {
-    let chunks = lex_chunks(stmt, SqlDialect::Postgres);
+fn significant_lexemes(stmt: &str, dialect: SqlDialect) -> Vec<Lexeme<'_>> {
+    let chunks = lex_chunks(stmt, dialect);
     let bytes = stmt.as_bytes();
     let mut out = Vec::new();
     for chunk in chunks {
         let range = match chunk {
             Chunk::Code(range) => range,
-            Chunk::Quoted(_, QuoteKind::DoubleIdent) => {
+            Chunk::Quoted(_, QuoteKind::DoubleIdent | QuoteKind::Backtick | QuoteKind::Bracket) => {
                 out.push(Lexeme::QuotedIdent);
                 continue;
             }
@@ -61,8 +61,8 @@ fn significant_lexemes(stmt: &str) -> Vec<Lexeme<'_>> {
     out
 }
 
-pub fn classify(stmt: &str) -> StatementClass {
-    let toks = significant_lexemes(stmt);
+pub fn classify(stmt: &str, dialect: SqlDialect) -> StatementClass {
+    let toks = significant_lexemes(stmt, dialect);
     match classify_from(&toks, 0).0 {
         StatementClass::Read if has_executable_comment(stmt) => StatementClass::Unknown,
         class => class,
@@ -587,6 +587,35 @@ fn skip_balanced(toks: &[Lexeme<'_>], idx: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use StatementClass::*;
+
+    fn classify(stmt: &str) -> StatementClass {
+        super::classify(stmt, SqlDialect::Postgres)
+    }
+
+    #[test]
+    fn mysql_quoting_rules_decide_what_is_code() {
+        let escaped_quote = r"SELECT 'a\'', (SELECT 1 INTO OUTFILE '/tmp/x') -- '";
+        let hash_comment = "SELECT 1 # '\n, (SELECT 1 INTO OUTFILE '/tmp/x') -- '";
+        assert_eq!(super::classify(escaped_quote, SqlDialect::Mysql), Write);
+        assert_eq!(super::classify(hash_comment, SqlDialect::Mysql), Write);
+        assert_eq!(classify(escaped_quote), Read);
+        assert_eq!(classify(hash_comment), Read);
+        assert_eq!(
+            super::classify("SELECT `sleep`(5)", SqlDialect::Mysql),
+            Unknown
+        );
+        assert_eq!(
+            super::classify("SELECT [sleep](5)", SqlDialect::Sqlite),
+            Unknown
+        );
+        assert_eq!(
+            super::classify(
+                r"SELECT `into`, 'it\'s into' FROM t # for update",
+                SqlDialect::Mysql
+            ),
+            Read
+        );
+    }
 
     #[test]
     fn basic_dml_and_ddl_and_tcl_and_admin() {

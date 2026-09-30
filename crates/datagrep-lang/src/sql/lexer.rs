@@ -45,21 +45,21 @@ pub fn lex_chunks(src: &str, dialect: SqlDialect) -> Vec<Chunk> {
         match b {
             b'\'' => {
                 flush_code!(i);
-                let end = scan_simple_quoted(bytes, i, b'\'');
+                let end = scan_simple_quoted(bytes, i, b'\'', dialect == SqlDialect::Mysql);
                 chunks.push(Chunk::Quoted(i..end, QuoteKind::SingleString));
                 i = end;
                 code_start = i;
             }
             b'"' => {
                 flush_code!(i);
-                let end = scan_simple_quoted(bytes, i, b'"');
+                let end = scan_simple_quoted(bytes, i, b'"', dialect == SqlDialect::Mysql);
                 chunks.push(Chunk::Quoted(i..end, QuoteKind::DoubleIdent));
                 i = end;
                 code_start = i;
             }
             b'`' if dialect == SqlDialect::Mysql => {
                 flush_code!(i);
-                let end = scan_simple_quoted(bytes, i, b'`');
+                let end = scan_simple_quoted(bytes, i, b'`', false);
                 chunks.push(Chunk::Quoted(i..end, QuoteKind::Backtick));
                 i = end;
                 code_start = i;
@@ -111,9 +111,13 @@ pub fn lex_chunks(src: &str, dialect: SqlDialect) -> Vec<Chunk> {
     chunks
 }
 
-fn scan_simple_quoted(bytes: &[u8], start: usize, quote: u8) -> usize {
+fn scan_simple_quoted(bytes: &[u8], start: usize, quote: u8, backslash_escapes: bool) -> usize {
     let mut i = start + 1;
     while i < bytes.len() {
+        if backslash_escapes && bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
         if bytes[i] == quote {
             if bytes.get(i + 1) == Some(&quote) {
                 i += 2;
@@ -283,6 +287,15 @@ mod tests {
             .iter()
             .any(|c| matches!(c, Chunk::Quoted(_, QuoteKind::Backtick))));
         assert!(chunks.iter().any(|c| matches!(c, Chunk::Comment(_))));
+    }
+
+    #[test]
+    fn mysql_strings_honour_backslash_escapes() {
+        let src = r"select 'a\'', 1";
+        assert_eq!(code(src, SqlDialect::Mysql), vec![0..7, 12..src.len()]);
+        assert_eq!(code(src, SqlDialect::Postgres), vec![0..7]);
+        let src = r#"select "a\"", 1"#;
+        assert_eq!(code(src, SqlDialect::Mysql), vec![0..7, 12..src.len()]);
     }
 
     #[test]
