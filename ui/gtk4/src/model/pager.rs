@@ -55,9 +55,8 @@ impl<W: WindowMeta> Pager<W> {
         self.order.clear();
     }
 
-    /// Returns the rows that were drawing as skeletons out of the dropped pages.
-    /// A short page is stale only once `loaded` reaches past it: the last page of
-    /// a finished result is short forever.
+    /// Returns the skeleton rows of the dropped pages; a short page is stale only once
+    /// `loaded` reaches past it, since a finished result's last page is short forever.
     pub fn invalidate_partial(&mut self, loaded: u64) -> Vec<Range<u64>> {
         let size = self.page_size;
         let mut stale: Vec<Range<u64>> = Vec::new();

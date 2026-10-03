@@ -1,4 +1,4 @@
-// Verification harness for schema-aware completion and SQL formatting — to PNGs.
+// Verification harness for schema-aware completion and SQL formatting, rendered to PNGs.
 use std::sync::Arc;
 
 use adw::prelude::*;

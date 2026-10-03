@@ -114,7 +114,7 @@ QString StatusBar::rowCountText(const dg::QueryStatus& s) const {
 
 QString StatusBar::incompleteNotice(const dg::QueryStatus& s) const {
     if (s.capped()) {
-        return QStringLiteral("stopped at the %1-row cap — result incomplete")
+        return QStringLiteral("stopped at the %1-row cap, result incomplete")
             .arg(formatCount(s.rowsLoaded));
     }
     if (limitHit(s)) {
@@ -126,7 +126,7 @@ QString StatusBar::incompleteNotice(const dg::QueryStatus& s) const {
 
 QString StatusBar::readOnlyBadge(const dg::QueryStatus& s) {
     if (s.readOnlyEnforcement.isEmpty()) {
-        return QString();  // writeable profile — nothing to badge
+        return QString();  // writeable profile; nothing to badge
     }
     if (s.readOnlyEnforcement == QStringLiteral("server")) {
         return s.readOnlyServerConfirmed
@@ -137,7 +137,7 @@ QString StatusBar::readOnlyBadge(const dg::QueryStatus& s) {
         return QStringLiteral("read-only (datagrep only)");
     }
     // "none": datagrep refuses writes, but nothing on the server does.
-    return QStringLiteral("read-only (datagrep only — server unguarded)");
+    return QStringLiteral("read-only (datagrep only, server unguarded)");
 }
 
 void StatusBar::updateStatus(const dg::QueryStatus& status) {
@@ -155,11 +155,11 @@ void StatusBar::updateStatus(const dg::QueryStatus& status) {
     rowsLabel_->setText(rowCountText(status));
     rowsLabel_->setToolTip(
         status.capped()
-            ? QStringLiteral("the engine stopped storing rows at its cap — this "
+            ? QStringLiteral("the engine stopped storing rows at its cap; this "
                              "is not the whole result")
             : (!status.totalKnown && status.streaming() == false
                    ? QStringLiteral("≥ because this engine streams without "
-                                    "reporting a total — more rows may exist")
+                                    "reporting a total, so more rows may exist")
                    : QString()));
 
     const QString notice = incompleteNotice(status);
@@ -167,12 +167,12 @@ void StatusBar::updateStatus(const dg::QueryStatus& status) {
     noticeLabel_->setToolTip(
         status.capped()
             ? QStringLiteral("the engine's soft row cap ended this result early; "
-                             "rows beyond this point exist but were not fetched — "
+                             "rows beyond this point exist but were not fetched; "
                              "narrow the query to see them")
             : (notice.isEmpty()
                    ? QString()
                    : QStringLiteral("an @limit directive stopped this result "
-                                    "early — the full result may be longer; "
+                                    "early, so the full result may be longer; "
                                     "raise or remove the @limit to fetch more")));
 
     elapsedLabel_->setText(formatElapsed(status.elapsedMs));

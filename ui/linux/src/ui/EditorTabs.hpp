@@ -1,5 +1,3 @@
-// EditorTabs.hpp — every open SQL editor, in one tab bar.
-
 #ifndef DATAGREP_EDITOR_TABS_HPP
 #define DATAGREP_EDITOR_TABS_HPP
 

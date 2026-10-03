@@ -48,7 +48,6 @@ impl SafetyLevel {
         }
     }
 
-    /// The picker's row title.
     pub fn title(self) -> &'static str {
         match self {
             SafetyLevel::Silent => "Silent",
@@ -59,7 +58,7 @@ impl SafetyLevel {
         }
     }
 
-    /// The line under the picker — short enough to leave the selected level its room.
+    /// The line under the picker, short enough to leave the selected level its room.
     pub fn blurb(self) -> &'static str {
         match self {
             SafetyLevel::Silent => "Sends every statement without asking",
@@ -70,7 +69,7 @@ impl SafetyLevel {
         }
     }
 
-    /// "`prod` …" — the connection as the subject of the sentence.
+    /// "`prod` …": the connection as the subject of the sentence.
     pub fn phrase(self) -> &'static str {
         match self {
             SafetyLevel::Silent => "sends every statement without asking",

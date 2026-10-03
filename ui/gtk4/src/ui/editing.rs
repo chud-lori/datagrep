@@ -30,7 +30,7 @@ pub fn commit_warning(count: u32, atomic: bool) -> String {
     format!(
         "{count} documents will be written one by one, and there is no transaction: if #{example} \
          fails, the {before} before it stay written and nothing is rolled back. The report then \
-         names every document — written, refused, or never attempted — and anything not written \
+         names every document (written, refused, or never attempted), and anything not written \
          stays staged."
     )
 }
@@ -303,11 +303,11 @@ fn row_line(row: &MutationRow) -> (String, String) {
         }
         MutationOutcome::NotAttempted => (
             "…".to_owned(),
-            "never attempted — the batch stopped before it, so this is still staged".to_owned(),
+            "never attempted: the batch stopped before it, so this is still staged".to_owned(),
         ),
         MutationOutcome::Failed if row.conflict => (
             "⑂".to_owned(),
-            "version conflict — this document changed on the server after you loaded it, so \
+            "version conflict: this document changed on the server after you loaded it, so \
              nothing was written"
                 .to_owned(),
         ),
@@ -328,7 +328,7 @@ fn report_subtitle(report: &MutationReport) -> String {
     }
     if report.not_attempted > 0 {
         text.push_str(&format!(
-            " · {} never attempted. The ones that were never attempted are still staged — nothing \
+            " · {} never attempted. The ones that were never attempted are still staged. Nothing \
              was written for them, and nothing was lost.",
             report.not_attempted
         ));
@@ -337,7 +337,7 @@ fn report_subtitle(report: &MutationReport) -> String {
         text.push_str(
             " A version conflict means the document changed on the server after you loaded it, so \
              the write was refused rather than overwriting someone else's change. What you typed \
-             is still staged — resolve it to see what changed.",
+             is still staged; resolve it to see what changed.",
         );
     }
     text
@@ -406,7 +406,7 @@ pub fn report_dialog(report: &MutationReport, on_resolve: impl Fn() + 'static) -
     dialog
 }
 
-/// One scrolled list under a heading, closed by Done — the shape both review dialogs take.
+/// One scrolled list under a heading, closed by Done: the shape both review dialogs take.
 pub(crate) struct Shell<'a> {
     pub dialog_title: &'a str,
     pub title: &'a str,

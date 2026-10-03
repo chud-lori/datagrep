@@ -213,7 +213,7 @@ QVariant ResultModel::data(const QModelIndex& index, int role) const {
             }
             return QVariant();
         case Qt::ToolTipRole:
-            // On-demand raw JSON for a single cell — never bulk.
+            // On-demand raw JSON for a single cell; never bulk.
             if (kind == dg::CellKind::Nested || kind == dg::CellKind::Value) {
                 if (auto detail = window->cellDetailJson(absRow, absCol)) {
                     return QString::fromStdString(*detail);

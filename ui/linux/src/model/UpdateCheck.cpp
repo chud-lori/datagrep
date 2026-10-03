@@ -57,7 +57,7 @@ void UpdateCheck::skip(const dg::UpdateManifest& manifest) {
     QSettings().setValue(skippedVersionKey(), manifest.version);
 }
 
-// One GET, short timeout, default manager — nothing cached, nothing persisted.
+// One GET, short timeout, default manager; nothing cached, nothing persisted.
 void UpdateCheck::fetchManifest(bool userInitiated) {
     QNetworkRequest request(manifestUrl());
     request.setRawHeader("Accept", "application/json");

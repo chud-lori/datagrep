@@ -141,7 +141,7 @@ fn cell(text: &str, tinted: bool) -> gtk::Label {
 
 fn summary(document: &ConflictDocument) -> String {
     match document.contested() {
-        0 => "The fields you edited are unchanged — somebody changed this document elsewhere. \
+        0 => "The fields you edited are unchanged; somebody changed this document elsewhere. \
               Re-applying writes your edits onto their version and overwrites nothing of theirs."
             .to_owned(),
         1 => "1 of the fields you edited was changed by somebody else. Re-applying overwrites \
@@ -208,7 +208,7 @@ fn document_block(document: &ConflictDocument, choose: &Choose) -> gtk::Widget {
         block.append(&note(&document.error, true));
     } else if document.gone {
         block.append(&note(
-            "This document is no longer on the server — somebody deleted it. There is no version \
+            "This document is no longer on the server; somebody deleted it. There is no version \
              to re-apply your edits onto.",
             true,
         ));
@@ -249,7 +249,7 @@ fn document_block(document: &ConflictDocument, choose: &Choose) -> gtk::Widget {
     block.upcast()
 }
 
-/// Deliberately never offers "retry as written" — that is the clobber the guard exists to prevent.
+/// Deliberately never offers "retry as written": that is the clobber the guard exists to prevent.
 pub struct ConflictDialog {
     dialog: adw::Dialog,
     list: gtk::Box,
@@ -277,7 +277,7 @@ impl ConflictDialog {
                 dialog_title: "Resolve conflicts",
                 title: &title,
                 subtitle: "Nothing was written for these. Each one is shown as you loaded it, as \
-                           the server holds it now, and as you typed it — so you can re-apply your \
+                           the server holds it now, and as you typed it, so you can re-apply your \
                            edits onto the current version, or drop them.",
                 footer: "Anything left unresolved stays staged and unwritten.",
                 size: (720, 520),

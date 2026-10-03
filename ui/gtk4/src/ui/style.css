@@ -1,6 +1,4 @@
-/* The gutter's rows and the grid's cells must request the same height: they are
-   two views sharing one vertical adjustment, so a pixel of drift misaligns every
-   row number below the fold. */
+/* Gutter rows and grid cells share one vertical adjustment, so their heights must match. */
 columnview.data-table > listview > row > cell,
 listview.dg-gutter > row {
   padding: 4px 8px;

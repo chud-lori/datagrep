@@ -50,7 +50,7 @@ mod imp {
             static SIGNALS: OnceLock<Vec<Signal>> = OnceLock::new();
             SIGNALS.get_or_init(|| {
                 vec![
-                    // (profile name or "", sql) — profile already resolved by precedence.
+                    // (profile name or "", sql); profile already resolved by precedence.
                     Signal::builder("run-requested")
                         .param_types([String::static_type(), String::static_type()])
                         .build(),
@@ -128,7 +128,7 @@ impl EditorTabs {
         let plus = adw::SplitButton::new();
         plus.set_icon_name("list-add-symbolic");
         plus.set_tooltip_text(Some(
-            "New query tab (Ctrl+T) — the arrow reopens a saved query",
+            "New query tab (Ctrl+T); the arrow reopens a saved query",
         ));
         plus.set_menu_model(Some(&imp.saved_menu));
         plus.connect_clicked(glib::clone!(
@@ -354,8 +354,6 @@ impl EditorTabs {
         ));
     }
 
-    // ---- pages -----------------------------------------------------------
-
     fn pages(&self) -> Vec<adw::TabPage> {
         self.imp()
             .tab_view
@@ -516,8 +514,6 @@ impl EditorTabs {
             .map(|p| self.editor_of(&p))
     }
 
-    // ---- run: the one precedence rule ------------------------------------
-
     /// Where this editor's statements go when no `-- @connection` overrides it.
     fn target_of(&self, editor: &EditorPage, directive: Option<&str>) -> String {
         let binding = editor.connection_binding();
@@ -578,8 +574,6 @@ impl EditorTabs {
         self.editors().iter().map(EditorPage::id).collect()
     }
 
-    // ---- close -----------------------------------------------------------
-
     fn on_close_page(&self, view: &adw::TabView, page: &adw::TabPage) -> glib::Propagation {
         let editor = self.editor_of(page);
         if editor.skip_close_confirm() {
@@ -599,7 +593,7 @@ impl EditorTabs {
             self.store().delete(&editor.snapshot_record());
             return glib::Propagation::Proceed;
         }
-        // The ONLY action that destroys typed SQL, so the only one that confirms.
+        // The only action that destroys typed SQL, so the only one that confirms.
         let dialog = adw::AlertDialog::new(
             Some("Discard This Scratch Tab?"),
             Some("Its SQL has never been named or saved. Closing the tab discards it permanently."),
@@ -630,8 +624,6 @@ impl EditorTabs {
         );
         glib::Propagation::Stop
     }
-
-    // ---- naming / saving -------------------------------------------------
 
     fn save_target(&self) {
         let Some(page) = self.target_page() else {
@@ -670,7 +662,7 @@ impl EditorTabs {
                     if response != "save" || name.is_empty() {
                         return;
                     }
-                    // New basename first, old pair dropped after — never the reverse.
+                    // New basename first, old pair dropped after, never the reverse.
                     let old = editor.snapshot_record();
                     editor.set_name(&name);
                     let store = tabs.store();
@@ -685,8 +677,6 @@ impl EditorTabs {
             ),
         );
     }
-
-    // ---- chrome ----------------------------------------------------------
 
     fn connection_info(&self, name: &str) -> Option<Profile> {
         self.imp()
@@ -722,9 +712,9 @@ impl EditorTabs {
                 } else {
                     "following the window connection,"
                 };
-                tooltip.push_str(&format!(" — {how} {}", glib::markup_escape_text(name)));
+                tooltip.push_str(&format!(", {how} {}", glib::markup_escape_text(name)));
             }
-            None => tooltip.push_str(" — no connection selected"),
+            None => tooltip.push_str(", no connection selected"),
         }
         if editor.is_dirty() {
             tooltip.push_str("\nUnsaved changes");
@@ -739,10 +729,10 @@ impl EditorTabs {
                     glib::markup_escape_text(&i.name)
                 );
                 if i.read_only {
-                    tip.push_str(" — read-only");
+                    tip.push_str(", read-only");
                 }
                 if i.safety.gates() {
-                    tip.push_str(&format!(" — {}", i.safety.badge()));
+                    tip.push_str(&format!(", {}", i.safety.badge()));
                 }
                 (Some("emblem-important-symbolic"), tip)
             }
@@ -752,7 +742,7 @@ impl EditorTabs {
                     glib::markup_escape_text(&i.name)
                 );
                 if i.safety.gates() {
-                    tip.push_str(&format!(" — {}", i.safety.badge()));
+                    tip.push_str(&format!(", {}", i.safety.badge()));
                 }
                 (Some("changes-prevent-symbolic"), tip)
             }
@@ -781,8 +771,6 @@ impl EditorTabs {
         }
         page.set_tooltip(&tooltip);
     }
-
-    // ---- menus -----------------------------------------------------------
 
     fn rebuild_saved_menu(&self) {
         let menu = &self.imp().saved_menu;
@@ -841,11 +829,9 @@ impl EditorTabs {
         view.set_menu_model(Some(&menu));
     }
 
-    // ---- state from the shell --------------------------------------------
-
     pub fn set_connections(&self, connections: &[Profile]) {
         self.imp().connections.replace(connections.to_vec());
-        // Prune only against an authoritative, non-empty list; the files stay
+        // Prune only against an authoritative, non-empty list.
         if !connections.is_empty() {
             for editor in self.editors() {
                 if let Some(bound) = editor.connection_binding() {
@@ -883,12 +869,10 @@ impl EditorTabs {
         self.schedule_flush();
     }
 
-    /// What the last session's NEW tabs were created for — seeds the shell's sidebar selection.
+    /// What the last session's new tabs were created for; seeds the shell's sidebar selection.
     pub fn restored_window_connection(&self) -> Option<String> {
         self.imp().window_connection.borrow().clone()
     }
-
-    // ---- persistence ------------------------------------------------------
 
     fn store(&self) -> &SavedQueryStore {
         self.imp().store.get().unwrap()
@@ -954,8 +938,6 @@ impl EditorTabs {
         }
         self.flush(true);
     }
-
-    // ---- empty state ------------------------------------------------------
 
     fn update_empty_state(&self) {
         let empty = self.imp().tab_view.n_pages() == 0;

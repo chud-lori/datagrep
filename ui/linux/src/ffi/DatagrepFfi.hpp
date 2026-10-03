@@ -1,4 +1,4 @@
-// DatagrepFfi.hpp — a thin, RAII C++ wrapper over the datagrep C ABI.
+// A thin RAII C++ wrapper over the datagrep C ABI.
 
 #ifndef DATAGREP_FFI_HPP
 #define DATAGREP_FFI_HPP
@@ -98,7 +98,7 @@ inline CellKind cellKindFromRaw(std::uint8_t raw) {
     }
 }
 
-// Owns one DatagrepRows* — a single materialised [offset, offset+len) window.
+// Owns one DatagrepRows*; a single materialised [offset, offset+len) window.
 class RowWindow {
 public:
     RowWindow(DatagrepRows* raw, std::uint64_t offset)
@@ -161,10 +161,10 @@ public:
         if (p == nullptr || len == 0) {
             return std::string();
         }
-        return std::string(p, len);  // COPY. Do not free p.
+        return std::string(p, len);  // Copied; never free p.
     }
 
-    // The field names THIS window projected, in column order, as owned JSON.
+    // The field names this window projected, in column order, as owned JSON.
     std::optional<std::string> columnNamesJson() const {
         return detail::takeOwnedString(datagrep_rows_column_names_json(raw_));
     }
@@ -197,7 +197,7 @@ public:
         if (raw_ != nullptr) {
             datagrep_query_free(raw_);
         }
-        // progress_ (if any) is destroyed after the join — safe.
+        // progress_ (if any) is destroyed after the join; safe.
     }
 
     Query(const Query&) = delete;
@@ -283,7 +283,6 @@ public:
         return *this;
     }
 
-    // --- profiles (raw JSON in / out; parsed one level up) -----------------
     std::string profilesListJson() const {
         return detail::tryCallJson(
             [&](char** err) { return datagrep_profiles_list_json(raw_, err); });
@@ -301,7 +300,7 @@ public:
         });
     }
 
-    // Blocks for up to the engine's connect timeout — call off the GUI thread.
+    // Blocks for up to the engine's connect timeout; call off the GUI thread.
     std::string connectionTestJson(const std::string& name,
                                    const std::string& url) const {
         return detail::tryCallJson([&](char** err) {

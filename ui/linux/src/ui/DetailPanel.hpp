@@ -1,5 +1,3 @@
-// DetailPanel.hpp — the inspector: schema and cell detail, two tabs.
-
 #ifndef DATAGREP_DETAIL_PANEL_HPP
 #define DATAGREP_DETAIL_PANEL_HPP
 
@@ -34,13 +32,11 @@ private:
     void buildSchemaTab();
     void buildCellTab();
 
-    // Schema tab.
     QLabel* schemaTitle_;
     QLabel* schemaSubtitle_;
     QLabel* schemaStats_;
     QTreeWidget* schemaTree_;
 
-    // Cell tab.
     QLabel* cellTitle_;
     QPushButton* cellCopyButton_;
     QPlainTextEdit* cellText_;

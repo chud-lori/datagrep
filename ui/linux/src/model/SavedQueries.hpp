@@ -1,5 +1,3 @@
-// SavedQueries.hpp — the on-disk store behind the editor tabs.
-
 #ifndef DATAGREP_SAVED_QUERIES_HPP
 #define DATAGREP_SAVED_QUERIES_HPP
 
@@ -29,7 +27,7 @@ struct EditorSession {
 
 }  // namespace dg
 
-// Pure file I/O — no engine, no ABI, no QObject.
+// Pure file I/O; no engine, no ABI, no QObject.
 class SavedQueryStore {
 public:
     explicit SavedQueryStore(const QString& directory = defaultDirectory());

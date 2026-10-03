@@ -7,10 +7,10 @@ use gtk::glib;
 use crate::model::{pretty_json, ObjectDetail};
 use crate::ui::StatusBar;
 
-const LEGEND: &str = "NULL — present, and null\n\
-                      (empty) — present, empty string\n\
-                      — — ABSENT: not in the document at all\n\
-                      {n fields} — nested: click to open here";
+const LEGEND: &str = "NULL: present, and null\n\
+                      (empty): present, empty string\n\
+                      —: ABSENT, not in the document at all\n\
+                      {n fields}: nested, click to open here";
 
 const NOTHING_SELECTED: &str =
     "Select a table, view, collection or key in the sidebar to see its structure.";
@@ -313,7 +313,7 @@ impl Inspector {
         let imp = self.imp();
         imp.cell_subtitle.set_text("nothing selected");
         imp.cell_text.buffer().set_text(
-            "Click a cell in the grid to see its whole value — a {…} chip opens here on its own.",
+            "Click a cell in the grid to see its whole value. A {…} chip opens here on its own.",
         );
         imp.cell_copy.set_sensitive(false);
     }

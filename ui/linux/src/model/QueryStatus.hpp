@@ -1,4 +1,4 @@
-// QueryStatus.hpp — the decoded form of datagrep_query_status_json().
+// The decoded form of datagrep_query_status_json().
 
 #ifndef DATAGREP_QUERY_STATUS_HPP
 #define DATAGREP_QUERY_STATUS_HPP

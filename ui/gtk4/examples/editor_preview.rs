@@ -1,5 +1,4 @@
-// Verification harness for the editor stack: welcome state, tabs across
-// connections, directive precedence, and the connection dialog — to PNGs.
+// Verification harness for the editor stack and connection dialog, rendered to PNGs.
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;

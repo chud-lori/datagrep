@@ -7,7 +7,6 @@
 
 namespace dg {
 
-// --- MutationValue ---------------------------------------------------------
 
 MutationValue MutationValue::str(const QString& s) {
     MutationValue v;
@@ -188,7 +187,6 @@ bool MutationValue::typedLike(const QString& text,
     return false;
 }
 
-// --- EditableResult --------------------------------------------------------
 
 std::optional<EditableResult> EditableResult::decode(const QJsonValue& v) {
     if (!v.isObject()) {
@@ -242,7 +240,7 @@ bool EditableResult::address(const QJsonObject& envelope, Address* out,
         if (!value || value->kind() == MutationValue::Kind::Null) {
             *whyNot = QStringLiteral(
                           "this document was loaded without `%1`, so an edit to it could "
-                          "only be sent unguarded — and an unguarded write would overwrite "
+                          "only be sent unguarded, and an unguarded write would overwrite "
                           "whatever the server holds now")
                           .arg(field);
             return false;
@@ -257,7 +255,6 @@ bool EditableResult::address(const QJsonObject& envelope, Address* out,
     return true;
 }
 
-// --- the batch -------------------------------------------------------------
 
 namespace {
 
@@ -314,7 +311,6 @@ QString documentAddressBatchJson(const QVector<DocumentAddress>& addresses) {
             .toJson(QJsonDocument::Compact));
 }
 
-// --- the re-read -----------------------------------------------------------
 
 ServerValue ServerValue::decode(const QJsonValue& v, bool present) {
     ServerValue out;
@@ -386,7 +382,6 @@ bool ServerDocument::decodeAll(const QString& json, QVector<ServerDocument>* out
     return true;
 }
 
-// --- the report ------------------------------------------------------------
 
 bool MutationReport::decode(const QString& json, MutationReport* out,
                             QString* whyNot) {

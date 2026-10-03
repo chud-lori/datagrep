@@ -1,5 +1,3 @@
-// GridEditing.hpp — every edit typed into the grid and not yet committed.
-
 // Addresses are captured at staging; refreshing expect at commit would compare the server against itself.
 #ifndef DATAGREP_GRID_EDITING_HPP
 #define DATAGREP_GRID_EDITING_HPP
@@ -69,7 +67,7 @@ public:
     int deleteCount() const;
     int updateCount() const;
 
-    // Documents whose last commit the guard refused — still staged.
+    // Documents whose last commit the guard refused; still staged.
     QVector<StagedDocument> conflicted() const;
     int conflictCount() const;
 

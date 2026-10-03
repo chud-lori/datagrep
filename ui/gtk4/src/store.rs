@@ -10,7 +10,7 @@ pub struct SavedQueryRecord {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// What this tab is about when it has no name — a browsed object's name.
+    /// What this tab is about when it has no name: a browsed object's name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -44,7 +44,7 @@ impl SavedQueryRecord {
     }
 }
 
-/// One global order and ONE active tab; `active_connection` only seeds what a NEW tab binds to.
+/// One global order and one active tab; `active_connection` only seeds what a new tab binds to.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct EditorSession {
     pub order: Vec<String>,
@@ -54,7 +54,7 @@ pub struct EditorSession {
     pub active_connection: Option<String>,
 }
 
-/// Read shape only — older builds wrote a per-connection `activeByConnection` map.
+/// Read shape only; older builds wrote a per-connection `activeByConnection` map.
 #[derive(Deserialize)]
 struct SessionOnDisk {
     #[serde(default)]

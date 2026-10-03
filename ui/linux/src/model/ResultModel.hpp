@@ -1,5 +1,3 @@
-// ResultModel.hpp — a QAbstractTableModel over the datagrep windowed row API.
-
 #ifndef DATAGREP_RESULT_MODEL_HPP
 #define DATAGREP_RESULT_MODEL_HPP
 
@@ -87,7 +85,7 @@ private:
 
     bool numericType(const QString& type) const;
 
-    // From the window itself, never the status header — heterogeneous results differ.
+    // From the window itself, never the status header; heterogeneous results differ.
     QString fieldName(const dg::RowWindow* window, int col) const;
     std::optional<dg::MutationValue> loadedValue(const dg::RowWindow* window,
                                                  int row, int col) const;

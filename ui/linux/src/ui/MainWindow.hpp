@@ -50,7 +50,6 @@ private slots:
     void onOpenHistoryInEditor(const QString& sql, const QString& connection);
     void onRerunFromHistory(const QString& sql, const QString& connection);
 
-    // --- staged document edits (Elasticsearch grid editing) ----------------
     void commitStagedEdits();
     void discardStagedEditsPrompt();
     void reviewConflicts();
@@ -69,11 +68,10 @@ private:
     void presentReport(const dg::MutationReport& report);
     void presentConflictReview();
 
-    // The sentence that has to be read before the click; numbered, not abstract.
     static QString commitWarning(int count, bool atomic);
     static QString reportHeadline(const dg::MutationReport& report);
 
-    // The one run path — the confirm-writes prompt and history record cannot be bypassed.
+    // The one run path; the confirm-writes prompt and history record cannot be bypassed.
     void executeStatement(const QString& profile, const QString& sql);
     bool selectConnection(const QString& name);
 

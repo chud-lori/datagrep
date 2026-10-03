@@ -30,7 +30,7 @@ public:
     static ConnectionDialog* forEditing(dg::Core* core, const QString& name,
                                         QWidget* parent);
 
-    // The name added/saved — valid once exec() returns QDialog::Accepted.
+    // The name added/saved; valid once exec() returns QDialog::Accepted.
     QString savedName() const { return savedName_; }
 
 private slots:
@@ -45,7 +45,7 @@ private slots:
     void onAccept();
 
 private:
-    // One engine as the form describes it — kept in step with the driver registry.
+    // One engine as the form describes it; kept in step with the driver registry.
     struct Engine {
         QString id;
         QString scheme;       // canonical scheme, e.g. "postgres://"
@@ -68,8 +68,8 @@ private:
     void showError(const QString& text);  // sets + shows; hidden while empty
     void seedForEdit(const QString& name);
     void applyFieldsToUi(const Fields& f);   // fields -> widgets (no URL round-trip)
-    Fields fieldsFromUi() const;             // widgets -> fields
-    void renderUrlFromFields();              // fields -> URL box
+    Fields fieldsFromUi() const;
+    void renderUrlFromFields();
     void reshapeForEngine(const Engine& e);  // show file vs host/port, TLS, labels
     QString optionsJson() const;             // add: full options object
     QString patchJson() const;               // edit: only the changed keys
@@ -99,7 +99,6 @@ private:
     // Guards the fields<->URL two-way sync against recursive updates.
     bool syncing_ = false;
 
-    // --- widgets ---
     QComboBox* engineBox_;
     QLineEdit* nameEdit_;
     QLabel* hostLabel_;
