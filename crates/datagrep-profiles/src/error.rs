@@ -18,14 +18,14 @@ pub enum ProfilesError {
     TomlDe(#[from] toml::de::Error),
 
     #[error(
-        "config key `{key}` looks like a secret (matches `{pattern}`) — secrets never live in \
+        "config key `{key}` looks like a secret (matches `{pattern}`): secrets never live in \
          Profile.config; store the credential in the OS keychain and reference it via \
          `secret_ref` instead"
     )]
     SecretShapedKey { key: String, pattern: &'static str },
 
     #[error(
-        "database schema version {found} is newer than this build supports (max {supported}) — \
+        "database schema version {found} is newer than this build supports (max {supported}): \
          upgrade datagrep-profiles"
     )]
     FutureSchema { found: i64, supported: i64 },

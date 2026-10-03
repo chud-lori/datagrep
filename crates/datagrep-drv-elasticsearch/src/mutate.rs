@@ -155,7 +155,7 @@ fn compile_insert(
                     return Err(DbError::Unsupported {
                         feature: format!(
                             "inserting field `{name}` with an absent value: a new document either \
-                             carries a field or omits it — a JSON null would insert an explicit \
+                             carries a field or omits it: a JSON null would insert an explicit \
                              null instead"
                         ),
                     });
@@ -230,7 +230,7 @@ fn identity_from_key(key: &[(FieldPath, Value)]) -> Result<WriteIdentity, DbErro
             "_routing" => {
                 if routing_seen {
                     return Err(DbError::Unsupported {
-                        feature: "mutation key names `_routing` twice — refusing an ambiguous key"
+                        feature: "mutation key names `_routing` twice: refusing an ambiguous key"
                             .into(),
                     });
                 }
@@ -251,7 +251,7 @@ fn identity_from_key(key: &[(FieldPath, Value)]) -> Result<WriteIdentity, DbErro
         };
         if slot.is_some() {
             return Err(DbError::Unsupported {
-                feature: format!("mutation key names `{name}` twice — refusing an ambiguous key"),
+                feature: format!("mutation key names `{name}` twice: refusing an ambiguous key"),
             });
         }
         *slot = Some(scalar_to_string(value).ok_or_else(|| DbError::Unsupported {
@@ -320,7 +320,7 @@ fn guard_from_expect(expect: &[(FieldPath, Value)]) -> Result<Guard, DbError> {
                 return Err(DbError::Unsupported {
                     feature: format!(
                         "precondition on `{path}`: Elasticsearch has no generic per-field \
-                         compare-and-swap — the only preconditions it can enforce are `_seq_no` \
+                         compare-and-swap; the only preconditions it can enforce are `_seq_no` \
                          and `_primary_term` (`if_seq_no`/`if_primary_term`)"
                     ),
                 })
@@ -329,7 +329,7 @@ fn guard_from_expect(expect: &[(FieldPath, Value)]) -> Result<Guard, DbError> {
         if slot.is_some() {
             return Err(DbError::Unsupported {
                 feature: format!(
-                    "precondition names `{}` twice — refusing an ambiguous guard",
+                    "precondition names `{}` twice: refusing an ambiguous guard",
                     name.unwrap_or_default()
                 ),
             });
@@ -350,7 +350,7 @@ fn guard_from_expect(expect: &[(FieldPath, Value)]) -> Result<Guard, DbError> {
         if n < floor {
             return Err(DbError::Unsupported {
                 feature: format!(
-                    "precondition `{}` is {n}, a sentinel — this index does not track sequence \
+                    "precondition `{}` is {n}, a sentinel: this index does not track sequence \
                      numbers (time-series indices on Elasticsearch >= 9.4 disable them), so an \
                      optimistic-concurrency guard cannot protect this write",
                     name.unwrap_or_default()
@@ -367,7 +367,7 @@ fn guard_from_expect(expect: &[(FieldPath, Value)]) -> Result<Guard, DbError> {
         _ => Err(DbError::Unsupported {
             feature: "an unguarded write: this row carries no `_seq_no`/`_primary_term` \
                       precondition (an aggregation result, a fields-only projection, or a scan \
-                      from before the guard was requested) — re-run the scan and retry, rather \
+                      from before the guard was requested): re-run the scan and retry, rather \
                       than overwriting whatever is there now"
                 .into(),
         }),
@@ -522,7 +522,7 @@ fn set_field_names(path: &FieldPath) -> Result<Vec<&str>, DbError> {
         Some(first) if ENVELOPE_FIELDS.contains(first) => {
             return Err(DbError::Unsupported {
                 feature: format!(
-                    "set `{path}`: the hit envelope is not writable — sets address fields inside \
+                    "set `{path}`: the hit envelope is not writable; sets address fields inside \
                      `_source` (write back the document, never its metadata)"
                 ),
             })
@@ -544,7 +544,7 @@ fn script_field_names(path: &FieldPath) -> Result<Vec<&str>, DbError> {
             return Err(DbError::Unsupported {
                 feature: format!(
                     "removing/setting `{path}` needs a scripted update, but the field name `{name}` \
-                     is not a plain identifier — this driver refuses to build Painless it cannot \
+                     is not a plain identifier: this driver refuses to build Painless it cannot \
                      address safely rather than approximate it"
                 ),
             });
@@ -589,7 +589,7 @@ fn insert_nested(
 fn overlap(path: &FieldPath) -> DbError {
     DbError::Unsupported {
         feature: format!(
-            "field paths overlap at `{path}` — one set/remove is the same field as, or nested \
+            "field paths overlap at `{path}`: one set/remove is the same field as, or nested \
              inside, another; refusing to pick which wins"
         ),
     }
@@ -770,7 +770,7 @@ pub fn batch_report(
                 message: Arc::from(
                     format!(
                         "mutation {} of {} (`{}` on `{}`) failed: {} applied, 1 failed, {} \
-                         not attempted — Elasticsearch has no transaction, so the applied \
+                         not attempted: Elasticsearch has no transaction, so the applied \
                          writes stay written and the rest were never sent",
                         i + 1,
                         total,
@@ -805,7 +805,7 @@ pub fn compile_bulk_body(writes: &[CompiledWrite], max_bytes: usize) -> Result<S
         return Err(DbError::Unsupported {
             feature: format!(
                 "this batch frames to {} bytes of _bulk NDJSON, over the {} MB \
-                 http.max_content_length ceiling — split it into smaller batches rather than send \
+                 http.max_content_length ceiling: split it into smaller batches rather than send \
                  a body Elasticsearch rejects whole",
                 body.len(),
                 max_bytes / (1024 * 1024)
@@ -896,7 +896,7 @@ fn query_u64(write: &CompiledWrite, key: &str) -> Option<u64> {
         .and_then(|(_, v)| v.parse().ok())
 }
 
-// Bulk is not atomic and returns HTTP 200 with per-item failures; every item executes — no early stop, so no not_attempted, unlike the serial batch_report.
+// Bulk is not atomic: HTTP 200 with per-item failures, and every item executes, so nothing is not_attempted.
 pub fn bulk_report(
     writes: &[CompiledWrite],
     response: &Json,
@@ -943,7 +943,7 @@ pub fn bulk_report(
             code: Some(Arc::from("es.bulk.applied")),
             message: Arc::from(
                 format!(
-                    "{applied} document(s) written in one _bulk request with refresh=wait_for — \
+                    "{applied} document(s) written in one _bulk request with refresh=wait_for: \
                      Elasticsearch bulk is not atomic (reported per item), and every item here \
                      applied"
                 )
@@ -962,7 +962,7 @@ pub fn bulk_report(
             message: Arc::from(
                 format!(
                     "_bulk applied {applied} of {total} document(s); {failed} failed{conflict_note}. \
-                     Elasticsearch bulk is not atomic and has no transaction — it executed every \
+                     Elasticsearch bulk is not atomic and has no transaction: it executed every \
                      item and applied the ones it could, so the failed items were left unwritten \
                      while the successful writes stay written (it did not stop at the first failure)"
                 )
@@ -1384,7 +1384,6 @@ mod tests {
 
     #[test]
     fn a_wildcard_or_missing_identity_is_refused() {
-        // Wildcard target.
         let m = Mutation::Delete {
             path: path(),
             key: vec![
@@ -1397,7 +1396,6 @@ mod tests {
             compile_mutation(&m, true),
             Err(DbError::Unsupported { .. })
         ));
-        // Missing `_id`.
         let m = Mutation::Delete {
             path: path(),
             key: vec![(fp("_index"), Value::Str(Arc::from("events")))],
@@ -1925,8 +1923,6 @@ mod tests {
             "a wait_for that degraded to an immediate refresh must be surfaced"
         );
     }
-
-    // ---- P1-2: multi-document `_bulk` batching ---------------------------
 
     fn update(id: &str, field: &str, value: Value, seq: i64, term: i64) -> CompiledWrite {
         compile_mutation(

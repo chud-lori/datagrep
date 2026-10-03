@@ -316,7 +316,7 @@ fn decode_bytes(col: &Column, raw: Vec<u8>) -> Value {
     let ct = col.column_type();
     let unsigned = col.flags().contains(ColumnFlags::UNSIGNED_FLAG);
 
-    // Helper: bytes as UTF-8 or bail to Unsupported (never lose bytes).
+    // Bytes as UTF-8 or bail to Unsupported (never lose bytes).
     macro_rules! text {
         () => {
             match std::str::from_utf8(&raw) {

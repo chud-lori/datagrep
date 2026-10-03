@@ -16,8 +16,6 @@ use datagrep_ffi::{
     datagrep_string_free, DatagrepCore,
 };
 
-// ---- helpers -----------------------------------------------------------
-
 fn core() -> *mut DatagrepCore {
     let path = CString::new(":memory:").expect("no interior NUL");
     let mut err: *mut c_char = ptr::null_mut();
@@ -46,8 +44,6 @@ fn invalid_utf8() -> Vec<u8> {
 fn embedded_nul() -> Vec<u8> {
     b"good\0evil\0".to_vec()
 }
-
-// ---- string arguments --------------------------------------------------
 
 #[test]
 fn null_string_arguments_are_errors_with_messages() {
@@ -225,8 +221,6 @@ fn blank_sql_is_refused_before_anything_is_spawned() {
     }
 }
 
-// ---- JSON arguments ----------------------------------------------------
-
 #[test]
 fn malformed_json_arguments_are_errors_not_panics() {
     let c = core();
@@ -323,8 +317,6 @@ fn null_options_json_means_defaults_not_an_error() {
     }
 }
 
-// ---- handle arguments --------------------------------------------------
-
 #[test]
 fn null_handles_are_errors_or_documented_defaults() {
     let mut err: *mut c_char = ptr::null_mut();
@@ -415,8 +407,6 @@ fn a_stale_err_out_slot_is_nulled_on_success() {
     }
 }
 
-// ---- window coordinates ------------------------------------------------
-
 #[test]
 fn extreme_window_coordinates_are_absent_not_a_crash() {
     let c = core();
@@ -454,8 +444,6 @@ fn extreme_window_coordinates_are_absent_not_a_crash() {
         datagrep_core_free(c);
     }
 }
-
-// ---- call ordering -----------------------------------------------------
 
 #[test]
 fn out_of_order_calls_stay_well_defined() {

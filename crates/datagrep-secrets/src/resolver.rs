@@ -294,8 +294,6 @@ mod tests {
         SecretResolver::new()
     }
 
-    // --- env: round-trip -----------------------------------------------
-
     #[tokio::test]
     async fn env_round_trip() {
         // SAFETY: test-only env mutation; no other test in this crate reads this var.
@@ -320,8 +318,6 @@ mod tests {
         ));
     }
 
-    // --- exec: happy path -------------------------------------------------
-
     #[tokio::test]
     async fn exec_echo_resolves_trimmed_stdout() {
         let r: SecretRef = "exec:echo '  hunter2  '".parse().unwrap();
@@ -335,8 +331,6 @@ mod tests {
         let err = resolver().resolve(&r).await.unwrap_err();
         assert!(matches!(err, SecretError::ExecEmpty));
     }
-
-    // --- exec: timeout ------------------------------------------------
 
     #[tokio::test]
     async fn exec_timeout_kills_slow_command() {
@@ -354,8 +348,6 @@ mod tests {
             other => panic!("expected ExecTimeout, got {other:?}"),
         }
     }
-
-    // --- exec: failure captures stderr, never stdout/secret -----------
 
     #[tokio::test]
     async fn exec_failure_captures_stderr_only() {
@@ -382,16 +374,12 @@ mod tests {
         assert!(matches!(err, SecretError::ExecFailed { .. }));
     }
 
-    // --- prompt: never resolves here -----------------------------------
-
     #[tokio::test]
     async fn prompt_always_needs_prompt() {
         let r: SecretRef = "prompt:".parse().unwrap();
         let err = resolver().resolve(&r).await.unwrap_err();
         assert!(matches!(err, SecretError::NeedsPrompt { reference } if reference == "prompt:"));
     }
-
-    // --- read-only sources reject store/delete -------------------------
 
     #[tokio::test]
     async fn env_exec_prompt_are_read_only() {

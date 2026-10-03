@@ -97,7 +97,7 @@ impl MongoConnection {
     fn read_only_gate(&self, is_write: bool) -> Result<(), DbError> {
         if is_write && self.read_only.load(Ordering::Acquire) {
             return Err(DbError::Unsupported {
-                feature: "connection is in read-only mode (client-enforced — MongoDB has no per-session server-side read-only switch outside routing to a secondary)".into(),
+                feature: "connection is in read-only mode (client-enforced; MongoDB has no per-session server-side read-only switch outside routing to a secondary)".into(),
             });
         }
         Ok(())
@@ -131,7 +131,7 @@ impl Connection for MongoConnection {
             Request::Native { text, params, opts } => {
                 if !params.is_empty() {
                     return Err(DbError::Unsupported {
-                        feature: "MongoDB native shell text takes no bind parameters (param_style: None) — literal values are already part of the parsed statement".into(),
+                        feature: "MongoDB native shell text takes no bind parameters (param_style: None); literal values are already part of the parsed statement".into(),
                     });
                 }
                 self.execute_text(&text, opts.timeout.unwrap_or(DEFAULT_MAX_TIME))
@@ -402,7 +402,7 @@ impl MongoConnection {
         Ok(Box::new(AckCursor::new(
             Some(n),
             Some(Arc::from(
-                "estimated_document_count (approximate — EXACT_COUNT_CHEAP is false)",
+                "estimated_document_count (approximate: EXACT_COUNT_CHEAP is false)",
             )),
         )))
     }
@@ -676,7 +676,7 @@ impl MongoConnection {
             return Ok(Box::new(AckCursor::new(
                 Some(n),
                 Some(Arc::from(
-                    "estimated_document_count (approximate — EXACT_COUNT_CHEAP is false)",
+                    "estimated_document_count (approximate: EXACT_COUNT_CHEAP is false)",
                 )),
             )));
         }
@@ -692,7 +692,7 @@ impl MongoConnection {
         let message = if exact {
             "count_documents (exact)"
         } else {
-            "count_documents (exact — estimatedDocumentCount does not support a filter)"
+            "count_documents (exact: estimatedDocumentCount does not support a filter)"
         };
         Ok(Box::new(AckCursor::new(Some(n), Some(Arc::from(message)))))
     }
@@ -742,7 +742,7 @@ impl MongoConnection {
                     return Err(DbError::Query {
                         code: None,
                         message: format!(
-                            "row identity changed — refresh (expected exactly 1 document matched, got {})",
+                            "row identity changed; refresh (expected exactly 1 document matched, got {})",
                             result.matched_count
                         ),
                         position: None,
@@ -760,7 +760,7 @@ impl MongoConnection {
                     return Err(DbError::Query {
                         code: None,
                         message: format!(
-                            "row identity changed — refresh (expected exactly 1 document deleted, got {})",
+                            "row identity changed; refresh (expected exactly 1 document deleted, got {})",
                             result.deleted_count
                         ),
                         position: None,
@@ -926,7 +926,7 @@ pub(crate) fn plan_ddl(default_database: &str, op: &DdlOp) -> Result<DdlCommand,
             ObjectKind::Collection => {
                 if !*if_exists {
                     return Err(DbError::Unsupported {
-                        feature: "dropping a collection without `if_exists` — MongoDB's `drop` \
+                        feature: "dropping a collection without `if_exists`: MongoDB's `drop` \
                                   succeeds on a collection that never existed, so it cannot \
                                   report that one was missing"
                             .into(),
@@ -952,7 +952,7 @@ pub(crate) fn plan_ddl(default_database: &str, op: &DdlOp) -> Result<DdlCommand,
             ObjectKind::Database => {
                 if !*if_exists {
                     return Err(DbError::Unsupported {
-                        feature: "dropping a database without `if_exists` — MongoDB's \
+                        feature: "dropping a database without `if_exists`: MongoDB's \
                                   dropDatabase succeeds on a database that never existed, so it \
                                   cannot report that one was missing"
                             .into(),
@@ -978,7 +978,7 @@ pub(crate) fn plan_ddl(default_database: &str, op: &DdlOp) -> Result<DdlCommand,
             if *kind != ObjectKind::Collection {
                 return Err(DbError::Unsupported {
                     feature: format!(
-                        "MongoDB can only rename a collection — a {kind:?} has no rename command"
+                        "MongoDB can only rename a collection: a {kind:?} has no rename command"
                     ),
                 });
             }
@@ -1009,7 +1009,7 @@ pub(crate) fn plan_ddl(default_database: &str, op: &DdlOp) -> Result<DdlCommand,
             }
             if !*if_not_exists {
                 return Err(DbError::Unsupported {
-                    feature: "creating an index without `if_not_exists` — MongoDB's \
+                    feature: "creating an index without `if_not_exists`: MongoDB's \
                               createIndexes is a no-op when the same index is already there, so \
                               it cannot report that one existed"
                         .into(),
@@ -1065,7 +1065,7 @@ pub(crate) fn is_write_method(method_lower: &str) -> bool {
 pub(crate) fn id_filter_from_key(key: &[(FieldPath, Value)]) -> Result<BsonDocument, DbError> {
     if key.is_empty() {
         return Err(DbError::Unsupported {
-            feature: "mutation with no row identity — refuse to guess which document to affect"
+            feature: "mutation with no row identity: refuse to guess which document to affect"
                 .into(),
         });
     }
@@ -1083,7 +1083,7 @@ pub(crate) fn refuse_expect(expect: &[(FieldPath, Value)]) -> Result<(), DbError
         return Ok(());
     }
     Err(DbError::Unsupported {
-        feature: "conditional mutation (`expect`) — this driver cannot check-and-set".into(),
+        feature: "conditional mutation (`expect`): this driver cannot check-and-set".into(),
     })
 }
 

@@ -79,7 +79,7 @@ impl MySqlConnection {
                     return Err(DbError::Unsupported {
                         feature: format!(
                             "positional parameters with a multi-statement script \
-                             ({} statements) — parameters bind to exactly one statement",
+                             ({} statements): parameters bind to exactly one statement",
                             statements.len()
                         ),
                     });
@@ -246,7 +246,7 @@ impl MySqlConnection {
                 return Err(DbError::Query {
                     code: None,
                     message: format!(
-                        "row identity changed — refresh (expected exactly 1 row affected, got {affected})"
+                        "row identity changed; refresh (expected exactly 1 row affected, got {affected})"
                     ),
                     position: None,
                 });

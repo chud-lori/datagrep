@@ -181,7 +181,7 @@ impl DdlOp {
         if from_parent != to_parent {
             return Err(DbError::Unsupported {
                 feature: format!(
-                    "rename moves {from} to a different parent ({to}) — a rename changes the \
+                    "rename moves {from} to a different parent ({to}): a rename changes the \
                      name, not the namespace"
                 ),
             });

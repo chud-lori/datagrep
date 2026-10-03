@@ -147,8 +147,6 @@ impl Store {
         reply_rx.await.map_err(|_| ProfilesError::WorkerGone)?
     }
 
-    // -- folder ----------------------------------------------------------
-
     pub async fn create_folder(&self, folder: Folder) -> Result<Folder, ProfilesError> {
         self.run(move |db| queries::create_folder(&db.conn, folder))
             .await
@@ -221,8 +219,6 @@ impl Store {
             .await
     }
 
-    // -- tunnel ------------------------------------------------------------
-
     pub async fn create_tunnel(&self, tunnel: Tunnel) -> Result<Tunnel, ProfilesError> {
         self.run(move |db| queries::create_tunnel(&db.conn, tunnel))
             .await
@@ -248,8 +244,6 @@ impl Store {
         self.run(move |db| queries::delete_tunnel(&db.conn, &id))
             .await
     }
-
-    // -- query_history -------------------------------------------------
 
     pub async fn record_history(
         &self,
@@ -277,8 +271,6 @@ impl Store {
         self.run(move |db| queries::search_history(db, profile_id.as_deref(), &query, limit))
             .await
     }
-
-    // -- saved_query -----------------------------------------------------
 
     pub async fn create_saved_query(&self, q: SavedQuery) -> Result<SavedQuery, ProfilesError> {
         self.run(move |db| queries::create_saved_query(&db.conn, q))
@@ -310,8 +302,6 @@ impl Store {
             .await
     }
 
-    // -- kv ----------------------------------------------------------------
-
     pub async fn kv_get(&self, key: impl Into<String>) -> Result<Option<String>, ProfilesError> {
         let key = key.into();
         self.run(move |db| queries::kv_get(&db.conn, &key)).await
@@ -332,8 +322,6 @@ impl Store {
         let key = key.into();
         self.run(move |db| queries::kv_delete(&db.conn, &key)).await
     }
-
-    // -- TOML export/import ---------------------------------------------
 
     pub async fn export_profiles(&self) -> Result<String, ProfilesError> {
         self.run(|db| {

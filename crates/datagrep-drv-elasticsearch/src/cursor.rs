@@ -629,7 +629,7 @@ impl Cursor for SearchCursor {
                 code: Some(Arc::from(format!("es.shard_failure.{ty}").as_str())),
                 message: Arc::from(
                     format!(
-                        "some shards failed ({ty}: {reason}) — these results are PARTIAL, not \
+                        "some shards failed ({ty}: {reason}); these results are PARTIAL, not \
                          the full match set"
                     )
                     .as_str(),

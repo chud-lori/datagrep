@@ -109,7 +109,7 @@ impl Canceller for EsCanceller {
 
             let mut server_cancelled = false;
 
-            // 1. The primary path: resolve our tagged task and cancel it.
+            // Primary path: resolve our tagged task and cancel it.
             if let Some(tag) = snapshot.opaque_id.as_deref() {
                 match self.tasks_for(tag).await {
                     Ok(tasks) => {

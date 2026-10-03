@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
-# Turns Cargo.lock into cargo-sources.json so flatpak-builder can pre-download
-# every crate and `cargo --offline` resolves inside the network-less sandbox.
-# Output is generated, never committed — CI regenerates it every run, so it
-# cannot drift from the lockfile. Needs python3 with aiohttp and tomlkit.
-#
-# TWO lockfiles: ui/gtk4 is its own cargo workspace with its own Cargo.lock,
-# and the generator takes one lockfile per run, so the two source lists are
-# merged here. They overlap heavily — both resolve the engine's dependency
-# graph — and an identical entry twice would have flatpak-builder unpack the
-# same crate over itself.
+# Generates cargo-sources.json for an offline flatpak build; never committed. Needs python3 with aiohttp and tomlkit.
+# ui/gtk4 has its own Cargo.lock, so both lockfiles' sources are merged with duplicates dropped.
 set -euo pipefail
 cd "$(dirname "$0")"
 

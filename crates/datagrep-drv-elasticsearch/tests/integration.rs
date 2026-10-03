@@ -15,8 +15,6 @@ use datagrep_api::ConfigValue;
 
 use datagrep_drv_elasticsearch::ElasticsearchDriver;
 
-// ---------------------------------------------------------------- harness --
-
 fn es_url() -> String {
     std::env::var("DATAGREP_TEST_ES").unwrap_or_else(|_| "http://localhost:9200".to_string())
 }
@@ -189,8 +187,6 @@ fn field(value: &Value, path: &str) -> Option<Value> {
     let path: FieldPath = path.parse().unwrap();
     doc.get_path(&path).cloned()
 }
-
-// ------------------------------------------------------------------ tests --
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live Elasticsearch; see tests/README.md"]
@@ -1100,7 +1096,7 @@ async fn a_stale_guard_is_refused_then_re_read_and_re_applied() {
         }
     };
 
-    // 1. Load it. The scan carries the guard, because every page asks for it.
+    // The scan carries the guard, because every page asks for it.
     let loaded = read_one(reread(None)).await;
     assert_eq!(loaded.len(), 1);
     let Some(Value::Str(doc_id)) = field(&loaded[0], "_id") else {
@@ -1174,7 +1170,7 @@ async fn a_stale_guard_is_refused_then_re_read_and_re_applied() {
         "and the refused write really did not land"
     );
 
-    // 5. Rebase: the same edit, re-guarded against that version, applies.
+    // Rebase: the same edit, re-guarded against that version, applies.
     let applied = read_one(update(vec![
         (FieldPath::field("_seq_no"), fresh_seq),
         (FieldPath::field("_primary_term"), fresh_term),
@@ -1219,7 +1215,7 @@ async fn the_root_describe_reports_running_tasks_alongside_health() {
             .map(|(_, v)| v.to_string())
     };
 
-    // The three sources P1-4 landed still answer…
+    // The existing three sources still answer…
     assert!(
         extra("status").is_some(),
         "cluster health must still render"
@@ -1348,8 +1344,6 @@ async fn the_root_describe_lists_all_three_template_systems() {
     delete_path(&format!("_index_template/{composable}")).await;
     delete_path(&format!("_component_template/{component}")).await;
 }
-
-// ------------------------------------------------------- structured DDL --
 
 async fn ddl(conn: &dyn Connection, op: DdlOp) -> Result<(), DbError> {
     let mut cur = conn.execute(Request::Op(Op::Ddl(op))).await?;

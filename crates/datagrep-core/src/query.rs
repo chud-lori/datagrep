@@ -238,7 +238,7 @@ impl QueryMgr {
         let report = CancelReport::pending(kind);
         tracing::debug!(%qid, ?kind, "local cancel done");
 
-        // ---- server half: fire and forget, reported honestly -------------
+        // Server half: fire and forget.
         let canceller = query.canceller.clone();
         let events = self.events.clone();
         tokio::spawn(async move {

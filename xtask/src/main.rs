@@ -1,23 +1,10 @@
-//! datagrep xtask — CI helper binary.
+//! CI helper binary, run by `ci/gates.sh`.
 //!
-//! Invoked as `cd xtask && cargo run -- <cmd>`, or by `ci/gates.sh` as a
-//! prebuilt binary. Commands:
+//! * `budget-check`: binary size vs budget.toml P11; fails only past the FAIL threshold.
+//! * `count-crates`: unique crates vs P16d; warn-only unless `--strict`.
+//! * `grep-gates`: banned patterns (reasons in `scan_content`), with an allowlist.
 //!
-//! * `budget-check <binary-path> [--budget <path>]`
-//!   File size vs budget.toml P11 (installed-on-disk); P10 (compressed
-//!   installer) reported informationally. Exits nonzero on a FAIL-threshold
-//!   breach (the CI-red line), zero on target-only breach (WARN).
-//! * `count-crates [<workspace-root>] [--budget <path>] [--strict]`
-//!   Unique crates in `cargo tree --workspace -e normal` vs P16d. Always
-//!   exits 0 unless `--strict` and the fail threshold is breached (the gate
-//!   is warn-only for now).
-//! * `grep-gates [<root>] [--allowlist <path>]`
-//!   The banned-pattern greps, structured, with an allowlist. Each rule and
-//!   the reason it exists is spelled out in `scan_content` below. Exits
-//!   nonzero on any non-allowlisted FAIL finding.
-//!
-//! No dependencies by design: the TOML subset parser below handles exactly
-//! the shape of budget.toml (tables + `key = "string"`), and is unit-tested.
+//! No dependencies by design: the TOML parser handles only budget.toml's shape.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -51,10 +38,6 @@ fn print_usage() {
          xtask grep-gates [<root>] [--allowlist <path>]"
     );
 }
-
-// ---------------------------------------------------------------------------
-// TOML subset parser (budget.toml only: [Table] + key = "quoted string")
-// ---------------------------------------------------------------------------
 
 type Budget = BTreeMap<String, BTreeMap<String, String>>;
 
@@ -108,8 +91,7 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
-/// Parse "22MB" / "64KB" / "4GB" / "512B" / "1234" into bytes (decimal units,
-/// matching how installer sizes are conventionally quoted).
+/// Decimal units ("22MB" is 22,000,000 bytes), as installer sizes are quoted.
 fn parse_size(s: &str) -> Result<u64, String> {
     let s = s.trim();
     let (num, mult) = if let Some(n) = s.strip_suffix("GB") {
@@ -129,8 +111,7 @@ fn parse_size(s: &str) -> Result<u64, String> {
         .map_err(|_| format!("cannot parse size `{s}`"))
 }
 
-/// P16d values look like "24 / 400" (pipelines / crates). Return the crate
-/// count — the part after the '/'.
+/// P16d values look like "24 / 400" (pipelines / crates); the crate count is after the '/'.
 fn parse_crate_limit(s: &str) -> Result<u64, String> {
     let part = s.rsplit('/').next().unwrap_or(s).trim();
     // Tolerate suffixed prose like "> 600" if the toml ever carries it.
@@ -172,10 +153,6 @@ fn load_budget(explicit: Option<&str>) -> Result<Budget, String> {
             .join(", ")
     ))
 }
-
-// ---------------------------------------------------------------------------
-// budget-check
-// ---------------------------------------------------------------------------
 
 fn cmd_budget_check(args: &[String]) -> ExitCode {
     let mut binary: Option<&str> = None;
@@ -228,7 +205,7 @@ fn budget_check(binary: &str, budget_path: Option<&str>) -> Result<bool, String>
         p11_fail as f64 / 1e6
     );
     println!(
-        "  P10 (informational — applies to the *compressed installer*, not this file): \
+        "  P10 (informational: applies to the *compressed installer*, not this file): \
          target {:.0} MB, fail {:.0} MB",
         p10_target as f64 / 1e6,
         p10_fail as f64 / 1e6
@@ -251,10 +228,6 @@ fn budget_check(binary: &str, budget_path: Option<&str>) -> Result<bool, String>
         Ok(true)
     }
 }
-
-// ---------------------------------------------------------------------------
-// count-crates
-// ---------------------------------------------------------------------------
 
 fn cmd_count_crates(args: &[String]) -> ExitCode {
     let mut root: Option<&str> = None;
@@ -337,9 +310,7 @@ fn count_crates(root: &str, budget_path: Option<&str>, strict: bool) -> Result<b
     }
 }
 
-/// Count unique `name version` pairs in `cargo tree --prefix none` output.
-/// Deduplicated repeats are printed with a trailing `(*)`; feature/target
-/// annotations vary — key on the first two whitespace-separated tokens.
+/// Keys on the first two tokens (`name version`); feature/target annotations and `(*)` repeats vary.
 fn count_unique_crates(tree_output: &str) -> u64 {
     let mut set: BTreeSet<(String, String)> = BTreeSet::new();
     for line in tree_output.lines() {
@@ -354,10 +325,6 @@ fn count_unique_crates(tree_output: &str) -> u64 {
     }
     set.len() as u64
 }
-
-// ---------------------------------------------------------------------------
-// grep-gates — banned anti-patterns, structured
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Severity {
@@ -374,8 +341,7 @@ struct Finding {
     text: String,
 }
 
-/// Path is inside test/bench/example/spike territory, where the banned
-/// patterns are legitimate (benchmarks may use ControlFlow::Poll etc.).
+/// Test, bench, example and spike code may use the banned patterns.
 fn in_test_or_bench(path: &str) -> bool {
     let file_is_test = path.ends_with("_test.rs") || path.ends_with("_tests.rs");
     file_is_test
@@ -389,7 +355,6 @@ fn is_comment_line(line: &str) -> bool {
     t.starts_with("//") // covers //, ///, //!
 }
 
-/// Scan one file's content. Pure function — unit-tested below.
 fn scan_content(path: &str, content: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
     let in_src = path.contains("/src/");
@@ -413,21 +378,15 @@ fn scan_content(path: &str, content: &str) -> Vec<Finding> {
             });
         };
         if !skip {
-            // ControlFlow::Poll anywhere outside a benchmark is banned: it
-            // repaints at display refresh forever, 200-1000x over the P12
-            // idle budget.
+            // ControlFlow::Poll repaints at display refresh forever, far over the P12 idle budget.
             if line.contains("ControlFlow::Poll") {
                 push("controlflow-poll", Severity::Fail);
             }
-            // A free-running tokio::time::interval is banned — the only timer
-            // is the armed-on-demand DelayQueue. Allowlist justified uses.
+            // The only timer is the armed-on-demand DelayQueue; allowlist justified uses.
             if line.contains("tokio::time::interval") {
                 push("tokio-interval", Severity::Fail);
             }
-            // An unbounded channel in the data path throws away backpressure:
-            // the producer outruns the consumer and the whole result lands in
-            // memory. Hard fail inside datagrep-core src; warn elsewhere
-            // (allowlist justified non-data-path uses).
+            // An unbounded channel drops backpressure, so the whole result lands in memory.
             if line.contains("unbounded_channel") {
                 let sev = if path.contains("datagrep-core/src") {
                     Severity::Fail
@@ -436,13 +395,10 @@ fn scan_content(path: &str, content: &str) -> Vec<Finding> {
                 };
                 push("unbounded-channel", sev);
             }
-            // Warning-only: .unwrap() in non-test src code (count reported).
             if in_src && line.contains(".unwrap()") {
                 push("unwrap", Severity::Warn);
             }
-            // format! in the cell-render path allocates per cell per frame;
-            // use itoa/ryu into a per-frame arena instead. Warn on format! in
-            // any file whose path mentions render/paint.
+            // format! in the render path allocates per cell per frame; use itoa/ryu into an arena.
             if render_path && line.contains("format!") {
                 push("format-in-render", Severity::Warn);
             }
@@ -451,9 +407,7 @@ fn scan_content(path: &str, content: &str) -> Vec<Finding> {
     findings
 }
 
-/// Allowlist file format (ci/grep-allowlist.txt): one entry per line,
-/// `<rule-id> <path-fragment>`, `#` comments. A finding is allowlisted when an
-/// entry's rule matches and its path-fragment is a substring of the path.
+/// Lines are `<rule-id> <path-fragment>`; a finding matches when the fragment is a substring of its path.
 fn parse_allowlist(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for raw in text.lines() {
@@ -551,8 +505,6 @@ fn grep_gates(root: &str, allowlist_path: Option<&str>) -> Result<bool, String> 
                 }
                 Severity::Warn => {
                     *warn_counts.entry(f.rule).or_insert(0) += 1;
-                    // Keep unwrap warnings to a count (they can be numerous);
-                    // print other warn rules per-finding.
                     if f.rule != "unwrap" {
                         println!("WARN  {} {}:{}: {}", f.rule, f.path, f.line, f.text);
                     }
@@ -569,7 +521,7 @@ fn grep_gates(root: &str, allowlist_path: Option<&str>) -> Result<bool, String> 
     }
     if fail_count > 0 {
         println!(
-            "grep-gates: {fail_count} FAIL finding(s) — each rule and why it \
+            "grep-gates: {fail_count} FAIL finding(s); each rule and why it \
              is banned is documented in xtask/src/main.rs (`scan_content`); \
              ci/gates.sh runs this gate"
         );
@@ -580,8 +532,6 @@ fn grep_gates(root: &str, allowlist_path: Option<&str>) -> Result<bool, String> 
     }
 }
 
-/// Recursively collect .rs files, skipping directories that are not gated
-/// source: VCS/build dirs, this xtask itself, ci/fixtures/.github.
 fn collect_rs_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
     for entry in entries {
@@ -604,10 +554,6 @@ fn collect_rs_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -689,12 +635,9 @@ thiserror v2.0.3
 
 serde v1.0.100
 ";
-        // serde appears at two versions -> both count; the (*) dedupe repeat
-        // and the blank line are ignored.
+        // Both serde versions count; the (*) repeat and the blank line do not.
         assert_eq!(count_unique_crates(out), 5);
     }
-
-    // -- grep rules ---------------------------------------------------------
 
     #[test]
     fn flags_controlflow_poll_outside_benches() {

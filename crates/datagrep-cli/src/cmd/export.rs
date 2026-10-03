@@ -79,7 +79,7 @@ pub async fn run(ctx: &Context, args: &ExportArgs) -> Result<(), CliError> {
         if timed_out {
             out.flush()?;
             return Err(CliError::query(format!(
-                "export stopped by --timeout after {rows_this_statement} rows — {} is INCOMPLETE",
+                "export stopped by --timeout after {rows_this_statement} rows: {} is INCOMPLETE",
                 args.out.display()
             )));
         }
@@ -203,7 +203,7 @@ impl ExportSink for ExportRowSink<'_> {
         if let Some(dl) = self.deadline {
             if Instant::now() >= dl {
                 self.note = Some(
-                    "stopped: timed out — the server may still be executing this query".to_string(),
+                    "stopped: timed out; the server may still be executing this query".to_string(),
                 );
                 self.timed_out = true;
                 return Ok(SinkFlow::Stop);

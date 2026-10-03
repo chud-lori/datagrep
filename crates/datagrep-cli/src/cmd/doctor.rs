@@ -16,12 +16,12 @@ pub async fn run(ctx: &Context, args: &DoctorArgs) -> Result<(), CliError> {
     for id in &registered {
         match crate::drivers::driver_for(id) {
             Some(driver) => println!("  {id}: {}", describe_caps(&driver.capabilities().flags)),
-            None => println!("  {id}: (registered, but not constructible from datagrep-cli — bug)"),
+            None => println!("  {id}: (registered, but not constructible from datagrep-cli: bug)"),
         }
     }
     for id in crate::drivers::known_driver_ids() {
         if !registered.iter().any(|r| r == id) {
-            println!("  {id}: KNOWN but not registered — drivers.rs is out of sync");
+            println!("  {id}: KNOWN but not registered; drivers.rs is out of sync");
         }
     }
 

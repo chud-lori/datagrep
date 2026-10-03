@@ -27,7 +27,7 @@ impl fmt::Display for ParkReason {
             ParkReason::Backpressure => "waiting for the result store",
             ParkReason::MemoryBudget => "result memory budget reached",
             ParkReason::HotWindow => "hot window full",
-            ParkReason::ViewportIdle => "paused — scroll to load more",
+            ParkReason::ViewportIdle => "paused: scroll to load more",
         })
     }
 }
@@ -328,7 +328,6 @@ async fn pull_loop(
             },
         };
 
-        // ---- pull one chunk --------------------------------------------
         let hint = FetchHint {
             max_rows: rows_hint,
             max_bytes: policy.max_batch_bytes,
@@ -351,7 +350,6 @@ async fn pull_loop(
             Err(err) => return Ending::Failed(err),
         };
 
-        // ---- account, adapt, hand over ---------------------------------
         let mut batch = batch;
         let mut rows = payload_rows(&batch) as u64;
         let admitted = ctl.rows.load(Ordering::SeqCst);

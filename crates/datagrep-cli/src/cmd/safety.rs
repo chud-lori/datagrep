@@ -41,7 +41,7 @@ fn refusal(decision: &datagrep_core::SafetyDecision) -> CliError {
         .map(|s| format!("  {}", s.text))
         .collect();
     CliError::usage(format!(
-        "`{}` is at safety level {} — this needs {} first:\n{}\n{}",
+        "`{}` is at safety level {}; this needs {} first:\n{}\n{}",
         decision.profile,
         decision.level,
         decision.requirement,

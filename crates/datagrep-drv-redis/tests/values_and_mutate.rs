@@ -65,7 +65,6 @@ async fn string_hash_set_zset_list_all_fetch_type_aware() {
     common::flush(&mut raw).await;
     let conn = common::connect().await;
 
-    // string
     let mut c = conn
         .execute(Request::native("SET datagreptest:s hello"))
         .await
@@ -102,7 +101,6 @@ async fn string_hash_set_zset_list_all_fetch_type_aware() {
         )]
     );
 
-    // hash
     for (f, v) in [("a", "1"), ("b", "2")] {
         let mut c = conn
             .execute(Request::native(format!("HSET datagreptest:h {f} {v}")))
@@ -129,7 +127,6 @@ async fn string_hash_set_zset_list_all_fetch_type_aware() {
     let pairs = drain_pairs(&mut cursor).await;
     assert_eq!(pairs.len(), 2, "expected both hash fields");
 
-    // set
     let mut c = conn
         .execute(Request::native("SADD datagreptest:set x y z"))
         .await
@@ -157,7 +154,6 @@ async fn string_hash_set_zset_list_all_fetch_type_aware() {
         assert_eq!(*present, Value::Bool(true));
     }
 
-    // zset
     let mut c = conn
         .execute(Request::native("ZADD datagreptest:z 1 alice 2 bob"))
         .await
@@ -184,7 +180,6 @@ async fn string_hash_set_zset_list_all_fetch_type_aware() {
     assert!(pairs.iter().any(|(_, score)| *score == Value::F64(1.0)));
     assert!(pairs.iter().any(|(_, score)| *score == Value::F64(2.0)));
 
-    // list — LRANGE-backed ListCursor, index-keyed
     let mut c = conn
         .execute(Request::native("RPUSH datagreptest:l one two three"))
         .await
@@ -236,7 +231,6 @@ async fn op_count_dbsize_and_per_key_cardinality() {
         .is_some()
     {}
 
-    // whole-db DBSIZE
     let mut cursor = conn
         .execute(Request::Op(Op::Count {
             path: ObjectPath::new(vec![Arc::from("0")]),
@@ -256,7 +250,6 @@ async fn op_count_dbsize_and_per_key_cardinality() {
     }
     let _ = batch;
 
-    // per-key HLEN
     let mut cursor = conn
         .execute(Request::Op(Op::Count {
             path: key_path("datagreptest:cnth"),
@@ -321,7 +314,6 @@ async fn op_mutate_set_hset_del_are_atomic_and_report_native_counts() {
         .expect("HGET failed");
     assert_eq!(got, "v1");
 
-    // Delete both.
     let del_batch = MutationBatch {
         mutations: vec![
             Mutation::Delete {
