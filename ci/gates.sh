@@ -90,6 +90,68 @@ else
   supply_chain_missing "cargo-deny" "cargo install cargo-deny --locked"
 fi
 
+note "Go sidecar (gofmt, vet, test -race, mod verify, govulncheck, go-licenses)"
+
+sidecar_dir="${repo_root}/sidecar"
+govulncheck_pkg="golang.org/x/vuln/cmd/govulncheck@v1.7.0"
+go_licenses_pkg="github.com/google/go-licenses/v2@v2.0.1"
+# Same spirit as deny.toml [licenses]: anything unlisted fails, GPL/AGPL/LGPL/SSPL included.
+go_licenses_allowed="0BSD,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT,MPL-2.0"
+
+if [[ ! -f "${sidecar_dir}/go.mod" ]]; then
+  echo "go: no sidecar/go.mod, Go gates skipped"
+elif ! go version >/dev/null 2>&1; then
+  supply_chain_missing "go" "https://go.dev/dl/ (the version in sidecar/go.mod)"
+else
+  export GOFLAGS=-mod=readonly
+
+  if grep -Eq '^(go|toolchain go)[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$' "${sidecar_dir}/go.mod"; then
+    echo "go toolchain pin: OK"
+  else
+    fail_gate "sidecar/go.mod must pin a patch-level toolchain (go 1.N.P or toolchain go1.N.P)"
+  fi
+
+  gofmt_out="$(gofmt -l "${sidecar_dir}")"
+  if [[ -z "${gofmt_out}" ]]; then
+    echo "gofmt: OK"
+  else
+    printf '%s\n' "${gofmt_out}"
+    fail_gate "gofmt -l (sidecar)"
+  fi
+
+  if go -C "${sidecar_dir}" mod verify; then
+    echo "go mod verify: OK"
+  else
+    fail_gate "go mod verify (sidecar)"
+  fi
+
+  if go -C "${sidecar_dir}" vet ./...; then
+    echo "go vet: OK"
+  else
+    fail_gate "go vet (sidecar)"
+  fi
+
+  if go -C "${sidecar_dir}" test -race ./...; then
+    echo "go test -race: OK"
+  else
+    fail_gate "go test -race (sidecar)"
+  fi
+
+  if go -C "${sidecar_dir}" run "${govulncheck_pkg}" ./...; then
+    echo "govulncheck: OK"
+  else
+    fail_gate "govulncheck (sidecar)"
+  fi
+
+  # Our own packages are Apache-2.0 via the repo-root LICENSE, which go-licenses cannot see from sidecar/.
+  if go -C "${sidecar_dir}" run "${go_licenses_pkg}" check ./... \
+       --allowed_licenses="${go_licenses_allowed}" --ignore "$(go -C "${sidecar_dir}" list -m)"; then
+    echo "go-licenses: OK"
+  else
+    fail_gate "go-licenses check (sidecar dependency licence not allowed)"
+  fi
+fi
+
 note "cargo clippy --workspace --all-targets -- -D warnings"
 if cargo clippy --workspace --all-targets -- -D warnings; then
   echo "clippy: OK"
