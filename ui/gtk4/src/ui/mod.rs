@@ -1,6 +1,7 @@
 mod conflict;
 pub mod editing;
 mod export;
+mod filter_bar;
 mod grid;
 mod history;
 mod inspector;
@@ -14,6 +15,7 @@ mod window;
 
 pub use conflict::{ConflictDialog, ConflictDocument, ConflictField, ConflictReview};
 pub use editing::StagedEditsBar;
+pub use filter_bar::FilterBar;
 pub use grid::ResultsGrid;
 pub use history::HistoryPanel;
 pub use inspector::Inspector;

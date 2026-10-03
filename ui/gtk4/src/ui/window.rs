@@ -15,15 +15,15 @@ use crate::model::mutation::{
 use crate::model::safety::challenge_in_error;
 use crate::model::update::UpdateCheck;
 use crate::model::{
-    ExportFormat, ExportState, ExportStatus, ParkedResult, Requirement, ResultModel,
-    SafetyDecision, StagedDocument,
+    ExportFormat, ExportState, ExportStatus, FilterOperator, ParkedResult, Requirement,
+    ResultModel, RowFilter, SafetyDecision, StagedDocument,
 };
 use crate::sql::Derived;
 use crate::ui::conflict::{ConflictDialog, ConflictReview};
 use crate::ui::editing::{commit_warning, confirm, report_dialog, report_headline};
 use crate::ui::export::ExportChoice;
 use crate::ui::safety::clear_challenge;
-use crate::ui::{ResultsGrid, Sidebar, StagedEditsBar, StatusBar};
+use crate::ui::{FilterBar, ResultsGrid, Sidebar, StagedEditsBar, StatusBar};
 
 mod imp {
     use super::*;
@@ -59,6 +59,8 @@ mod imp {
         pub exporting: RefCell<Option<crate::ffi::Export>>,
         pub export_button: gtk::Button,
         pub toasts: adw::ToastOverlay,
+        pub filter_bar: FilterBar,
+        pub filter_toggle: gtk::ToggleButton,
     }
 
     #[derive(Clone)]
@@ -108,6 +110,8 @@ mod imp {
                 exporting: RefCell::new(None),
                 export_button: gtk::Button::from_icon_name(EXPORT_ICON),
                 toasts: adw::ToastOverlay::new(),
+                filter_bar: FilterBar::new(),
+                filter_toggle: gtk::ToggleButton::new(),
             }
         }
     }
@@ -238,6 +242,13 @@ mod imp {
                 }
             });
             header.pack_end(&self.export_button);
+
+            self.filter_toggle.set_icon_name("edit-find-symbolic");
+            self.filter_toggle.set_tooltip_text(Some(
+                "Filter Rows — re-runs the statement with a WHERE (Ctrl+Shift+F)",
+            ));
+            self.filter_toggle.set_sensitive(false);
+            header.pack_end(&self.filter_toggle);
             header
         }
 
@@ -249,6 +260,7 @@ mod imp {
 
             // The bar annotates the rows it is about, so it sits directly over them.
             let results = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            results.append(&self.filter_bar);
             results.append(&self.staged);
             results.append(&self.grid);
 
@@ -340,6 +352,23 @@ mod imp {
             });
             self.obj().add_action(&export);
 
+            let filter_rows = gio::SimpleAction::new("filter-rows", None);
+            let toggle = self.filter_toggle.clone();
+            filter_rows.connect_activate(move |_, _| {
+                if toggle.is_sensitive() || toggle.is_active() {
+                    toggle.set_active(!toggle.is_active());
+                }
+            });
+            self.obj().add_action(&filter_rows);
+            let shortcuts = gtk::ShortcutController::new();
+            shortcuts.set_scope(gtk::ShortcutScope::Global);
+            shortcuts.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string("<Control><Shift>f"),
+                Some(gtk::NamedAction::new("win.filter-rows")),
+            ));
+            self.obj().add_controller(shortcuts);
+            self.wire_filtering();
+
             let window = self.obj().downgrade();
             self.sidebar
                 .connect_connection_selected(move |sidebar, name| {
@@ -392,6 +421,125 @@ mod imp {
                     }
                 }
             });
+        }
+
+        fn wire_filtering(&self) {
+            let window = self.obj().downgrade();
+            self.filter_toggle.connect_toggled(move |toggle| {
+                let Some(window) = window.upgrade() else {
+                    return;
+                };
+                let imp = window.imp();
+                imp.filter_bar.set_visible(toggle.is_active());
+                if toggle.is_active() {
+                    if imp.filter_bar.is_empty() {
+                        imp.filter_bar.add_condition(None);
+                    }
+                    return;
+                }
+                // Closing the bar drops its filters, so a hidden bar never hides a WHERE.
+                imp.filter_bar.set_filters(&[]);
+                if !imp.derived.borrow().filters().is_empty() {
+                    imp.derived.borrow_mut().set_filters(Vec::new());
+                    imp.execute();
+                }
+            });
+
+            let window = self.obj().downgrade();
+            self.filter_bar.connect_apply_requested(move |bar| {
+                let Some(window) = window.upgrade() else {
+                    return;
+                };
+                let imp = window.imp();
+                if imp.derived.borrow().base().is_empty() {
+                    return;
+                }
+                imp.derived.borrow_mut().set_filters(bar.filters());
+                imp.execute();
+            });
+
+            let window = self.obj().downgrade();
+            self.filter_bar.connect_clear_requested(move |bar| {
+                let Some(window) = window.upgrade() else {
+                    return;
+                };
+                let imp = window.imp();
+                bar.set_filters(&[]);
+                if !imp.derived.borrow().is_derived() {
+                    return;
+                }
+                imp.derived.borrow_mut().clear();
+                imp.grid.clear_sort_indicator();
+                imp.execute();
+            });
+
+            let toggle = self.filter_toggle.clone();
+            self.filter_bar
+                .connect_close_requested(move |_| toggle.set_active(false));
+
+            let window = self.obj().downgrade();
+            self.grid
+                .connect_filter_requested(move |_, column, op, value| {
+                    let Some(window) = window.upgrade() else {
+                        return;
+                    };
+                    let imp = window.imp();
+                    if imp.derived.borrow().base().is_empty() || !imp.filter_bar.has_operators() {
+                        imp.status.say(
+                            "filtering re-runs the statement inside SQL, which this engine cannot take",
+                            true,
+                        );
+                        return;
+                    }
+                    imp.derived.borrow_mut().filter(RowFilter {
+                        column: column.to_owned(),
+                        op: op.to_owned(),
+                        value: value.to_owned(),
+                    });
+                    imp.filter_bar.set_filters(imp.derived.borrow().filters());
+                    imp.filter_toggle.set_active(true);
+                    imp.execute();
+                });
+
+            // A filtered-out result reports no columns; the bar keeps the last ones it saw.
+            let window = self.obj().downgrade();
+            self.model.connect_columns_changed(move |model| {
+                let Some(window) = window.upgrade() else {
+                    return;
+                };
+                let columns: Vec<String> = (0..model.column_count())
+                    .filter_map(|col| model.column(col).map(|c| c.name))
+                    .collect();
+                if columns.is_empty() {
+                    return;
+                }
+                let imp = window.imp();
+                let operators = filter_operators(imp.derived.borrow().driver());
+                imp.filter_bar.set_choices(columns, operators);
+            });
+        }
+
+        /// The bar follows the statement on screen: its engine decides whether it can filter.
+        pub(super) fn sync_filter_bar(&self) {
+            let derived = self.derived.borrow();
+            let operators = filter_operators(derived.driver());
+            let usable = !operators.is_empty() && !derived.base().is_empty();
+            let columns = self.filter_bar_columns();
+            self.filter_bar.set_choices(columns, operators);
+            self.filter_bar.set_filters(derived.filters());
+            drop(derived);
+            if !usable {
+                self.filter_toggle.set_active(false);
+            } else if !self.derived.borrow().filters().is_empty() {
+                self.filter_toggle.set_active(true);
+            }
+            self.filter_toggle.set_sensitive(usable);
+        }
+
+        fn filter_bar_columns(&self) -> Vec<String> {
+            (0..self.model.column_count())
+                .filter_map(|col| self.model.column(col).map(|c| c.name))
+                .collect()
         }
 
         fn wire_editing(&self) {
@@ -749,6 +897,7 @@ mod imp {
             self.ran_profile.borrow_mut().clear();
             *self.derived.borrow_mut() = Derived::default();
             self.grid.clear_sort_indicator();
+            self.sync_filter_bar();
             self.status
                 .say(if had { "no result in this tab yet" } else { "" }, false);
         }
@@ -780,6 +929,7 @@ mod imp {
             *self.result_tab.borrow_mut() = tab;
             self.grid.set_sort_indicator(saved.sort);
             self.model.adopt(saved.parked);
+            self.sync_filter_bar();
             self.status.say(&saved.message, saved.is_error);
         }
 
@@ -805,7 +955,10 @@ mod imp {
                 self.status.say("pick a connection first", true);
                 return;
             }
-            let sql = self.derived.borrow().sql();
+            let sql = match self.derived.borrow().sql() {
+                Ok(sql) => sql,
+                Err(error) => return self.status.say(&error, true),
+            };
             if sql.trim().is_empty() {
                 return;
             }
@@ -914,7 +1067,6 @@ mod imp {
                 return;
             }
             let profile = self.ran_profile.borrow().clone();
-            let sql = self.derived.borrow().sql();
             if profile.is_empty() || self.derived.borrow().base().trim().is_empty() {
                 self.status.say(
                     "run a query first — export re-runs the result on screen",
@@ -922,6 +1074,10 @@ mod imp {
                 );
                 return;
             }
+            let sql = match self.derived.borrow().sql() {
+                Ok(sql) => sql,
+                Err(error) => return self.status.say(&error, true),
+            };
             let formats = crate::ffi::export_formats_json(self.derived.borrow().driver())
                 .map(|json| ExportFormat::parse_list(&json))
                 .unwrap_or_default();
@@ -1069,7 +1225,10 @@ mod imp {
                 return;
             };
             let profile = self.run_profile.borrow().clone();
-            let sql = self.derived.borrow().sql();
+            let sql = match self.derived.borrow().sql() {
+                Ok(sql) => sql,
+                Err(error) => return self.status.say(&error, true),
+            };
             // Announced before the engine is asked, so a statement refused was never a run.
             let driver = self.derived.borrow().driver().to_owned();
             // Set before the result exists, and read from the connection the
@@ -1100,6 +1259,12 @@ mod imp {
     }
 }
 
+fn filter_operators(driver: &str) -> Vec<FilterOperator> {
+    crate::ffi::filter_operators_json(driver)
+        .map(|json| FilterOperator::parse_list(&json))
+        .unwrap_or_default()
+}
+
 const EXPORT_ICON: &str = "document-save-as-symbolic";
 const EXPORT_TOOLTIP: &str = "Export Result — every row, as CSV, JSON, Markdown or SQL";
 
@@ -1117,6 +1282,7 @@ fn primary_menu() -> gtk::MenuButton {
     let view = gio::Menu::new();
     view.append(Some("Query History"), Some("win.history"));
     view.append(Some("Export Result…"), Some("win.export"));
+    view.append(Some("Filter Rows"), Some("win.filter-rows"));
 
     let updates = gio::Menu::new();
     updates.append(Some("Check for Updates…"), Some("win.check-updates"));
@@ -1166,6 +1332,7 @@ impl Window {
         imp.run_profile.replace(profile.to_string());
         imp.derived.borrow_mut().ask(sql, driver);
         imp.grid.clear_sort_indicator();
+        imp.sync_filter_bar();
         imp.execute();
     }
 

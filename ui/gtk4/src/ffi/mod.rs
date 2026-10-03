@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use datagrep_ffi::{
     datagrep_browse_statement, datagrep_catalog_children_json, datagrep_catalog_describe_json,
-    datagrep_core_free, datagrep_core_new, datagrep_export_cancel, datagrep_export_formats_json,
-    datagrep_export_free, datagrep_export_start, datagrep_export_status_json, datagrep_mutate,
+    datagrep_core_free, datagrep_core_new, datagrep_derive_statement, datagrep_export_cancel,
+    datagrep_export_formats_json, datagrep_export_free, datagrep_export_start,
+    datagrep_export_status_json, datagrep_filter_operators_json, datagrep_mutate,
     datagrep_profiles_add, datagrep_profiles_list_json, datagrep_profiles_remove,
     datagrep_query_cancel, datagrep_query_free, datagrep_query_on_progress, datagrep_query_rows,
     datagrep_query_run, datagrep_query_status_json, datagrep_reread_documents, datagrep_rows_cell,
@@ -354,6 +355,31 @@ pub fn export_formats_json(driver_id: &str) -> Result<String, Error> {
     let driver = nul_terminated(driver_id)?;
     owned_string_from_ffi(unsafe { datagrep_export_formats_json(driver.as_ptr()) })
         .ok_or_else(|| Error("the engine listed no export formats".to_owned()))
+}
+
+/// The filter operators this engine's results take, as the engine's JSON list.
+pub fn filter_operators_json(driver_id: &str) -> Result<String, Error> {
+    let driver = nul_terminated(driver_id)?;
+    owned_string_from_ffi(unsafe { datagrep_filter_operators_json(driver.as_ptr()) })
+        .ok_or_else(|| Error("the engine listed no filter operators".to_owned()))
+}
+
+/// `statement` with the spec's WHERE and ORDER BY, quoted by the engine.
+pub fn derive_statement(
+    driver_id: &str,
+    statement: &str,
+    spec_json: &str,
+) -> Result<String, Error> {
+    let (driver, statement, spec) = (
+        nul_terminated(driver_id)?,
+        nul_terminated(statement)?,
+        nul_terminated(spec_json)?,
+    );
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let raw = unsafe {
+        datagrep_derive_statement(driver.as_ptr(), statement.as_ptr(), spec.as_ptr(), &mut err)
+    };
+    owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
 }
 
 pub struct Export {

@@ -1,12 +1,14 @@
 use std::ops::Range;
 
-/// The statement asked for, plus the ORDER BY/WHERE the grid's headers and cells added.
+use crate::model::RowFilter;
+
+/// The statement asked for, plus the ORDER BY/WHERE the grid's headers and filter bar added.
 #[derive(Debug, Clone, Default)]
 pub struct Derived {
     base: String,
     driver: String,
     sort: Option<(String, bool)>,
-    filters: Vec<(String, String)>,
+    filters: Vec<RowFilter>,
 }
 
 impl Derived {
@@ -31,9 +33,17 @@ impl Derived {
         self.sort = Some((column.to_owned(), ascending));
     }
 
-    pub fn filter(&mut self, column: &str, value: &str) {
-        self.filters.retain(|(c, _)| c != column);
-        self.filters.push((column.to_owned(), value.to_owned()));
+    pub fn filter(&mut self, filter: RowFilter) {
+        self.filters.retain(|f| f.column != filter.column);
+        self.filters.push(filter);
+    }
+
+    pub fn filters(&self) -> &[RowFilter] {
+        &self.filters
+    }
+
+    pub fn set_filters(&mut self, filters: Vec<RowFilter>) {
+        self.filters = filters;
     }
 
     pub fn clear(&mut self) {
@@ -45,47 +55,16 @@ impl Derived {
         self.sort.is_some() || !self.filters.is_empty()
     }
 
-    /// One level of wrapping only — sorting twice re-wraps the base, never nests.
-    pub fn sql(&self) -> String {
+    /// The engine writes the WHERE/ORDER BY; nothing here quotes a name or a value.
+    pub fn sql(&self) -> Result<String, String> {
         if !self.is_derived() {
-            return self.base.clone();
+            return Ok(self.base.clone());
         }
-        let inner = self.base.trim().trim_end_matches(';').trim_end();
-        let mut sql = format!("SELECT * FROM (\n{inner}\n) AS datagrep_result");
-        if !self.filters.is_empty() {
-            let clauses: Vec<String> = self
-                .filters
-                .iter()
-                .map(|(column, value)| self.predicate(column, value))
-                .collect();
-            sql.push_str("\nWHERE (");
-            sql.push_str(&clauses.join(") AND ("));
-            sql.push(')');
-        }
-        if let Some((column, ascending)) = &self.sort {
-            sql.push_str("\nORDER BY ");
-            sql.push_str(&self.quote(column));
-            sql.push_str(if *ascending { " ASC" } else { " DESC" });
-        }
-        sql
-    }
-
-    fn predicate(&self, column: &str, value: &str) -> String {
-        let ident = self.quote(column);
-        if value.is_empty() {
-            format!("{ident} IS NULL OR {ident} = ''")
-        } else {
-            format!("{ident} = '{}'", value.replace('\'', "''"))
-        }
-    }
-
-    // MySQL takes double-quoted identifiers only under ANSI_QUOTES, which datagrep does not set.
-    fn quote(&self, name: &str) -> String {
-        if self.driver.contains("mysql") {
-            format!("`{}`", name.replace('`', "``"))
-        } else {
-            format!("\"{}\"", name.replace('"', "\"\""))
-        }
+        let sort = self.sort.as_ref().map(
+            |(column, ascending)| serde_json::json!({"column": column, "ascending": ascending}),
+        );
+        let spec = serde_json::json!({"filters": self.filters, "sort": sort});
+        crate::ffi::derive_statement(&self.driver, &self.base, &spec.to_string()).map_err(|e| e.0)
     }
 }
 
@@ -99,10 +78,18 @@ mod tests {
         derived
     }
 
+    fn eq(column: &str, value: &str) -> RowFilter {
+        RowFilter {
+            column: column.to_owned(),
+            op: "eq".to_owned(),
+            value: value.to_owned(),
+        }
+    }
+
     #[test]
     fn an_underived_statement_is_sent_exactly_as_typed() {
         let derived = asked("SELECT * FROM users;", "postgres");
-        assert_eq!(derived.sql(), "SELECT * FROM users;");
+        assert_eq!(derived.sql().unwrap(), "SELECT * FROM users;");
         assert!(!derived.is_derived());
     }
 
@@ -111,7 +98,7 @@ mod tests {
         let mut derived = asked("SELECT * FROM users", "postgres");
         derived.sort_by("created at", true);
         assert_eq!(
-            derived.sql(),
+            derived.sql().unwrap(),
             "SELECT * FROM (\nSELECT * FROM users\n) AS datagrep_result\nORDER BY \"created at\" ASC"
         );
     }
@@ -121,56 +108,53 @@ mod tests {
         let mut derived = asked("SELECT * FROM users", "postgres");
         derived.sort_by("id", true);
         derived.sort_by("id", false);
-        assert_eq!(derived.sql().matches("datagrep_result").count(), 1);
-        assert!(derived.sql().ends_with("ORDER BY \"id\" DESC"));
+        let sql = derived.sql().unwrap();
+        assert_eq!(sql.matches("datagrep_result").count(), 1);
+        assert!(sql.ends_with("ORDER BY \"id\" DESC"));
     }
 
     #[test]
-    fn a_new_question_drops_the_previous_order_by() {
+    fn a_new_question_drops_the_previous_clauses() {
         let mut derived = asked("SELECT * FROM users", "postgres");
         derived.sort_by("id", true);
+        derived.filter(eq("id", "1"));
         derived.ask("SELECT * FROM orders", "postgres");
         assert!(!derived.is_derived());
-        assert_eq!(derived.sql(), "SELECT * FROM orders");
-    }
-
-    #[test]
-    fn the_trailing_semicolon_is_stripped_before_wrapping() {
-        let mut derived = asked("SELECT 1;  ", "postgres");
-        derived.sort_by("a", true);
-        assert!(derived.sql().starts_with("SELECT * FROM (\nSELECT 1\n)"));
+        assert_eq!(derived.sql().unwrap(), "SELECT * FROM orders");
     }
 
     #[test]
     fn mysql_identifiers_are_backquoted_because_ansi_quotes_is_not_set() {
         let mut derived = asked("SELECT * FROM t", "mysql");
         derived.sort_by("or`der", true);
-        assert!(derived.sql().ends_with("ORDER BY `or``der` ASC"));
+        assert!(derived.sql().unwrap().ends_with("ORDER BY `or``der` ASC"));
     }
 
     #[test]
     fn a_filter_value_cannot_close_its_own_quote() {
-        let mut derived = asked("SELECT * FROM t", "postgres");
-        derived.filter("name", "O'Brien");
-        assert!(derived.sql().contains("\"name\" = 'O''Brien'"));
-    }
-
-    #[test]
-    fn filtering_by_an_empty_cell_matches_null_as_well_as_the_empty_string() {
-        let mut derived = asked("SELECT * FROM t", "postgres");
-        derived.filter("note", "");
+        let mut derived = asked("SELECT * FROM t", "mysql");
+        derived.filter(eq("name", "\\'; DROP TABLE t; --"));
         assert!(derived
             .sql()
-            .contains("WHERE (\"note\" IS NULL OR \"note\" = '')"));
+            .unwrap()
+            .contains("`name` = '\\\\''; DROP TABLE t; --'"));
     }
 
     #[test]
     fn re_filtering_a_column_replaces_its_predicate_instead_of_stacking_one() {
         let mut derived = asked("SELECT * FROM t", "postgres");
-        derived.filter("state", "new");
-        derived.filter("state", "done");
-        assert_eq!(derived.sql().matches("\"state\"").count(), 1);
-        assert!(derived.sql().contains("'done'"));
+        derived.filter(eq("state", "new"));
+        derived.filter(eq("state", "done"));
+        let sql = derived.sql().unwrap();
+        assert_eq!(sql.matches("\"state\"").count(), 1);
+        assert!(sql.contains("'done'"));
+    }
+
+    #[test]
+    fn an_engine_that_cannot_be_wrapped_says_so_instead_of_sending_sql() {
+        let mut derived = asked("db.users.find({})", "mongodb");
+        derived.sort_by("name", true);
+        assert!(derived.sql().unwrap_err().contains("mongodb"));
     }
 }
 
