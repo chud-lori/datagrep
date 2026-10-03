@@ -146,7 +146,7 @@ enum SQLLineLexer {
             }
         }
 
-        // ---- continuation of a construct opened on an earlier line ---------
+        // Continuation of a construct opened on an earlier line.
         if state.commentDepth > 0 {
             consumeBlockComment()
             emit(0, i, .comment)

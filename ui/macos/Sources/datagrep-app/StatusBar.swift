@@ -33,14 +33,14 @@ struct StatusBar: View {
 
     private var rowCountHelp: String {
         if model.state == .capped {
-            return "the engine stopped storing rows at its cap — this is not the whole result"
+            return "the engine stopped storing rows at its cap, so this is not the whole result"
         }
         if limitHit != nil {
-            return "the statement ran with an @limit directive — this is not the whole result"
+            return "the statement ran with an @limit directive, so this is not the whole result"
         }
         if !model.totalKnown {
             return
-                "≥ because this engine streams without reporting a total — more rows may exist than have been loaded"
+                "≥ because this engine streams without reporting a total; more rows may exist than have been loaded"
         }
         return "row count reported by the engine"
     }
@@ -48,16 +48,16 @@ struct StatusBar: View {
     private var incompleteNotice: (text: String, icon: String, help: String)? {
         if model.state == .capped {
             return (
-                "stopped at \(model.rowsLoaded.formatted())-row limit — result incomplete",
+                "stopped at \(model.rowsLoaded.formatted())-row limit, result incomplete",
                 "exclamationmark.triangle.fill",
-                "the engine's soft row cap ended this result early; rows beyond this point exist but were not fetched — narrow the query to see them"
+                "the engine's soft row cap ended this result early; rows beyond this point exist but were not fetched. Narrow the query to see them"
             )
         }
         if let lim = limitHit {
             return (
                 "showing first \(lim.formatted()) rows of more (@limit)",
                 "arrow.down.to.line",
-                "an @limit \(lim) directive stopped this result at \(lim.formatted()) rows — the full result may be longer; raise or remove the @limit to fetch more"
+                "an @limit \(lim) directive stopped this result at \(lim.formatted()) rows. The full result may be longer; raise or remove the @limit to fetch more"
             )
         }
         return nil
@@ -86,7 +86,7 @@ struct StatusBar: View {
     private var fullTooltip: String {
         var lines: [String] = [
             "state: \(model.state?.rawValue ?? "idle")",
-            "rows: \(rowCountText) — \(rowCountHelp)",
+            "rows: \(rowCountText), \(rowCountHelp)",
             "elapsed: \(model.elapsedMs) ms",
             "\(residentText)  (phys_footprint, not ps RSS)",
         ]
@@ -95,7 +95,7 @@ struct StatusBar: View {
         }
         if model.hiddenColumns > 0 {
             lines.append(
-                "\(model.hiddenColumns) columns hidden beyond the 30-column visible cap — new columns append on the right and never reorder"
+                "\(model.hiddenColumns) columns hidden beyond the 30-column visible cap; new columns append on the right and never reorder"
             )
         }
         if let notice = incompleteNotice { lines.append(notice.text) }

@@ -324,7 +324,7 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         highlighter.refreshVisible()
     }
 
-    // MARK: - external API (unchanged surface for AppModel)
+    // MARK: - external API
 
     func setText(_ text: String, markDirty: Bool = true) {
         loadViewIfNeeded()
@@ -345,7 +345,6 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
 
     // MARK: - scope: which connection's editors are showing
 
-    /// Show `connection`'s editors.
     func setScope(_ connection: String?) {
         loadViewIfNeeded()
         let next = (connection?.isEmpty ?? true) ? nil : connection
@@ -746,7 +745,7 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         alert.alertStyle = .warning
         alert.messageText = "Discard this query?"
         alert.informativeText =
-            "\(tab.displayTitle) has not been saved. Closing the tab deletes it — "
+            "\(tab.displayTitle) has not been saved. Closing the tab deletes it; "
             + "quitting datagrep would keep it."
         alert.addButton(withTitle: "Discard")
         alert.addButton(withTitle: "Cancel")
@@ -790,7 +789,7 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
         let alert = NSAlert()
         alert.messageText = "Save Query"
         alert.informativeText =
-            "Saved as a plain .sql file in ~/Library/Application Support/datagrep/tabs — readable in any editor, and committable to git."
+            "Saved as a plain .sql file in ~/Library/Application Support/datagrep/tabs, readable in any editor, and committable to git."
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
@@ -833,7 +832,7 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
 
     // MARK: - persistence
 
-    /// Reopen what was open, and **make nothing up**.
+    /// Reopen what was open, and make nothing up.
     private func restoreSession() {
         let loaded = store.load()
         for (record, text) in loaded.tabs {

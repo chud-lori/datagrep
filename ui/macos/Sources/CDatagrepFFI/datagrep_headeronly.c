@@ -1,7 +1,4 @@
-/* CDatagrepFFI carries the frozen header only. SwiftPM requires at least one
- * source file per C target, so this TU exists purely to give it one.
- * The symbols themselves come from either CDatagrepStub (default) or the real
- * libdatagrep_ffi.a (DATAGREP_FFI=real, see ../../Package.swift). */
+/* SwiftPM needs one source file per C target; the symbols come from CDatagrepStub or libdatagrep_ffi.a. */
 #include "include/datagrep.h"
 
 const char *datagrep_header_abi_tag(void);

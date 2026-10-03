@@ -47,7 +47,7 @@ struct SidebarView: View {
         )
         .safeAreaInset(edge: .bottom) {
             if !model.searchText.isEmpty {
-                Text("Filtering nodes already loaded — this never triggers a server scan.")
+                Text("Filtering nodes already loaded; this never triggers a server scan.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 10)
@@ -273,7 +273,7 @@ private struct ScanPrompt: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text(
-                "‘\(node.name)’ has no cheap listing. Enter a key prefix — enumerating everything would be a full keyspace scan."
+                "‘\(node.name)’ has no cheap listing. Enter a key prefix; enumerating everything would be a full keyspace scan."
             )
             .font(.caption2)
             .foregroundStyle(.secondary)
