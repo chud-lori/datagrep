@@ -66,6 +66,17 @@ mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 
 cp "${BIN}" "${APP}/Contents/MacOS/${APP_NAME}"
 
+GOARCH="$(uname -m | sed 's/x86_64/amd64/')"
+../../packaging/build-sidecars.sh "darwin/${GOARCH}"
+shopt -s nullglob
+SIDECARS=("${PWD}/../../dist/.sidecars/darwin-${GOARCH}"/datagrep-sidecar-*)
+shopt -u nullglob
+if [ ${#SIDECARS[@]} -gt 0 ]; then
+  mkdir -p "${APP}/Contents/Helpers"
+  cp "${SIDECARS[@]}" "${APP}/Contents/Helpers/"
+  echo "==> bundled ${#SIDECARS[@]} engine sidecar(s) into Contents/Helpers"
+fi
+
 # App icon. CFBundleIconFile below must match this basename WITHOUT extension
 # ("datagrep", not "datagrep.icns") — Finder/Dock resolve it themselves, and a
 # wrong value fails silently (app launches fine, just keeps the generic
@@ -142,7 +153,18 @@ printf 'APPL????' > "${APP}/Contents/PkgInfo"
 # Gatekeeper warning.
 SIGN_IDENTITY="${DATAGREP_SIGN_IDENTITY:-datagrep-dev}"
 if command -v codesign >/dev/null 2>&1; then
+  SIGN_AS="-"
   if security find-identity -v -p codesigning 2>/dev/null | grep -qF "${SIGN_IDENTITY}"; then
+    SIGN_AS="${SIGN_IDENTITY}"
+  fi
+  # The bundle is signed without --deep, so nested helpers must be signed first.
+  shopt -s nullglob
+  for helper in "${APP}/Contents/Helpers"/*; do
+    codesign --force --sign "${SIGN_AS}" --timestamp=none "${helper}" >/dev/null 2>&1 \
+      || echo "==> codesign of $(basename "${helper}") failed"
+  done
+  shopt -u nullglob
+  if [ "${SIGN_AS}" != "-" ]; then
     codesign --force --sign "${SIGN_IDENTITY}" --timestamp=none "${APP}" >/dev/null 2>&1 \
       && echo "==> signed as ${SIGN_IDENTITY}" \
       || echo "==> codesign with ${SIGN_IDENTITY} failed (app will still run)"
