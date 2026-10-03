@@ -57,7 +57,7 @@ fn formats_for(driver_id: &str) -> Vec<&'static str> {
 }
 
 // Only engines whose rows an INSERT can recreate; the quoting is the driver's own.
-fn sql_target(driver_id: &str) -> Option<(SqlDialect, QuoteIdent)> {
+pub(crate) fn sql_target(driver_id: &str) -> Option<(SqlDialect, QuoteIdent)> {
     match driver_id {
         "postgres" => Some((
             SqlDialect::Postgres,

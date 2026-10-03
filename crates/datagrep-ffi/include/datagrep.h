@@ -140,6 +140,18 @@ char* datagrep_catalog_describe_json(DatagrepCore*, const char* profile, const c
 char* datagrep_browse_statement(const char* driver_id, const char* path_json,
                                 const char* database, char** err_out);
 
+// Filter operators as [{"op":"eq","label":"=","needs_value":true},..]; [] where the
+// engine cannot run a statement inside an SQL subquery. Pure. Caller frees.
+char* datagrep_filter_operators_json(const char* driver_id);
+
+// `statement` wrapped as SELECT * FROM (statement) AS datagrep_result plus the spec's WHERE/ORDER BY.
+// spec_json: {"filters":[{"column":str,"op":str,"value":str}],"sort":{"column":str,"ascending":bool}|null}
+// Filters are ANDed; names and values are quoted per dialect; an empty spec returns `statement` as is.
+// Pure: run the result through datagrep_query_run so the safety ladder sees exactly what runs.
+// NULL + *err_out for an engine with no operators, an unknown op, or a NUL in a value. Caller frees.
+char* datagrep_derive_statement(const char* driver_id, const char* statement,
+                                const char* spec_json, char** err_out);
+
 // ---- editor ----------------------------------------------------------
 // Completion candidates for the caret at `caret`, a UTF-8 BYTE offset into
 // `text` (the whole editor buffer). Returns JSON:

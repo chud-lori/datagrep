@@ -267,6 +267,13 @@ mod imp {
                     Signal::builder("copied")
                         .param_types([String::static_type()])
                         .build(),
+                    Signal::builder("filter-requested")
+                        .param_types([
+                            String::static_type(),
+                            String::static_type(),
+                            String::static_type(),
+                        ])
+                        .build(),
                 ]
             })
         }
@@ -409,6 +416,19 @@ mod imp {
             });
             group.add_action(&copy_selection);
 
+            let filter_cell =
+                gio::SimpleAction::new("filter-cell", Some(&<(u64, u32)>::static_variant_type()));
+            let grid = self.obj().downgrade();
+            filter_cell.connect_activate(move |_, target| {
+                let (Some(grid), Some((row, col))) =
+                    (grid.upgrade(), target.and_then(|t| t.get::<(u64, u32)>()))
+                else {
+                    return;
+                };
+                grid.imp().request_filter(row, col);
+            });
+            group.add_action(&filter_cell);
+
             self.obj().insert_action_group("results", Some(&group));
 
             let shortcuts = gtk::ShortcutController::new();
@@ -418,6 +438,23 @@ mod imp {
                 Some(gtk::NamedAction::new("results.copy-selection")),
             ));
             self.view.add_controller(shortcuts);
+        }
+
+        /// NULL and '' look alike in the grid, so an empty cell matches both.
+        fn request_filter(&self, row: u64, col: u32) {
+            let Some(model) = self.model.borrow().clone() else {
+                return;
+            };
+            let Some(column) = model.column(col) else {
+                return;
+            };
+            let (op, value) = model.with_cell(row, col, |kind, text, _| match kind {
+                CellKind::Null => ("is_null", String::new()),
+                _ if text.is_empty() => ("is_empty", String::new()),
+                _ => ("eq", text.to_owned()),
+            });
+            self.obj()
+                .emit_by_name::<()>("filter-requested", &[&column.name, &op.to_string(), &value]);
         }
 
         fn model_text(&self, read: impl Fn(&ResultModel) -> String) -> String {
@@ -624,6 +661,21 @@ impl ResultsGrid {
         })
     }
 
+    /// A cell's "filter by this value": column, operator id and value.
+    pub fn connect_filter_requested<F: Fn(&Self, &str, &str, &str) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.connect_local("filter-requested", false, move |values| {
+            let grid = values[0]
+                .get::<Self>()
+                .expect("the signal carries the grid");
+            let text = |i: usize| values[i].get::<String>().unwrap_or_default();
+            f(&grid, &text(1), &text(2), &text(3));
+            None
+        })
+    }
+
     pub fn connect_edit_refused<F: Fn(&Self, &str) + 'static>(
         &self,
         f: F,
@@ -785,6 +837,14 @@ impl ResultsGrid {
         copy.append_item(&item("Copy Row", "results.copy-row", row.to_variant()));
         copy.append(Some("Copy Selected Rows"), Some("results.copy-selection"));
         menu.append_section(None, &copy);
+
+        let narrow = gio::Menu::new();
+        narrow.append_item(&item(
+            "Filter by This Value",
+            "results.filter-cell",
+            (row, col).to_variant(),
+        ));
+        menu.append_section(None, &narrow);
 
         if model.editable().is_some() {
             let editing = gio::Menu::new();
