@@ -155,7 +155,6 @@ final class ConnectionForm: ObservableObject {
         sshSecret = ""
     }
 
-    /// The tunnel these fields describe, or nil when the connection is direct.
     var ssh: SSHSettings? {
         guard useSSH, engine?.isFileBased == false else { return nil }
         return SSHSettings(

@@ -33,11 +33,9 @@ bool  datagrep_profiles_add(DatagrepCore*, const char* name, const char* url, ch
 // SSH = {"host":str,"port":u16 (22),"user":str,
 //        "auth":"agent"|"key"|"password" (agent),"key_path":str|null,
 //        "secret":str}
-// "secret" is the SSH password (auth=password) or key passphrase (auth=key).
-// It goes to the keychain and never into the profile store; absent or ""
-// keeps the saved one if "auth" did not change. A profile with "ssh" dials
-// through that host: the engine connects to a 127.0.0.1 listener whose
-// connections are carried over the SSH session to the URL's host:port.
+// "secret" (SSH password or key passphrase) is stored only in the keychain;
+// absent or "" keeps the saved one while "auth" is unchanged.
+// With "ssh" the engine dials a 127.0.0.1 forward to the URL's host:port.
 // "safety" is the query-safety ladder for THIS connection, one of silent /
 // warn_all / warn_writes / auth_all / auth_writes; "confirm_writes" is the
 // boolean it replaced, still accepted (true = warn_writes) so a frontend can
@@ -108,27 +106,23 @@ char* datagrep_connection_info_json(DatagrepCore*, const char* name, char** err_
 // or NULL with *err_out set to the driver's own failure message.
 char* datagrep_connection_test_json(DatagrepCore*, const char* name, const char* url,
                                     char** err_out);
-// datagrep_connection_test_json for a dialog that may not be saved yet. An
-// empty `url` uses the saved profile's config. options_json is NULL, "" or
-// {"ssh":SSH|null} as in _add_json: absent = the saved profile's tunnel,
-// null = none. An SSH "secret" left empty is borrowed from `name`'s saved
-// tunnel when "auth" matches.
+// datagrep_connection_test_json for an unsaved dialog; empty `url` = saved config.
+// options_json is NULL, "" or {"ssh":SSH|null}: absent = saved tunnel, null = none.
+// An empty SSH "secret" is borrowed from `name`'s saved tunnel when "auth" matches.
 char* datagrep_connection_test_with_json(DatagrepCore*, const char* name, const char* url,
                                          const char* options_json, char** err_out);
 
 // ---- SSH host keys -----------------------------------------------------
-// A tunnel only connects to a host whose key is trusted: pinned here, or
-// already in ~/.ssh/known_hosts (read, never written). An unknown key fails
-// the connect until the user has reviewed it; a changed key always fails.
-// Key exchange only - nothing is authenticated or sent. BLOCKING. JSON:
+// Fail-closed: only keys pinned here or in ~/.ssh/known_hosts (never written) connect;
+// an unknown key fails until the user reviews it, a changed key always fails.
+// Key exchange only, nothing is authenticated or sent. BLOCKING. JSON:
 // {"host":str,"port":u16,"algorithm":str,"fingerprint":"SHA256:...",
 //  "status":"trusted"|"unknown"|"changed","expected":str|null,
 //  "known_hosts":str}   // the file datagrep pins keys in
 char* datagrep_ssh_host_key_json(DatagrepCore*, const char* host, uint16_t port,
                                  char** err_out);
-// Pins the key the last _host_key_json call saw for host:port, only while
-// `fingerprint` is the one the user was shown. Refuses a "changed" host: the
-// old line must be removed from "known_hosts" by hand.
+// Pins the key the last _host_key_json call saw, only if `fingerprint` is the one shown.
+// Refuses a "changed" host; its old line must be removed from "known_hosts" by hand.
 bool  datagrep_ssh_trust_host_key(DatagrepCore*, const char* host, uint16_t port,
                                   const char* fingerprint, char** err_out);
 
