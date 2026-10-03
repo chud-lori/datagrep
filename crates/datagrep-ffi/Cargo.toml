@@ -33,6 +33,7 @@ datagrep-drv-redis = { path = "../datagrep-drv-redis" }
 datagrep-drv-mongo = { path = "../datagrep-drv-mongo" }
 datagrep-drv-mysql = { path = "../datagrep-drv-mysql" }
 datagrep-drv-elasticsearch = { path = "../datagrep-drv-elasticsearch" }
+datagrep-drv-sidecar = { path = "../datagrep-drv-sidecar" }
 
 # The one global runtime for the whole process. `rt-multi-thread` for the four
 # workers, `sync` for the broadcast/watch channels CoreApi hands out.

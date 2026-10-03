@@ -41,6 +41,14 @@ jobs:
           ./dist/datagrep-macos-arm64 --version
           ./dist/datagrep-macos-arm64 --help
 
+      - name: Install Go (sidecars)
+        if: hashFiles('sidecar/go.mod') != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: sidecar/go.mod
+          cache-dependency-path: sidecar/go.sum
+
+      # build-app.sh builds the darwin/arm64 sidecars itself and signs them into Contents/Helpers.
       - name: Build app bundle (real FFI, arm64)
         run: |
           export MACOSX_DEPLOYMENT_TARGET=14.0
@@ -97,6 +105,16 @@ jobs:
       - name: Build CLI
         run: cargo build --release -p datagrep-cli
 
+      - name: Install Go (sidecars)
+        if: hashFiles('sidecar/go.mod') != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: sidecar/go.mod
+          cache-dependency-path: sidecar/go.sum
+
+      - name: Build engine sidecars
+        run: bash packaging/build-sidecars.sh "linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+
       - name: Stage, strip, smoke test, checksum
         run: |
           mkdir -p dist
@@ -106,6 +124,17 @@ jobs:
           "./dist/${{ matrix.asset }}" --help
           ls -lh dist
           cd dist && sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+
+      - name: Stage engine sidecars
+        run: |
+          shopt -s nullglob
+          platform="${{ matrix.asset }}"
+          cd dist
+          for sidecar in .sidecars/linux-*/datagrep-sidecar-*; do
+            asset="$(basename "$sidecar")-${platform#datagrep-}"
+            cp "$sidecar" "$asset"
+            sha256sum "$asset" > "$asset.sha256"
+          done
 
       - uses: actions/upload-artifact@v4
         with:

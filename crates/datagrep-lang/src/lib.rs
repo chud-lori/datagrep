@@ -95,7 +95,7 @@ pub fn language_for(id: LanguageId) -> &'static dyn Language {
         LanguageId::MongoShell => &mongo::MONGO,
         LanguageId::RedisCli => &redis::REDIS,
         LanguageId::EsDsl => &esdsl::ES_DSL,
-        LanguageId::Cypher | LanguageId::PartiQl => &fallback::FALLBACK,
+        LanguageId::Cypher | LanguageId::PartiQl | LanguageId::Unclassified => &fallback::FALLBACK,
     }
 }
 
@@ -155,6 +155,7 @@ mod tests {
             LanguageId::EsDsl,
             LanguageId::Cypher,
             LanguageId::PartiQl,
+            LanguageId::Unclassified,
         ];
         for id in ids {
             let lang = language_for(id);
@@ -169,5 +170,17 @@ mod tests {
         assert_eq!(lang.context_at("x", 0), EditContext::Statement);
         assert!(lang.highlight("x").is_empty());
         assert!(lang.split("   \n  ").is_empty());
+    }
+
+    #[test]
+    fn unclassified_language_never_calls_anything_a_read() {
+        let lang = language_for(LanguageId::Unclassified);
+        for stmt in [
+            "SELECT 1 FROM dual",
+            "select * from t",
+            "UPDATE t SET x = 1",
+        ] {
+            assert_eq!(lang.classify(stmt), StatementClass::Unknown, "{stmt}");
+        }
     }
 }

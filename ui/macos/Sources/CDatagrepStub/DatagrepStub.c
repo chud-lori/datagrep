@@ -12,6 +12,7 @@
 
 #include "datagrep.h"
 
+#include <ctype.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -549,6 +550,58 @@ char *datagrep_browse_statement(const char *driver_id, const char *path_json,
         sb_putf(&s, "-- @limit 500\nSELECT * FROM \"%s\";", leaf);
     }
     return s.buf;
+}
+
+/* ------------------------------------------------------------------ editor */
+
+char *datagrep_complete_json(DatagrepCore *c, const char *profile, const char *text, size_t caret,
+                             char **err_out) {
+    (void)c;
+    (void)profile;
+    if (!text) {
+        set_err(err_out, "text must not be NULL");
+        return NULL;
+    }
+    size_t end = strlen(text) < caret ? strlen(text) : caret, start = end;
+    while (start > 0 && (isalnum((unsigned char)text[start - 1]) || text[start - 1] == '_')) start--;
+    char prefix[128];
+    size_t n = end - start < sizeof prefix - 1 ? end - start : sizeof prefix - 1;
+    memcpy(prefix, text + start, n);
+    prefix[n] = '\0';
+    static const char *names[][2] = {{"users", "table"}, {"orders", "table"}, {"id", "column"},
+                                     {"name", "column"}, {"SELECT", "keyword"},
+                                     {"FROM", "keyword"}, {"WHERE", "keyword"}};
+    Sb s;
+    sb_init(&s);
+    sb_put(&s, "{\"prefix\":\"");
+    sb_put_escaped(&s, prefix);
+    sb_put(&s, "\",\"items\":[");
+    int first = 1;
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+        if (n == 0 || strncasecmp(names[i][0], prefix, n) != 0) continue;
+        sb_putf(&s, "%s{\"label\":\"%s\",\"insert\":\"%s\",\"kind\":\"%s\",\"detail\":null}",
+                first ? "" : ",", names[i][0], names[i][0], names[i][1]);
+        first = 0;
+    }
+    sb_put(&s, "],\"error\":null}");
+    return s.buf;
+}
+
+void datagrep_complete_forget(DatagrepCore *c, const char *profile) {
+    (void)c;
+    (void)profile;
+}
+
+char *datagrep_sql_format(const char *driver_id, const char *sql, char **err_out) {
+    if (!driver_id || !sql) {
+        set_err(err_out, "driver_id and sql must not be NULL");
+        return NULL;
+    }
+    if (strcmp(driver_id, "postgres") && strcmp(driver_id, "mysql") && strcmp(driver_id, "sqlite")) {
+        set_err(err_out, "this engine's statements are not SQL");
+        return NULL;
+    }
+    return dup_cstr(sql);
 }
 
 /* ------------------------------------------------------------------- query */

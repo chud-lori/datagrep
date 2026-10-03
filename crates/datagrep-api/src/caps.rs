@@ -53,6 +53,8 @@ pub enum LanguageId {
     EsDsl,
     Cypher,
     PartiQl,
+    // No classifier exists: every statement is gated as a write.
+    Unclassified,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

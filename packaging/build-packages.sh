@@ -30,6 +30,14 @@ install -Dm644 "$REPO_ROOT/packaging/icons/datagrep.png" \
 install -Dm644 "$REPO_ROOT/packaging/icons/datagrep.svg" \
                "$STAGE/usr/share/icons/hicolor/scalable/apps/datagrep.svg"
 
+# Engine sidecars from packaging/build-sidecars.sh, if any; static, so no extra --depends.
+SIDECAR_DIR="${SIDECAR_DIR:-$OUT_DIR/.sidecars/linux-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')}"
+shopt -s nullglob
+for sidecar in "$SIDECAR_DIR"/datagrep-sidecar-*; do
+    install -Dm755 "$sidecar" "$STAGE/usr/lib/datagrep/sidecars/$(basename "$sidecar")"
+done
+shopt -u nullglob
+
 # Strip the staged copy only — the original build output stays intact.
 if command -v strip >/dev/null 2>&1; then
     strip --strip-unneeded "$STAGE/usr/bin/datagrep" || true

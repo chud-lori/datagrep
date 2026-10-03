@@ -261,6 +261,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - actions wired to the main menu
 
     @objc func runStatement(_ sender: Any?) { model.runStatementUnderCaret() }
+    @objc func formatSQL(_ sender: Any?) { model.formatSQL() }
+    @objc func showCompletions(_ sender: Any?) { model.editor.requestCompletions(after: 0) }
     @objc func cancelQuery(_ sender: Any?) { model.cancel() }
     @objc func exportResult(_ sender: Any?) { model.exportResult() }
     @objc func newConnection(_ sender: Any?) { model.showNewConnection = true }
@@ -388,6 +390,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let queryMenu = NSMenu(title: "Query")
         add(queryMenu, "Run Statement Under Caret", #selector(runStatement(_:)), "\r")
         add(queryMenu, "Cancel", #selector(cancelQuery(_:)), ".")
+        queryMenu.addItem(.separator())
+        let format = NSMenuItem(title: "Format SQL", action: #selector(formatSQL(_:)), keyEquivalent: "f")
+        format.keyEquivalentModifierMask = [.option, .shift]
+        queryMenu.addItem(format)
+        let complete = NSMenuItem(
+            title: "Show Completions", action: #selector(showCompletions(_:)), keyEquivalent: " ")
+        complete.keyEquivalentModifierMask = [.option]
+        queryMenu.addItem(complete)
         queryMenu.addItem(.separator())
         add(queryMenu, "Query History…", #selector(showQueryHistory(_:)), "y")
         queryMenu.addItem(.separator())

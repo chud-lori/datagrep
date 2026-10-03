@@ -52,6 +52,13 @@ jobs:
           restore-keys: |
             advisory-db-
 
+      - name: Install Go (version from sidecar/go.mod)
+        if: hashFiles('sidecar/go.mod') != ''
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: sidecar/go.mod
+          cache-dependency-path: sidecar/go.mod
+
       - name: Shellcheck shell entry points
         run: shellcheck ci/gates.sh install.sh
 

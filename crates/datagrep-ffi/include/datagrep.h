@@ -174,6 +174,33 @@ char* datagrep_catalog_describe_json(DatagrepCore*, const char* profile, const c
 char* datagrep_browse_statement(const char* driver_id, const char* path_json,
                                 const char* database, char** err_out);
 
+// ---- editor ----------------------------------------------------------
+// Completion candidates for the caret at `caret`, a UTF-8 BYTE offset into
+// `text` (the whole editor buffer). Returns JSON:
+// {"prefix":str,"items":[{"label":str,"insert":str,"kind":str,"detail":str|null}],
+//  "error":str|null}
+// Accepting an item replaces the `prefix` text just before the caret with
+// "insert". "kind" is keyword/schema/table/view/column for SQL engines and the
+// catalog kind (collection/field/key) otherwise. SQL names come from the
+// catalog only — the text is parsed here, never sent to the server — and are
+// cached per connection: the table list on first use, a table's columns the
+// first time a statement names it. A DDL statement run through
+// datagrep_query_run drops the cache, as do datagrep_complete_forget and a
+// five-minute age limit. "error" is set when the catalog could not be read;
+// keywords are still returned.
+// SYNCHRONOUS: the first call per connection lists its tables, so call it off
+// the UI thread. Returns an OWNED char* the caller MUST datagrep_string_free().
+char* datagrep_complete_json(DatagrepCore*, const char* profile, const char* text,
+                             size_t caret, char** err_out);
+// Drops the connection's cached names, e.g. when the user refreshes its schema.
+void  datagrep_complete_forget(DatagrepCore*, const char* profile);
+// The statement(s) re-flowed one clause per line with keywords upper-cased.
+// Only whitespace between tokens and keyword case change; strings, quoted
+// names and comments are kept byte for byte. NULL with *err_out set for an
+// engine whose language is not SQL. Pure: no connection is used.
+// Returns an OWNED char* the caller MUST datagrep_string_free().
+char* datagrep_sql_format(const char* driver_id, const char* sql, char** err_out);
+
 // ---- query -----------------------------------------------------------
 // Non-blocking: returns immediately with a handle; rows stream in the background.
 DatagrepQuery* datagrep_query_run(DatagrepCore*, const char* profile, const char* sql, char** err_out);
