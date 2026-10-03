@@ -905,8 +905,7 @@ impl ConnectionDialog {
         );
     }
 
-    // Shows the SSH host's key and asks before trusting a new one; `then` runs once it is trusted.
-    // Unless `required`, an unreachable host does not block saving: the key is checked on connect.
+    // `then` runs once the host key is trusted; unless `required`, an unreachable host does not block it.
     fn verify_host_key(&self, required: bool, fail: fn(&Self, &str), then: fn(&Self)) {
         let Some(ssh) = self.ssh_from_ui() else {
             return then(self);

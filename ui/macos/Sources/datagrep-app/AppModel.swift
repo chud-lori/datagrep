@@ -609,8 +609,7 @@ final class AppModel: ObservableObject {
             then: { [weak self] in self?.commitConnectionDraft() })
     }
 
-    /// Shows an SSH host's key and asks before trusting a new one; `then` runs once it is trusted.
-    /// With `required` false an unreachable host does not block saving: the key is checked on connect.
+    /// `then` runs once the host key is trusted; unless `required`, an unreachable host does not block it.
     func verifyHostKey(
         _ ssh: SSHSettings, required: Bool, failure: @escaping (String) -> Void,
         then proceed: @escaping () -> Void

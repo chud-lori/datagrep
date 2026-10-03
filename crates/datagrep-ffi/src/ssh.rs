@@ -1095,7 +1095,7 @@ mod tests {
         .unwrap();
         errors.push(h.detail("canary"));
         errors.extend(h.test_saved("canary").err());
-        errors.extend(h.block(h.inner().open_profile("canary")).err().into_iter());
+        errors.extend(h.block(h.inner().open_profile("canary")).err());
         h.update(
             "canary",
             &json!({"ssh": {"host": "127.0.0.1", "port": 1, "user": "u", "auth": "password", "secret": ssh2}}).to_string(),
