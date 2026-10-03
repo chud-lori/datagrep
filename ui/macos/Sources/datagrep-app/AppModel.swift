@@ -311,6 +311,12 @@ final class AppModel: ObservableObject {
             self?.isError = false
         }
         editor.onSelectionChanged = { [weak self] in self?.refreshDirectives() }
+        editor.completionSource = { [weak self] in
+            guard let self, let core = self.core else { return nil }
+            let profile = self.editor.currentBlock()?.directives.connection ?? self.activeProfile
+            guard !profile.isEmpty else { return nil }
+            return { text, caret in try core.complete(profile: profile, text: text, caretUTF8: caret) }
+        }
 
         editor.profilesProvider = { [weak self] in
             (self?.roots ?? []).map { EditorConnectionOption(name: $0.name, driver: $0.driver) }
@@ -599,6 +605,9 @@ final class AppModel: ObservableObject {
                     return
                 }
                 self.editDraft = nil
+                // An edit can point the connection at another database; its cached names are stale.
+                core.forgetCompletions(profile: oldName)
+                core.forgetCompletions(profile: newName)
                 if self.activeProfile == oldName { self.activeProfile = newName }
                 self.reloadProfiles()
                 self.message =
@@ -978,6 +987,22 @@ final class AppModel: ObservableObject {
 
     func refreshDirectives() {
         directives = editor.currentBlock()?.directives ?? BlockDirectives()
+    }
+
+    func formatSQL() {
+        let profile = editor.currentBlock()?.directives.connection ?? activeProfile
+        guard !profile.isEmpty else {
+            message = "choose a connection first: its engine decides how SQL is formatted"
+            isError = true
+            return
+        }
+        let driver = driverID(for: profile)
+        do {
+            try editor.reformat { try SQLFormatter.format(driver: driver, sql: $0) }
+        } catch {
+            message = "\(error)"
+            isError = true
+        }
     }
 
     func runStatementUnderCaret() {

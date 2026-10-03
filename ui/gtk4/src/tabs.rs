@@ -1,3 +1,5 @@
+use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use adw::prelude::*;
@@ -6,6 +8,7 @@ use gtk::{gio, glib};
 
 use crate::editor::EditorPage;
 use crate::engine;
+use crate::ffi::Core;
 use crate::model::Profile;
 use crate::sql;
 use crate::store::{SavedQueryRecord, SavedQueryStore};
@@ -32,6 +35,7 @@ mod imp {
         pub bind_action: OnceCell<gio::SimpleAction>,
         pub flush_source: RefCell<Option<glib::SourceId>>,
         pub restoring: Cell<bool>,
+        pub core: RefCell<Option<Arc<Core>>>,
     }
 
     #[glib::object_subclass]
@@ -56,6 +60,9 @@ mod imp {
                         .param_types([String::static_type(), String::static_type()])
                         .build(),
                     Signal::builder("tabs-closed").build(),
+                    Signal::builder("notice")
+                        .param_types([String::static_type()])
+                        .build(),
                 ]
             })
         }
@@ -109,7 +116,14 @@ impl EditorTabs {
         run.set_tooltip_text(Some("Run the statement under the caret (Ctrl+Return)"));
         run.add_css_class("flat");
         run.set_action_name(Some("tabs.run"));
-        tab_bar.set_start_action_widget(Some(&run));
+        let format = gtk::Button::from_icon_name("format-justify-left-symbolic");
+        format.set_tooltip_text(Some("Format SQL (Shift+Alt+F)"));
+        format.add_css_class("flat");
+        format.set_action_name(Some("tabs.format"));
+        let start = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        start.append(&run);
+        start.append(&format);
+        tab_bar.set_start_action_widget(Some(&start));
 
         let plus = adw::SplitButton::new();
         plus.set_icon_name("list-add-symbolic");
@@ -221,6 +235,14 @@ impl EditorTabs {
         ));
         group.add_action(&run);
 
+        let format = gio::SimpleAction::new("format", None);
+        format.connect_activate(glib::clone!(
+            #[weak(rename_to = tabs)]
+            self,
+            move |_, _| tabs.format_active()
+        ));
+        group.add_action(&format);
+
         let close = gio::SimpleAction::new("close", None);
         close.connect_activate(glib::clone!(
             #[weak(rename_to = tabs)]
@@ -266,6 +288,7 @@ impl EditorTabs {
             ("<Control>t", "tabs.new"),
             ("<Control>w", "tabs.close"),
             ("<Control>s", "tabs.save"),
+            ("<Shift><Alt>f", "tabs.format"),
         ] {
             shortcuts.add_shortcut(gtk::Shortcut::new(
                 gtk::ShortcutTrigger::parse_string(trigger),
@@ -409,6 +432,20 @@ impl EditorTabs {
             ),
         );
 
+        editor.set_completion_target(Rc::new(glib::clone!(
+            #[weak(rename_to = tabs)]
+            self,
+            #[weak]
+            editor,
+            #[upgrade_or]
+            None,
+            move || {
+                let core = tabs.imp().core.borrow().clone()?;
+                let profile = tabs.target_of(&editor, tabs.directive_of(&editor).as_deref());
+                (!profile.is_empty()).then_some((core, profile))
+            }
+        )));
+
         let page = self.imp().tab_view.add_page(&editor, None);
         self.update_page_chrome(&editor);
         self.rebuild_saved_menu();
@@ -488,6 +525,39 @@ impl EditorTabs {
         sql::effective_connection(directive, binding.as_deref(), window.as_deref())
             .unwrap_or_default()
             .to_string()
+    }
+
+    fn directive_of(&self, editor: &EditorPage) -> Option<String> {
+        editor
+            .statement_under_cursor()
+            .and_then(|block| block.directives.connection)
+    }
+
+    pub fn set_core(&self, core: Arc<Core>) {
+        self.imp().core.replace(Some(core));
+    }
+
+    fn format_active(&self) {
+        let Some(editor) = self.active_editor() else {
+            return;
+        };
+        let profile = self.target_of(&editor, self.directive_of(&editor).as_deref());
+        let driver = self
+            .imp()
+            .connections
+            .borrow()
+            .iter()
+            .find(|c| c.name == profile)
+            .map(|c| c.driver.clone());
+        let outcome = match driver {
+            Some(driver) => editor.format_sql(&driver).map_err(|e| e.0),
+            None => {
+                Err("choose a connection first: its engine decides how SQL is formatted".into())
+            }
+        };
+        if let Err(message) = outcome {
+            self.emit_by_name::<()>("notice", &[&message]);
+        }
     }
 
     fn run(&self, editor: &EditorPage, sql_text: &str, directive: &str) {
