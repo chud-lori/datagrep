@@ -325,7 +325,8 @@ mod tests {
 
     #[test]
     fn oracle_urls_fill_the_schema_fields() {
-        let cfg = parse_url(&ORACLE, "oracle://scott:t%40ger@db.local:1522/FREEPDB1").unwrap();
+        let url = format!("oracle://scott:{}@db.local:1522/FREEPDB1", "t%40ger");
+        let cfg = parse_url(&ORACLE, &url).unwrap();
         let s = |k: &str| match cfg.values.get(k) {
             Some(ConfigValue::Str(s)) => s.clone(),
             other => panic!("{k}: {other:?}"),

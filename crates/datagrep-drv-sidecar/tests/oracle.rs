@@ -21,8 +21,9 @@ async fn the_oracle_sidecar_agrees_with_its_manifest_and_fails_a_dead_server_cle
         return;
     }
     let driver = SidecarDriver::new(&ORACLE);
+    let canary = "never-shown-77";
     let mut cfg = driver
-        .parse_url("oracle://scott:never-shown-77@127.0.0.1:1/FREEPDB1")
+        .parse_url(&format!("oracle://scott:{canary}@127.0.0.1:1/FREEPDB1"))
         .unwrap();
     cfg.driver = Arc::from("oracle");
     let err = tokio::time::timeout(
@@ -35,7 +36,7 @@ async fn the_oracle_sidecar_agrees_with_its_manifest_and_fails_a_dead_server_cle
     .expect("nothing listens on port 1");
     // A handshake mismatch would be a Protocol error; reaching the dial proves it passed.
     assert!(matches!(err, DbError::Connect(_)), "{err:?}");
-    assert!(!err.to_string().contains("never-shown-77"), "{err}");
+    assert!(!err.to_string().contains(canary), "{err}");
 }
 
 #[tokio::test]
