@@ -9,16 +9,24 @@ pub fn register_drivers(core: &CoreApi) {
     core.register_driver("postgres", || {
         Arc::new(datagrep_drv_postgres::PostgresDriver::new())
     });
+    core.register_driver("oracle", || {
+        Arc::new(datagrep_drv_sidecar::SidecarDriver::new(
+            &datagrep_drv_sidecar::ORACLE,
+        ))
+    });
 }
 
 pub fn known_driver_ids() -> &'static [&'static str] {
-    &["sqlite", "postgres"]
+    &["sqlite", "postgres", "oracle"]
 }
 
 pub fn driver_for(id: &str) -> Option<Arc<dyn datagrep_api::Driver>> {
     match id {
         "sqlite" => Some(Arc::new(datagrep_drv_sqlite::SqliteDriver::new())),
         "postgres" => Some(Arc::new(datagrep_drv_postgres::PostgresDriver::new())),
+        "oracle" => Some(Arc::new(datagrep_drv_sidecar::SidecarDriver::new(
+            &datagrep_drv_sidecar::ORACLE,
+        ))),
         _ => None,
     }
 }
@@ -28,6 +36,8 @@ pub fn driver_for_url(url: &str) -> Option<(&'static str, Arc<dyn datagrep_api::
         Some(("sqlite", driver_for("sqlite")?))
     } else if url.starts_with("postgres://") || url.starts_with("postgresql://") {
         Some(("postgres", driver_for("postgres")?))
+    } else if url.starts_with("oracle://") {
+        Some(("oracle", driver_for("oracle")?))
     } else {
         None
     }
@@ -41,6 +51,7 @@ pub fn language_for_driver(id: &str) -> Option<datagrep_api::LanguageId> {
         "postgres" => Some(datagrep_api::LanguageId::Sql(
             datagrep_api::SqlDialect::Postgres,
         )),
+        "oracle" => Some(datagrep_drv_sidecar::ORACLE.language),
         _ => None,
     }
 }

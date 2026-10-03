@@ -129,20 +129,16 @@ impl SidecarDriver {
     }
 }
 
-// Next to the running binary, then a macOS bundle's Helpers, then DATAGREP_ENGINE_DIR.
+// DATAGREP_SIDECAR_DIR, then the bundle layout for this OS, then next to the executable.
 fn locate_program(manifest: &EngineManifest) -> Result<PathBuf, DbError> {
-    let name = manifest.program;
-    let mut candidates = Vec::new();
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(PathBuf::from))
-    {
-        candidates.push(dir.join(name));
-        candidates.push(dir.join("../Helpers").join(name));
-    }
-    if let Some(dir) = std::env::var_os("DATAGREP_ENGINE_DIR") {
-        candidates.push(PathBuf::from(dir).join(name));
-    }
+    let candidates = candidates(
+        manifest.program,
+        std::env::var_os("DATAGREP_SIDECAR_DIR").map(PathBuf::from),
+        std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .ok()
+            .and_then(|exe| exe.parent().map(PathBuf::from)),
+    );
     candidates
         .iter()
         .find(|p| p.is_file())
@@ -155,6 +151,20 @@ fn locate_program(manifest: &EngineManifest) -> Result<PathBuf, DbError> {
                 looked.join(", ")
             ))
         })
+}
+
+fn candidates(name: &str, override_dir: Option<PathBuf>, exe_dir: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = override_dir.into_iter().map(|d| d.join(name)).collect();
+    if let Some(dir) = exe_dir {
+        let bundled = if cfg!(target_os = "macos") {
+            dir.join("../Helpers")
+        } else {
+            dir.join("../lib/datagrep/sidecars")
+        };
+        out.push(bundled.join(name));
+        out.push(dir.join(name));
+    }
+    out
 }
 
 #[async_trait]
@@ -333,6 +343,28 @@ mod tests {
         assert!(parse_url(&ORACLE, "postgres://h/db").is_err());
         assert!(parse_url(&ORACLE, "oracle://h:notaport/x").is_err());
         assert!(parse_url(&ORACLE, "oracle://u:%zz@h/x").is_err());
+    }
+
+    #[test]
+    fn the_override_wins_then_the_bundle_then_the_executable_dir() {
+        let found = candidates(
+            "datagrep-sidecar-oracle",
+            Some(PathBuf::from("/dev/sidecars")),
+            Some(PathBuf::from("/opt/datagrep/bin")),
+        );
+        let bundled = if cfg!(target_os = "macos") {
+            "/opt/datagrep/bin/../Helpers/datagrep-sidecar-oracle"
+        } else {
+            "/opt/datagrep/bin/../lib/datagrep/sidecars/datagrep-sidecar-oracle"
+        };
+        assert_eq!(
+            found,
+            [
+                PathBuf::from("/dev/sidecars/datagrep-sidecar-oracle"),
+                PathBuf::from(bundled),
+                PathBuf::from("/opt/datagrep/bin/datagrep-sidecar-oracle"),
+            ]
+        );
     }
 
     #[test]
