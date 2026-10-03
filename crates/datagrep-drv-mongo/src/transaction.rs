@@ -44,7 +44,7 @@ impl MongoTransaction {
         match parse(text).map_err(map_parse_err)? {
             ParsedMongo::Chain(stmt) => self.dispatch_method(stmt).await,
             ParsedMongo::RawCommand(_) => Err(DbError::Unsupported {
-                feature: "raw command documents are not supported inside an explicit transaction — use db.<collection>.<method>(...) instead".into(),
+                feature: "raw command documents are not supported inside an explicit transaction: use db.<collection>.<method>(...) instead".into(),
             }),
         }
     }
@@ -198,7 +198,7 @@ impl MongoTransaction {
                     return Err(DbError::Query {
                         code: None,
                         message: format!(
-                            "row identity changed — refresh (expected exactly 1 document matched, got {})",
+                            "row identity changed; refresh (expected exactly 1 document matched, got {})",
                             result.matched_count
                         ),
                         position: None,
@@ -221,7 +221,7 @@ impl MongoTransaction {
                     return Err(DbError::Query {
                         code: None,
                         message: format!(
-                            "row identity changed — refresh (expected exactly 1 document deleted, got {})",
+                            "row identity changed; refresh (expected exactly 1 document deleted, got {})",
                             result.deleted_count
                         ),
                         position: None,

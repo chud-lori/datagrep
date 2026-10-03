@@ -39,7 +39,7 @@ async fn require_current_database(client: &Client, db: &str) -> Result<(), DbErr
     if current != db {
         return Err(DbError::Unsupported {
             feature: format!(
-                "browsing database {db:?} over a connection to {current:?} — Postgres has no \
+                "browsing database {db:?} over a connection to {current:?}: Postgres has no \
                  cross-database catalog access; open a new connection to {db:?} instead"
             ),
         });
@@ -60,7 +60,7 @@ where
 {
     row.try_get::<_, T>(idx).map_err(|e| {
         DbError::Protocol(format!(
-            "catalog query column {idx} did not decode as {} ({e}) — the server answered with a \
+            "catalog query column {idx} did not decode as {} ({e}): the server answered with a \
              different shape than this pg_catalog query implies",
             std::any::type_name::<T>()
         ))
@@ -70,7 +70,7 @@ where
 fn try_get_text(row: &tokio_postgres::Row, idx: usize) -> Result<String, DbError> {
     row.try_get::<_, String>(idx).map_err(|e| {
         DbError::Protocol(format!(
-            "catalog query column {idx} did not decode as text ({e}) — a pg_catalog column is \
+            "catalog query column {idx} did not decode as text ({e}): a pg_catalog column is \
              probably missing its ::text cast"
         ))
     })

@@ -75,8 +75,8 @@ pub async fn run(ctx: &Context, args: &QueryArgs) -> Result<(), CliError> {
                 StatementClass::Write | StatementClass::Ddl | StatementClass::Admin
             ) {
                 return Err(CliError::query(format!(
-                    "statement {} blocked by the read-only guard (client-side) \
-                     — {class:?} statement: {}",
+                    "statement {} blocked by the read-only guard (client-side); \
+                     {class:?} statement: {}",
                     statement_index + 1,
                     preview(stmt_text)
                 )));
@@ -136,7 +136,7 @@ pub async fn run(ctx: &Context, args: &QueryArgs) -> Result<(), CliError> {
         if outcome.capped {
             let cap = ctx.core.queries().policy().soft_row_cap;
             return Err(CliError::query(format!(
-                "statement {} stopped at the soft row cap ({cap} rows) after {} rows — \
+                "statement {} stopped at the soft row cap ({cap} rows) after {} rows: \
                  the output is (or may be) incomplete. Use `datagrep export` for the complete \
                  result, or pass --limit N to raise the cap to exactly N rows",
                 statement_index + 1,

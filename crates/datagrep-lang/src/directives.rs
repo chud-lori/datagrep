@@ -10,7 +10,7 @@ pub struct Directives {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DirectiveError {
-    #[error("unknown directive @{0} — only limit, timeout, connection, readonly are recognized")]
+    #[error("unknown directive @{0}: only limit, timeout, connection, readonly are recognized")]
     UnknownDirective(String),
     #[error("@{directive} {value:?} is not a valid value: {reason}")]
     InvalidValue {

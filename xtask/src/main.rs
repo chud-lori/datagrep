@@ -205,7 +205,7 @@ fn budget_check(binary: &str, budget_path: Option<&str>) -> Result<bool, String>
         p11_fail as f64 / 1e6
     );
     println!(
-        "  P10 (informational — applies to the *compressed installer*, not this file): \
+        "  P10 (informational: applies to the *compressed installer*, not this file): \
          target {:.0} MB, fail {:.0} MB",
         p10_target as f64 / 1e6,
         p10_fail as f64 / 1e6
@@ -521,7 +521,7 @@ fn grep_gates(root: &str, allowlist_path: Option<&str>) -> Result<bool, String> 
     }
     if fail_count > 0 {
         println!(
-            "grep-gates: {fail_count} FAIL finding(s) — each rule and why it \
+            "grep-gates: {fail_count} FAIL finding(s); each rule and why it \
              is banned is documented in xtask/src/main.rs (`scan_content`); \
              ci/gates.sh runs this gate"
         );

@@ -224,7 +224,7 @@ pub(crate) fn compile_resume_clause(
     if order.len() != 1 {
         return Err(DbError::Unsupported {
             feature: format!(
-                "Op::Scan resume with {} sort keys — only single-key keyset resume is supported",
+                "Op::Scan resume with {} sort keys: only single-key keyset resume is supported",
                 order.len()
             ),
         });

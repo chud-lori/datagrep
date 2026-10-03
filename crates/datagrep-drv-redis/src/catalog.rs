@@ -295,7 +295,7 @@ impl Catalog for RedisCatalog {
 fn missing_prefix_error() -> DbError {
     DbError::Unsupported {
         feature: "listing this level requires an explicit prefix (Enumeration::ScanOnly{\
-                  requires_prefix: true}) — pass ListOpts::prefix, even Some(\"\")"
+                  requires_prefix: true}): pass ListOpts::prefix, even Some(\"\")"
             .into(),
     }
 }

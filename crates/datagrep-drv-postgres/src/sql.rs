@@ -316,7 +316,7 @@ fn index_column(path: &FieldPath) -> Result<String, DbError> {
         [PathSeg::Field(name)] => quote_ident(name),
         _ => Err(DbError::Unsupported {
             feature: format!(
-                "index key {path} is not a plain column — an expression index is native DDL"
+                "index key {path} is not a plain column: an expression index is native DDL"
             ),
         }),
     }
@@ -412,14 +412,14 @@ fn refuse_expect(expect: &[(FieldPath, Value)]) -> Result<(), DbError> {
         return Ok(());
     }
     Err(DbError::Unsupported {
-        feature: "conditional mutation (`expect`) — this driver cannot check-and-set".into(),
+        feature: "conditional mutation (`expect`): this driver cannot check-and-set".into(),
     })
 }
 
 fn key_where(key: &[(FieldPath, Value)], pb: &mut ParamBuilder) -> Result<String, DbError> {
     if key.is_empty() {
         return Err(DbError::Unsupported {
-            feature: "mutation with no row identity — refuse to guess which row to affect".into(),
+            feature: "mutation with no row identity: refuse to guess which row to affect".into(),
         });
     }
     let mut parts = Vec::with_capacity(key.len());

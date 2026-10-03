@@ -38,7 +38,7 @@ fn one_object(path: &ObjectPath) -> Result<&str, DbError> {
     {
         return Err(DbError::Unsupported {
             feature: format!(
-                "{name:?} is a pattern, not one object — a wildcard, comma list or date-math \
+                "{name:?} is a pattern, not one object: a wildcard, comma list or date-math \
                  name expands server-side and could match more than was named"
             ),
         });
@@ -76,25 +76,25 @@ pub fn plan(op: &DdlOp) -> Result<EsDdl, DbError> {
             }
             other => Err(DbError::Unsupported {
                 feature: format!(
-                    "dropping a {other:?} — this engine's catalog lists indices (Collection) \
+                    "dropping a {other:?}: this engine's catalog lists indices (Collection) \
                      and aliases (View), and a drop must say which of the two a name means"
                 ),
             }),
         },
         DdlOp::Rename { .. } => Err(DbError::Unsupported {
-            feature: "renaming an index or alias — this engine has no rename; the equivalent is \
+            feature: "renaming an index or alias: this engine has no rename; the equivalent is \
                       to reindex into the new name and re-point an alias, which is several \
                       requests with a data copy in the middle, not one DDL statement"
                 .into(),
         }),
         DdlOp::CreateIndex { .. } => Err(DbError::Unsupported {
-            feature: "creating a named secondary index — this engine has no such object; a \
+            feature: "creating a named secondary index: this engine has no such object; a \
                       field is searchable through its mapping, which is authoring and goes as \
                       a native request"
                 .into(),
         }),
         DdlOp::Native { .. } => Err(DbError::Unsupported {
-            feature: "DdlOp::Native — this engine's own request language is already what \
+            feature: "DdlOp::Native: this engine's own request language is already what \
                       `Request::Native` carries (`PUT /<index>`, `POST /_aliases`), so a \
                       second untyped text door here would only be able to guess at it"
                 .into(),

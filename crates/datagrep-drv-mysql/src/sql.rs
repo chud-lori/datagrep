@@ -255,7 +255,7 @@ fn index_column(path: &FieldPath) -> Result<String, DbError> {
         [PathSeg::Field(name)] => quote_ident(name),
         _ => Err(DbError::Unsupported {
             feature: format!(
-                "index key {path} is not a plain column — a functional index is native DDL"
+                "index key {path} is not a plain column: a functional index is native DDL"
             ),
         }),
     }
@@ -274,7 +274,7 @@ pub fn compile_ddl(op: &DdlOp, flavor: Flavor) -> Result<String, DbError> {
                     let (table, index) = split_index_path(path)?;
                     if *if_exists && flavor == Flavor::MySql {
                         return Err(DbError::Unsupported {
-                            feature: "DROP INDEX IF EXISTS — MySQL has no such form (MariaDB \
+                            feature: "DROP INDEX IF EXISTS: MySQL has no such form (MariaDB \
                                       does); drop it unconditionally or check first"
                                 .into(),
                         });
@@ -289,7 +289,7 @@ pub fn compile_ddl(op: &DdlOp, flavor: Flavor) -> Result<String, DbError> {
                 other => Err(DbError::Unsupported {
                     feature: format!(
                         "{other:?} is not a MySQL object this driver can administer \
-                         (SCHEMA is a synonym for DATABASE here — use Database)"
+                         (SCHEMA is a synonym for DATABASE here: use Database)"
                     ),
                 }),
             }
@@ -327,7 +327,7 @@ pub fn compile_ddl(op: &DdlOp, flavor: Flavor) -> Result<String, DbError> {
             }
             if *if_not_exists && flavor == Flavor::MySql {
                 return Err(DbError::Unsupported {
-                    feature: "CREATE INDEX IF NOT EXISTS — MySQL has no such form (MariaDB \
+                    feature: "CREATE INDEX IF NOT EXISTS: MySQL has no such form (MariaDB \
                               does); create it unconditionally or check first"
                         .into(),
                 });
@@ -441,14 +441,14 @@ fn refuse_expect(expect: &[(FieldPath, Value)]) -> Result<(), DbError> {
         return Ok(());
     }
     Err(DbError::Unsupported {
-        feature: "conditional mutation (`expect`) — this driver cannot check-and-set".into(),
+        feature: "conditional mutation (`expect`): this driver cannot check-and-set".into(),
     })
 }
 
 fn key_where(key: &[(FieldPath, Value)], pb: &mut ParamBuilder) -> Result<String, DbError> {
     if key.is_empty() {
         return Err(DbError::Unsupported {
-            feature: "mutation with no row identity — refuse to guess which row to affect".into(),
+            feature: "mutation with no row identity: refuse to guess which row to affect".into(),
         });
     }
     let mut parts = Vec::with_capacity(key.len());

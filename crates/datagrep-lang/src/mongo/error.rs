@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MongoError {
-    #[error("datagrep supports query expressions, not arbitrary JavaScript — use a raw command document for anything else")]
+    #[error("datagrep supports query expressions, not arbitrary JavaScript: use a raw command document for anything else")]
     UnsupportedJs,
 
     #[error("unexpected end of input at byte {at}: expected {expected}")]

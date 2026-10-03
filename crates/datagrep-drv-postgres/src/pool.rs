@@ -118,7 +118,7 @@ impl PgPool {
                 .map_err(|_| {
                     DbError::ResourceExhausted(format!(
                         "all {MAX_SESSIONS} Postgres sessions on this connection are pinned by \
-                         open result cursors or transactions, and none was released within {}s — \
+                         open result cursors or transactions, and none was released within {}s: \
                          close a result set (or commit/roll back an open transaction) and retry",
                         ACQUIRE_TIMEOUT.as_secs()
                     ))

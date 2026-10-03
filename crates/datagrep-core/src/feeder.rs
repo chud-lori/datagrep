@@ -27,7 +27,7 @@ impl fmt::Display for ParkReason {
             ParkReason::Backpressure => "waiting for the result store",
             ParkReason::MemoryBudget => "result memory budget reached",
             ParkReason::HotWindow => "hot window full",
-            ParkReason::ViewportIdle => "paused — scroll to load more",
+            ParkReason::ViewportIdle => "paused: scroll to load more",
         })
     }
 }
