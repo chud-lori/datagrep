@@ -551,6 +551,33 @@ char *datagrep_browse_statement(const char *driver_id, const char *path_json,
     return s.buf;
 }
 
+char *datagrep_filter_operators_json(const char *driver_id) {
+    int sql = driver_id && (strcmp(driver_id, "postgres") == 0 ||
+                            strcmp(driver_id, "mysql") == 0 || strcmp(driver_id, "sqlite") == 0);
+    return dup_cstr(sql ? "[{\"op\":\"eq\",\"label\":\"=\",\"needs_value\":true},"
+                          "{\"op\":\"ne\",\"label\":\"\u2260\",\"needs_value\":true},"
+                          "{\"op\":\"contains\",\"label\":\"contains\",\"needs_value\":true},"
+                          "{\"op\":\"is_null\",\"label\":\"is NULL\",\"needs_value\":false},"
+                          "{\"op\":\"is_empty\",\"label\":\"is empty\",\"needs_value\":false}]"
+                        : "[]");
+}
+
+/* Wraps without quoting anything: the stub engine never parses the WHERE. */
+char *datagrep_derive_statement(const char *driver_id, const char *statement,
+                                const char *spec_json, char **err_out) {
+    if (!driver_id || !statement || !spec_json) {
+        set_err(err_out, "null argument");
+        return NULL;
+    }
+    if (!strstr(spec_json, "\"column\"")) return dup_cstr(statement);
+    Sb s;
+    sb_init(&s);
+    sb_put(&s, "SELECT * FROM (\n");
+    sb_put(&s, statement);
+    sb_put(&s, "\n) AS datagrep_result");
+    return s.buf;
+}
+
 /* ------------------------------------------------------------------- query */
 
 enum { ST_STREAMING = 0, ST_PARKED, ST_CAPPED, ST_DONE, ST_CANCELLED, ST_FAILED };

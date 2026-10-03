@@ -263,6 +263,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func runStatement(_ sender: Any?) { model.runStatementUnderCaret() }
     @objc func cancelQuery(_ sender: Any?) { model.cancel() }
     @objc func exportResult(_ sender: Any?) { model.exportResult() }
+    @objc func toggleFilterBar(_ sender: Any?) { model.toggleFilterBar() }
     @objc func newConnection(_ sender: Any?) { model.showNewConnection = true }
     @objc func focusEditor(_ sender: Any?) { model.editor.focus() }
     @objc func reportFootprint(_ sender: Any?) { model.reportFootprint() }
@@ -393,6 +394,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         queryMenu.addItem(.separator())
         add(queryMenu, "Focus Editor", #selector(focusEditor(_:)), "l")
         add(queryMenu, "Toggle Cell Detail", #selector(toggleDetail(_:)), "i")
+        add(queryMenu, "Filter Rows", #selector(toggleFilterBar(_:)), "F")
         queryMenu.addItem(.separator())
         add(queryMenu, "Report Footprint", #selector(reportFootprint(_:)), "")
         add(queryMenu, "Run Scroll Benchmark", #selector(runScrollBench(_:)), "B")
@@ -479,12 +481,14 @@ final class Autopilot {
     private let selectPath: [String]
     private let safety: (profile: String, level: SafetyLevel)?
     private let newConnection: Bool
+    private let filter: RowFilter?
+    private var filtered = false
     private var settleTicks = 0
 
     init(
         model: AppModel?, profile: (name: String, url: String)?, sql: String?, bench: Bool,
         selectPath: [String] = [], safety: (profile: String, level: SafetyLevel)? = nil,
-        newConnection: Bool = false
+        newConnection: Bool = false, filter: RowFilter? = nil
     ) {
         self.model = model
         self.profile = profile
@@ -493,6 +497,7 @@ final class Autopilot {
         self.selectPath = selectPath
         self.safety = safety
         self.newConnection = newConnection
+        self.filter = filter
     }
 
     static func fromArguments(model: AppModel?) -> Autopilot? {
@@ -516,12 +521,20 @@ final class Autopilot {
             safety = (String(spec[spec.startIndex..<eq]), level)
         }
         let newConnection = args.contains("--new-connection")
+        // `--filter column:op:value`, applied through the filter bar once the rows settle.
+        let filter = value("--filter").flatMap { spec -> RowFilter? in
+            let parts = spec.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
+            guard parts.count >= 2 else { return nil }
+            return RowFilter(
+                column: String(parts[0]), op: String(parts[1]),
+                value: parts.count == 3 ? String(parts[2]) : "")
+        }
         guard profile != nil || sql != nil || bench || !selectPath.isEmpty || safety != nil
             || newConnection
         else { return nil }
         return Autopilot(
             model: model, profile: profile, sql: sql, bench: bench, selectPath: selectPath,
-            safety: safety, newConnection: newConnection)
+            safety: safety, newConnection: newConnection, filter: filter)
     }
 
     func start() {
@@ -556,7 +569,15 @@ final class Autopilot {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self, let model = self.model else { return }
             self.settleTicks += 1
-            let settled = !model.isRunning && model.rowsLoaded > 0
+            let settled = !model.isRunning && (model.rowsLoaded > 0 || self.filtered)
+            if settled, let filter = self.filter, !self.filtered {
+                self.filtered = true
+                FileHandle.standardError.write(Data("AUTOPILOT filtering: \(filter)\n".utf8))
+                model.filterDraft = [FilterDraftRow(filter)]
+                model.showFilterBar = true
+                model.applyFilters()
+                return self.waitForRows()
+            }
             if settled || self.settleTicks > 240 {
                 FileHandle.standardError.write(
                     Data(

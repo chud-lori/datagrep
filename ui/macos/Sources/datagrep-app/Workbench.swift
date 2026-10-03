@@ -139,6 +139,10 @@ private struct ResultsPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if model.showFilterBar {
+                FilterBar(model: model)
+                Divider()
+            }
             grid
             StagedEditsSlot(model: model, edits: model.edits)
         }
@@ -517,12 +521,19 @@ private struct WorkbenchToolbar: ToolbarContent {
             ResultViewToggle(model: model)
 
             Button {
-                model.clearDerived()
+                model.toggleFilterBar()
             } label: {
-                Label("Clear sort & filters", systemImage: "line.3.horizontal.decrease.circle")
+                Label(
+                    "Filter Rows",
+                    systemImage: model.hasDerivedClauses
+                        ? "line.3.horizontal.decrease.circle.fill"
+                        : "line.3.horizontal.decrease.circle")
             }
-            .disabled(!model.hasDerivedClauses)
-            .help("Remove the ORDER BY / WHERE datagrep added by clicking headers and cells")
+            .disabled(!model.showFilterBar && !model.canFilter)
+            .help(
+                model.canFilter
+                    ? "Filter rows by column — re-runs the statement with a WHERE  ⇧⌘F"
+                    : "Filtering re-runs the statement inside SQL, which this engine cannot take")
 
             Button {
                 if model.isExporting { model.cancelExport() } else { model.exportResult() }

@@ -211,7 +211,11 @@ final class AppModel: ObservableObject {
     @Published var sortColumn: String?
     @Published var sortAscending = true
     private var baseSQL: String = ""
-    private var baseFilters: [(column: String, value: String)] = []
+    private var baseFilters: [RowFilter] = []
+    /// The filter bar's rows; they reach the engine only on Apply.
+    @Published var filterDraft: [FilterDraftRow] = []
+    @Published var showFilterBar = false
+    private var operatorsByDriver: [String: [FilterOperator]] = [:]
 
     var showsGrid: Bool { rowsLoaded > 0 }
 
@@ -305,7 +309,7 @@ final class AppModel: ObservableObject {
             self.hiddenColumns = n
         }
         results.onSortRequested = { [weak self] col in self?.sort(by: col) }
-        results.onFilterRequested = { [weak self] col, value in self?.filter(col, equals: value) }
+        results.onFilterRequested = { [weak self] filter in self?.filter(filter) }
         results.onCopied = { [weak self] label in
             self?.message = label
             self?.isError = false
@@ -995,6 +999,7 @@ final class AppModel: ObservableObject {
         sortColumn = nil
         sortAscending = true
         baseFilters = []
+        filterDraft = []
         execute(directives: directives)
     }
 
@@ -1015,14 +1020,66 @@ final class AppModel: ObservableObject {
         execute(directives: directives)
     }
 
-    func filter(_ column: String, equals value: String) {
-        guard !baseSQL.isEmpty, canSortInEngine else {
+    func filter(_ filter: RowFilter) {
+        guard !baseSQL.isEmpty, canFilter else {
             message = "filtering needs an engine datagrep can wrap the statement for"
             isError = true
             return
         }
-        baseFilters.removeAll { $0.column == column }
-        baseFilters.append((column, value))
+        baseFilters.removeAll { $0.column == filter.column }
+        baseFilters.append(filter)
+        filterDraft = baseFilters.map(FilterDraftRow.init)
+        showFilterBar = true
+        execute(directives: directives)
+    }
+
+    var filterOperators: [FilterOperator] {
+        let driver = driverID(for: resultProfile.isEmpty ? activeProfile : resultProfile)
+        if let known = operatorsByDriver[driver] { return known }
+        let ops = FilterOperator.available(driver: driver)
+        operatorsByDriver[driver] = ops
+        return ops
+    }
+
+    var canFilter: Bool { !filterOperators.isEmpty }
+
+    /// Columns the bar offers: this result's, plus any a draft row still names.
+    var filterColumns: [String] {
+        var names = results.resultColumnNames.filter { !$0.isEmpty }
+        for row in filterDraft where !row.filter.column.isEmpty && !names.contains(row.filter.column) {
+            names.append(row.filter.column)
+        }
+        return names
+    }
+
+    func toggleFilterBar() {
+        if showFilterBar { return closeFilterBar() }
+        guard !baseSQL.isEmpty, canFilter else { return }
+        if filterDraft.isEmpty { addFilterRow() }
+        showFilterBar = true
+    }
+
+    func addFilterRow() {
+        let column = filterColumns.first ?? ""
+        filterDraft.append(FilterDraftRow(RowFilter(column: column, op: filterOperators.first?.op ?? "eq")))
+    }
+
+    func removeFilterRow(_ id: UUID) {
+        filterDraft.removeAll { $0.id == id }
+    }
+
+    func applyFilters() {
+        guard !baseSQL.isEmpty else { return }
+        baseFilters = filterDraft.map(\.filter).filter { !$0.column.isEmpty }
+        execute(directives: directives)
+    }
+
+    /// Closing the bar drops its filters, so a hidden bar never hides a WHERE.
+    func closeFilterBar() {
+        showFilterBar = false
+        filterDraft = []
+        guard !baseFilters.isEmpty else { return }
+        baseFilters = []
         execute(directives: directives)
     }
 
@@ -1035,42 +1092,31 @@ final class AppModel: ObservableObject {
     func clearDerived() {
         sortColumn = nil
         baseFilters = []
+        filterDraft = []
         execute(directives: directives)
     }
 
     var hasDerivedClauses: Bool { sortColumn != nil || !baseFilters.isEmpty }
 
-    var effectiveSQL: String {
-        var inner = baseSQL.trimmingCharacters(in: .whitespacesAndNewlines)
-        while inner.hasSuffix(";") { inner = String(inner.dropLast()) }
+    /// The core writes the WHERE/ORDER BY; nothing here quotes a name or a value.
+    private func derivedSQL(for profile: String) throws -> String {
         guard hasDerivedClauses else { return baseSQL }
-        var q = "SELECT * FROM (\n\(inner)\n) AS datagrep_result"
-        if !baseFilters.isEmpty {
-            let clauses = baseFilters.map { f -> String in
-                f.value.isEmpty
-                    ? "\(quoteIdent(f.column)) IS NULL OR \(quoteIdent(f.column)) = ''"
-                    : "\(quoteIdent(f.column)) = '\(f.value.replacingOccurrences(of: "'", with: "''"))'"
-            }
-            q += "\nWHERE (" + clauses.joined(separator: ") AND (") + ")"
-        }
-        if let sortColumn {
-            q += "\nORDER BY \(quoteIdent(sortColumn)) \(sortAscending ? "ASC" : "DESC")"
-        }
-        return q
-    }
-
-    private func quoteIdent(_ name: String) -> String {
-        let escaped = name.replacingOccurrences(of: "\"", with: "\"\"")
-        if EngineStyle.displayName(for: activeDriver) == "MySQL" {
-            return "`\(name.replacingOccurrences(of: "`", with: "``"))`"
-        }
-        return "\"\(escaped)\""
+        return try DerivedStatement.render(
+            driver: driverID(for: profile), statement: baseSQL, filters: baseFilters,
+            sort: sortColumn.map { ($0, sortAscending) })
     }
 
     private func execute(directives: BlockDirectives) {
         guard core != nil else { return }
-        let sql = effectiveSQL
         let profile = directives.connection ?? activeProfile
+        let sql: String
+        do {
+            sql = try derivedSQL(for: profile)
+        } catch {
+            message = "\(error)"
+            isError = true
+            return
+        }
         results.sortColumn = sortColumn
         results.sortAscending = sortAscending
         if directives.readOnly && SQLBlocks.isWriteStatement(sql) {
@@ -1360,7 +1406,7 @@ final class AppModel: ObservableObject {
         let query: DatagrepQueryHandle
         let profile: String
         let sql: String
-        let filters: [(column: String, value: String)]
+        let filters: [RowFilter]
         let sortColumn: String?
         let sortAscending: Bool
         let allowsEditing: Bool
@@ -1398,6 +1444,7 @@ final class AppModel: ObservableObject {
         stagingGeneration &+= 1
         baseSQL = ""
         baseFilters = []
+        filterDraft = []
         sortColumn = nil
         sortAscending = true
         results.sortColumn = nil
@@ -1420,6 +1467,7 @@ final class AppModel: ObservableObject {
         resultProfile = saved.profile
         baseSQL = saved.sql
         baseFilters = saved.filters
+        filterDraft = saved.filters.map(FilterDraftRow.init)
         sortColumn = saved.sortColumn
         sortAscending = saved.sortAscending
         results.sortColumn = saved.sortColumn
@@ -1467,7 +1515,14 @@ final class AppModel: ObservableObject {
     func exportResult() {
         guard canExport else { return }
         let profile = resultProfile
-        let sql = effectiveSQL
+        let sql: String
+        do {
+            sql = try derivedSQL(for: profile)
+        } catch {
+            message = "\(error)"
+            isError = true
+            return
+        }
         let formats = DatagrepCoreHandle.exportFormats(driver: driverID(for: profile))
         ExportPanel.present(formats: formats, suggestedName: profile) { [weak self] choice in
             guard let self, let choice else { return }
