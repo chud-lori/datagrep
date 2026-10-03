@@ -51,6 +51,14 @@ final class ConnectionForm: ObservableObject {
     @Published var extras: String = ""
     @Published var showsRawURL: Bool = false
 
+    @Published var useSSH = false
+    @Published var sshHost = ""
+    @Published var sshPort = ""
+    @Published var sshUser = ""
+    @Published var sshAuth: SSHAuth = .agent
+    @Published var sshKeyPath = ""
+    @Published var sshSecret = ""
+
     @Published private var rawURLDraft: String?
 
     init(engineID: String = "postgres") {
@@ -137,12 +145,40 @@ final class ConnectionForm: ObservableObject {
         extras = f.extras
     }
 
+    func applySSH(_ ssh: SSHSettings?) {
+        useSSH = ssh != nil
+        sshHost = ssh?.host ?? ""
+        sshPort = ssh.map { String($0.port) } ?? ""
+        sshUser = ssh?.user ?? ""
+        sshAuth = ssh?.auth ?? .agent
+        sshKeyPath = ssh?.keyPath ?? ""
+        sshSecret = ""
+    }
+
+    /// The tunnel these fields describe, or nil when the connection is direct.
+    var ssh: SSHSettings? {
+        guard useSSH, engine?.isFileBased == false else { return nil }
+        return SSHSettings(
+            host: sshHost.trimmingCharacters(in: .whitespaces),
+            port: Int(sshPort.trimmingCharacters(in: .whitespaces)) ?? 22,
+            user: sshUser.trimmingCharacters(in: .whitespaces),
+            auth: sshAuth,
+            keyPath: sshKeyPath.trimmingCharacters(in: .whitespaces))
+    }
+
+    /// What the test and add calls take for `ssh`: an object, or `NSNull()` for none.
+    var sshOption: Any { ssh.map { $0.json(secret: sshSecret) } ?? NSNull() }
+
     /// Enough to attempt a connection with.
     var isComplete: Bool {
         guard let engine else { return false }
-        return engine.isFileBased
-            ? !filePath.trimmingCharacters(in: .whitespaces).isEmpty
-            : !host.trimmingCharacters(in: .whitespaces).isEmpty
+        if engine.isFileBased {
+            return !filePath.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+        if let ssh, ssh.host.isEmpty || ssh.user.isEmpty || (ssh.auth == .key && ssh.keyPath.isEmpty) {
+            return false
+        }
+        return !host.trimmingCharacters(in: .whitespaces).isEmpty
     }
 }
 
@@ -243,6 +279,7 @@ final class ConnectionDraft: ObservableObject, Identifiable {
         } else if let engine = ConnectionEngines.engine(id: detail.driver) {
             form.selectEngine(engine.id)
         }
+        form.applySSH(detail.ssh)
         // Never seeded from the profile: the secret does not cross this ABI.
         form.password = ""
         form.name = detail.name
@@ -251,6 +288,9 @@ final class ConnectionDraft: ObservableObject, Identifiable {
     var url: String { form.url }
 
     var originalURL: String { original.url }
+
+    /// A saved SSH secret is only kept while the sign-in method stays the same.
+    var hasSSHSecret: Bool { original.ssh?.hasSecret == true && original.ssh?.auth == form.sshAuth }
 
     var driver: String {
         let id = form.engineID
@@ -313,6 +353,10 @@ final class ConnectionDraft: ObservableObject, Identifiable {
         if autoLimit != original.autoLimit { p.set("auto_limit", autoLimit) }
         if idleTimeout != original.idleTimeoutS { p.set("idle_timeout_s", idleTimeout) }
         if color != original.color { p.set("color", color) }
+        let ssh = form.ssh
+        if !(ssh?.sameSettings(as: original.ssh) ?? (original.ssh == nil)) || !form.sshSecret.isEmpty {
+            p.set("ssh", json: form.sshOption)
+        }
         return p
     }
 
@@ -364,6 +408,7 @@ struct ConnectionFieldsView: View {
     @ObservedObject var form: ConnectionForm
     var name: Binding<String>?
     var hasStoredSecret: Bool = false
+    var hasStoredSSHSecret: Bool = false
 
     private var engine: ConnectionEngine? { form.engine }
 
@@ -456,6 +501,14 @@ struct ConnectionFieldsView: View {
                             .toggleStyle(.checkbox)
                     }
                 }
+                GridRow {
+                    label("")
+                    Toggle("Connect over SSH", isOn: $form.useSSH)
+                        .toggleStyle(.checkbox)
+                }
+                if form.useSSH {
+                    sshRows
+                }
             }
 
             GridRow {
@@ -480,6 +533,88 @@ struct ConnectionFieldsView: View {
         }
         .animation(.smooth(duration: 0.18), value: form.engineID)
         .animation(.smooth(duration: 0.18), value: form.showsRawURL)
+        .animation(.smooth(duration: 0.18), value: form.useSSH)
+        .animation(.smooth(duration: 0.18), value: form.sshAuth)
+    }
+
+    @ViewBuilder
+    private var sshRows: some View {
+        GridRow {
+            label("SSH host")
+            HStack(spacing: 6) {
+                TextField("bastion.example.com", text: $form.sshHost)
+                    .textFieldStyle(.roundedBorder)
+                Text("Port").foregroundStyle(.secondary).font(.callout)
+                TextField("22", text: $form.sshPort)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 62)
+            }
+        }
+        GridRow {
+            label("SSH user")
+            TextField("", text: $form.sshUser)
+                .textFieldStyle(.roundedBorder)
+        }
+        GridRow {
+            label("Sign in with")
+            Picker("", selection: $form.sshAuth) {
+                ForEach(SSHAuth.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+        }
+        if form.sshAuth == .key {
+            GridRow {
+                label("Key file")
+                HStack(spacing: 6) {
+                    TextField("~/.ssh/id_ed25519", text: $form.sshKeyPath)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Choose…") { chooseKeyFile() }
+                        .controlSize(.small)
+                }
+            }
+        }
+        if form.sshAuth != .agent {
+            GridRow {
+                label(form.sshAuth == .key ? "Passphrase" : "SSH password")
+                VStack(alignment: .leading, spacing: 2) {
+                    SecureField(
+                        hasStoredSSHSecret ? "••••••••" : (form.sshAuth == .key ? "if the key has one" : ""),
+                        text: $form.sshSecret
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    Text(
+                        hasStoredSSHSecret
+                            ? "Saved in the macOS keychain. Leave this blank to keep it."
+                            : "Kept in the macOS keychain, never in the connection file."
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+        GridRow {
+            label("")
+            Text(
+                "The database host and port above are dialled from the SSH host. A host datagrep has not seen before shows its key fingerprint for you to confirm first."
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func chooseKeyFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".ssh")
+        panel.message = "Choose an SSH private key"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        form.sshKeyPath = url.path
     }
 
     private func chooseFile() {
@@ -614,7 +749,8 @@ struct ConnectionEditorSheet: View {
     private var fields: some View {
         VStack(alignment: .leading, spacing: 8) {
             ConnectionFieldsView(
-                form: draft.form, name: $draft.name, hasStoredSecret: draft.hasSecret)
+                form: draft.form, name: $draft.name, hasStoredSecret: draft.hasSecret,
+                hasStoredSSHSecret: draft.hasSSHSecret)
             settings
         }
     }

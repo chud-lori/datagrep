@@ -449,10 +449,19 @@ final class AppModel: ObservableObject {
     }
 
     func addProfileFromForm() {
-        addProfile(name: newForm.name, url: newForm.urlWithPassword, safety: newSafety)
+        let ssh = newForm.ssh
+        let add = { [self] in
+            addProfile(
+                name: newForm.name, url: newForm.urlWithPassword, safety: newSafety,
+                ssh: ssh.map { $0.json(secret: newForm.sshSecret) })
+        }
+        guard let ssh else { return add() }
+        verifyHostKey(ssh, required: false, failure: { [weak self] in self?.newError = $0 }, then: add)
     }
 
-    func addProfile(name: String, url: String, safety: SafetyLevel = .silent) {
+    func addProfile(
+        name: String, url: String, safety: SafetyLevel = .silent, ssh: [String: Any]? = nil
+    ) {
         guard let core else { return }
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let u = url.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -463,7 +472,7 @@ final class AppModel: ObservableObject {
         newError = nil
         queryQueue.async { [weak self] in
             var failure: String?
-            do { try core.addProfile(name: n, url: u, safety: safety) } catch {
+            do { try core.addProfile(name: n, url: u, safety: safety, ssh: ssh) } catch {
                 failure = "\(error)"
             }
             DispatchQueue.main.async {
@@ -488,23 +497,39 @@ final class AppModel: ObservableObject {
     // MARK: - testing a connection
 
     func testNewConnection() {
-        runTest(newTest, name: nil, url: newForm.urlWithPassword)
+        runTest(newTest, ssh: newForm.ssh, name: nil, url: newForm.urlWithPassword, option: newForm.sshOption)
     }
 
     /// Test what the Edit sheet currently describes.
     func testConnection(_ draft: ConnectionDraft) {
         let typed = draft.urlToTest.trimmingCharacters(in: .whitespacesAndNewlines)
         let unchanged = typed == draft.originalURL && draft.password.isEmpty
-        runTest(draft.test, name: unchanged ? draft.originalName : nil, url: unchanged ? nil : typed)
+        runTest(
+            draft.test, ssh: draft.form.ssh, name: draft.originalName, url: unchanged ? nil : typed,
+            option: draft.form.sshOption)
     }
 
-    private func runTest(_ state: ConnectionTestState, name: String?, url: String?) {
+    private func runTest(
+        _ state: ConnectionTestState, ssh: SSHSettings?, name: String?, url: String?, option: Any
+    ) {
+        guard let ssh else { return runTest(state, name: name, url: url, option: option) }
+        state.begin()
+        verifyHostKey(
+            ssh, required: true,
+            failure: { message in
+                state.running = false
+                state.failure = message
+            },
+            then: { [weak self] in self?.runTest(state, name: name, url: url, option: option) })
+    }
+
+    private func runTest(_ state: ConnectionTestState, name: String?, url: String?, option: Any) {
         guard let core else { return }
         state.begin()
         queryQueue.async { [weak self] in
             var result: ConnectionTestResult?
             var failure: String?
-            do { result = try core.testConnection(name: name, url: url) } catch {
+            do { result = try core.testConnection(name: name, url: url, ssh: option) } catch {
                 failure = "\(error)"
             }
             DispatchQueue.main.async {
@@ -575,6 +600,78 @@ final class AppModel: ObservableObject {
     func closeConnectionEditor() { editDraft = nil }
 
     func saveConnectionDraft() {
+        guard let draft = editDraft else { return }
+        guard let ssh = draft.form.ssh, draft.changedKeys.contains("ssh") else {
+            return commitConnectionDraft()
+        }
+        verifyHostKey(
+            ssh, required: false, failure: { draft.error = $0 },
+            then: { [weak self] in self?.commitConnectionDraft() })
+    }
+
+    /// Shows an SSH host's key and asks before trusting a new one; `then` runs once it is trusted.
+    /// With `required` false an unreachable host does not block saving: the key is checked on connect.
+    func verifyHostKey(
+        _ ssh: SSHSettings, required: Bool, failure: @escaping (String) -> Void,
+        then proceed: @escaping () -> Void
+    ) {
+        guard let core else { return }
+        queryQueue.async {
+            let review = Result { try core.reviewHostKey(host: ssh.host, port: ssh.port) }
+            DispatchQueue.main.async { [weak self] in
+                switch review {
+                case .failure(let error):
+                    required ? failure("\(error)") : proceed()
+                case .success(let r) where r.status == .trusted:
+                    proceed()
+                case .success(let r) where r.status == .changed:
+                    Self.hostKeyChangedAlert(r).runModal()
+                    failure(
+                        "The SSH host key of \(r.host):\(r.port) has changed, so nothing was sent to it.")
+                case .success(let r):
+                    guard Self.trustHostAlert(r).runModal() == .alertFirstButtonReturn else {
+                        return failure(
+                            "The SSH host key was not trusted, so nothing was sent to \(r.host).")
+                    }
+                    self?.queryQueue.async {
+                        let trusted = Result {
+                            try core.trustHostKey(host: r.host, port: r.port, fingerprint: r.fingerprint)
+                        }
+                        DispatchQueue.main.async {
+                            switch trusted {
+                            case .success: proceed()
+                            case .failure(let error): failure("\(error)")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static func trustHostAlert(_ r: HostKeyReview) -> NSAlert {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Trust the SSH host “\(r.host)”?"
+        alert.informativeText =
+            "datagrep has not connected to \(r.host):\(r.port) before. It offered this \(r.algorithm) key:\n\n\(r.fingerprint)\n\nCompare it with the fingerprint the server's administrator gives you. Trusting it saves it to \(r.knownHosts); a different key later will be refused."
+        alert.addButton(withTitle: "Trust and Continue")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.last?.keyEquivalent = "\u{1b}"
+        return alert
+    }
+
+    private static func hostKeyChangedAlert(_ r: HostKeyReview) -> NSAlert {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "The SSH host key of “\(r.host)” has changed"
+        alert.informativeText =
+            "Trusted: \(r.expected ?? "unknown")\nOffered: \(r.fingerprint)\n\nSomeone may be intercepting the connection, or the server was reinstalled. datagrep will not connect. If the change is expected, confirm the new fingerprint with the server's administrator and remove the old entry from \(r.knownHosts)."
+        alert.addButton(withTitle: "OK")
+        return alert
+    }
+
+    private func commitConnectionDraft() {
         guard let core, let draft = editDraft else { return }
         let oldName = draft.originalName
         let patchJSON = draft.patch.json
