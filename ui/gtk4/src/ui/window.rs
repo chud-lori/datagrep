@@ -245,7 +245,7 @@ mod imp {
 
             self.filter_toggle.set_icon_name("edit-find-symbolic");
             self.filter_toggle.set_tooltip_text(Some(
-                "Filter Rows — re-runs the statement with a WHERE (Ctrl+Shift+F)",
+                "Filter Rows: re-runs the statement with a WHERE (Ctrl+Shift+F)",
             ));
             self.filter_toggle.set_sensitive(false);
             header.pack_end(&self.filter_toggle);

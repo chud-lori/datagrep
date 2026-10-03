@@ -532,7 +532,7 @@ private struct WorkbenchToolbar: ToolbarContent {
             .disabled(!model.showFilterBar && !model.canFilter)
             .help(
                 model.canFilter
-                    ? "Filter rows by column — re-runs the statement with a WHERE  ⇧⌘F"
+                    ? "Filter rows by column: re-runs the statement with a WHERE  ⇧⌘F"
                     : "Filtering re-runs the statement inside SQL, which this engine cannot take")
 
             Button {

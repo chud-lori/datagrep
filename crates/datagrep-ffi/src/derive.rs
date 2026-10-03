@@ -163,7 +163,7 @@ pub fn derive_statement(driver_id: &str, statement: &str, spec: &Spec) -> Result
     let Some((dialect, quote)) = sql_target(driver_id) else {
         return Err(format!(
             "sorting and filtering re-run the statement inside an SQL subquery, which `{driver_id}` \
-             cannot take — put the condition in the statement itself"
+             cannot take. Put the condition in the statement itself"
         ));
     };
     let inner = statement.trim().trim_end_matches(';').trim_end();

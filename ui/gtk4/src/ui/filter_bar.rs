@@ -61,7 +61,7 @@ mod imp {
 
             let add = gtk::Button::from_icon_name("list-add-symbolic");
             add.add_css_class("flat");
-            add.set_tooltip_text(Some("Add a condition — every condition must hold"));
+            add.set_tooltip_text(Some("Add a condition (every condition must hold)"));
             let bar = self.obj().downgrade();
             add.connect_clicked(move |_| {
                 if let Some(bar) = bar.upgrade() {

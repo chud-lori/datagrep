@@ -28,7 +28,7 @@ struct FilterBar: View {
                 } label: {
                     Label("Add Filter", systemImage: "plus")
                 }
-                .help("Add another condition — every condition must hold")
+                .help("Add another condition (every condition must hold)")
                 Spacer()
                 Button("Clear") { model.clearDerived() }
                     .disabled(!model.hasDerivedClauses && model.filterDraft.isEmpty)
