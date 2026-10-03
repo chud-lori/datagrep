@@ -6,6 +6,7 @@ pub mod browse;
 pub mod catalog;
 pub mod cells;
 pub mod core;
+pub mod derive;
 pub mod drivers;
 pub mod export;
 pub mod ffi_util;
@@ -20,6 +21,7 @@ pub mod safety;
 pub use crate::core::{datagrep_core_free, datagrep_core_new, datagrep_string_free, DatagrepCore};
 pub use browse::datagrep_browse_statement;
 pub use catalog::{datagrep_catalog_children_json, datagrep_catalog_describe_json};
+pub use derive::{datagrep_derive_statement, datagrep_filter_operators_json};
 pub use export::{
     datagrep_export_cancel, datagrep_export_formats_json, datagrep_export_free,
     datagrep_export_start, datagrep_export_status_json, DatagrepExport,

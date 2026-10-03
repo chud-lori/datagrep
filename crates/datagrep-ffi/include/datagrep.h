@@ -140,6 +140,26 @@ char* datagrep_catalog_describe_json(DatagrepCore*, const char* profile, const c
 char* datagrep_browse_statement(const char* driver_id, const char* path_json,
                                 const char* database, char** err_out);
 
+// The filter operators this engine's results can be narrowed by, as
+// [{"op":"eq","label":"=","needs_value":true},..] — or [] where a result
+// cannot be re-run inside an SQL subquery (Mongo, Elasticsearch, Redis).
+// Pure. Caller frees.
+char* datagrep_filter_operators_json(const char* driver_id);
+
+// `statement` wrapped once as SELECT * FROM (statement) AS datagrep_result
+// with the WHERE and ORDER BY a filter bar or header click asked for.
+// spec_json: {"filters":[{"column":str,"op":str,"value":str}],
+//             "sort":{"column":str,"ascending":bool}|null}
+// Filters are ANDed; `op` is an id from datagrep_filter_operators_json; `value`
+// is ignored where needs_value is false. Identifiers go through the driver's own
+// quoting and values become escaped literals for that dialect, so no part of
+// the spec can end its own token. An empty spec returns `statement` unchanged.
+// Pure: run the result through datagrep_query_run like any statement, so the
+// safety ladder sees exactly what is sent. NULL + *err_out for an engine with
+// no operators, an unknown op, or a NUL in a value. Caller frees.
+char* datagrep_derive_statement(const char* driver_id, const char* statement,
+                                const char* spec_json, char** err_out);
+
 // ---- query -----------------------------------------------------------
 // Non-blocking: returns immediately with a handle; rows stream in the background.
 DatagrepQuery* datagrep_query_run(DatagrepCore*, const char* profile, const char* sql, char** err_out);
