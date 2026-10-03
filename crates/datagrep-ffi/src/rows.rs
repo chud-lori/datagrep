@@ -66,8 +66,6 @@ unsafe fn rows_ref<'a>(r: *mut DatagrepRows) -> Option<&'a DatagrepRows> {
     }
 }
 
-// ---- build -------------------------------------------------------------
-
 /// # Safety
 /// `q` is an unfreed query handle from `datagrep_query_run`. `err_out` is NULL or a writable slot.
 #[no_mangle]
@@ -418,8 +416,6 @@ pub(crate) fn doc_columns(segment: &Arc<DocSegment>, root: Option<&str>) -> Vec<
         root,
     )
 }
-
-// ---- accessors ---------------------------------------------------------
 
 /// # Safety
 /// `r` is NULL or an unfreed window from `datagrep_query_rows`.

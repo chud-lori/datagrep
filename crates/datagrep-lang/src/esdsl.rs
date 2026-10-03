@@ -113,7 +113,6 @@ fn read_method(bytes: &[u8], i: usize) -> Option<usize> {
 fn skip_ws_and_comments(bytes: &[u8], mut i: usize) -> usize {
     let len = bytes.len();
     loop {
-        // Whitespace.
         while i < len && bytes[i].is_ascii_whitespace() {
             i += 1;
         }

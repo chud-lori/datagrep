@@ -251,7 +251,7 @@ async fn undrained_result_does_not_poison_connection() {
     let rows = collect_rows(&*conn, native("SELECT 1 + 1")).await;
     assert_eq!(rows, vec![vec![Value::I64(2)]], "conn poisoned by drop");
 
-    // Case 2: drop the cursor without fetching anything at all.
+    // Drop the cursor without fetching anything at all.
     {
         let cur = conn.execute(native(seq_100k_sql())).await.expect("execute");
         drop(cur);
@@ -259,7 +259,7 @@ async fn undrained_result_does_not_poison_connection() {
     let rows = collect_rows(&*conn, native("SELECT 2 + 2")).await;
     assert_eq!(rows, vec![vec![Value::I64(4)]], "conn poisoned by drop");
 
-    // Case 3: explicit close() mid-stream.
+    // Explicit close() mid-stream.
     {
         let mut cur = conn.execute(native(seq_100k_sql())).await.expect("execute");
         let _ = cur

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ci/gates.sh — the Tier-1 gate.
+# The Tier-1 gate.
 
 set -euo pipefail
 

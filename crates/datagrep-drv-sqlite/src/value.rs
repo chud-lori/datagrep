@@ -135,7 +135,6 @@ mod tests {
         assert!(quote_ident("a\0b").is_err());
     }
 
-    // "every storage-class Value mapping" — one test per SQLite storage class.
     #[test]
     fn maps_null() {
         assert_eq!(sqlite_value_to_datagrep(ValueRef::Null, None), Value::Null);

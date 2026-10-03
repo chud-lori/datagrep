@@ -66,8 +66,6 @@ impl RedisConnection {
         flag
     }
 
-    // ---- Request::Native --------------------------------------------
-
     async fn execute_native(
         &self,
         text: &str,
@@ -185,8 +183,6 @@ impl RedisConnection {
         }
         result
     }
-
-    // ---- Request::Op(Scan) --------------------------------------------
 
     async fn scan_cursor(
         &self,
@@ -327,8 +323,6 @@ impl RedisConnection {
             }),
         }
     }
-
-    // ---- Request::Op(Count) --------------------------------------------
 
     async fn count(
         &self,
@@ -472,8 +466,6 @@ impl RedisConnection {
             ))),
         )))
     }
-
-    // ---- Request::Op(Mutate) --------------------------------------------
 
     async fn mutate(&self, batch: MutationBatch) -> Result<Box<dyn Cursor>, DbError> {
         if batch.mutations.is_empty() {

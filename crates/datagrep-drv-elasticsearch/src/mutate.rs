@@ -896,7 +896,7 @@ fn query_u64(write: &CompiledWrite, key: &str) -> Option<u64> {
         .and_then(|(_, v)| v.parse().ok())
 }
 
-// Bulk is not atomic and returns HTTP 200 with per-item failures; every item executes — no early stop, so no not_attempted, unlike the serial batch_report.
+// Bulk is not atomic: HTTP 200 with per-item failures, and every item executes, so nothing is not_attempted.
 pub fn bulk_report(
     writes: &[CompiledWrite],
     response: &Json,
@@ -1384,7 +1384,6 @@ mod tests {
 
     #[test]
     fn a_wildcard_or_missing_identity_is_refused() {
-        // Wildcard target.
         let m = Mutation::Delete {
             path: path(),
             key: vec![
@@ -1397,7 +1396,6 @@ mod tests {
             compile_mutation(&m, true),
             Err(DbError::Unsupported { .. })
         ));
-        // Missing `_id`.
         let m = Mutation::Delete {
             path: path(),
             key: vec![(fp("_index"), Value::Str(Arc::from("events")))],
@@ -1925,8 +1923,6 @@ mod tests {
             "a wait_for that degraded to an immediate refresh must be surfaced"
         );
     }
-
-    // ---- P1-2: multi-document `_bulk` batching ---------------------------
 
     fn update(id: &str, field: &str, value: Value, seq: i64, term: i64) -> CompiledWrite {
         compile_mutation(

@@ -623,7 +623,7 @@ impl EsConnection {
         Ok(Box::new(DocsCursor::new(docs).with_notices(notices)))
     }
 
-    // TSDB indices (ES >= 9.4) carry sentinel _seq_no and reject or ignore if_seq_no, so refuse up front; best-effort — unreadable settings skip the check and the per-document guard still refuses at write time.
+    // TSDB indices (ES >= 9.4) carry a sentinel _seq_no, so refuse up front; unreadable settings fall back to the per-document guard.
     async fn refuse_tsdb_indices(
         &self,
         writes: &[CompiledWrite],

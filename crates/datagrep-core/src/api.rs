@@ -73,8 +73,6 @@ impl CoreApi {
         }
     }
 
-    // ---- drivers ------------------------------------------------------
-
     pub fn register_driver(
         &self,
         id: impl Into<Arc<str>>,
@@ -86,8 +84,6 @@ impl CoreApi {
     pub fn drivers(&self) -> Vec<Arc<str>> {
         self.drivers.ids()
     }
-
-    // ---- profiles -----------------------------------------------------
 
     pub async fn add_profile(
         &self,
@@ -124,8 +120,6 @@ impl CoreApi {
         all
     }
 
-    // ---- connections --------------------------------------------------
-
     pub async fn connect(&self, id: ProfileId) -> Result<Arc<Session>, DbError> {
         let session = self.session(id)?;
         let lease = session.acquire().await?;
@@ -146,8 +140,6 @@ impl CoreApi {
             profile.safety,
         )
     }
-
-    // ---- safety -------------------------------------------------------
 
     pub fn safety_gate(&self, id: ProfileId) -> Result<Arc<SafetyGate>, DbError> {
         Ok(self.session(id)?.gate().clone())
@@ -192,8 +184,6 @@ impl CoreApi {
         self.sessions.close(id);
     }
 
-    // ---- queries ------------------------------------------------------
-
     pub async fn run_query(&self, id: ProfileId, req: Request) -> Result<QueryId, DbError> {
         let session = self.session(id)?;
         let lease = session.acquire().await?;
@@ -234,8 +224,6 @@ impl CoreApi {
         &self.queries
     }
 
-    // ---- catalog ------------------------------------------------------
-
     pub async fn list_catalog(
         &self,
         id: ProfileId,
@@ -248,8 +236,6 @@ impl CoreApi {
         let parent = parent.clone();
         guarded(async move { catalog.children(&parent, opts).await }).await
     }
-
-    // ---- lifecycle ----------------------------------------------------
 
     pub fn timer(&self) -> &Arc<TimerWheel> {
         &self.timer

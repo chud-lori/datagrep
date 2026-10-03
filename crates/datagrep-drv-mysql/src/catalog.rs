@@ -331,7 +331,6 @@ impl MySqlCatalog {
             .await
             .map_err(map_mysql_error)?;
 
-        // Column detail, one query.
         let col_rows: Vec<(String, String, String, String, String, String)> = conn
             .exec(
                 "SELECT column_name, data_type, column_type, is_nullable, column_key, extra \
@@ -342,7 +341,6 @@ impl MySqlCatalog {
             .await
             .map_err(map_mysql_error)?;
 
-        // Index detail, one query (name, ordered columns, uniqueness).
         let idx_rows: Vec<(String, i64, String)> = conn
             .exec(
                 "SELECT index_name, non_unique, column_name \
