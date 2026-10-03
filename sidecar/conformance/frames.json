@@ -1,5 +1,5 @@
 {
-  "hello": {"protocol": 1, "engine": "oracle", "engine_version": "0.4.0", "language": "Unclassified", "caps": 8336},
+  "hello": {"protocol": 1, "engine": "oracle", "engine_version": "0.5.0", "language": "Unclassified", "caps": 8336},
   "execute_table": {"cursor": 7, "shape": {"kind": "table", "fields": [{"name": "ID", "logical": "Decimal", "nullable": false, "native_type": "NUMBER"}, {"name": "NAME", "logical": "Str", "nullable": true}]}},
   "execute_ack": {"cursor": 0, "shape": {"kind": "ack", "affected": 3}},
   "fetch_rows": {"batch": {"rows": [["1", "SCOTT"], ["2", null]]}},

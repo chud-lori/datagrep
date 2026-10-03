@@ -14,7 +14,7 @@ import (
 	"github.com/chud-lori/datagrep/sidecar/common/wire"
 )
 
-const version = "0.4.0"
+const version = "0.5.0"
 
 type engine struct{}
 
