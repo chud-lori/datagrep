@@ -157,7 +157,11 @@ impl Fake {
         let env: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
         self.ok(
             id,
-            json!({ "server": { "product": "fake", "version": "0", "details": [["env", env.join(",")]] } }),
+            json!({ "server": {
+                "product": "fake",
+                "version": "0",
+                "details": [["env", env.join(",")], ["pid", std::process::id().to_string()]],
+            } }),
         );
     }
 
