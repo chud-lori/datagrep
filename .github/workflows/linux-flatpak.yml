@@ -18,6 +18,8 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "packaging/flatpak/**"
+      - "packaging/build-sidecars.sh"
+      - "sidecar/**"
       - ".github/workflows/linux-flatpak.yml"
   pull_request:
     paths:
@@ -26,6 +28,8 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "packaging/flatpak/**"
+      - "packaging/build-sidecars.sh"
+      - "sidecar/**"
       - ".github/workflows/linux-flatpak.yml"
   workflow_dispatch:
 
@@ -55,6 +59,17 @@ jobs:
             python3 -m pip install --user aiohttp tomlkit
           packaging/flatpak/generate-cargo-sources.sh
 
+      - name: Install Go (sidecars)
+        if: hashFiles('sidecar/go.mod') != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: sidecar/go.mod
+          cache-dependency-path: sidecar/go.sum
+
+      # The Go equivalent: sidecar/'s module graph as a local proxy; writes [] without sidecar/.
+      - name: Generate Go offline sources
+        run: packaging/flatpak/generate-go-sources.sh
+
       # Installs remaining deps (the rust-stable SDK extension) from flathub,
       # builds, and uploads the bundle as an artifact — installable on any
       # box with `flatpak install ./datagrep-gtk4.flatpak`.
@@ -63,4 +78,4 @@ jobs:
         with:
           manifest-path: packaging/flatpak/io.github.chud_lori.datagrep.yml
           bundle: datagrep-gtk4.flatpak
-          cache-key: flatpak-builder-${{ hashFiles('Cargo.lock', 'ui/gtk4/Cargo.lock') }}
+          cache-key: flatpak-builder-${{ hashFiles('Cargo.lock', 'ui/gtk4/Cargo.lock', 'sidecar/go.sum') }}

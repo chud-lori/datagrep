@@ -108,6 +108,32 @@ stored passwords fails. Hence the .deb *Recommends* (not Depends)
 `gnome-keyring | kwalletd6`; on Fedora, GNOME/KDE spins ship a provider by
 default so the .rpm declares nothing.
 
+## Engine sidecars
+
+`packaging/build-sidecars.sh [GOOS/GOARCH ...]` builds every engine under
+`sidecar/engines/<engine>` into a static `datagrep-sidecar-<engine>`
+(`CGO_ENABLED=0`, `-trimpath`, `-buildvcs=false`, `-ldflags "-s -w -buildid="`,
+`-mod=readonly`) in `dist/.sidecars/<goos>-<goarch>/`. Two builds from the same
+tree produce identical bytes. With no `sidecar/` tree it builds nothing and
+exits 0, so every format below still packages without Go.
+
+| Format | Where the sidecars land |
+|--------|-------------------------|
+| .deb / .rpm | `/usr/lib/datagrep/sidecars/` |
+| AppImage | `$APPDIR/usr/lib/datagrep/sidecars/` |
+| Flatpak | `/app/lib/datagrep/sidecars/` |
+| macOS .app | `datagrep.app/Contents/Helpers/` (built and signed by `ui/macos/build-app.sh`) |
+
+The rule at runtime is the same everywhere: start from the resolved path of the
+running executable. On Linux, sidecars are in `../lib/datagrep/sidecars/`; on
+macOS, they are in `../Helpers/`. The binaries are static, so they add no
+package dependencies and do not constrain the ubuntu-22.04 glibc floor.
+
+```sh
+packaging/build-sidecars.sh linux/amd64
+packaging/build-packages.sh && packaging/build-appimage.sh
+```
+
 ## CI notes
 
 - The workflow triggers on `v*` tags and `workflow_dispatch` only; per-push
