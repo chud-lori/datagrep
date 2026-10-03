@@ -48,6 +48,34 @@ pub struct Profile {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TunnelAuth {
+    #[default]
+    Agent,
+    Key,
+    Password,
+}
+
+impl TunnelAuth {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TunnelAuth::Agent => "agent",
+            TunnelAuth::Key => "key",
+            TunnelAuth::Password => "password",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<TunnelAuth> {
+        match s {
+            "agent" => Some(TunnelAuth::Agent),
+            "key" => Some(TunnelAuth::Key),
+            "password" => Some(TunnelAuth::Password),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tunnel {
     pub id: String,
@@ -55,6 +83,10 @@ pub struct Tunnel {
     pub host: String,
     pub port: u16,
     pub username: String,
+    #[serde(default)]
+    pub auth: TunnelAuth,
+    #[serde(default)]
+    pub key_path: Option<String>,
     pub secret_ref: Option<String>,
     pub known_hosts_pin: Option<String>,
     pub created_at: i64,

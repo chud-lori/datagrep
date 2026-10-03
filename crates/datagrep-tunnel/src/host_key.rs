@@ -47,10 +47,18 @@ impl HostKeyDecision {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostKeyStatus {
+    Trusted,
+    Unknown,
+    Changed { expected_fingerprint: String },
+}
+
 pub struct TofuStore {
     path: PathBuf,
     entries: Mutex<HashMap<(String, u16), Vec<u8>>>,
-    decisions: mpsc::UnboundedSender<HostKeyDecision>,
+    decisions: Option<mpsc::UnboundedSender<HostKeyDecision>>,
+    system_known_hosts: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for TofuStore {
@@ -72,10 +80,82 @@ impl TofuStore {
             Self {
                 path,
                 entries: Mutex::new(entries),
-                decisions: tx,
+                decisions: Some(tx),
+                system_known_hosts: None,
             },
             rx,
         ))
+    }
+
+    /// Never prompts: an unknown key fails with `HostKeyUnknown` until `pin` records it.
+    pub async fn open_unattended(
+        path: impl Into<PathBuf>,
+        system_known_hosts: Option<PathBuf>,
+    ) -> Result<Self, TunnelError> {
+        let path = path.into();
+        let entries = load(&path).await?;
+        Ok(Self {
+            path,
+            entries: Mutex::new(entries),
+            decisions: None,
+            system_known_hosts,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn system_default_path() -> Option<PathBuf> {
+        dirs::home_dir().map(|home| home.join(".ssh").join("known_hosts"))
+    }
+
+    pub async fn status(
+        &self,
+        host: &str,
+        port: u16,
+        key: &PublicKey,
+    ) -> Result<HostKeyStatus, TunnelError> {
+        let offered = encode(host, port, key)?;
+        let pinned = self
+            .entries
+            .lock()
+            .await
+            .get(&(host.to_owned(), port))
+            .cloned();
+        match pinned {
+            Some(pinned) if pinned == offered => return Ok(HostKeyStatus::Trusted),
+            Some(pinned) => {
+                return Ok(HostKeyStatus::Changed {
+                    expected_fingerprint: fingerprint_of(&pinned),
+                })
+            }
+            None => {}
+        }
+        let Some(system) = &self.system_known_hosts else {
+            return Ok(HostKeyStatus::Unknown);
+        };
+        // Read-only: the user's own file is consulted, never written.
+        match russh::keys::check_known_hosts_path(host, port, key, system) {
+            Ok(true) => Ok(HostKeyStatus::Trusted),
+            Err(russh::keys::Error::KeyChanged { line }) => Ok(HostKeyStatus::Changed {
+                expected_fingerprint: format!("the key at {} line {line}", system.display()),
+            }),
+            Ok(false) => Ok(HostKeyStatus::Unknown),
+            Err(error) => {
+                tracing::debug!(%error, "system known_hosts unreadable, treating host as unknown");
+                Ok(HostKeyStatus::Unknown)
+            }
+        }
+    }
+
+    pub async fn pin(&self, host: &str, port: u16, key: &PublicKey) -> Result<(), TunnelError> {
+        let offered = encode(host, port, key)?;
+        self.entries
+            .lock()
+            .await
+            .insert((host.to_owned(), port), offered);
+        self.persist().await
     }
 
     pub fn default_path() -> PathBuf {
@@ -163,6 +243,18 @@ async fn load(path: &Path) -> Result<HashMap<(String, u16), Vec<u8>>, TunnelErro
     Ok(out)
 }
 
+fn encode(host: &str, port: u16, key: &PublicKey) -> Result<Vec<u8>, TunnelError> {
+    key.to_bytes().map_err(|source| TunnelError::HostKeyEncode {
+        host: host.to_owned(),
+        port,
+        reason: source.to_string(),
+    })
+}
+
+pub fn fingerprint(key: &PublicKey) -> String {
+    key.fingerprint(HashAlg::Sha256).to_string()
+}
+
 fn fingerprint_of(bytes: &[u8]) -> String {
     match PublicKey::from_bytes(bytes) {
         Ok(key) => key.fingerprint(HashAlg::Sha256).to_string(),
@@ -172,36 +264,32 @@ fn fingerprint_of(bytes: &[u8]) -> String {
 
 impl HostKeyPolicy for TofuStore {
     async fn check(&self, host: &str, port: u16, key: &PublicKey) -> Result<(), TunnelError> {
-        let offered = key
-            .to_bytes()
-            .map_err(|source| TunnelError::HostKeyEncode {
+        match self.status(host, port, key).await? {
+            HostKeyStatus::Trusted => Ok(()),
+            HostKeyStatus::Changed {
+                expected_fingerprint,
+            } => Err(TunnelError::HostKeyChanged {
                 host: host.to_owned(),
                 port,
-                reason: source.to_string(),
-            })?;
-
-        let existing = {
-            let entries = self.entries.lock().await;
-            entries.get(&(host.to_owned(), port)).cloned()
-        };
-
-        match existing {
-            Some(pinned) if pinned == offered => Ok(()),
-            Some(pinned) => Err(TunnelError::HostKeyChanged {
-                host: host.to_owned(),
-                port,
-                expected_fingerprint: fingerprint_of(&pinned),
-                offered_fingerprint: key.fingerprint(HashAlg::Sha256).to_string(),
+                expected_fingerprint,
+                offered_fingerprint: fingerprint(key),
             }),
-            None => {
+            HostKeyStatus::Unknown => {
+                let Some(decisions) = &self.decisions else {
+                    return Err(TunnelError::HostKeyUnknown {
+                        host: host.to_owned(),
+                        port,
+                        fingerprint: fingerprint(key),
+                    });
+                };
                 let (respond, await_decision) = oneshot::channel();
                 let decision = HostKeyDecision {
                     host: host.to_owned(),
                     port,
-                    fingerprint: key.fingerprint(HashAlg::Sha256).to_string(),
+                    fingerprint: fingerprint(key),
                     respond,
                 };
-                self.decisions
+                decisions
                     .send(decision)
                     .map_err(|_| TunnelError::NoPromptListener {
                         host: host.to_owned(),
@@ -209,14 +297,7 @@ impl HostKeyPolicy for TofuStore {
                     })?;
 
                 match await_decision.await {
-                    Ok(true) => {
-                        self.entries
-                            .lock()
-                            .await
-                            .insert((host.to_owned(), port), offered);
-                        self.persist().await?;
-                        Ok(())
-                    }
+                    Ok(true) => self.pin(host, port, key).await,
                     Ok(false) | Err(_) => Err(TunnelError::HostKeyRejected {
                         host: host.to_owned(),
                         port,
@@ -353,5 +434,68 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, TunnelError::NoPromptListener { .. }));
+    }
+
+    #[tokio::test]
+    async fn unattended_refuses_an_unknown_key_until_it_is_pinned() {
+        let path = unique_temp_path("unattended");
+        let store = TofuStore::open_unattended(&path, None).await.unwrap();
+        let key = test_key(1);
+
+        let err = store.check("bastion.example", 22, &key).await.unwrap_err();
+        assert!(matches!(err, TunnelError::HostKeyUnknown { .. }), "{err:?}");
+        assert!(!tokio::fs::try_exists(&path).await.unwrap_or(false));
+
+        store.pin("bastion.example", 22, &key).await.unwrap();
+        let reopened = TofuStore::open_unattended(&path, None).await.unwrap();
+        reopened.check("bastion.example", 22, &key).await.unwrap();
+        let err = reopened
+            .check("bastion.example", 22, &test_key(2))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TunnelError::HostKeyChanged { .. }), "{err:?}");
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn the_system_known_hosts_file_is_trusted_and_a_mismatch_there_is_refused() {
+        // A key offered on the wire carries no comment, and russh compares comments too.
+        let bare = |line: &str| {
+            let mut parts = line.split(' ');
+            let (kind, body) = (parts.next().unwrap(), parts.next().unwrap());
+            PublicKey::from_openssh(&format!("{kind} {body}")).unwrap()
+        };
+        let (known, other) = (bare(TEST_KEY_1), bare(TEST_KEY_2));
+        let system = unique_temp_path("system");
+        tokio::fs::write(
+            &system,
+            format!("[jump.example]:2222 {}\n", known.to_openssh().unwrap()),
+        )
+        .await
+        .unwrap();
+        let pins = unique_temp_path("pins");
+        let store = TofuStore::open_unattended(&pins, Some(system.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.status("jump.example", 2222, &known).await.unwrap(),
+            HostKeyStatus::Trusted
+        );
+        assert!(matches!(
+            store.status("jump.example", 2222, &other).await.unwrap(),
+            HostKeyStatus::Changed { .. }
+        ));
+        assert_eq!(
+            store.status("other.example", 22, &known).await.unwrap(),
+            HostKeyStatus::Unknown
+        );
+        assert!(
+            !tokio::fs::try_exists(&pins).await.unwrap_or(false),
+            "trusting the system file must not copy it"
+        );
+
+        let _ = tokio::fs::remove_file(&system).await;
     }
 }

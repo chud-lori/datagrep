@@ -142,6 +142,7 @@ public struct ProfileDetail: Sendable, Hashable {
     public var enforcement: ReadOnlyEnforcement
     public var reported: Set<String>
     public var fields: ConnectionFields?
+    public var ssh: SSHSettings?
 
     public init(
         name: String, url: String = "", driver: String = "",
@@ -179,6 +180,7 @@ public struct ProfileDetail: Sendable, Hashable {
         d.enforcement = ReadOnlyEnforcement(
             abi: ProfileDetail.string(dict, "enforcement")
                 ?? ProfileDetail.string(dict, "read_only_enforcement"))
+        d.ssh = SSHSettings.decode(dict["ssh"])
         if let config = dict["config"] as? [String: Any] {
             d.fields = ConnectionFields.fromConfig(driver: d.driver, config: config)
             if d.url.isEmpty, let rendered = d.fields?.url(), !rendered.isEmpty {
@@ -213,6 +215,7 @@ public struct ProfilePatch {
     public mutating func set(_ key: String, _ value: Int?) {
         fields[key] = value.map { $0 as Any } ?? NSNull()
     }
+    public mutating func set(_ key: String, json value: Any) { fields[key] = value }
 
     public var isEmpty: Bool { fields.isEmpty }
     public var changedKeys: [String] { fields.keys.sorted() }
@@ -231,6 +234,24 @@ public struct ConnectionTestResult: Sendable, Hashable {
     public let version: String
     public let details: [(String, String)]
     public let elapsedMs: UInt64
+
+    static func decode(_ json: String) throws -> ConnectionTestResult {
+        guard let dict = jsonObject(json) as? [String: Any] else {
+            throw DatagrepError("the connection test did not return an object")
+        }
+        let details = (dict["details"] as? [[Any]] ?? []).compactMap { pair -> (String, String)? in
+            guard pair.count == 2, let k = pair[0] as? String, let v = pair[1] as? String else {
+                return nil
+            }
+            return (k, v)
+        }
+        return ConnectionTestResult(
+            driver: dict["driver"] as? String ?? "",
+            product: dict["product"] as? String ?? "",
+            version: dict["version"] as? String ?? "",
+            details: details,
+            elapsedMs: (dict["elapsed_ms"] as? NSNumber)?.uint64Value ?? 0)
+    }
 
     /// One line for the callout: what answered, and how long it took.
     public var headline: String {
@@ -268,21 +289,7 @@ extension DatagrepCoreHandle {
                 (url ?? "").withCString { u in takeOwnedString(test(raw, n, u, errOut)) }
             }
         }
-        guard let dict = jsonObject(json) as? [String: Any] else {
-            throw DatagrepError("datagrep_connection_test_json did not return an object")
-        }
-        let details = (dict["details"] as? [[Any]] ?? []).compactMap { pair -> (String, String)? in
-            guard pair.count == 2, let k = pair[0] as? String, let v = pair[1] as? String else {
-                return nil
-            }
-            return (k, v)
-        }
-        return ConnectionTestResult(
-            driver: dict["driver"] as? String ?? "",
-            product: dict["product"] as? String ?? "",
-            version: dict["version"] as? String ?? "",
-            details: details,
-            elapsedMs: (dict["elapsed_ms"] as? NSNumber)?.uint64Value ?? 0)
+        return try ConnectionTestResult.decode(json)
     }
 
     /// Full detail for one profile, for pre-populating the editor.

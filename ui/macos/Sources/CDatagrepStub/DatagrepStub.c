@@ -1350,6 +1350,41 @@ bool datagrep_safety_satisfy(DatagrepCore *c, const char *profile, const char *c
     return ok != 0;
 }
 
+/* ---- SSH: the stub has no network, so dialing fails and every host is new ---- */
+
+char *datagrep_connection_test_with_json(DatagrepCore *c, const char *name, const char *url,
+                                         const char *options_json, char **err_out) {
+    (void)c; (void)name; (void)url; (void)options_json;
+    set_err(err_out, "the stub engine cannot dial a server");
+    return NULL;
+}
+
+char *datagrep_ssh_host_key_json(DatagrepCore *c, const char *host, uint16_t port,
+                                 char **err_out) {
+    if (!c || !host || !*host) {
+        set_err(err_out, "host must not be empty");
+        return NULL;
+    }
+    Sb s;
+    sb_init(&s);
+    sb_putf(&s,
+            "{\"host\":\"%s\",\"port\":%u,\"algorithm\":\"ssh-ed25519\","
+            "\"fingerprint\":\"SHA256:stubstubstubstubstubstubstubstubstubstubstu\","
+            "\"status\":\"unknown\",\"expected\":null,\"known_hosts\":\"(stub)\"}",
+            host, (unsigned)port);
+    return s.buf;
+}
+
+bool datagrep_ssh_trust_host_key(DatagrepCore *c, const char *host, uint16_t port,
+                                 const char *fingerprint, char **err_out) {
+    (void)port;
+    if (!c || !host || !fingerprint) {
+        set_err(err_out, "null argument");
+        return false;
+    }
+    return true;
+}
+
 /* ---- editing a profile, so the ladder can be set from the UI ---------- */
 
 bool datagrep_profiles_add_json(DatagrepCore *c, const char *name, const char *url,

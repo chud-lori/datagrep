@@ -47,6 +47,20 @@ bool  datagrep_profiles_remove(DatagrepCore *, const char *name, char **err_out)
  * null until a connection of this profile has succeeded. */
 char *datagrep_connection_info_json(DatagrepCore *, const char *name, char **err_out);
 
+/* Dial once through the profile's settings, saving nothing. options_json is
+ * {"ssh":SSH|null} as in datagrep_profiles_add_json; absent = the saved tunnel.
+ * Returns {"ok","driver","product","version","details","elapsed_ms"}. */
+char *datagrep_connection_test_with_json(DatagrepCore *, const char *name, const char *url,
+                                         const char *options_json, char **err_out);
+
+/* Key exchange only. {"host","port","algorithm","fingerprint",
+ *  "status":"trusted"|"unknown"|"changed","expected":str|null,"known_hosts"} */
+char *datagrep_ssh_host_key_json(DatagrepCore *, const char *host, uint16_t port,
+                                 char **err_out);
+/* Pins the reviewed key while `fingerprint` still matches it; refuses "changed". */
+bool  datagrep_ssh_trust_host_key(DatagrepCore *, const char *host, uint16_t port,
+                                  const char *fingerprint, char **err_out);
+
 /* path_json = JSON array of segments, [] for roots
  * [{"name","kind","has_children","enumeration":"cheap"|"scan_only"|"paged"|"on_demand"}] */
 char *datagrep_catalog_children_json(DatagrepCore *, const char *profile, const char *path_json,

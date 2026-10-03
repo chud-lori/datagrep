@@ -112,8 +112,12 @@ public final class DatagrepCoreHandle: @unchecked Sendable {
             version: (server?["version"] as? String).flatMap { $0.isEmpty ? nil : $0 })
     }
 
-    public func addProfile(name: String, url: String, safety: SafetyLevel = .silent) throws {
-        let options = #"{"safety":"\#(safety.rawValue)"}"#
+    public func addProfile(
+        name: String, url: String, safety: SafetyLevel = .silent, ssh: [String: Any]? = nil
+    ) throws {
+        var fields: [String: Any] = ["safety": safety.rawValue]
+        if let ssh { fields["ssh"] = ssh }
+        let options = jsonText(fields)
         if let add = ProfileABI.addJSON {
             return try name.withCString { n in
                 try url.withCString { u in
@@ -128,7 +132,7 @@ public final class DatagrepCoreHandle: @unchecked Sendable {
                 try datagrepTryBool { errOut in datagrep_profiles_add(raw, n, u, errOut) }
             }
         }
-        if safety != .silent { try updateProfile(name: name, patchJSON: options) }
+        if safety != .silent || ssh != nil { try updateProfile(name: name, patchJSON: options) }
     }
 
     public func removeProfile(name: String) throws {

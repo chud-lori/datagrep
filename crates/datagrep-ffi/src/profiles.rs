@@ -25,6 +25,8 @@ struct ProfilePatch {
     idle_timeout_s: Option<Option<i64>>,
     #[serde(default, deserialize_with = "nullable")]
     color: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable")]
+    ssh: Option<Option<crate::ssh::SshPatch>>,
 }
 
 fn nullable<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
@@ -58,7 +60,7 @@ fn parse_patch(text: &str) -> Result<ProfilePatch, String> {
     serde_json::from_str(trimmed).map_err(|e| {
         format!(
             "patch/options JSON is invalid ({e}); accepted keys: name, url, \
-             read_only, safety, confirm_writes (legacy), auto_limit, idle_timeout_s, color"
+             read_only, safety, confirm_writes (legacy), auto_limit, idle_timeout_s, color, ssh"
         )
     })
 }
@@ -180,26 +182,31 @@ async fn add_profile(
 
     let safety = options.level()?.unwrap_or_default();
     let now = datagrep_profiles::now_ms();
-    core.store
-        .create_profile(datagrep_profiles::Profile {
-            id,
-            folder_id: None,
-            name: name.to_string(),
-            driver_id: driver_id.to_string(),
-            config,
-            secret_ref,
-            tunnel_id: None,
-            color: options.color.flatten(),
-            read_only: options.read_only.unwrap_or(false),
-            safety,
-            auto_limit: options.auto_limit.flatten(),
-            idle_timeout_s: options.idle_timeout_s.flatten(),
-            last_used_at: None,
-            created_at: now,
-            updated_at: now,
-        })
-        .await
-        .map_err(|e| format!("could not save the profile: {e}"))?;
+    let mut profile = datagrep_profiles::Profile {
+        id,
+        folder_id: None,
+        name: name.to_string(),
+        driver_id: driver_id.to_string(),
+        config,
+        secret_ref,
+        tunnel_id: None,
+        color: options.color.flatten(),
+        read_only: options.read_only.unwrap_or(false),
+        safety,
+        auto_limit: options.auto_limit.flatten(),
+        idle_timeout_s: options.idle_timeout_s.flatten(),
+        last_used_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    if let Some(ssh) = options.ssh {
+        crate::ssh::apply(core, &mut profile, ssh).await?;
+    }
+    let tunnel_id = profile.tunnel_id.clone();
+    if let Err(e) = core.store.create_profile(profile).await {
+        crate::ssh::remove(core, tunnel_id).await;
+        return Err(format!("could not save the profile: {e}"));
+    }
     Ok(())
 }
 
@@ -316,6 +323,9 @@ async fn update_profile(core: &CoreInner, name: &str, patch: ProfilePatch) -> Re
     if let Some(color) = patch.color {
         profile.color = color;
     }
+    if let Some(ssh) = patch.ssh {
+        crate::ssh::apply(core, &mut profile, ssh).await?;
+    }
 
     let new_name = profile.name.clone();
     core.store
@@ -348,6 +358,7 @@ pub unsafe extern "C" fn datagrep_profiles_get_json(
             let name = unsafe { cstr(name, "name") }?;
             let rt = runtime()?;
             let p = rt.block_on(core.saved_profile(name))?;
+            let tunnel = rt.block_on(crate::ssh::saved_tunnel(core, &p))?;
 
             let secret_keys: Vec<String> = crate::drivers::driver_for(&p.driver_id)
                 .map(|d| {
@@ -390,6 +401,7 @@ pub unsafe extern "C" fn datagrep_profiles_get_json(
                 "has_secret": p.secret_ref.is_some(),
                 "secret": p.secret_ref.is_some().then_some("••••"),
                 "config": config,
+                "ssh": tunnel.as_ref().map(crate::ssh::tunnel_json),
                 "last_used_at": p.last_used_at,
             });
             let text = serde_json::to_string(&payload)
@@ -473,7 +485,47 @@ pub unsafe extern "C" fn datagrep_connection_test_json(
                 return Err("pass either a profile name or a connection URL".to_string());
             }
             let rt = runtime()?;
-            let payload = rt.block_on(test_connection(core, name.trim(), url.trim()))?;
+            let payload = rt.block_on(test_connection(core, name.trim(), url.trim(), None))?;
+            let text = serde_json::to_string(&payload)
+                .map_err(|e| format!("could not encode the test result: {e}"))?;
+            Ok(to_c_string(text))
+        },
+    )
+}
+
+/// # Safety
+/// `core` is a live handle from `datagrep_core_new`; string arguments are NULL or NUL-terminated; `err_out` is NULL or a writable slot.
+#[no_mangle]
+pub unsafe extern "C" fn datagrep_connection_test_with_json(
+    core: *mut DatagrepCore,
+    name: *const c_char,
+    url: *const c_char,
+    options_json: *const c_char,
+    err_out: *mut *mut c_char,
+) -> *mut c_char {
+    guard(
+        err_out,
+        std::ptr::null_mut(),
+        "datagrep_connection_test_with_json",
+        || {
+            // SAFETY: live DatagrepCore* and NUL-terminated strings per the module contract.
+            let core = unsafe { core_ref(core) }?;
+            let optional = |p: *const c_char, what: &'static str| -> Result<&str, String> {
+                if p.is_null() {
+                    Ok("")
+                } else {
+                    // SAFETY: non-NULL and NUL-terminated per the module contract.
+                    unsafe { cstr(p, what) }.map(str::trim)
+                }
+            };
+            let name = optional(name, "name")?;
+            let url = optional(url, "url")?;
+            let options = parse_patch(optional(options_json, "options_json")?)?;
+            if name.is_empty() && url.is_empty() {
+                return Err("pass either a profile name or a connection URL".to_string());
+            }
+            let rt = runtime()?;
+            let payload = rt.block_on(test_connection(core, name, url, options.ssh))?;
             let text = serde_json::to_string(&payload)
                 .map_err(|e| format!("could not encode the test result: {e}"))?;
             Ok(to_c_string(text))
@@ -483,13 +535,22 @@ pub unsafe extern "C" fn datagrep_connection_test_json(
 
 const TEST_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-async fn test_connection(
+pub(crate) async fn test_connection(
     core: &CoreInner,
     name: &str,
     url: &str,
+    ssh: Option<Option<crate::ssh::SshPatch>>,
 ) -> Result<serde_json::Value, String> {
-    let (driver_id, driver, config) = if !name.is_empty() {
-        let profile = core.saved_profile(name).await?;
+    let saved = if name.is_empty() {
+        None
+    } else {
+        Some(core.saved_profile(name).await?)
+    };
+    let tunnel = match &saved {
+        Some(profile) => crate::ssh::saved_tunnel(core, profile).await?,
+        None => None,
+    };
+    let (driver_id, driver, mut config) = if let (Some(profile), true) = (&saved, url.is_empty()) {
         let driver = crate::drivers::driver_for(&profile.driver_id).ok_or_else(|| {
             format!(
                 "this build has no `{}` driver (it knows {})",
@@ -497,7 +558,7 @@ async fn test_connection(
                 crate::drivers::known_driver_ids().join(", ")
             )
         })?;
-        let config = core.plaintext_config(&profile).await?;
+        let config = core.plaintext_config(profile).await?;
         (profile.driver_id.clone(), driver, config)
     } else {
         let (id, driver) = crate::drivers::driver_for_url(url).ok_or_else(|| {
@@ -509,6 +570,12 @@ async fn test_connection(
         })?;
         let config = driver.parse_url(url).map_err(|e| e.to_string())?;
         (id.to_string(), driver, config)
+    };
+
+    // Held until the test connection closes: dropping it stops the loopback listener.
+    let _forward = match crate::ssh::spec_for(core, tunnel.as_ref(), ssh).await? {
+        Some(spec) => Some(crate::ssh::route(core, spec, &mut config).await?),
+        None => None,
     };
 
     let ctx = datagrep_api::driver::ConnectCtx {
@@ -575,7 +642,9 @@ async fn remove_profile(core: &CoreInner, name: &str) -> Result<(), String> {
     core.store
         .delete_profile(profile.id)
         .await
-        .map_err(|e| format!("could not delete the profile: {e}"))
+        .map_err(|e| format!("could not delete the profile: {e}"))?;
+    crate::ssh::remove(core, profile.tunnel_id).await;
+    Ok(())
 }
 
 #[cfg(test)]

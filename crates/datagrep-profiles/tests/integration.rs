@@ -5,7 +5,7 @@ use datagrep_api::safety::SafetyLevel;
 use datagrep_api::{ConfigValue, ConnectionConfig};
 use datagrep_profiles::{
     new_id, now_ms, Folder, HistoryStatus, ImportStrategy, NewHistoryEntry, ProfilesError,
-    RetentionPolicy, SavedQuery, Store, Tunnel,
+    RetentionPolicy, SavedQuery, Store, Tunnel, TunnelAuth,
 };
 
 fn sample_config() -> ConnectionConfig {
@@ -60,6 +60,8 @@ fn sample_tunnel(id: &str) -> Tunnel {
         host: "jump.example.com".to_string(),
         port: 22,
         username: "deploy".to_string(),
+        auth: TunnelAuth::Key,
+        key_path: Some("~/.ssh/id_ed25519".to_string()),
         secret_ref: Some(format!("keychain:datagrep:tunnel:{id}")),
         known_hosts_pin: Some("SHA256:abc123".to_string()),
         created_at: now,
@@ -104,7 +106,7 @@ async fn migration_brings_empty_db_to_current_version() {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        version, 3,
+        version, 4,
         "fresh db should land on the current schema version"
     );
 
@@ -170,7 +172,7 @@ async fn reopen_is_idempotent_and_does_not_reapply_migrations() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3, "version must not change on a no-op reopen");
+    assert_eq!(version, 4, "version must not change on a no-op reopen");
 
     let bak_len_after_second_open = std::fs::metadata(&bak).unwrap().len();
     assert_eq!(bak_len_after_first_open, bak_len_after_second_open);
@@ -262,8 +264,11 @@ async fn tunnel_crud_round_trip() {
 
     let mut updated = tunnel;
     updated.port = 2222;
+    updated.auth = TunnelAuth::Password;
+    updated.key_path = None;
     let updated = store.update_tunnel(updated).await.unwrap();
     assert_eq!(updated.port, 2222);
+    assert_eq!(store.get_tunnel("t1").await.unwrap(), Some(updated));
     assert_eq!(store.list_tunnels().await.unwrap().len(), 1);
 
     store.delete_tunnel("t1").await.unwrap();
@@ -731,6 +736,35 @@ async fn a_v2_database_reads_its_confirm_writes_as_a_ladder_rung() {
     };
     assert_eq!(level("ask"), SafetyLevel::WarnWrites);
     assert_eq!(level("keep"), SafetyLevel::Silent);
+}
+
+#[tokio::test]
+async fn a_v3_tunnel_row_gains_agent_auth() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("profiles.db");
+    {
+        let store = Store::open(&path);
+        store.create_tunnel(sample_tunnel("old")).await.unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE tunnel DROP COLUMN auth;
+             ALTER TABLE tunnel DROP COLUMN key_path;
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&path);
+    let tunnel = store
+        .get_tunnel("old")
+        .await
+        .unwrap()
+        .expect("row survived");
+    assert_eq!(tunnel.auth, TunnelAuth::Agent);
+    assert_eq!(tunnel.key_path, None);
+    assert_eq!(tunnel.host, "jump.example.com");
 }
 
 #[tokio::test]

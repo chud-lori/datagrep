@@ -61,6 +61,11 @@ impl Context {
         name: &str,
     ) -> Result<(datagrep_core::ProfileId, datagrep_profiles::Profile), CliError> {
         let profile = self.find_profile(name).await?;
+        if profile.tunnel_id.is_some() {
+            return Err(CliError::usage(format!(
+                "`{name}` connects through an SSH tunnel, which the CLI does not open yet; use the desktop app"
+            )));
+        }
         let mut config = profile.config.clone();
 
         if let Some(secret_ref) = &profile.secret_ref {

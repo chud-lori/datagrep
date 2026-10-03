@@ -1051,11 +1051,14 @@ dependencies = [
  "datagrep-lang",
  "datagrep-profiles",
  "datagrep-secrets",
+ "datagrep-tunnel",
  "once_cell",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

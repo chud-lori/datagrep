@@ -18,6 +18,7 @@ pub mod reread;
 pub mod rows;
 pub mod runtime;
 pub mod safety;
+pub mod ssh;
 
 pub use crate::core::{datagrep_core_free, datagrep_core_new, datagrep_string_free, DatagrepCore};
 pub use browse::datagrep_browse_statement;
@@ -44,3 +45,4 @@ pub use rows::{
 pub use safety::{
     datagrep_safety_evaluate_json, datagrep_safety_pending_json, datagrep_safety_satisfy,
 };
+pub use ssh::{datagrep_ssh_host_key_json, datagrep_ssh_trust_host_key};
