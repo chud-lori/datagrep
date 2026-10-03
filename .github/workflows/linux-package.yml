@@ -8,6 +8,7 @@ on:
   pull_request:
     paths:
       - "packaging/**"
+      - "sidecar/**"
       - ".github/workflows/linux-package.yml"
   workflow_dispatch:
 
@@ -64,6 +65,16 @@ jobs:
 
       - name: Validate desktop entry
         run: desktop-file-validate packaging/datagrep.desktop
+
+      - name: Install Go (sidecars)
+        if: hashFiles('sidecar/go.mod') != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: sidecar/go.mod
+          cache-dependency-path: sidecar/go.sum
+
+      - name: Build engine sidecars
+        run: bash packaging/build-sidecars.sh linux/amd64
 
       - name: Build .deb and .rpm
         run: bash packaging/build-packages.sh
