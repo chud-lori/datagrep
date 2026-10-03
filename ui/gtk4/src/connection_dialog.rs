@@ -322,6 +322,12 @@ is written; it never reaches disk in plain text and is never shown in the URL be
 const KEYCHAIN_STORED: &str = "A password is saved in the system keychain. Leave this blank to \
 keep it — datagrep never reads it back into the window.";
 
+const SSH_AUTH: [(&str, &str); 3] = [
+    ("agent", "SSH Agent"),
+    ("key", "Key File"),
+    ("password", "Password"),
+];
+
 mod imp {
     use std::cell::{Cell, OnceCell, RefCell};
     use std::sync::OnceLock;
@@ -341,6 +347,14 @@ mod imp {
         pub username_row: adw::EntryRow,
         pub password_row: adw::PasswordEntryRow,
         pub tls_row: adw::SwitchRow,
+        pub ssh_group: adw::PreferencesGroup,
+        pub ssh_row: adw::ExpanderRow,
+        pub ssh_host_row: adw::EntryRow,
+        pub ssh_port_row: adw::SpinRow,
+        pub ssh_user_row: adw::EntryRow,
+        pub ssh_auth_row: adw::ComboRow,
+        pub ssh_key_row: adw::EntryRow,
+        pub ssh_secret_row: adw::PasswordEntryRow,
         pub url_row: adw::EntryRow,
         pub test_row: adw::ActionRow,
         pub swatches: Vec<(String, gtk::CheckButton)>,
@@ -368,6 +382,7 @@ mod imp {
         pub orig_color: RefCell<String>,
         pub orig_auto_limit: Cell<i64>,
         pub orig_idle_timeout: Cell<i64>,
+        pub orig_ssh: RefCell<Value>,
     }
 
     #[glib::object_subclass]
@@ -412,6 +427,7 @@ impl ConnectionDialog {
         w.save_button.set_label("Add");
         w.enforcement_row.set_visible(false);
         dialog.reshape_for_engine();
+        dialog.reshape_for_ssh_auth();
         dialog.render_url_from_fields();
         dialog
     }
@@ -515,6 +531,55 @@ impl ConnectionDialog {
         password_row.set_title("Password");
         auth_group.add(&password_row);
         page.add(&auth_group);
+
+        let ssh_group = adw::PreferencesGroup::new();
+        ssh_group.set_title("SSH Tunnel");
+        let ssh_row = adw::ExpanderRow::new();
+        ssh_row.set_title("Connect over SSH");
+        ssh_row.set_subtitle("Reach the database host and port above from an SSH server");
+        ssh_row.set_show_enable_switch(true);
+        ssh_row.set_enable_expansion(false);
+        let ssh_host_row = adw::EntryRow::new();
+        ssh_host_row.set_title("SSH Host");
+        ssh_row.add_row(&ssh_host_row);
+        let ssh_port_row = adw::SpinRow::with_range(1.0, 65535.0, 1.0);
+        ssh_port_row.set_title("SSH Port");
+        ssh_port_row.set_value(22.0);
+        ssh_row.add_row(&ssh_port_row);
+        let ssh_user_row = adw::EntryRow::new();
+        ssh_user_row.set_title("SSH User");
+        ssh_row.add_row(&ssh_user_row);
+        let ssh_auth_row = adw::ComboRow::new();
+        ssh_auth_row.set_title("Sign In With");
+        let auth_titles: Vec<&str> = SSH_AUTH.iter().map(|(_, title)| *title).collect();
+        ssh_auth_row.set_model(Some(&gtk::StringList::new(&auth_titles)));
+        ssh_row.add_row(&ssh_auth_row);
+        let ssh_key_row = adw::EntryRow::new();
+        ssh_key_row.set_title("Key File");
+        let browse_key = gtk::Button::from_icon_name("document-open-symbolic");
+        browse_key.set_valign(gtk::Align::Center);
+        browse_key.add_css_class("flat");
+        browse_key.set_tooltip_text(Some("Choose an SSH private key"));
+        browse_key.connect_clicked(glib::clone!(
+            #[weak(rename_to = dialog)]
+            self,
+            move |_| dialog.on_browse_key()
+        ));
+        ssh_key_row.add_suffix(&browse_key);
+        ssh_row.add_row(&ssh_key_row);
+        let ssh_secret_row = adw::PasswordEntryRow::new();
+        ssh_row.add_row(&ssh_secret_row);
+        ssh_group.add(&ssh_row);
+        ssh_group.set_description(Some(
+            "The secret is kept in the system keychain. A host datagrep has not seen \
+             before shows its key fingerprint for you to confirm first.",
+        ));
+        page.add(&ssh_group);
+        ssh_auth_row.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = dialog)]
+            self,
+            move |_| dialog.reshape_for_ssh_auth()
+        ));
 
         let url_group = adw::PreferencesGroup::new();
         let url_row = adw::EntryRow::new();
@@ -677,6 +742,14 @@ impl ConnectionDialog {
                 username_row,
                 password_row,
                 tls_row,
+                ssh_group,
+                ssh_row,
+                ssh_host_row,
+                ssh_port_row,
+                ssh_user_row,
+                ssh_auth_row,
+                ssh_key_row,
+                ssh_secret_row,
                 url_row,
                 test_row,
                 swatches,
@@ -706,6 +779,7 @@ impl ConnectionDialog {
         w.host_row.set_visible(!file);
         w.port_row.set_visible(!file);
         w.auth_group.set_visible(!file);
+        w.ssh_group.set_visible(!file);
         w.file_row.set_visible(file);
         w.database_row.set_visible(!file);
         w.database_row.set_title(e.database_label);
@@ -715,6 +789,215 @@ impl ConnectionDialog {
         }
         if !file && !self.imp().syncing.get() {
             w.port_row.set_value(e.default_port.unwrap_or(0) as f64);
+        }
+    }
+
+    fn ssh_auth(&self) -> &'static str {
+        let idx = self.widgets().ssh_auth_row.selected() as usize;
+        SSH_AUTH[idx.min(SSH_AUTH.len() - 1)].0
+    }
+
+    fn reshape_for_ssh_auth(&self) {
+        let w = self.widgets();
+        let auth = self.ssh_auth();
+        w.ssh_key_row.set_visible(auth == "key");
+        w.ssh_secret_row.set_visible(auth != "agent");
+        let saved = self.imp().orig_ssh.borrow()["auth"].as_str() == Some(auth)
+            && self.imp().orig_ssh.borrow()["has_secret"].as_bool() == Some(true);
+        let title = if auth == "key" {
+            "Key Passphrase"
+        } else {
+            "SSH Password"
+        };
+        w.ssh_secret_row.set_title(&if saved {
+            format!("{title} (saved)")
+        } else {
+            title.to_string()
+        });
+    }
+
+    // The tunnel the form describes, without its secret; None when the connection is direct.
+    fn ssh_from_ui(&self) -> Option<Value> {
+        let w = self.widgets();
+        if !w.ssh_row.enables_expansion() || self.current_engine().file_based {
+            return None;
+        }
+        let auth = self.ssh_auth();
+        let mut ssh = json!({
+            "host": w.ssh_host_row.text().trim(),
+            "port": w.ssh_port_row.value() as u16,
+            "user": w.ssh_user_row.text().trim(),
+            "auth": auth,
+        });
+        if auth == "key" {
+            ssh["key_path"] = json!(w.ssh_key_row.text().trim());
+        }
+        Some(ssh)
+    }
+
+    // What the add, update and test calls take for "ssh": an object (with any typed secret) or null.
+    fn ssh_option(&self) -> Value {
+        let Some(mut ssh) = self.ssh_from_ui() else {
+            return Value::Null;
+        };
+        let secret = self.widgets().ssh_secret_row.text();
+        if ssh["auth"] != "agent" && !secret.is_empty() {
+            ssh["secret"] = json!(secret.as_str());
+        }
+        ssh
+    }
+
+    fn ssh_changed(&self) -> bool {
+        let current = self.ssh_from_ui().unwrap_or(Value::Null);
+        let orig = self.imp().orig_ssh.borrow();
+        let same = |key: &str| current[key] == orig[key];
+        let key_path_same = current["auth"] != "key" || same("key_path");
+        let unchanged = (current.is_null() && orig.is_null())
+            || (!current.is_null()
+                && same("host")
+                && same("port")
+                && same("user")
+                && same("auth")
+                && key_path_same);
+        !unchanged || !self.widgets().ssh_secret_row.text().is_empty()
+    }
+
+    fn apply_ssh_to_ui(&self, ssh: &Value) {
+        let w = self.widgets();
+        w.ssh_row.set_enable_expansion(!ssh.is_null());
+        w.ssh_row.set_expanded(!ssh.is_null());
+        w.ssh_host_row
+            .set_text(ssh["host"].as_str().unwrap_or_default());
+        w.ssh_port_row
+            .set_value(ssh["port"].as_u64().unwrap_or(22) as f64);
+        w.ssh_user_row
+            .set_text(ssh["user"].as_str().unwrap_or_default());
+        let auth = ssh["auth"].as_str().unwrap_or("agent");
+        let idx = SSH_AUTH.iter().position(|(id, _)| *id == auth).unwrap_or(0);
+        w.ssh_auth_row.set_selected(idx as u32);
+        w.ssh_key_row
+            .set_text(ssh["key_path"].as_str().unwrap_or_default());
+        self.reshape_for_ssh_auth();
+    }
+
+    fn on_browse_key(&self) {
+        let chooser = gtk::FileDialog::new();
+        chooser.set_title("Choose an SSH private key");
+        if let Some(home) = glib::home_dir().to_str() {
+            chooser.set_initial_folder(Some(&gio::File::for_path(format!("{home}/.ssh"))));
+        }
+        let parent = self.root().and_downcast::<gtk::Window>();
+        chooser.open(
+            parent.as_ref(),
+            gio::Cancellable::NONE,
+            glib::clone!(
+                #[weak(rename_to = dialog)]
+                self,
+                move |result| {
+                    if let Some(path) = result.ok().and_then(|f| f.path()) {
+                        dialog
+                            .widgets()
+                            .ssh_key_row
+                            .set_text(&path.to_string_lossy());
+                    }
+                }
+            ),
+        );
+    }
+
+    // Shows the SSH host's key and asks before trusting a new one; `then` runs once it is trusted.
+    // Unless `required`, an unreachable host does not block saving: the key is checked on connect.
+    fn verify_host_key(&self, required: bool, fail: fn(&Self, &str), then: fn(&Self)) {
+        let Some(ssh) = self.ssh_from_ui() else {
+            return then(self);
+        };
+        let host = ssh["host"].as_str().unwrap_or_default().to_string();
+        let port = ssh["port"].as_u64().unwrap_or(22) as u16;
+        let core = self.core();
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(core.ssh_host_key_json(&host, port));
+        });
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = dialog)]
+            self,
+            async move {
+                let Ok(review) = rx.recv().await else {
+                    return;
+                };
+                let review: Value = match review {
+                    Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+                    Err(e) if required => return fail(&dialog, &e.0),
+                    Err(_) => return then(&dialog),
+                };
+                dialog.on_host_key_reviewed(review, fail, then);
+            }
+        ));
+    }
+
+    fn on_host_key_reviewed(&self, review: Value, fail: fn(&Self, &str), then: fn(&Self)) {
+        let text = |key: &str| review[key].as_str().unwrap_or_default().to_string();
+        let (host, fingerprint) = (text("host"), text("fingerprint"));
+        let port = review["port"].as_u64().unwrap_or(22) as u16;
+        match review["status"].as_str() {
+            Some("trusted") => then(self),
+            Some("changed") => {
+                let alert = adw::AlertDialog::new(
+                    Some("SSH Host Key Changed"),
+                    Some(&format!(
+                        "Trusted: {}\nOffered: {fingerprint}\n\nSomeone may be intercepting the \
+                         connection, or the server was reinstalled. datagrep will not connect. \
+                         If the change is expected, confirm the new fingerprint with the server's \
+                         administrator and remove the old entry from {}.",
+                        text("expected"),
+                        text("known_hosts")
+                    )),
+                );
+                alert.add_responses(&[("close", "Close")]);
+                alert.present(Some(self));
+                fail(
+                    self,
+                    &format!(
+                        "The SSH host key of {host}:{port} has changed, so nothing was sent to it."
+                    ),
+                );
+            }
+            _ => {
+                let alert = adw::AlertDialog::new(
+                    Some("Trust This SSH Host?"),
+                    Some(&format!(
+                        "datagrep has not connected to {host}:{port} before. It offered this {} key:\n\n\
+                         {fingerprint}\n\nCompare it with the fingerprint the server's \
+                         administrator gives you. Trusting it saves it to {}; a different key later \
+                         will be refused.",
+                        text("algorithm"),
+                        text("known_hosts")
+                    )),
+                );
+                alert.add_responses(&[("cancel", "Cancel"), ("trust", "Trust and Continue")]);
+                alert.set_default_response(Some("cancel"));
+                alert.set_close_response("cancel");
+                alert.choose(
+                    self,
+                    gio::Cancellable::NONE,
+                    glib::clone!(
+                        #[weak(rename_to = dialog)]
+                        self,
+                        move |response: glib::GString| {
+                            if response != "trust" {
+                                return fail(
+                                    &dialog,
+                                    &format!("The SSH host key was not trusted, so nothing was sent to {host}."),
+                                );
+                            }
+                            match dialog.core().ssh_trust_host_key(&host, port, &fingerprint) {
+                                Ok(()) => then(&dialog),
+                                Err(e) => fail(&dialog, &e.0),
+                            }
+                        }
+                    ),
+                );
+            }
         }
     }
 
@@ -836,33 +1119,54 @@ impl ConnectionDialog {
     // ---- test / enforcement ----------------------------------------------
 
     fn on_test_connection(&self) {
-        let imp = self.imp();
-        if imp.testing.get() {
+        if self.imp().testing.get() {
             return;
         }
+        self.imp().testing.set(true);
+        self.widgets()
+            .test_row
+            .set_subtitle("Checking the SSH host…");
+        self.verify_host_key(
+            true,
+            |dialog, message| {
+                dialog.imp().testing.set(false);
+                dialog.widgets().test_row.set_subtitle(&format!(
+                    "Could not connect: {}",
+                    glib::markup_escape_text(message)
+                ));
+            },
+            Self::run_test_connection,
+        );
+    }
+
+    fn run_test_connection(&self) {
+        let imp = self.imp();
         let w = self.widgets();
         let url = build_url(&self.fields_from_ui(), true);
         let unchanged = imp.editing.get()
             && imp.have_original.get()
             && w.password_row.text().is_empty()
             && w.url_row.text().trim() == imp.original_url_no_password.borrow().as_str();
-        let name = if unchanged {
+        // The saved profile lends its keychain secrets; an edited URL replaces its config.
+        let name = if imp.editing.get() {
             imp.original_name.borrow().clone()
         } else {
             String::new()
         };
+        let url = if unchanged { String::new() } else { url };
         if name.is_empty() && url.is_empty() {
+            imp.testing.set(false);
             w.test_row
                 .set_subtitle("Complete the connection details first.");
             return;
         }
-        imp.testing.set(true);
         w.test_row.set_subtitle("Connecting…");
 
+        let options = json!({ "ssh": self.ssh_option() }).to_string();
         let core = self.core();
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
-            let _ = tx.send_blocking(core.test_connection_json(&name, &url));
+            let _ = tx.send_blocking(core.test_connection_json(&name, &url, &options));
         });
         glib::spawn_future_local(glib::clone!(
             #[weak(rename_to = dialog)]
@@ -996,6 +1300,7 @@ impl ConnectionDialog {
             .set(o["idle_timeout_s"].as_i64().unwrap_or(0));
         let has_secret = o["has_secret"].as_bool().unwrap_or(false);
         let driver = o["driver"].as_str().unwrap_or_default();
+        imp.orig_ssh.replace(o["ssh"].clone());
 
         imp.syncing.set(true);
         let fields = fields_from_config(driver, &o["config"]);
@@ -1006,6 +1311,7 @@ impl ConnectionDialog {
             .set_selected(level_index(imp.orig_safety.get()));
         w.limit_row.set_value(imp.orig_auto_limit.get() as f64);
         w.idle_row.set_value(imp.orig_idle_timeout.get() as f64);
+        self.apply_ssh_to_ui(&o["ssh"]);
         let url = build_url(&self.fields_from_ui(), false);
         w.url_row.set_text(&url);
         imp.syncing.set(false);
@@ -1034,6 +1340,10 @@ impl ConnectionDialog {
         }
         if let Some(color) = self.current_color() {
             o["color"] = json!(color);
+        }
+        let ssh = self.ssh_option();
+        if !ssh.is_null() {
+            o["ssh"] = ssh;
         }
         o.to_string()
     }
@@ -1096,16 +1406,31 @@ impl ConnectionDialog {
                 if idle == 0 { Value::Null } else { json!(idle) },
             );
         }
+        if self.ssh_changed() {
+            p.insert("ssh".into(), self.ssh_option());
+        }
         Value::Object(p).to_string()
     }
 
     fn on_accept(&self) {
-        let imp = self.imp();
-        let name = self.widgets().name_row.text().trim().to_string();
-        if name.is_empty() {
+        if self.widgets().name_row.text().trim().is_empty() {
             self.show_error("A name is required.");
             return;
         }
+        if self.ssh_from_ui().is_some() && (!self.imp().editing.get() || self.ssh_changed()) {
+            self.verify_host_key(
+                false,
+                |dialog, message| dialog.show_error(message),
+                Self::save,
+            );
+        } else {
+            self.save();
+        }
+    }
+
+    fn save(&self) {
+        let imp = self.imp();
+        let name = self.widgets().name_row.text().trim().to_string();
         if !imp.editing.get() {
             let url = build_url(&self.fields_from_ui(), true);
             if url.is_empty() {

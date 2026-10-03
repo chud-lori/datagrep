@@ -13,12 +13,12 @@ use datagrep_ffi::{
     datagrep_rows_cell_detail_json, datagrep_rows_cell_kind, datagrep_rows_column_names_json,
     datagrep_rows_columns, datagrep_rows_count, datagrep_rows_envelope_json, datagrep_rows_free,
     datagrep_rows_pending, datagrep_safety_evaluate_json, datagrep_safety_pending_json,
-    datagrep_safety_satisfy, datagrep_string_free, DatagrepCore, DatagrepExport, DatagrepQuery,
-    DatagrepRows,
+    datagrep_safety_satisfy, datagrep_ssh_host_key_json, datagrep_ssh_trust_host_key,
+    datagrep_string_free, DatagrepCore, DatagrepExport, DatagrepQuery, DatagrepRows,
 };
 // Not re-exported at the crate root, unlike the rest of the ABI surface.
 use datagrep_ffi::profiles::{
-    datagrep_connection_info_json, datagrep_connection_test_json, datagrep_profiles_add_json,
+    datagrep_connection_info_json, datagrep_connection_test_with_json, datagrep_profiles_add_json,
     datagrep_profiles_get_json, datagrep_profiles_update,
 };
 
@@ -208,13 +208,57 @@ impl Core {
     }
 
     /// Opens one connection and closes it again; nothing is saved by testing.
-    pub fn test_connection_json(&self, name: &str, url: &str) -> Result<String, Error> {
+    pub fn test_connection_json(
+        &self,
+        name: &str,
+        url: &str,
+        options_json: &str,
+    ) -> Result<String, Error> {
         let (name, url) = (nul_terminated(name)?, nul_terminated(url)?);
+        let options = nul_terminated(options_json)?;
         let mut err: *mut c_char = std::ptr::null_mut();
         let raw = unsafe {
-            datagrep_connection_test_json(self.raw.0, name.as_ptr(), url.as_ptr(), &mut err)
+            datagrep_connection_test_with_json(
+                self.raw.0,
+                name.as_ptr(),
+                url.as_ptr(),
+                options.as_ptr(),
+                &mut err,
+            )
         };
         owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+    }
+
+    /// Key exchange only: what the SSH host offers, before anything is trusted or sent.
+    pub fn ssh_host_key_json(&self, host: &str, port: u16) -> Result<String, Error> {
+        let host = nul_terminated(host)?;
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let raw = unsafe { datagrep_ssh_host_key_json(self.raw.0, host.as_ptr(), port, &mut err) };
+        owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+    }
+
+    pub fn ssh_trust_host_key(
+        &self,
+        host: &str,
+        port: u16,
+        fingerprint: &str,
+    ) -> Result<(), Error> {
+        let (host, fingerprint) = (nul_terminated(host)?, nul_terminated(fingerprint)?);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let trusted = unsafe {
+            datagrep_ssh_trust_host_key(
+                self.raw.0,
+                host.as_ptr(),
+                port,
+                fingerprint.as_ptr(),
+                &mut err,
+            )
+        };
+        if trusted {
+            Ok(())
+        } else {
+            Err(error_from_ffi(err))
+        }
     }
 
     pub fn query(&self, profile: &str, sql: &str) -> Result<Query, Error> {
