@@ -256,7 +256,7 @@ fn leaf_name(node: &ObjectNode) -> String {
         .unwrap_or_default()
 }
 
-fn kind_str(kind: ObjectKind) -> &'static str {
+pub(crate) fn kind_str(kind: ObjectKind) -> &'static str {
     match kind {
         ObjectKind::Database => "database",
         ObjectKind::Schema => "schema",

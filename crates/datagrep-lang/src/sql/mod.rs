@@ -1,4 +1,6 @@
 pub mod classifier;
+pub mod complete;
+pub mod format;
 pub mod highlight;
 pub mod lexer;
 pub mod references;

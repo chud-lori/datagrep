@@ -61,6 +61,15 @@ char *datagrep_catalog_describe_json(DatagrepCore *, const char *profile, const 
 char *datagrep_browse_statement(const char *driver_id, const char *path_json,
                                 const char *database, char **err_out);
 
+/* caret = UTF-8 byte offset into text. Blocks on first use per connection.
+ * {"prefix":str,"items":[{"label","insert","kind","detail":str|null}],"error":str|null}
+ * Accepting an item replaces `prefix` before the caret with "insert". */
+char *datagrep_complete_json(DatagrepCore *, const char *profile, const char *text, size_t caret,
+                             char **err_out);
+void  datagrep_complete_forget(DatagrepCore *, const char *profile);
+/* NULL with *err_out set when the driver's language is not SQL. */
+char *datagrep_sql_format(const char *driver_id, const char *sql, char **err_out);
+
 DatagrepQuery *datagrep_query_run(DatagrepCore *, const char *profile, const char *sql, char **err_out);
 void      datagrep_query_free(DatagrepQuery *);
 void      datagrep_query_cancel(DatagrepQuery *, char **outcome_json_out);

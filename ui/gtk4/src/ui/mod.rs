@@ -69,6 +69,7 @@ pub fn mount(app: &adw::Application, core: Arc<Core>) -> Window {
     let window = Window::new(app, core.clone());
     let utility = UtilityPane::mount(&window, history_dir());
     let tabs = EditorTabs::new();
+    tabs.set_core(core.clone());
     window.editor_slot().set_child(Some(&tabs));
 
     let profiles = Rc::new(RefCell::new(load_profiles(&core)));
@@ -106,6 +107,16 @@ pub fn mount(app: &adw::Application, core: Arc<Core>) -> Window {
         }
     });
     tabs.announce_active();
+    tabs.connect_local("notice", false, {
+        let window = window.downgrade();
+        move |values| {
+            let message = values[1].get::<String>().unwrap_or_default();
+            if let Some(window) = window.upgrade() {
+                window.status_bar().say(&message, true);
+            }
+            None
+        }
+    });
 
     tabs.connect_local("run-requested", false, {
         let window = window.downgrade();
@@ -133,6 +144,10 @@ pub fn mount(app: &adw::Application, core: Arc<Core>) -> Window {
         let tabs = tabs.downgrade();
         move |window: &Window, select: &str| {
             profiles.replace(load_profiles(&core));
+            // An edit can point a connection at another database; its cached names are stale.
+            for profile in profiles.borrow().iter() {
+                core.complete_forget(&profile.name);
+            }
             window.reload_connections();
             if !select.is_empty() {
                 window.select_connection(select);
