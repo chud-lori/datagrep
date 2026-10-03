@@ -17,6 +17,11 @@ pub fn register_drivers(core: &CoreApi) {
     core.register_driver("elasticsearch", || {
         Arc::new(datagrep_drv_elasticsearch::ElasticsearchDriver::new())
     });
+    core.register_driver("oracle", || {
+        Arc::new(datagrep_drv_sidecar::SidecarDriver::new(
+            &datagrep_drv_sidecar::ORACLE,
+        ))
+    });
 }
 
 pub fn driver_for(id: &str) -> Option<Arc<dyn datagrep_api::Driver>> {
@@ -29,6 +34,9 @@ pub fn driver_for(id: &str) -> Option<Arc<dyn datagrep_api::Driver>> {
         "elasticsearch" => Some(Arc::new(
             datagrep_drv_elasticsearch::ElasticsearchDriver::new(),
         )),
+        "oracle" => Some(Arc::new(datagrep_drv_sidecar::SidecarDriver::new(
+            &datagrep_drv_sidecar::ORACLE,
+        ))),
         _ => None,
     }
 }
@@ -49,6 +57,8 @@ pub fn driver_for_url(url: &str) -> Option<(&'static str, Arc<dyn datagrep_api::
         || url.starts_with("https://")
     {
         "elasticsearch"
+    } else if url.starts_with("oracle://") {
+        "oracle"
     } else {
         return None;
     };
@@ -63,6 +73,7 @@ pub fn known_driver_ids() -> &'static [&'static str] {
         "mongodb",
         "mysql",
         "elasticsearch",
+        "oracle",
     ]
 }
 
@@ -100,6 +111,10 @@ mod tests {
             driver_for_url("mongodb://h/db").map(|(i, _)| i),
             Some("mongodb")
         );
+        assert_eq!(
+            driver_for_url("oracle://scott@h:1521/FREEPDB1").map(|(i, _)| i),
+            Some("oracle")
+        );
         for url in [
             "elasticsearch://localhost:9200",
             "http://localhost:9200",
@@ -129,6 +144,7 @@ mod tests {
                 "elasticsearch",
                 "mongodb",
                 "mysql",
+                "oracle",
                 "postgres",
                 "redis",
                 "sqlite"

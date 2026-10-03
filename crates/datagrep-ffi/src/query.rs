@@ -481,6 +481,7 @@ pub fn language_for_driver(id: &str) -> Option<LanguageId> {
         "mongodb" => Some(LanguageId::MongoShell),
         "mysql" => Some(LanguageId::Sql(datagrep_api::SqlDialect::Mysql)),
         "elasticsearch" => Some(LanguageId::EsDsl),
+        "oracle" => Some(datagrep_drv_sidecar::ORACLE.language),
         _ => None,
     }
 }
