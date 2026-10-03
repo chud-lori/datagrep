@@ -3,7 +3,7 @@ use datagrep_api::SqlDialect;
 use super::lexer::{lex_chunks, Chunk, QuoteKind};
 use crate::{Token, TokenKind};
 
-const KEYWORDS: &[&str] = &[
+pub(crate) const KEYWORDS: &[&str] = &[
     "SELECT",
     "INSERT",
     "UPDATE",

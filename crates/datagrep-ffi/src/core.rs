@@ -23,6 +23,7 @@ pub(crate) struct CoreInner {
     enforcement: Mutex<HashMap<String, Enforcement>>,
     server: Mutex<HashMap<String, (String, String)>>,
     caps: Mutex<HashMap<String, Caps>>,
+    pub(crate) completion: crate::complete::CompletionCache,
 }
 
 impl std::fmt::Debug for CoreInner {
@@ -57,6 +58,7 @@ impl DatagrepCore {
             enforcement: Mutex::new(HashMap::new()),
             server: Mutex::new(HashMap::new()),
             caps: Mutex::new(HashMap::new()),
+            completion: Default::default(),
         })))
     }
 }
