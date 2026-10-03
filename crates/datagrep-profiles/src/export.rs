@@ -110,19 +110,30 @@ pub(crate) fn apply_import(
 
     for t in bundle.tunnel {
         tx.execute(
-            "INSERT INTO tunnel (id, name, host, port, username, secret_ref, known_hosts_pin, created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+            "INSERT INTO tunnel (id, name, host, port, username, auth, key_path, secret_ref, known_hosts_pin, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 host = excluded.host,
                 port = excluded.port,
                 username = excluded.username,
+                auth = excluded.auth,
+                key_path = excluded.key_path,
                 secret_ref = excluded.secret_ref,
                 known_hosts_pin = excluded.known_hosts_pin,
                 updated_at = excluded.updated_at",
             params![
-                t.id, t.name, t.host, t.port, t.username, t.secret_ref, t.known_hosts_pin,
-                t.created_at, t.updated_at,
+                t.id,
+                t.name,
+                t.host,
+                t.port,
+                t.username,
+                t.auth.as_str(),
+                t.key_path,
+                t.secret_ref,
+                t.known_hosts_pin,
+                t.created_at,
+                t.updated_at,
             ],
         )?;
         summary.tunnels_upserted += 1;

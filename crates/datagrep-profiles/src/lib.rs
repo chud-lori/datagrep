@@ -14,7 +14,7 @@ pub use error::ProfilesError;
 pub use export::{ExportBundle, ImportStrategy, ImportSummary};
 pub use model::{
     new_id, now_ms, Folder, HistoryEntry, HistoryStatus, NewHistoryEntry, Profile, SavedQuery,
-    Tunnel,
+    Tunnel, TunnelAuth,
 };
 pub use secrets::validate_no_secrets;
 pub use store::Store;

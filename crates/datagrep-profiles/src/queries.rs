@@ -4,7 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use crate::db::{hash_text, Db};
 use crate::error::ProfilesError;
 use crate::model::{
-    Folder, HistoryEntry, HistoryStatus, NewHistoryEntry, Profile, SavedQuery, Tunnel,
+    Folder, HistoryEntry, HistoryStatus, NewHistoryEntry, Profile, SavedQuery, Tunnel, TunnelAuth,
 };
 
 fn folder_from_row(row: &Row<'_>) -> rusqlite::Result<Folder> {
@@ -267,6 +267,8 @@ fn tunnel_from_row(row: &Row<'_>) -> rusqlite::Result<Tunnel> {
         host: row.get("host")?,
         port: row.get::<_, i64>("port")? as u16,
         username: row.get("username")?,
+        auth: TunnelAuth::parse(&row.get::<_, String>("auth")?).unwrap_or_default(),
+        key_path: row.get("key_path")?,
         secret_ref: row.get("secret_ref")?,
         known_hosts_pin: row.get("known_hosts_pin")?,
         created_at: row.get("created_at")?,
@@ -276,11 +278,20 @@ fn tunnel_from_row(row: &Row<'_>) -> rusqlite::Result<Tunnel> {
 
 pub(crate) fn create_tunnel(conn: &Connection, t: Tunnel) -> Result<Tunnel, ProfilesError> {
     conn.execute(
-        "INSERT INTO tunnel (id, name, host, port, username, secret_ref, known_hosts_pin, created_at, updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        "INSERT INTO tunnel (id, name, host, port, username, auth, key_path, secret_ref, known_hosts_pin, created_at, updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         params![
-            t.id, t.name, t.host, t.port, t.username, t.secret_ref, t.known_hosts_pin,
-            t.created_at, t.updated_at,
+            t.id,
+            t.name,
+            t.host,
+            t.port,
+            t.username,
+            t.auth.as_str(),
+            t.key_path,
+            t.secret_ref,
+            t.known_hosts_pin,
+            t.created_at,
+            t.updated_at,
         ],
     )?;
     Ok(t)
@@ -305,8 +316,8 @@ pub(crate) fn list_tunnels(conn: &Connection) -> Result<Vec<Tunnel>, ProfilesErr
 
 pub(crate) fn update_tunnel(conn: &Connection, t: Tunnel) -> Result<Tunnel, ProfilesError> {
     let changed = conn.execute(
-        "UPDATE tunnel SET name = ?2, host = ?3, port = ?4, username = ?5, secret_ref = ?6,
-            known_hosts_pin = ?7, updated_at = ?8
+        "UPDATE tunnel SET name = ?2, host = ?3, port = ?4, username = ?5, auth = ?6,
+            key_path = ?7, secret_ref = ?8, known_hosts_pin = ?9, updated_at = ?10
          WHERE id = ?1",
         params![
             t.id,
@@ -314,6 +325,8 @@ pub(crate) fn update_tunnel(conn: &Connection, t: Tunnel) -> Result<Tunnel, Prof
             t.host,
             t.port,
             t.username,
+            t.auth.as_str(),
+            t.key_path,
             t.secret_ref,
             t.known_hosts_pin,
             t.updated_at,

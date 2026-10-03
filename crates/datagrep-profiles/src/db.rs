@@ -68,7 +68,7 @@ pub(crate) fn open_and_prepare(
 
 type MigrationFn = fn(&Transaction<'_>) -> rusqlite::Result<()>;
 
-const MIGRATIONS: &[MigrationFn] = &[migrate_v1, migrate_v2, migrate_v3];
+const MIGRATIONS: &[MigrationFn] = &[migrate_v1, migrate_v2, migrate_v3, migrate_v4];
 
 pub(crate) fn migrate(
     conn: &mut Connection,
@@ -318,6 +318,20 @@ fn migrate_v3(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         DROP TABLE profile;
         ALTER TABLE profile_new RENAME TO profile;
         CREATE INDEX ix_profile_folder ON profile(folder_id);",
+    )
+}
+
+fn migrate_v4(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let has_auth: bool = tx
+        .prepare("SELECT 1 FROM pragma_table_info('tunnel') WHERE name = 'auth'")?
+        .exists([])?;
+    if has_auth {
+        return Ok(());
+    }
+    tx.execute_batch(
+        "ALTER TABLE tunnel ADD COLUMN auth TEXT NOT NULL DEFAULT 'agent'
+            CHECK (auth IN ('agent','key','password'));
+         ALTER TABLE tunnel ADD COLUMN key_path TEXT;",
     )
 }
 
