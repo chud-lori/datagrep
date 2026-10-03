@@ -9,6 +9,7 @@ fn auth_writes_authenticates_selects_that_are_not_proven_reads() {
         ProfileId(1),
         "prod",
         LanguageId::Sql(SqlDialect::Postgres),
+        None,
         SafetyLevel::AuthWrites,
     );
     assert_eq!(
