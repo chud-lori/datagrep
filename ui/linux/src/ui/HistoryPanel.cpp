@@ -68,7 +68,6 @@ HistoryPanel::HistoryPanel(QueryHistoryStore* store, QWidget* parent)
     layout->setContentsMargins(6, 6, 6, 6);
     layout->setSpacing(6);
 
-    // --- filter bar ---------------------------------------------------------
     search_ = new QLineEdit(this);
     search_->setPlaceholderText(QStringLiteral("Search SQL and error text"));
     search_->setClearButtonEnabled(true);
@@ -103,7 +102,7 @@ HistoryPanel::HistoryPanel(QueryHistoryStore* store, QWidget* parent)
     outcomeFilter_->addItem(QStringLiteral("cancelled"),
                             static_cast<int>(dg::QueryOutcome::Cancelled));
     outcomeFilter_->setToolTip(
-        QStringLiteral("Filter by outcome — ok, failed or cancelled"));
+        QStringLiteral("Filter by outcome: ok, failed or cancelled"));
     connect(outcomeFilter_, &QComboBox::currentIndexChanged, this,
             &HistoryPanel::refresh);
 
@@ -129,7 +128,6 @@ HistoryPanel::HistoryPanel(QueryHistoryStore* store, QWidget* parent)
     filterRow->addWidget(countLabel_);
     layout->addLayout(filterRow);
 
-    // --- the list, grouped by day -------------------------------------------
     list_ = new QTreeWidget(this);
     list_->setColumnCount(ColCount);
     list_->setHeaderLabels({QStringLiteral("Statement"), QStringLiteral("Outcome"),
@@ -173,7 +171,6 @@ HistoryPanel::HistoryPanel(QueryHistoryStore* store, QWidget* parent)
     connect(deleteShortcut, &QShortcut::activated, this,
             &HistoryPanel::removeSelected);
 
-    // --- the detail strip: full statement, its error, and the actions --------
     detail_ = new QWidget(this);
     auto* detailLayout = new QVBoxLayout(detail_);
     detailLayout->setContentsMargins(0, 0, 0, 0);
@@ -227,7 +224,6 @@ HistoryPanel::HistoryPanel(QueryHistoryStore* store, QWidget* parent)
     splitter->setStretchFactor(1, 0);
     layout->addWidget(splitter, 1);
 
-    // --- footer: retention stated, retention editable, and Clear… ------------
     retentionLabel_ = new QLabel(this);
     retentionButton_ = new QPushButton(QStringLiteral("Retention…"), this);
     retentionButton_->setToolTip(QStringLiteral(
@@ -375,7 +371,7 @@ void HistoryPanel::refresh() {
                 item->setText(ColRuns, QStringLiteral("×%1").arg(e.runCount));
                 item->setToolTip(
                     ColRuns,
-                    QStringLiteral("Run %1 times in quick succession — collapsed "
+                    QStringLiteral("Run %1 times in quick succession, collapsed "
                                    "into one entry")
                         .arg(e.runCount));
             }
@@ -390,7 +386,7 @@ void HistoryPanel::refresh() {
         placeholderItem(
             list_,
             QStringLiteral("Every statement datagrep runs is logged here "
-                           "automatically — the SQL, the connection, how long it "
+                           "automatically: the SQL, the connection, how long it "
                            "took, and what came back."));
     } else if (shown.isEmpty()) {
         placeholderItem(list_,

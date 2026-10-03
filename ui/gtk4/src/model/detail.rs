@@ -2,7 +2,7 @@ use serde::Deserialize;
 
 use crate::model::format;
 
-/// The decoded `datagrep_catalog_describe_json` payload — one shape for every engine.
+/// The decoded `datagrep_catalog_describe_json` payload, one shape for every engine.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ObjectDetail {
     #[serde(default)]

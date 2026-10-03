@@ -178,7 +178,7 @@ impl UpdateCheck {
     }
 }
 
-// One GET, short timeout, nothing cached, nothing persisted — informs and links only.
+// One GET, short timeout, nothing cached, nothing persisted; informs and links only.
 fn fetch_manifest() -> Option<Manifest> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

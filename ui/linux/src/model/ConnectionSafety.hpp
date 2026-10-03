@@ -1,5 +1,3 @@
-// ConnectionSafety.hpp — the safety facts about one connection.
-
 #ifndef DATAGREP_CONNECTION_SAFETY_HPP
 #define DATAGREP_CONNECTION_SAFETY_HPP
 

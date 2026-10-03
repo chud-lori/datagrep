@@ -18,7 +18,6 @@ void RowNumberHeader::updateWidthForRowCount(int rowCount) {
                                   QString::number(std::max(rowCount, 1)).size()));
     if (d != digits_) {
         digits_ = d;
-        // Ask the layout to re-read sizeHint() so the new width takes effect.
         updateGeometry();
     }
 }

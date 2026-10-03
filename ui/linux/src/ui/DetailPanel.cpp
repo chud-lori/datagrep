@@ -221,14 +221,14 @@ void DetailPanel::buildCellTab() {
     cellText_->setLineWrapMode(QPlainTextEdit::NoWrap);
     cellText_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     cellText_->setPlaceholderText(
-        QStringLiteral("Click a cell in the grid to see its whole value — a "
+        QStringLiteral("Click a cell in the grid to see its whole value. A "
                        "{…} chip opens here on its own."));
 
     auto* legend = new QLabel(
-        QStringLiteral("NULL — present, and null\n"
-                       "(empty) — present, empty string\n"
-                       "— — ABSENT: not in the document at all\n"
-                       "{n fields} — nested: click to open here"),
+        QStringLiteral("NULL: present, and null\n"
+                       "(empty): present, empty string\n"
+                       "—: ABSENT, not in the document at all\n"
+                       "{n fields}: nested, click to open here"),
         page);
     legend->setStyleSheet(QStringLiteral("color: gray; font-size: 10px;"));
 
@@ -274,7 +274,7 @@ void DetailPanel::showSchema(const QString& /*profile*/, const QString& pathJson
 
     const QJsonObject o = QJsonDocument::fromJson(describeJson.toUtf8()).object();
 
-    // --- the stats strip: only facts that arrived -----------------------------
+    // Stats strip: only facts that arrived.
     QStringList stats;
     const QString kind = o.value(QStringLiteral("kind")).toString();
     if (!kind.isEmpty()) {
@@ -309,12 +309,12 @@ void DetailPanel::showSchema(const QString& /*profile*/, const QString& pathJson
         schemaStats_->show();
     }
 
-    // --- columns: [] and null are two different sentences ---------------------
+    // Columns: [] and null are two different sentences.
     const QJsonValue columnsValue = o.value(QStringLiteral("columns"));
     if (columnsValue.isArray()) {
         const QJsonArray columns = columnsValue.toArray();
         if (columns.isEmpty()) {
-            sectionItem(schemaTree_, QStringLiteral("Columns — none"));
+            sectionItem(schemaTree_, QStringLiteral("Columns: none"));
         } else {
             auto* section = sectionItem(
                 schemaTree_,
@@ -329,15 +329,14 @@ void DetailPanel::showSchema(const QString& /*profile*/, const QString& pathJson
             section->setExpanded(true);
         }
     } else {
-        sectionItem(schemaTree_, QStringLiteral("Columns — not reported"));
+        sectionItem(schemaTree_, QStringLiteral("Columns: not reported"));
     }
 
-    // --- indexes: the same distinction --------------------------------------
     const QJsonValue indexesValue = o.value(QStringLiteral("indexes"));
     if (indexesValue.isArray()) {
         const QJsonArray indexes = indexesValue.toArray();
         if (indexes.isEmpty()) {
-            sectionItem(schemaTree_, QStringLiteral("Indexes — none"));
+            sectionItem(schemaTree_, QStringLiteral("Indexes: none"));
         } else {
             auto* section = sectionItem(
                 schemaTree_,
@@ -357,10 +356,10 @@ void DetailPanel::showSchema(const QString& /*profile*/, const QString& pathJson
             section->setExpanded(true);
         }
     } else {
-        sectionItem(schemaTree_, QStringLiteral("Indexes — not reported"));
+        sectionItem(schemaTree_, QStringLiteral("Indexes: not reported"));
     }
 
-    // --- whatever else the driver reported, shown rather than dropped ---------
+    // Whatever else the driver reported is shown rather than dropped.
     const QJsonObject extra = o.value(QStringLiteral("extra")).toObject();
     if (!extra.isEmpty()) {
         auto* section = sectionItem(schemaTree_, QStringLiteral("Extra"));

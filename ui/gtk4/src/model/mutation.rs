@@ -64,7 +64,7 @@ impl MutationValue {
         Self::decode(&serde_json::from_str::<Json>(json).ok()?)
     }
 
-    /// Coerces to the loaded value's type — a string would silently retype the field.
+    /// Coerces to the loaded value's type; a string would silently retype the field.
     pub fn typed_like(text: &str, loaded: Option<&MutationValue>) -> Result<Self, String> {
         let trimmed = text.trim();
         match loaded.unwrap_or(&MutationValue::Null) {
@@ -160,7 +160,7 @@ impl EditableResult {
                 Some(MutationValue::Null) | None => {
                     return Err(format!(
                         "this document was loaded without `{field}`, so an edit to it could only \
-                         be sent unguarded — and an unguarded write would overwrite whatever the \
+                         be sent unguarded, and an unguarded write would overwrite whatever the \
                          server holds now"
                     ))
                 }
@@ -230,7 +230,7 @@ pub fn document_address_batch_json(addresses: &[DocumentAddress]) -> String {
     json!({ "documents": list }).to_string()
 }
 
-/// One field as the server holds it now — which may be a shape a grid cell cannot show.
+/// One field as the server holds it now, possibly a shape a grid cell cannot show.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerValue {
     Value(MutationValue),
@@ -557,7 +557,7 @@ mod tests {
                 "path": [],
                 "key": [[[{"Field":"_id"}], {"Str":"abc"}]],
                 "expect": [[[{"Field":"_seq_no"}], {"I64":41}]],
-                // A null is the bare tag, not an object — the one value spelled differently.
+                // A null is the bare tag, not an object: the one value spelled differently.
                 "sets": [[[{"Field":"status"}], "Null"]]}}]})
         );
     }

@@ -32,7 +32,6 @@ SqlHighlighter::SqlHighlighter(QTextDocument* document)
         rules_.push_back(rule);
     }
 
-    // Numbers.
     rules_.push_back({QRegularExpression(QStringLiteral("\\b[0-9]+(\\.[0-9]+)?\\b")),
                       numberFormat_});
     rules_.push_back(
@@ -40,7 +39,6 @@ SqlHighlighter::SqlHighlighter(QTextDocument* document)
     // Double-quoted identifiers styled as strings is close enough here.
     rules_.push_back(
         {QRegularExpression(QStringLiteral("\"([^\"]|\"\")*\"")), stringFormat_});
-    // Line comments.
     rules_.push_back(
         {QRegularExpression(QStringLiteral("--[^\n]*")), commentFormat_});
 

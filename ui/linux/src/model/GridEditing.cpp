@@ -102,7 +102,7 @@ void PendingEdits::stage(const QString& id, int row, const QVector<FieldValue>& 
     bool found = false;
     for (StagedField& set : doc.sets) {
         if (set.field == field) {
-            // Retyping keeps the loaded value it was FIRST typed over.
+            // Retyping keeps the loaded value it was first typed over.
             set.value = value;
             found = true;
             break;

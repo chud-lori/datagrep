@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.19)
 
-# datagrep — native Linux Qt6/C++ UI over the Rust core.
+# datagrep: native Linux Qt6/C++ UI over the Rust core.
 
 project(datagrep-linux LANGUAGES CXX)
 

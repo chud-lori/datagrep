@@ -1,5 +1,3 @@
-// StatusBar.hpp — the honest results status bar.
-
 #ifndef DATAGREP_STATUS_BAR_HPP
 #define DATAGREP_STATUS_BAR_HPP
 

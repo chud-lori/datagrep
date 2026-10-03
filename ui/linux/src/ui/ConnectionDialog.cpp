@@ -23,17 +23,10 @@
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrent>
 
-// ---------------------------------------------------------------------------
-// Engine table — the ported subset of the macOS ConnectionEngines list. Kept in
-// step with crates/datagrep-ffi/src/drivers.rs: an engine offered here that the
-// build cannot route a URL for would fail on Add, which is worse than not
-// offering it. Static, so it needs no per-dialog allocation.
-// ---------------------------------------------------------------------------
 namespace {
 
 QString percentEncode(const QString& s) {
-    // Unreserved set (A-Za-z0-9-._~) — exactly what the macOS encoder allows, so
-    // a URL built here round-trips through the CLI unchanged.
+    // Unreserved set (A-Za-z0-9-._~), so the URL round-trips through the CLI unchanged.
     return QString::fromUtf8(QUrl::toPercentEncoding(s));
 }
 
@@ -44,8 +37,7 @@ QString percentDecode(const QString& s) {
 }  // namespace
 
 const ConnectionDialog::Engine* ConnectionDialog::engineById(const QString& id) const {
-    // A tiny static registry; folded spellings (mongodb->mongo, mariadb->mysql)
-    // are handled by matching id prefixes below.
+    // Keep in step with crates/datagrep-ffi/src/drivers.rs, or Add fails for an offered engine.
     static const Engine engines[] = {
         {QStringLiteral("postgres"), QStringLiteral("postgres://"),
          {QStringLiteral("postgresql://")}, QString(), 5432, false,
@@ -66,9 +58,7 @@ const ConnectionDialog::Engine* ConnectionDialog::engineById(const QString& id) 
          false, QStringLiteral("Default index"), QStringLiteral("optional")},
     };
 
-    // The shared folding table, so a profile's stored driver ("postgresql",
-    // "mariadb", "mongodb") still matches — one definition of what an engine
-    // is, same as EngineStyle.canonicalID keeps on macOS.
+    // Folds stored spellings like "postgresql" or "mongodb" onto the engine id.
     const QString key = dg::canonicalDriverId(id);
     for (const Engine& e : engines) {
         if (e.id == key) {
@@ -82,11 +72,6 @@ const ConnectionDialog::Engine* ConnectionDialog::currentEngine() const {
     return engineById(engineBox_->currentData().toString());
 }
 
-// ---------------------------------------------------------------------------
-// URL <-> fields. Ported from DatagrepKit.ConnectionURL so New and Edit agree
-// with the CLI on the profile's storage format, and pasting a URL fills the
-// fields while editing the fields rewrites the URL.
-// ---------------------------------------------------------------------------
 
 QString ConnectionDialog::buildUrl(const Fields& f, bool includePassword) const {
     const Engine* e = engineById(f.engineId);
@@ -102,8 +87,7 @@ QString ConnectionDialog::buildUrl(const Fields& f, bool includePassword) const 
         if (path == QStringLiteral(":memory:")) {
             return path;
         }
-        // sqlite:// + an absolute path is sqlite:///home/… — three slashes; the
-        // driver takes everything after the second as the path.
+        // An absolute path gives three slashes; the driver reads everything after the second.
         return e->scheme + (path.startsWith(QLatin1Char('/')) ? path
                                                               : QStringLiteral("/") + path);
     }
@@ -122,8 +106,7 @@ QString ConnectionDialog::buildUrl(const Fields& f, bool includePassword) const 
         }
         out += QLatin1Char('@');
     }
-    // An IPv6 literal keeps its brackets, or the ':' before the port reads as
-    // part of the address.
+    // An IPv6 literal keeps its brackets, or the port's ':' reads as part of the address.
     if (host.contains(QLatin1Char(':')) && !host.startsWith(QLatin1Char('['))) {
         out += QLatin1Char('[') + host + QLatin1Char(']');
     } else {
@@ -148,7 +131,7 @@ QString ConnectionDialog::buildUrl(const Fields& f, bool includePassword) const 
 
 ConnectionDialog::Fields ConnectionDialog::parseUrl(const QString& url) const {
     Fields f;
-    f.engineId.clear();  // empty == unknown scheme; the caller keeps its engine
+    f.engineId.clear();  // empty means unknown scheme; the caller keeps its engine
     const QString trimmed = url.trimmed();
     const QString lower = trimmed.toLower();
 
@@ -158,7 +141,6 @@ ConnectionDialog::Fields ConnectionDialog::parseUrl(const QString& url) const {
         return f;
     }
 
-    // Scheme -> engine, by matching any spelling the engine accepts.
     const Engine* engine = nullptr;
     const QString ids[] = {
         QStringLiteral("postgres"),      QStringLiteral("mysql"),
@@ -185,7 +167,7 @@ ConnectionDialog::Fields ConnectionDialog::parseUrl(const QString& url) const {
         }
     }
     if (engine == nullptr) {
-        return f;  // still half-typed / unknown
+        return f;
     }
     f.engineId = engine->id;
 
@@ -207,8 +189,7 @@ ConnectionDialog::Fields ConnectionDialog::parseUrl(const QString& url) const {
         f.extras = rest.mid(q + 1);
         rest = rest.left(q);
     }
-    // firstIndex of '/', so an Elasticsearch proxy prefix that itself contains a
-    // slash is kept whole rather than cut at the second one.
+    // First '/', so an Elasticsearch proxy prefix containing a slash stays whole.
     const int slash = rest.indexOf(QLatin1Char('/'));
     if (slash >= 0) {
         f.database = percentDecode(rest.mid(slash + 1));
@@ -263,8 +244,7 @@ ConnectionDialog::Fields ConnectionDialog::fieldsFromConfig(const QString& drive
             return QString();
         }
         const QString s = v.toString();
-        // The ABI masks a stored secret to "••••"; it must never be pasted into
-        // a URL.
+        // The ABI masks a stored secret to "••••"; never paste that into a URL.
         return (s.isEmpty() || s == QString::fromUtf8("••••"))
                    ? QString()
                    : s;
@@ -315,9 +295,6 @@ ConnectionDialog::Fields ConnectionDialog::fieldsFromConfig(const QString& drive
     return f;
 }
 
-// ---------------------------------------------------------------------------
-// Construction / factory
-// ---------------------------------------------------------------------------
 
 ConnectionDialog::ConnectionDialog(dg::Core* core, QWidget* parent)
     : QDialog(parent), core_(core) {
@@ -330,7 +307,7 @@ ConnectionDialog* ConnectionDialog::forNewConnection(dg::Core* core, QWidget* pa
     d->editing_ = false;
     d->buttons_->button(QDialogButtonBox::Save)->setText(QStringLiteral("Add"));
     d->enforcementButton_->hide();  // nothing to check until the profile exists
-    d->onEngineChanged(d->engineBox_->currentIndex());  // shape + first URL
+    d->onEngineChanged(d->engineBox_->currentIndex());
     return d;
 }
 
@@ -345,15 +322,11 @@ ConnectionDialog* ConnectionDialog::forEditing(dg::Core* core, const QString& na
     return d;
 }
 
-// ---------------------------------------------------------------------------
-// UI
-// ---------------------------------------------------------------------------
 
 void ConnectionDialog::buildUi() {
     auto* outer = new QVBoxLayout(this);
     outer->setSpacing(10);
 
-    // --- engine + connection fields ---------------------------------------
     engineBox_ = new QComboBox(this);
     const QString ids[] = {
         QStringLiteral("postgres"),      QStringLiteral("mysql"),
@@ -398,7 +371,6 @@ void ConnectionDialog::buildUi() {
     urlEdit_->setFont(mono);
     urlEdit_->setPlaceholderText(QStringLiteral("postgres://user@localhost:5432/mydb"));
 
-    // Host / port share one row so they line up like every other client.
     auto* hostPort = new QWidget(this);
     auto* hostPortLayout = new QHBoxLayout(hostPort);
     hostPortLayout->setContentsMargins(0, 0, 0, 0);
@@ -455,19 +427,13 @@ void ConnectionDialog::buildUi() {
     connGroup->setLayout(connForm);
     outer->addWidget(connGroup);
 
-    // Two-way field <-> URL sync. Fields use textChanged (any change re-renders
-    // the URL); the URL box uses textEdited (only USER edits re-parse — a
-    // programmatic setText must not bounce back).
+    // The URL box uses textEdited so a programmatic setText never re-parses.
     for (QLineEdit* e : {hostEdit_, portEdit_, databaseEdit_, usernameEdit_, fileEdit_}) {
         connect(e, &QLineEdit::textChanged, this, &ConnectionDialog::onFieldEdited);
     }
     connect(tlsCheck_, &QCheckBox::toggled, this, &ConnectionDialog::onFieldEdited);
     connect(urlEdit_, &QLineEdit::textEdited, this, &ConnectionDialog::onUrlEdited);
 
-    // --- settings ----------------------------------------------------------
-    // No environment picker: the engine dropped the dev/staging/prod enum in
-    // favour of the colour marker and the read-only tick, and still sending
-    // `env` made every save from this dialog fail.
 
     colorBox_ = new QComboBox(this);
     colorBox_->addItem(QStringLiteral("none"), QString());
@@ -498,7 +464,6 @@ void ConnectionDialog::buildUi() {
     auto* settingsGroup = new QGroupBox(QStringLiteral("Settings"), this);
     settingsGroup->setLayout(settingsForm);
 
-    // --- safety ------------------------------------------------------------
     readOnlyCheck_ = new QCheckBox(QStringLiteral("Read-only"), this);
     readOnlyCheck_->setToolTip(QStringLiteral(
         "Refuse writes on this connection even when the account is allowed to "
@@ -513,14 +478,14 @@ void ConnectionDialog::buildUi() {
     enforcementButton_ = new QPushButton(QStringLiteral("Check read-only enforcement"),
                                          this);
     enforcementButton_->setToolTip(QStringLiteral(
-        "Ask the engine which protection is actually in force — server, client, "
+        "Ask the engine which protection is actually in force: server, client, "
         "or none."));
     connect(enforcementButton_, &QPushButton::clicked, this,
             &ConnectionDialog::onCheckEnforcement);
     enforcementLabel_ = new QLabel(this);
     enforcementLabel_->setWordWrap(true);
     enforcementLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    enforcementLabel_->hide();  // shown once there is an answer to report
+    enforcementLabel_->hide();
 
     auto* safetyLayout = new QVBoxLayout();
     safetyLayout->addWidget(readOnlyCheck_);
@@ -547,7 +512,6 @@ void ConnectionDialog::buildUi() {
     midRow->addWidget(safetyGroup, 1);
     outer->addLayout(midRow);
 
-    // --- errors + buttons --------------------------------------------------
     errorLabel_ = new QLabel(this);
     errorLabel_->setWordWrap(true);
     errorLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -608,7 +572,6 @@ void ConnectionDialog::reshapeForEngine(const Engine& e) {
     passwordLabel_->setVisible(!file);
     passwordEdit_->setVisible(!file);
     passwordHint_->setVisible(!file);
-    // parent widget of the host/port row shares the host label's visibility.
     hostEdit_->parentWidget()->setVisible(!file);
 
     fileLabel_->setVisible(file);
@@ -627,13 +590,9 @@ void ConnectionDialog::reshapeForEngine(const Engine& e) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Field <-> UI helpers
-// ---------------------------------------------------------------------------
 
 void ConnectionDialog::applyFieldsToUi(const Fields& f) {
-    // Caller sets syncing_ so these setText calls do not bounce back through the
-    // URL parser or re-render the URL mid-edit.
+    // Caller sets syncing_ so these setText calls do not bounce back through the URL.
     if (!f.engineId.isEmpty()) {
         const int idx = engineBox_->findData(f.engineId);
         if (idx >= 0) {
@@ -646,8 +605,7 @@ void ConnectionDialog::applyFieldsToUi(const Fields& f) {
     usernameEdit_->setText(f.username);
     fileEdit_->setText(f.filePath);
     tlsCheck_->setChecked(f.tls);
-    // A password lifted out of a pasted URL goes straight into the secure field;
-    // it is never rendered back into the visible URL.
+    // A pasted URL's password moves to the secure field and never back into the URL.
     if (!f.password.isEmpty()) {
         passwordEdit_->setText(f.password);
     }
@@ -673,9 +631,6 @@ void ConnectionDialog::renderUrlFromFields() {
     syncing_ = false;
 }
 
-// ---------------------------------------------------------------------------
-// Slots
-// ---------------------------------------------------------------------------
 
 void ConnectionDialog::onEngineChanged(int /*index*/) {
     const Engine* e = currentEngine();
@@ -700,12 +655,10 @@ void ConnectionDialog::onUrlEdited() {
     }
     const Fields f = parseUrl(urlEdit_->text());
     if (f.engineId.isEmpty()) {
-        return;  // half-typed / unknown scheme — keep the current engine + fields
+        return;
     }
     syncing_ = true;
     applyFieldsToUi(f);
-    // If the pasted URL carried a password we lifted it into the secure field
-    // and must re-render the URL without it so the visible box never shows it.
     if (!f.password.isEmpty()) {
         urlEdit_->setText(buildUrl(fieldsFromUi(), /*includePassword=*/false));
     }
@@ -717,7 +670,7 @@ void ConnectionDialog::onReadOnlyToggled(bool on) {
     confirmWritesCheck_->setEnabled(!on);
     if (on) {
         confirmWritesCheck_->setToolTip(
-            QStringLiteral("Not needed while read-only is on — writes are refused."));
+            QStringLiteral("Not needed while read-only is on: writes are refused."));
     } else {
         confirmWritesCheck_->setToolTip(
             QStringLiteral("Show a confirmation before INSERT / UPDATE / DELETE / DROP."));
@@ -728,7 +681,7 @@ void ConnectionDialog::onBrowseFile() {
     const QString path = QFileDialog::getOpenFileName(
         this, QStringLiteral("Choose a SQLite database file"));
     if (!path.isEmpty()) {
-        fileEdit_->setText(path);  // triggers onFieldEdited -> URL re-render
+        fileEdit_->setText(path);
     }
 }
 
@@ -750,7 +703,7 @@ void ConnectionDialog::onCheckEnforcement() {
     if (ro.isNull() || ro.isUndefined()) {
         enforcementLabel_->setStyleSheet(QStringLiteral("color: gray;"));
         enforcementLabel_->setText(
-            QStringLiteral("This connection is writeable — no read-only protection "
+            QStringLiteral("This connection is writeable; no read-only protection "
                            "is in force."));
         return;
     }
@@ -761,7 +714,7 @@ void ConnectionDialog::onCheckEnforcement() {
     if (level == QStringLiteral("server")) {
         enforcementLabel_->setStyleSheet(QStringLiteral("color: #1e8449;"));
         text = confirmed
-                   ? QStringLiteral("Read-only enforced by the server — the engine "
+                   ? QStringLiteral("Read-only enforced by the server: the engine "
                                     "opened this session read-only and will refuse a "
                                     "write itself.")
                    : QStringLiteral("Read-only reported by the server, but not yet "
@@ -769,13 +722,13 @@ void ConnectionDialog::onCheckEnforcement() {
     } else if (level == QStringLiteral("client")) {
         enforcementLabel_->setStyleSheet(QStringLiteral("color: #b9770e;"));
         text = QStringLiteral(
-            "Read-only blocked by datagrep only — statements classified as writes "
+            "Read-only blocked by datagrep only. Statements classified as writes "
             "are refused before dispatch. The server would still accept a write "
             "from anything that bypasses datagrep.");
     } else {
         enforcementLabel_->setStyleSheet(QStringLiteral("color: #c0392b;"));
         text = QStringLiteral(
-            "No read-only enforcement is available for this engine — datagrep can "
+            "No read-only enforcement is available for this engine. datagrep can "
             "refuse writes it sends, but nothing else is protected.");
     }
     enforcementLabel_->setText(text);
@@ -848,21 +801,16 @@ void ConnectionDialog::onTestFinished() {
     }
     lines << (detailParts.isEmpty()
                   ? QStringLiteral("The engine accepted the connection and it was "
-                                   "closed again — nothing was saved by testing.")
+                                   "closed again. Nothing was saved by testing.")
                   : detailParts.join(QStringLiteral(" · ")));
     testResultLabel_->setStyleSheet(QStringLiteral("color: #1e8449;"));
     testResultLabel_->setText(lines.join(QLatin1Char('\n')));
 }
 
-// ---------------------------------------------------------------------------
-// Seeding the Edit form
-// ---------------------------------------------------------------------------
 
 void ConnectionDialog::seedForEdit(const QString& name) {
     nameEdit_->setText(name);
-    // Baseline the diff against the form's current default state, so that if the
-    // seed read fails (or a key is absent) the patch does not manufacture a
-    // spurious change against an empty original.
+    // Baseline against the form defaults so a failed read does not invent a change.
     origColor_ = colorBox_->currentData().toString();
     if (core_ == nullptr) {
         return;
@@ -873,7 +821,6 @@ void ConnectionDialog::seedForEdit(const QString& name) {
     } catch (const dg::Error& e) {
         showError(QStringLiteral("Could not read this connection back: %1")
                       .arg(QString::fromUtf8(e.what())));
-        // The engine reshape still needs doing so the form is usable.
         onEngineChanged(engineBox_->currentIndex());
         return;
     }
@@ -895,8 +842,7 @@ void ConnectionDialog::seedForEdit(const QString& name) {
 
     const bool hasSecret = o.value(QStringLiteral("has_secret")).toBool(false);
 
-    // Rebuild the structured fields from the parsed config the ABI reports (it
-    // returns no `url` key at all — config is the only route back).
+    // The ABI returns no `url`; config is the only route back to the fields.
     Fields f;
     const QJsonValue config = o.value(QStringLiteral("config"));
     if (config.isObject()) {
@@ -910,8 +856,6 @@ void ConnectionDialog::seedForEdit(const QString& name) {
 
     syncing_ = true;
     applyFieldsToUi(f);
-    // Engine reshape (applyFieldsToUi set the engine box, but if config was empty
-    // we still owe a reshape for the driver).
     const Engine* e = currentEngine();
     if (e != nullptr) {
         reshapeForEngine(*e);
@@ -922,7 +866,6 @@ void ConnectionDialog::seedForEdit(const QString& name) {
     autoLimitEdit_->setText(origAutoLimit_);
     idleTimeoutEdit_->setText(origIdleTimeout_);
     onReadOnlyToggled(origReadOnly_);
-    // Now that the fields are in place, render the baseline URL.
     urlEdit_->setText(buildUrl(fieldsFromUi(), /*includePassword=*/false));
     urlEdit_->setCursorPosition(0);
     syncing_ = false;
@@ -935,13 +878,10 @@ void ConnectionDialog::seedForEdit(const QString& name) {
             QString::fromUtf8("••••••••"));
         passwordHint_->setText(QStringLiteral(
             "A password is saved in the system keychain. Leave this blank to keep "
-            "it — datagrep never reads it back into the window."));
+            "it; datagrep never reads it back into the window."));
     }
 }
 
-// ---------------------------------------------------------------------------
-// Building the payloads
-// ---------------------------------------------------------------------------
 
 QString ConnectionDialog::optionsJson() const {
     QJsonObject o;
@@ -966,18 +906,15 @@ QString ConnectionDialog::optionsJson() const {
 }
 
 QString ConnectionDialog::patchJson() const {
-    // ONLY the keys that actually moved. A full-object write would round-trip
-    // fields this build does not understand and silently reset them. Absent key
-    // = leave alone; JSON null = clear (auto_limit / idle_timeout_s / color only).
+    // Only changed keys: a full write would reset fields this build does not know.
+    // Absent key leaves alone; JSON null clears (auto_limit, idle_timeout_s, color).
     QJsonObject p;
 
     if (nameEdit_->text().trimmed() != originalName_) {
         p.insert(QStringLiteral("name"), nameEdit_->text().trimmed());
     }
 
-    // url: send it when the user typed a password (so it reaches the keychain)
-    // or the connection itself changed. With neither, the stored secret and URL
-    // are left untouched.
+    // Send url only for a typed password or a changed connection, else the secret stays put.
     const Fields f = fieldsFromUi();
     const QString currentUrl = buildUrl(f, /*includePassword=*/false);
     const bool typedPassword = !passwordEdit_->text().isEmpty();
@@ -1053,7 +990,6 @@ void ConnectionDialog::onAccept() {
         return;
     }
 
-    // Editing: a minimal patch. Nothing changed => nothing to write.
     const QString patch = patchJson();
     const QJsonObject po = QJsonDocument::fromJson(patch.toUtf8()).object();
     if (po.isEmpty()) {
@@ -1067,6 +1003,6 @@ void ConnectionDialog::onAccept() {
         showError(QString::fromUtf8(e.what()));
         return;
     }
-    savedName_ = name;  // the patch renamed it if name changed
+    savedName_ = name;
     accept();
 }

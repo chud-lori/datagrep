@@ -129,7 +129,7 @@ impl UtilityPane {
                 };
                 if !connection.is_empty() && !window.select_connection(connection) {
                     window.status_bar().say(
-                        &format!("connection ‘{connection}’ no longer exists — not run"),
+                        &format!("connection ‘{connection}’ no longer exists, not run"),
                         true,
                     );
                     return;
@@ -177,7 +177,7 @@ impl UtilityPane {
         let model = window.model();
         let kind = model.with_cell(row, column, |kind, _, _| kind);
         if kind == CellKind::Pending {
-            return; // skeleton row — nothing truthful to show yet
+            return;
         }
         let name = model.column(column).map(|c| c.name).unwrap_or_default();
         self.imp().inspector.show_cell(

@@ -269,7 +269,7 @@ void EditorTabs::onCloseRequested(int index) {
         !text.trimmed().isEmpty()) {
         QMessageBox box(QMessageBox::Warning, QStringLiteral("Discard this query?"),
                         QStringLiteral("%1 has not been saved. Closing the tab "
-                                       "deletes it — quitting datagrep would "
+                                       "deletes it; quitting datagrep would "
                                        "keep it.")
                             .arg(displayTitle(tab)),
                         QMessageBox::Cancel, this);
@@ -346,7 +346,7 @@ void EditorTabs::saveActiveTab() {
         const QString name =
             QInputDialog::getText(
                 this, QStringLiteral("Save Query"),
-                QStringLiteral("Saved as a plain .sql file in %1 — readable in "
+                QStringLiteral("Saved as a plain .sql file in %1, readable in "
                                "any editor, and committable to git.")
                     .arg(store_.directory()),
                 QLineEdit::Normal, suggestion.left(48), &ok)
@@ -409,7 +409,7 @@ void EditorTabs::updateTabChrome(int index) {
                            driver.isEmpty() ? QIcon() : dg::engineIcon(driver));
     QStringList tip;
     tip << (tab.record.isScratch()
-                ? QStringLiteral("Unsaved scratch tab — Ctrl+S names it")
+                ? QStringLiteral("Unsaved scratch tab: Ctrl+S names it")
                 : QStringLiteral("%1 · Ctrl+S saves").arg(tab.record.name));
     tip << (tab.record.connection.isEmpty()
                 ? QStringLiteral("follows the window connection")

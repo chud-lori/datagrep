@@ -1,5 +1,3 @@
-// RowNumberHeader.hpp — vertical (row-number) header of the results grid.
-
 #ifndef DATAGREP_ROW_NUMBER_HEADER_HPP
 #define DATAGREP_ROW_NUMBER_HEADER_HPP
 

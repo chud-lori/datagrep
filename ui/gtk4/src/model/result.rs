@@ -447,7 +447,7 @@ impl ResultModel {
         Some(self.imp().window(row)?.column_name(col)?.to_owned())
     }
 
-    /// What the cell held when it was loaded — the type a typed edit is coerced to.
+    /// What the cell held when it was loaded: the type a typed edit is coerced to.
     pub fn loaded_value(&self, row: u64, col: u32) -> Option<MutationValue> {
         let window = self.imp().window(row)?;
         match window.kind(row, col)? {

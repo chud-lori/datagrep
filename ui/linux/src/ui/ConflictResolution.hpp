@@ -1,4 +1,4 @@
-// Deliberately never offers "retry as written" — that is the clobber the guard exists to prevent.
+// Deliberately never offers "retry as written"; that is the clobber the guard exists to prevent.
 #ifndef DATAGREP_CONFLICT_RESOLUTION_HPP
 #define DATAGREP_CONFLICT_RESOLUTION_HPP
 
@@ -25,7 +25,7 @@ struct ConflictField {
 };
 
 struct ConflictDocument {
-    QString id;     // the staged document's own id — how a resolution finds it
+    QString id;     // the staged document's own id; how a resolution finds it
     QString title;  // the identity, spelled the way the engine spells it
     QVector<ConflictField> fields;
     bool isDelete = false;

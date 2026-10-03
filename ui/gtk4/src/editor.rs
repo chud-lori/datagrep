@@ -41,7 +41,7 @@ mod imp {
             static SIGNALS: OnceLock<Vec<Signal>> = OnceLock::new();
             SIGNALS.get_or_init(|| {
                 vec![
-                    // (sql, `-- @connection` value or "") — precedence resolves upstream.
+                    // (sql, `-- @connection` value or ""); precedence resolves upstream.
                     Signal::builder("run-requested")
                         .param_types([String::static_type(), String::static_type()])
                         .build(),

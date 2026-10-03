@@ -1,4 +1,4 @@
-// RowPager.hpp — a bounded, page-keyed LRU over dg::RowWindow.
+// A bounded, page-keyed LRU over dg::RowWindow.
 
 #ifndef DATAGREP_ROW_PAGER_HPP
 #define DATAGREP_ROW_PAGER_HPP

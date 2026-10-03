@@ -129,7 +129,7 @@ fn expand_first_tree_row(widget: &gtk::Widget) -> bool {
     false
 }
 
-/// Selects the first child of the expanded root — the click the inspector describes.
+/// Selects the first child of the expanded root, the click the inspector describes.
 fn describe_first_object(widget: &gtk::Widget) {
     let Some(list) = first_expander(widget)
         .and_then(|expander| expander.ancestor(gtk::ListView::static_type()))

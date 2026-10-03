@@ -53,17 +53,12 @@
 
 namespace {
 
-// The engine (datagrep_core_new) opens/creates the SQLite file at this path.
 // Same filename as the macOS app, so one DATAGREP_CONFIG_DIR serves both.
 QString profilesDbPath() {
     return dg::SupportDir::ensured() + QStringLiteral("/profiles.sqlite");
 }
 
-// The @limit N block directive parsed from the statement being run. Mirrors
-// DatagrepKit.SQLBlocks.directives: a line that is a `--` comment whose body
-// starts with `@limit`. Used ONLY so the status bar can say "first N rows
-// (@limit)" honestly when a result sits at the limit — it never bounds the query
-// itself (the engine does that).
+// Only feeds the status bar's "first N rows (@limit)" hint; the engine applies the limit.
 std::optional<std::uint64_t> parseLimitDirective(const QString& sql) {
     const QStringList lines = sql.split(QLatin1Char('\n'));
     for (const QString& raw : lines) {
@@ -90,8 +85,7 @@ std::optional<std::uint64_t> parseLimitDirective(const QString& sql) {
     return std::nullopt;
 }
 
-// The `-- @connection NAME` block directive. Mirrors the macOS directive of the
-// same name: text the user wrote outranks the tab's binding and the sidebar.
+// `-- @connection NAME` outranks the tab's binding and the sidebar selection.
 QString parseConnectionDirective(const QString& sql) {
     const QStringList lines = sql.split(QLatin1Char('\n'));
     for (const QString& raw : lines) {
@@ -121,9 +115,7 @@ QString parseConnectionDirective(const QString& sql) {
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle(QStringLiteral("datagrep"));
 
-    // --- engine ------------------------------------------------------------
-    // A failure here is fatal to the session but must be reported honestly, not
-    // swallowed. The window still constructs so the message is visible.
+    // The window still constructs on failure so the message stays visible.
     try {
         core_ = std::make_unique<dg::Core>(profilesDbPath().toStdString());
     } catch (const dg::Error& e) {
@@ -132,14 +124,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                                   .arg(QString::fromUtf8(e.what())));
     }
 
-    // --- sidebar: connection list + management over a lazy schema tree ------
     connections_ = new QListWidget(this);
     connections_->setAlternatingRowColors(true);
-    // Wider than square: [marker bar · engine mark] — see dg::engineIcon.
+    // Wider than square: marker bar plus engine mark, see dg::engineIcon.
     connections_->setIconSize(QSize(23, 16));
     connect(connections_, &QListWidget::itemSelectionChanged, this,
             &MainWindow::onConnectionSelected);
-    // Double-clicking a connection edits it, matching the macOS sidebar.
     connect(connections_, &QListWidget::itemDoubleClicked, this,
             &MainWindow::onEditConnection);
 
@@ -174,10 +164,6 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(schema_, &SchemaTree::objectActivated, this,
             &MainWindow::onSchemaObjectActivated);
 
-    // --- the inspector: schema + cell detail, as a right-hand dock ----------
-    // A QDockWidget rather than a fixed pane: closable, floatable, movable to
-    // the left — the Linux-native shape for an inspector. Its toggle action
-    // lives on the editor toolbar so a closed inspector stays reachable.
     inspector_ = new DetailPanel(this);
     inspectorDock_ = new QDockWidget(QStringLiteral("Inspector"), this);
     inspectorDock_->setObjectName(QStringLiteral("inspectorDock"));
@@ -187,17 +173,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     addDockWidget(Qt::RightDockWidgetArea, inspectorDock_);
     // Otherwise the dock opens at its content's sizeHint.
     resizeDocks({inspectorDock_}, {300}, Qt::Horizontal);
-    // The schema pane follows the sidebar selection; the tree made the describe
-    // call, the panel only draws it, so selecting never describes twice.
+    // The tree already made the describe call; the panel only draws it.
     connect(schema_, &SchemaTree::objectDescribed, inspector_,
             &DetailPanel::showSchema);
     connect(inspector_, &DetailPanel::cellCopied, this, [this]() {
         status_->showMessage(QStringLiteral("cell JSON copied"));
     });
 
-    // --- query history: a bottom dock over the JSONL store ------------------
-    // Hidden until asked for; its toggle lives on the editor toolbar with the
-    // shortcut, so closed history stays one keystroke away.
     history_ = new QueryHistoryStore(QueryHistoryStore::defaultDirectory(), this);
     historyPanel_ = new HistoryPanel(history_, this);
     historyDock_ = new QDockWidget(QStringLiteral("Query History"), this);
@@ -223,11 +205,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     sidebar->setChildrenCollapsible(false);
     sidebar->setSizes({220, 480});
 
-    // --- editors over grid: one unified tab bar across all connections ------
     editors_ = new EditorTabs(this);
     connect(editors_, &EditorTabs::runRequested, this, &MainWindow::runStatement);
-    // Binding a tab to a profile moves the window there, so the schema tree
-    // and safety surfaces describe the connection the next run will hit.
+    // Follow the binding so schema and safety surfaces match the next run's target.
     connect(editors_, &EditorTabs::connectionBound, this,
             [this](const QString& name) { selectConnection(name); });
     connect(editors_, &EditorTabs::newConnectionRequested, this,
@@ -257,16 +237,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &MainWindow::onStatusChanged);
     edits_ = new dg::PendingEdits(this);
     model_->setPendingEdits(edits_);
-    // An edit that could not be staged is said out loud — a cell that quietly
-    // refuses what was typed is indistinguishable from one that lost it.
     connect(model_, &ResultModel::editRefused, this,
             [this](const QString& why) { status_->showMessage(why, true); });
 
     grid_ = new ResultTableView(this);
     grid_->setModel(model_);
-    // Clicking a cell shows its full value in the inspector. Only a nested
-    // `{n fields}` chip RAISES the Cell tab — that click is an unambiguous
-    // request to see inside; a plain value click updates the pane quietly.
+    // Only a nested `{n fields}` chip raises the Cell tab; plain values update it quietly.
     connect(grid_, &QAbstractItemView::clicked, this,
             [this](const QModelIndex& idx) {
                 if (!idx.isValid()) {
@@ -274,7 +250,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                 }
                 const auto kind = model_->cellKind(idx.row(), idx.column());
                 if (!kind.has_value()) {
-                    return;  // skeleton/pending — nothing truthful to show yet
+                    return;
                 }
                 inspector_->showCell(
                     idx.row(), idx.column(),
@@ -316,25 +292,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     root->setChildrenCollapsible(false);
     root->setSizes({240, 960});
 
-    // --- the marked-connection band -----------------------------------------
-    // When the selected connection carries a user-chosen colour, this band sits
-    // across the whole window above everything else, filled with that colour and
-    // carrying the connection's name. The colour means whatever the user meant
-    // by it — the band says the name and nothing else. It is deliberately a
-    // full-width fill, not a dot or a tint: shrinking it is how these markers
-    // stop being noticed. Mirrors the macOS MarkedBanner in intent.
+    // Deliberately a full-width fill: a dot or tint stops being noticed.
     markedBanner_ = new QLabel(this);
     markedBanner_->setTextFormat(Qt::PlainText);
     markedBanner_->hide();
 
-    // --- update notice ------------------------------------------------------
-    // One silent manifest GET per launch; the bar below the marked band exists
-    // only while a newer release is known. Nothing polls, nothing installs.
     updateCheck_ = new UpdateCheck(this);
     updateNotice_ = new UpdateNotice(updateCheck_, this);
     connect(updateCheck_, &UpdateCheck::checkFinished, this,
             [this](bool newerFound, bool failed) {
-                // Only checkNow() reports here — the user asked and is watching.
+                // Only checkNow() reports here.
                 if (failed) {
                     status_->showMessage(QStringLiteral("update check failed"),
                                          true);
@@ -354,12 +321,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     centralLayout->addWidget(root, 1);
     setCentralWidget(central);
 
-    // --- status bar --------------------------------------------------------
     status_ = new StatusBar(this);
     connect(status_, &StatusBar::cancelRequested, this, &MainWindow::cancelQuery);
     statusBar()->addWidget(status_, 1);
 
-    // --- menu bar -----------------------------------------------------------
     QMenu* viewMenu = menuBar()->addMenu(QStringLiteral("&View"));
     QMenu* appearanceMenu = viewMenu->addMenu(QStringLiteral("&Appearance"));
     auto* appearanceGroup = new QActionGroup(this);
@@ -388,7 +353,6 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         helpMenu->addAction(QStringLiteral("Check for Updates at Launch"));
     launchCheckAction->setCheckable(true);
     launchCheckAction->setChecked(UpdateCheck::checkOnLaunchEnabled());
-    // The honest wording is the point: exactly what the check does and sends.
     launchCheckAction->setStatusTip(QStringLiteral(
         "One GET of a static JSON manifest per launch, only to compare "
         "version numbers. Nothing is downloaded or installed. Off means zero "
@@ -431,8 +395,6 @@ void MainWindow::reloadProfiles() {
         const QString driver = o.value(QStringLiteral("driver")).toString();
         const bool readOnly = o.value(QStringLiteral("read_only")).toBool(false);
 
-        // The safety slice every surface shares — the swatch below, the banner
-        // and the run path's confirm-writes prompt all read this one record.
         dg::ConnectionSafety safety;
         safety.name = name;
         safety.color = o.value(QStringLiteral("color")).toString();
@@ -445,7 +407,6 @@ void MainWindow::reloadProfiles() {
 
         auto* item = new QListWidgetItem(name, connections_);
 
-        // Tooltip carries the facts the row cannot spell out at a glance.
         QStringList tip;
         if (!driver.isEmpty()) {
             tip << dg::engineDisplayName(driver);
@@ -454,10 +415,6 @@ void MainWindow::reloadProfiles() {
             tip << QStringLiteral("read-only");
         }
 
-        // Engine mark, with the marker colour as a bar down its leading edge —
-        // both visible while scanning the list, not only after selecting. The
-        // banner (updateMarkedBanner) is the loud half; this is the
-        // recognition cue.
         const auto swatch = dg::connectionColor(safety.color);
         item->setIcon(dg::engineIcon(driver, swatch.value_or(QColor())));
         if (swatch) {
@@ -465,16 +422,12 @@ void MainWindow::reloadProfiles() {
         }
         item->setToolTip(tip.join(QStringLiteral(" · ")));
 
-        // A marked row is bolded so it is unmistakable. Keyed on the colour
-        // marker, not on a dev/staging/prod tag: the engine dropped that enum,
-        // so this branch was dead and every marked connection looked ordinary.
-        // Weight, never colour alone — the swatch already carries the hue.
+        // Weight, never colour alone; the swatch already carries the hue.
         if (safety.isMarked()) {
             QFont f = item->font();
             f.setBold(true);
             item->setFont(f);
         }
-        // A read-only profile is italicised, so the badge survives in both themes.
         if (readOnly) {
             QFont f = item->font();
             f.setItalic(true);
@@ -510,7 +463,7 @@ void MainWindow::refreshConnectionInfo() {
         status_->showIdentity(
             QStringLiteral("%1 · %2").arg(
                 profile, dg::engineDisplayName(driverByProfile_.value(profile))),
-            QStringLiteral("Engine from the saved profile — the server has not "
+            QStringLiteral("Engine from the saved profile; the server has not "
                            "answered yet."));
     }
     if (infoInFlight_) {
@@ -564,7 +517,7 @@ void MainWindow::applyConnectionInfo(const QString& profile, const QString& json
     status_->showIdentity(
         parts.join(QStringLiteral(" · ")),
         server.isEmpty()
-            ? QStringLiteral("Engine from the saved profile — the server has "
+            ? QStringLiteral("Engine from the saved profile; the server has "
                              "not answered yet.")
             : QStringLiteral("As reported by the server at handshake."));
 }
@@ -578,8 +531,7 @@ void MainWindow::updateMarkedBanner() {
         return;
     }
     markedBanner_->setText(profile);
-    // Weight AND colour, never colour alone; white text on the user's colour
-    // keeps the band legible for every palette entry (all are mid-dark tones).
+    // White text stays legible because every palette entry is a mid-dark tone.
     markedBanner_->setStyleSheet(
         QStringLiteral("QLabel { background-color: %1; color: white; "
                        "font-weight: 600; padding: 4px 10px; }")
@@ -597,7 +549,6 @@ void MainWindow::onAddConnection() {
     if (dialog->exec() == QDialog::Accepted) {
         const QString name = dialog->savedName();
         reloadProfiles();
-        // Reselect the newly-added connection so queries scope to it immediately.
         const auto matches = connections_->findItems(name, Qt::MatchExactly);
         if (!matches.isEmpty()) {
             connections_->setCurrentItem(matches.first());
@@ -654,7 +605,7 @@ void MainWindow::onRemoveConnection() {
         return;
     }
     reloadProfiles();
-    schema_->showProfile(QString());  // clear the tree for the gone profile
+    schema_->showProfile(QString());
     status_->showMessage(QStringLiteral("removed connection ‘%1’").arg(profile));
 }
 
@@ -662,15 +613,13 @@ void MainWindow::runStatement() {
     SqlEditor* editor = editors_->currentEditor();
     if (editor == nullptr) {
         status_->showMessage(
-            QStringLiteral("No editor open — Ctrl+T opens one."), true);
+            QStringLiteral("No editor open. Ctrl+T opens one."), true);
         return;
     }
     const QString sql = editor->statementUnderCursor();
     if (sql.isEmpty()) {
         return;
     }
-    // Precedence: `-- @connection` in the text, then the tab's binding, then
-    // the window's selection.
     QString profile = parseConnectionDirective(sql);
     if (profile.isEmpty()) {
         profile = editors_->activeConnection();
@@ -684,7 +633,7 @@ void MainWindow::runStatement() {
     }
     if (!safetyByProfile_.contains(profile)) {
         status_->showMessage(
-            QStringLiteral("connection ‘%1’ does not exist — not run").arg(profile),
+            QStringLiteral("connection ‘%1’ does not exist, not run").arg(profile),
             true);
         return;
     }
@@ -696,10 +645,7 @@ void MainWindow::executeStatement(const QString& profile, const QString& sql) {
         return;
     }
     infoRefreshedForQuery_ = false;
-    // The confirm-writes promise. The engine has no notion of this profile
-    // setting, so the prompt lives here: classify the statement, and ask before
-    // sending — never after. The classifier is a fat-finger guardrail (first
-    // verb only); real refusal on a read-only profile stays with the engine.
+    // The engine ignores confirm-writes, so the UI asks; read-only refusal stays in the engine.
     const dg::ConnectionSafety safety = safetyByProfile_.value(profile);
     if (safety.confirmWrites && dg::isWriteStatement(sql)) {
         const QString verb = dg::statementVerb(sql);
@@ -715,34 +661,25 @@ void MainWindow::executeStatement(const QString& profile, const QString& sql) {
         box.exec();
         if (box.clickedButton() != runButton) {
             status_->showMessage(
-                QStringLiteral("not sent — ‘%1’ asks before every write")
+                QStringLiteral("not sent: ‘%1’ asks before every write")
                     .arg(profile));
             return;
         }
     }
-    // Recorded before the engine is asked, so a run that never gets a query
-    // handle still has a pending entry to fail into.
+    // Recorded first so a run that never gets a query handle has an entry to fail into.
     history_->executionStarted(sql, profile, driverByProfile_.value(profile));
     try {
         auto query = std::make_unique<dg::Query>(
             core_->run(profile.toStdString(), sql.toStdString()));
-        // The window's veto on editing, decided per statement: a read-only
-        // connection offers no edit at all, however editable the result it
-        // returns. Set before the result exists, so no window of rows is ever
-        // editable for an instant.
+        // Set before the result exists so read-only rows are never editable, even briefly.
         model_->setAllowsEditing(!safety.readOnly);
         lastProfile_ = profile;
         lastSql_ = sql;
-        // Reset the status bar's per-result honesty state and tell it whether the
-        // statement carried an @limit BEFORE handing the query to the model — the
-        // model reads the first status snapshot synchronously inside setQuery, so
-        // the hint must already be in place for that first tick.
+        // setQuery reads the first status snapshot synchronously, so the hint goes first.
         status_->beginQuery();
         status_->setLimitHint(parseLimitDirective(sql));
         status_->showMessage(QString());
         model_->setQuery(std::move(query));
-        // The cell pane could still be naming a row/column of the previous
-        // result; a new query makes that reference meaningless.
         inspector_->clearCell();
     } catch (const dg::Error& e) {
         history_->executionFailedToStart(QString::fromUtf8(e.what()));
@@ -761,18 +698,15 @@ bool MainWindow::selectConnection(const QString& name) {
 
 void MainWindow::onOpenHistoryInEditor(const QString& sql,
                                        const QString& connection) {
-    // A NEW tab, bound to the connection the entry ran against — never
-    // overwriting the SQL someone was half way through writing.
     editors_->openInNewTab(sql, connection);
 }
 
 void MainWindow::onRerunFromHistory(const QString& sql, const QString& connection) {
     QString profile = connection;
     if (!profile.isEmpty()) {
-        // The entry names the connection it ran against; honour it or say why not.
         if (!selectConnection(profile)) {
             status_->showMessage(
-                QStringLiteral("connection ‘%1’ no longer exists — not run")
+                QStringLiteral("connection ‘%1’ no longer exists, not run")
                     .arg(profile),
                 true);
             return;
@@ -813,7 +747,6 @@ void MainWindow::commitStagedEdits() {
             ? QStringLiteral("Commit 1 Document")
             : QStringLiteral("Commit %1 Documents").arg(pending.size()),
         QMessageBox::DestructiveRole);
-    // Nothing is written by pressing return on a dialog nobody read.
     box.setDefaultButton(QMessageBox::Cancel);
     box.exec();
     if (box.clickedButton() != commitButton) {
@@ -836,16 +769,12 @@ QString MainWindow::commitWarning(int count, bool atomic) {
     }
     const int example = std::min(3, count);
     const int before = example - 1;
-    // Deliberately does not promise that the batch stops at the first failure:
-    // on this engine a multi-document batch goes as one bulk request and every
-    // item is attempted, while a single-document path halts. What is true
-    // either way is that nothing is rolled back and the report names each
-    // document — so that is what it says.
+    // No stop-at-first-failure promise: a multi-document bulk request attempts every item.
     return QStringLiteral(
                "%1 documents will be written one by one, and there is no "
                "transaction: if #%2 fails, the %3 before it stay written and "
-               "nothing is rolled back. The report then names every document — "
-               "written, refused, or never attempted — and anything not written "
+               "nothing is rolled back. The report then names every document "
+               "(written, refused, or never attempted), and anything not written "
                "stays staged.")
         .arg(count)
         .arg(example)
@@ -870,8 +799,7 @@ void MainWindow::sendMutations(const QVector<dg::StagedDocument>& pending,
     const std::string batchJson = dg::mutationBatchJson(batch).toStdString();
     const std::string profileStd = profile.toStdString();
     dg::Core* core = core_.get();
-    // core_ outlives every window this app opens; the queued reply is dropped
-    // if `this` is gone, exactly like a queued signal.
+    // core_ outlives every window; the queued reply is dropped if `this` is gone.
     std::thread([this, core, profileStd, batchJson, ids, rows]() {
         QString reportJson;
         QString failure;
@@ -897,9 +825,7 @@ void MainWindow::finishCommit(const QString& reportJson, const QString& failure,
     isCommitting_ = false;
     stagedBar_->setCommitting(false);
     if (!failure.isEmpty()) {
-        // The batch never ran at all — a read-only refusal, or a driver that
-        // refused every write up front. Nothing was written, and everything
-        // stays staged.
+        // The batch never ran, so nothing was written and everything stays staged.
         status_->showMessage(failure, true);
         return;
     }
@@ -915,7 +841,7 @@ void MainWindow::finishCommit(const QString& reportJson, const QString& failure,
         linedUp ? reportHeadline(report)
                 : QStringLiteral(
                       "the engine reported %1 outcome(s) for %2 document(s), so "
-                      "datagrep cannot say which is which — read the report, and "
+                      "datagrep cannot say which is which. Read the report, and "
                       "re-run the statement to see what was written")
                       .arg(report.rows.size())
                       .arg(ids.size()),
@@ -963,7 +889,7 @@ void MainWindow::reviewConflicts() {
         status_->showMessage(
             QStringLiteral(
                 "this result no longer says how its documents are identified, so "
-                "datagrep cannot read them back — re-run the statement"),
+                "datagrep cannot read them back. Re-run the statement"),
             true);
         return;
     }
@@ -1013,15 +939,12 @@ void MainWindow::finishReread(const QString& serverJson, const QString& failure,
         status_->showMessage(whyNot, true);
         return;
     }
-    // Matched by position, exactly like the commit report. A list that does
-    // not line up one-for-one is not guessed at: showing one document's server
-    // values against another's edits is how somebody overwrites the wrong
-    // thing.
+    // Matched by position; a list that does not line up one-for-one is never guessed at.
     if (server.size() != conflicted.size()) {
         status_->showMessage(
             QStringLiteral("the engine answered for %1 of %2 documents, so "
-                           "datagrep cannot say which answer belongs to which — "
-                           "re-run the statement")
+                           "datagrep cannot say which answer belongs to which. "
+                           "Re-run the statement")
                 .arg(server.size())
                 .arg(conflicted.size()),
             true);
@@ -1036,10 +959,7 @@ void MainWindow::finishReread(const QString& serverJson, const QString& failure,
 
 void MainWindow::presentConflictReview() {
     ConflictReviewDialog dialog(conflictReview_, this);
-    // A rebase is staged again, not written: it re-guards the edit against the
-    // version the user has just looked at, and the commit button is still the
-    // only thing that writes. A rebase that wrote immediately would be the
-    // silent retry this whole flow exists to avoid.
+    // A rebase is re-staged against the new version, never written; only commit writes.
     connect(&dialog, &ConflictReviewDialog::rebaseChosen, this,
             [this, &dialog](const QString& id) {
                 const dg::ConflictDocument* found = nullptr;
@@ -1054,7 +974,7 @@ void MainWindow::presentConflictReview() {
                         QStringLiteral(
                             "the server did not return a version for this "
                             "document, so the edit could only be re-sent "
-                            "unguarded — which would overwrite whatever is "
+                            "unguarded, which would overwrite whatever is "
                             "there now"),
                         true);
                     return;
@@ -1063,7 +983,7 @@ void MainWindow::presentConflictReview() {
                     model_->refreshStagedRows({*row});
                 }
                 status_->showMessage(QStringLiteral(
-                    "re-applied onto the current version — still staged, and "
+                    "re-applied onto the current version: still staged, and "
                     "still not written. Commit to write it."));
                 dialog.removeDocument(id);
             });
@@ -1073,7 +993,7 @@ void MainWindow::presentConflictReview() {
                     model_->refreshStagedRows({*row});
                 }
                 status_->showMessage(QStringLiteral(
-                    "edit discarded — the server's version is untouched"));
+                    "edit discarded; the server's version is untouched"));
                 dialog.removeDocument(id);
             });
     dialog.exec();
@@ -1110,10 +1030,6 @@ void MainWindow::discardStagedEditsPrompt() {
 }
 
 void MainWindow::reloadResult() {
-    // The grid still holds the rows as they were loaded, with typed values
-    // drawn over them — re-asking the server is offered, never done
-    // automatically: a re-query costs a round trip and resets the scroll of a
-    // result someone may still be reading.
     if (lastSql_.isEmpty() || lastProfile_.isEmpty()) {
         return;
     }
@@ -1121,13 +1037,9 @@ void MainWindow::reloadResult() {
 }
 
 void MainWindow::cancelQuery() {
-    // The outcome string describes what the SERVER actually did — for engines
-    // that cannot truly cancel it says so. model_->cancel() owns the
-    // datagrep_query_cancel call and frees its outcome JSON; we only display it.
+    // model_->cancel() owns the datagrep_query_cancel call and frees its outcome JSON.
     const QString outcome = model_->cancel();
     if (!outcome.isEmpty()) {
-        // The ABI returns a JSON object; surface its "message" if present, else
-        // the raw text.
         const QJsonDocument doc = QJsonDocument::fromJson(outcome.toUtf8());
         const QString message =
             doc.isObject()
@@ -1141,11 +1053,9 @@ void MainWindow::cancelQuery() {
 
 void MainWindow::onStatusChanged(const dg::QueryStatus& status) {
     status_->updateStatus(status);
-    // Safe on every tick: this records once, when the query goes terminal.
+    // Safe on every tick: it records once, when the query goes terminal.
     history_->executionProgressed(status);
-    // A finished query may be this profile's first connection — the handshake
-    // facts (product, version) exist only now. Once per query: terminal
-    // statuses re-emit on scroll.
+    // Handshake facts exist only after the first query; terminal statuses re-emit on scroll.
     if (dg::isTerminal(status.state) && !infoRefreshedForQuery_ &&
         lastProfile_ == selectedProfile()) {
         infoRefreshedForQuery_ = true;
@@ -1155,9 +1065,7 @@ void MainWindow::onStatusChanged(const dg::QueryStatus& status) {
 
 void MainWindow::onSchemaObjectActivated(const QString& /*profile*/,
                                          const QString& pathJson) {
-    // Insert the object's leaf name at the cursor as a convenience. Building a
-    // full, correctly-quoted SELECT is engine-specific and belongs to the
-    // engine, not the UI, so we deliberately do not synthesise SQL here.
+    // Quoting a full SELECT is engine-specific, so only the leaf name is inserted.
     const QJsonArray path = QJsonDocument::fromJson(pathJson.toUtf8()).array();
     if (path.isEmpty()) {
         return;

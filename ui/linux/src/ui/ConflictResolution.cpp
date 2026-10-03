@@ -88,7 +88,6 @@ ConflictReview ConflictReview::build(const QVector<StagedDocument>& conflicted,
 
 }  // namespace dg
 
-// --- the dialog -------------------------------------------------------------
 
 namespace {
 
@@ -137,7 +136,7 @@ ConflictReviewDialog::ConflictReviewDialog(const dg::ConflictReview& review,
     auto* subtitle = new QLabel(
         QStringLiteral(
             "Nothing was written for these. Each one is shown as you loaded it, "
-            "as the server holds it now, and as you typed it — so you can "
+            "as the server holds it now, and as you typed it, so you can "
             "re-apply your edits onto the current version, or drop them."),
         this);
     subtitle->setWordWrap(true);
@@ -208,7 +207,7 @@ QWidget* ConflictReviewDialog::buildDocumentBlock(
     } else if (document.gone) {
         layout->addWidget(note(
             QStringLiteral(
-                "This document is no longer on the server — somebody deleted it. "
+                "This document is no longer on the server; somebody deleted it. "
                 "There is no version to re-apply your edits onto."),
             true, block));
     }
@@ -256,7 +255,7 @@ QWidget* ConflictReviewDialog::buildDocumentBlock(
         QString summary;
         if (contested == 0) {
             summary = QStringLiteral(
-                "The fields you edited are unchanged — somebody changed this "
+                "The fields you edited are unchanged; somebody changed this "
                 "document elsewhere. Re-applying writes your edits onto their "
                 "version and overwrites nothing of theirs.");
         } else if (contested == 1) {

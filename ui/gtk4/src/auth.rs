@@ -12,7 +12,7 @@ pub async fn system_auth() -> Option<String> {
     polkit_auth().await
 }
 
-// Any failure — no system bus, polkit absent, action not installed, refusal — lands on None.
+// Any failure (no system bus, polkit absent, action not installed, refusal) lands on None.
 async fn polkit_auth() -> Option<String> {
     let bus = gio::bus_get_future(gio::BusType::System).await.ok()?;
     let unique = bus.unique_name()?;

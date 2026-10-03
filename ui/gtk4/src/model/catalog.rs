@@ -22,7 +22,7 @@ impl From<String> for Enumeration {
 }
 
 impl Enumeration {
-    /// A level this costly is never listed by an arrow click alone — the user asks twice.
+    /// A level this costly is never listed by an arrow click alone; the user asks twice.
     pub fn needs_consent(self) -> bool {
         matches!(self, Enumeration::ScanOnly | Enumeration::OnDemand)
     }

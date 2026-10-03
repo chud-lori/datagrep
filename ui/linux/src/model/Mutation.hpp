@@ -1,5 +1,3 @@
-// Mutation.hpp — the editing wire types.
-
 // Wire JSON must stay byte-equivalent to the macOS encoders; the engine's tests pin it.
 #ifndef DATAGREP_MUTATION_HPP
 #define DATAGREP_MUTATION_HPP
@@ -40,7 +38,7 @@ public:
 
     static std::optional<MutationValue> decodeFragment(const QString& json);
 
-    // Coerces to the loaded value's type — a string would silently retype the field.
+    // Coerces to the loaded value's type; a string would silently retype the field.
     static bool typedLike(const QString& text,
                           const std::optional<MutationValue>& loaded,
                           MutationValue* out, QString* whyNot);
@@ -61,7 +59,7 @@ struct FieldValue {
 struct EditableResult {
     // Fields that name exactly one row. They become the mutation's `key`.
     QStringList identity;
-    // `expect` carries the values that were LOADED — the compare-and-swap guard.
+    // `expect` carries the values that were loaded; the compare-and-swap guard.
     QStringList guardFields;
     // The field the grid's columns are projected from; empty = none.
     QString root;
@@ -80,7 +78,7 @@ struct EditableResult {
 };
 
 struct DocumentMutation {
-    QStringList path;  // where a NEW document would go; empty — nothing here inserts
+    QStringList path;  // where a new document would go; empty; nothing here inserts
     QVector<FieldValue> key;
     QVector<FieldValue> expect;
     QVector<FieldValue> sets;  // empty for a delete

@@ -1,5 +1,3 @@
-// HistoryPanel.hpp — the query history dock: everything datagrep ran, searchable.
-
 #ifndef DATAGREP_HISTORY_PANEL_HPP
 #define DATAGREP_HISTORY_PANEL_HPP
 

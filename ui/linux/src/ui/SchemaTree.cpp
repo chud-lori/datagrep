@@ -12,7 +12,6 @@
 #include <QTreeWidgetItem>
 
 namespace {
-// Item data roles carried on each tree node.
 constexpr int kPathRole = Qt::UserRole + 1;         // QStringList: full path
 constexpr int kHasChildrenRole = Qt::UserRole + 2;  // bool
 constexpr int kEnumerationRole = Qt::UserRole + 3;  // QString
@@ -132,7 +131,7 @@ void SchemaTree::fetchInto(QTreeWidgetItem* parent, const QStringList& fetchPath
                 prompt->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
                 prompt->setToolTip(
                     0, QStringLiteral("This node has no cheap listing. Enter a key "
-                                      "prefix — enumerating everything would be a "
+                                      "prefix; enumerating everything would be a "
                                       "full keyspace scan."));
             } else {
                 auto* placeholder = new QTreeWidgetItem(node);
@@ -153,7 +152,7 @@ void SchemaTree::onItemExpanded(QTreeWidgetItem* item) {
     if (item == nullptr || item->data(0, kLoadedRole).toBool()) {
         return;  // already fetched
     }
-    // A scan_only node is NEVER enumerated by expansion — it waits for a prefix.
+    // A scan_only node is never enumerated by expansion; it waits for a prefix.
     if (item->data(0, kEnumerationRole).toString() == kScanOnly) {
         return;
     }
@@ -172,7 +171,7 @@ void SchemaTree::promptScan(QTreeWidgetItem* node) {
     bool ok = false;
     const QString prefix = QInputDialog::getText(
         this, QStringLiteral("Scan required"),
-        QStringLiteral("‘%1’ has no cheap listing. Enter a key prefix — "
+        QStringLiteral("‘%1’ has no cheap listing. Enter a key prefix; "
                        "enumerating everything would be a full keyspace scan.")
             .arg(node->text(0)),
         QLineEdit::Normal, QString(), &ok);
@@ -222,7 +221,7 @@ void SchemaTree::onCurrentItemChanged(QTreeWidgetItem* current,
         return;
     }
     if (current->data(0, kDescribedRole).toBool()) {
-        // Cached — re-announce without re-describing.
+        // Cached; re-announce without re-describing.
         emit objectDescribed(profile_, encodePath(path),
                              current->data(0, kDescribeJsonRole).toString(),
                              current->data(0, kDescribeErrorRole).toString());

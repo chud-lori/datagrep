@@ -1,5 +1,3 @@
-// SchemaTree.hpp — the lazy schema sidebar.
-
 #ifndef DATAGREP_SCHEMA_TREE_HPP
 #define DATAGREP_SCHEMA_TREE_HPP
 

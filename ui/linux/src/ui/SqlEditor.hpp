@@ -1,5 +1,3 @@
-// SqlEditor.hpp — the SQL editing pane.
-
 #ifndef DATAGREP_SQL_EDITOR_HPP
 #define DATAGREP_SQL_EDITOR_HPP
 

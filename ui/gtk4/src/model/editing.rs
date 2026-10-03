@@ -147,7 +147,7 @@ impl PendingEdits {
         self.filtered(StagedDocument::is_pending)
     }
 
-    /// Documents whose last commit the guard refused — still staged.
+    /// Documents whose last commit the guard refused; still staged.
     pub fn conflicted(&self) -> Vec<StagedDocument> {
         self.filtered(StagedDocument::is_conflicted)
     }
@@ -203,7 +203,7 @@ impl PendingEdits {
     ) {
         let mut document = self.existing(address, row);
         match document.sets.iter_mut().find(|set| set.field == field) {
-            // Retyping keeps the loaded value it was FIRST typed over.
+            // Retyping keeps the loaded value it was first typed over.
             Some(set) => set.value = value,
             None => document.sets.push(StagedField {
                 field: field.to_owned(),

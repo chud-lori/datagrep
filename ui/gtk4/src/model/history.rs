@@ -104,7 +104,7 @@ impl HistoryEntry {
         self.run_count = self.run_count.max(1);
     }
 
-    /// Day bucket in the user's own time zone — "Today" means the day they had.
+    /// Day bucket in the user's own time zone: "Today" means the day they had.
     pub fn day_key(&self) -> String {
         day_key(self.started_at_ms)
     }
@@ -260,7 +260,7 @@ pub fn normalise(sql: &str) -> String {
     out
 }
 
-/// FNV-1a over the normalised statement — the same digits the other two stores write.
+/// FNV-1a over the normalised statement, the same digits the other two stores write.
 pub fn hash_text(sql: &str) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in normalise(sql).as_bytes() {
@@ -554,7 +554,7 @@ impl HistoryStore {
         );
     }
 
-    /// The run never got a query handle — a connect failure, or a rejected statement.
+    /// The run never got a query handle: a connect failure, or a rejected statement.
     pub fn execution_failed_to_start(&self, message: &str) {
         let elapsed = self
             .imp()

@@ -8,7 +8,7 @@ use crate::model::format;
 use crate::model::history::{DateRange, HistoryEntry, HistoryFilter, HistoryStore, Outcome};
 use crate::ui::StatusBar;
 
-const EMPTY: &str = "Every statement datagrep runs is logged here automatically — the SQL, the \
+const EMPTY: &str = "Every statement datagrep runs is logged here automatically: the SQL, the \
                      connection, how long it took, and what came back.";
 const NO_MATCH: &str = "No recorded query matches these filters.";
 const RANGES: [(&str, DateRange); 4] = [
@@ -267,7 +267,7 @@ mod imp {
                 ),
                 outcome: dropdown(
                     &OUTCOMES.map(|(label, _)| label),
-                    "Filter by outcome — ok, failed or cancelled",
+                    "Filter by outcome: ok, failed or cancelled",
                 ),
                 clear_filters: gtk::Button::with_label("Clear"),
                 count: caption(""),
@@ -822,7 +822,7 @@ impl HistoryPanel {
         imp.show_detail();
     }
 
-    /// Run this statement again — always through the window's one run path.
+    /// Run this statement again, always through the window's one run path.
     pub fn connect_rerun_requested<F: Fn(&Self, &str, &str) + 'static>(
         &self,
         f: F,

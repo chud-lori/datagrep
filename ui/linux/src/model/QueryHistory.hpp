@@ -1,5 +1,3 @@
-// QueryHistory.hpp — the automatic log of every statement datagrep actually ran.
-
 #ifndef DATAGREP_QUERY_HISTORY_HPP
 #define DATAGREP_QUERY_HISTORY_HPP
 
@@ -26,7 +24,7 @@ std::optional<QueryOutcome> outcomeFromKey(const QString& key);
 
 struct QueryHistoryEntry {
     QString id;
-    QString sql;         // verbatim as the user ran it — never reformatted
+    QString sql;         // verbatim as the user ran it; never reformatted
     QString connection;  // profile name; empty only if none was selected
     QString engine;      // driver id, kept so a deleted connection still reads
     qint64 startedAtMs = 0;
@@ -39,7 +37,7 @@ struct QueryHistoryEntry {
     QString textHash;  // FNV-1a over the normalised SQL; stable across launches
 
     QDateTime startedAt() const { return QDateTime::fromMSecsSinceEpoch(startedAtMs); }
-    // Day bucket in the user's own time zone — "Today" means the day they had.
+    // Day bucket in the user's own time zone; "Today" means the day they had.
     QString dayKey() const { return startedAt().date().toString(Qt::ISODate); }
     // Whitespace collapsed for the list row; the full text stays in `sql`.
     QString oneLine() const;
@@ -80,7 +78,7 @@ QString rows(const std::optional<int>& n);  // empty when no result set
 
 }  // namespace dg
 
-// Reads and writes the history directory. Pure file I/O — no engine, no ABI.
+// Reads and writes the history directory. Pure file I/O; no engine, no ABI.
 class QueryHistoryStore : public QObject {
     Q_OBJECT
 

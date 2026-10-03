@@ -368,7 +368,7 @@ fn connection_factory() -> gtk::SignalListItemFactory {
             safety.set_tooltip_text(
                 level
                     .gates()
-                    .then(|| format!("{} — {}", level.title(), level.blurb()))
+                    .then(|| format!("{}: {}", level.title(), level.blurb()))
                     .as_deref(),
             );
         }
@@ -460,7 +460,7 @@ impl Sidebar {
         })
     }
 
-    /// The engine behind the selected connection — what identifier quoting turns on.
+    /// The engine behind the selected connection, which identifier quoting turns on.
     pub fn selected_driver(&self) -> Option<String> {
         self.imp()
             .selection

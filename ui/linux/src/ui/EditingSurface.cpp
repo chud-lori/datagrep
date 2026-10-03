@@ -22,7 +22,6 @@ QLabel* wrappedLabel(const QString& text, QWidget* parent) {
 
 }  // namespace
 
-// --- the bar ----------------------------------------------------------------
 
 StagedEditsBar::StagedEditsBar(dg::PendingEdits* edits, QWidget* parent)
     : QWidget(parent), edits_(edits) {
@@ -89,8 +88,8 @@ void StagedEditsBar::refresh() {
     if (pending == 0) {
         headline_->setText(
             written == 1
-                ? QStringLiteral("1 document written — the grid still shows what was loaded")
-                : QStringLiteral("%1 documents written — the grid still shows what was loaded")
+                ? QStringLiteral("1 document written; the grid still shows what was loaded")
+                : QStringLiteral("%1 documents written; the grid still shows what was loaded")
                       .arg(written));
     } else {
         headline_->setText(
@@ -144,7 +143,6 @@ void StagedEditsBar::refresh() {
     show();
 }
 
-// --- the report -------------------------------------------------------------
 
 MutationReportDialog::MutationReportDialog(const dg::MutationReport& report,
                                            QWidget* parent)
@@ -173,14 +171,14 @@ MutationReportDialog::MutationReportDialog(const dg::MutationReport& report,
     if (report.notAttempted > 0) {
         subtitle += QStringLiteral(" · %1 never attempted").arg(report.notAttempted);
         subtitle += QStringLiteral(
-            ". The ones that were never attempted are still staged — nothing was "
+            ". The ones that were never attempted are still staged. Nothing was "
             "written for them, and nothing was lost.");
     }
     if (report.conflicts > 0) {
         subtitle += QStringLiteral(
             " A version conflict means the document changed on the server after "
             "you loaded it, so the write was refused rather than overwriting "
-            "someone else's change. What you typed is still staged — resolve it "
+            "someone else's change. What you typed is still staged; resolve it "
             "to see what changed.");
     }
     layout->addWidget(wrappedLabel(subtitle, this));
@@ -225,14 +223,14 @@ MutationReportDialog::MutationReportDialog(const dg::MutationReport& report,
             case dg::MutationRow::Outcome::NotAttempted:
                 mark = QStringLiteral("…");
                 detail = QStringLiteral(
-                    "never attempted — the batch stopped before it, so this is "
+                    "never attempted: the batch stopped before it, so this is "
                     "still staged");
                 break;
             case dg::MutationRow::Outcome::Failed:
                 mark = row.conflict ? QStringLiteral("⑂") : QStringLiteral("✗");
                 detail = row.conflict
                              ? QStringLiteral(
-                                   "version conflict — this document changed on the "
+                                   "version conflict: this document changed on the "
                                    "server after you loaded it, so nothing was written")
                              : (row.error.isEmpty()
                                     ? QStringLiteral("the write failed")

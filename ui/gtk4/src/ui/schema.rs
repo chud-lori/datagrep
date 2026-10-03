@@ -86,7 +86,7 @@ impl SchemaNode {
         Self::leaf(
             Role::Consent,
             "dialog-warning-symbolic",
-            "Listing this level scans the whole keyspace — click to list it anyway",
+            "Listing this level scans the whole keyspace. Click to list it anyway",
         )
     }
 
@@ -106,7 +106,7 @@ impl SchemaNode {
         self.imp().path_json.borrow().clone()
     }
 
-    /// Whether activating this node has rows to open — a schema or a Redis key has not.
+    /// Whether activating this node has rows to open; a schema or a Redis key has not.
     pub fn browsable(&self) -> bool {
         self.imp().browsable.get()
     }
@@ -328,7 +328,7 @@ mod imp {
             }
         }
 
-        /// Describes once per node — a remembered failure cannot loop on the engine.
+        /// Describes once per node, so a remembered failure cannot loop on the engine.
         fn on_selected(&self, selection: &gtk::SingleSelection) {
             let selected = selection
                 .selected_item()
@@ -495,7 +495,7 @@ impl SchemaTree {
         *self.imp().core.borrow_mut() = Some(core);
     }
 
-    /// One cheap query on connect — the top level and nothing under it.
+    /// One cheap query on connect: the top level and nothing under it.
     pub fn show_profile(&self, profile: &str) {
         let imp = self.imp();
         imp.generation.set(imp.generation.get() + 1);
