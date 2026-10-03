@@ -5,7 +5,8 @@ cd "$(dirname "$0")"
 
 SIDECAR_ROOT="$(cd ../.. && pwd)/sidecar"
 if [[ ! -d "$SIDECAR_ROOT" ]]; then
-    echo "[]" > go-sources.json
+    # flatpak-builder rejects an empty sources file, which silently drops every source of the module.
+    echo '[{"type": "inline", "contents": "", "dest-filename": ".go-sources-none"}]' > go-sources.json
     echo "go-sources.json: no sidecar/ tree, 0 sources"
     exit 0
 fi
@@ -51,6 +52,8 @@ for rel, version in sorted(versions):
         "dest-filename": f"{version}.info",
     })
 
+if not sources:
+    sources.append({"type": "inline", "contents": "", "dest-filename": ".go-sources-none"})
 with open("go-sources.json", "w") as handle:
     json.dump(sources, handle, indent=4)
     handle.write("\n")
