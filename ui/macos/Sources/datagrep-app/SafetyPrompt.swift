@@ -90,7 +90,7 @@ struct SafetyPromptSheet: View {
                         : "Run this on “\(prompt.profile)”?"
                 )
                 .font(.headline)
-                Text("\(decision.level.title) — \(decision.level.detail)")
+                Text("\(decision.level.title): \(decision.level.detail)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -147,7 +147,7 @@ struct SafetyPromptSheet: View {
                 .disabled(prompt.typed.isEmpty || prompt.working)
             }
             Text(
-                "datagrep never checks what you type — the engine compares it against the name it holds."
+                "datagrep never checks what you type; the engine compares it against the name it holds."
             )
             .font(.caption2)
             .foregroundStyle(.secondary)

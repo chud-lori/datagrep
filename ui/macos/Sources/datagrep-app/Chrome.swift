@@ -4,7 +4,6 @@ import SwiftUI
 
 // MARK: - materials
 
-/// `NSVisualEffectView` behind the sidebar.
 struct VisualEffect: NSViewRepresentable {
     var material: NSVisualEffectView.Material = .sidebar
     var blending: NSVisualEffectView.BlendingMode = .behindWindow
@@ -28,7 +27,6 @@ struct VisualEffect: NSViewRepresentable {
 
 // MARK: - progress
 
-/// Query progress, drawn from real data and nothing else.
 struct QueryProgressBar: View {
     @ObservedObject var model: AppModel
 
@@ -72,7 +70,7 @@ struct ResultsEmptyState: View {
             ContentUnavailableView {
                 Label("No connection", systemImage: "cable.connector.slash")
             } description: {
-                Text("Add a database and datagrep will list its schema one level at a time — it never crawls.")
+                Text("Add a database and datagrep will list its schema one level at a time; it never crawls.")
             } actions: {
                 Button("New Connection…") { model.showNewConnection = true }
                     .buttonStyle(.borderedProminent)
@@ -95,7 +93,6 @@ struct ResultsEmptyState: View {
     }
 }
 
-/// An error is a first-class result, not a line of red text in the gutter.
 struct ErrorCard: View {
     let message: String
     var onDismiss: () -> Void

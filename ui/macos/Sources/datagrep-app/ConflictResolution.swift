@@ -3,7 +3,7 @@ import SwiftUI
 
 /// A version conflict, as three readings of the same document.
 
-// MARK: - the review, built once
+// MARK: - the review
 
 /// One edited field's three readings.
 struct ConflictField: Identifiable {
@@ -98,7 +98,6 @@ struct ConflictReview {
 
 // MARK: - the sheet
 
-/// The three-column conflict view.
 struct ConflictReviewSheet: View {
     @ObservedObject var model: AppModel
     let review: ConflictReview
@@ -130,7 +129,7 @@ struct ConflictReviewSheet: View {
             )
             .font(.system(size: 14, weight: .semibold))
             Text(
-                "Nothing was written for these. Each one is shown as you loaded it, as the server holds it now, and as you typed it — so you can re-apply your edits onto the current version, or drop them."
+                "Nothing was written for these. Each one is shown as you loaded it, as the server holds it now, and as you typed it, so you can re-apply your edits onto the current version, or drop them."
             )
             .font(.system(size: 11.5))
             .foregroundStyle(.secondary)
@@ -178,7 +177,7 @@ private struct ConflictDocumentView: View {
                 note(error, warning: true)
             } else if document.gone {
                 note(
-                    "This document is no longer on the server — somebody deleted it. There is no version to re-apply your edits onto.",
+                    "This document is no longer on the server: somebody deleted it. There is no version to re-apply your edits onto.",
                     warning: true)
             }
 
@@ -227,7 +226,7 @@ private struct ConflictDocumentView: View {
         let text: String
         if contested == 0 {
             text =
-                "The fields you edited are unchanged — somebody changed this document elsewhere. Re-applying writes your edits onto their version and overwrites nothing of theirs."
+                "The fields you edited are unchanged, but somebody changed this document elsewhere. Re-applying writes your edits onto their version and overwrites nothing of theirs."
         } else if contested == 1 {
             text =
                 "1 of the fields you edited was changed by somebody else. Re-applying overwrites their value with yours."

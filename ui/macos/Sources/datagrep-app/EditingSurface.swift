@@ -63,8 +63,8 @@ struct StagedEditsBar: View {
         if n == 0 {
             let written = edits.documents.count
             return written == 1
-                ? "1 document written — the grid still shows what was loaded"
-                : "\(written) documents written — the grid still shows what was loaded"
+                ? "1 document written; the grid still shows what was loaded"
+                : "\(written) documents written; the grid still shows what was loaded"
         }
         return n == 1
             ? "1 document edited, not yet written"
@@ -148,11 +148,11 @@ struct MutationReportSheet: View {
         var line = parts.joined(separator: " · ")
         if report.notAttempted > 0 {
             line +=
-                ". The ones that were never attempted are still staged — nothing was written for them, and nothing was lost."
+                ". The ones that were never attempted are still staged: nothing was written for them, and nothing was lost."
         }
         if report.conflicts > 0 {
             line +=
-                " A version conflict means the document changed on the server after you loaded it, so the write was refused rather than overwriting someone else's change. What you typed is still staged — resolve it below to see what changed."
+                " A version conflict means the document changed on the server after you loaded it, so the write was refused rather than overwriting someone else's change. What you typed is still staged; resolve it below to see what changed."
         }
         return line
     }
@@ -262,11 +262,11 @@ private struct MutationRowLine: View {
             }
             return line
         case .notAttempted:
-            return "never attempted — the batch stopped before it, so this is still staged"
+            return "never attempted: the batch stopped before it, so this is still staged"
         case .failed:
             if row.conflict {
                 return
-                    "version conflict — this document changed on the server after you loaded it, so nothing was written"
+                    "version conflict: this document changed on the server after you loaded it, so nothing was written"
             }
             return row.error ?? "the write failed"
         }

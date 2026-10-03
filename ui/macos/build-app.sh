@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # Builds ui/macos and assembles datagrep.app by hand.
-#
-# There is no Xcode on this machine — Command Line Tools 16.4 only — so there is
-# no xcodebuild and no .xcodeproj. `swift build` produces the executable and this
-# script writes the bundle layout (Info.plist + Contents/MacOS/) around it.
+# Needs only the Command Line Tools: no xcodebuild, no .xcodeproj.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -13,19 +10,12 @@ APP_NAME="datagrep"
 BUNDLE_ID="com.lori.datagrep"
 VERSION="0.4.0"
 
-# Default to the REAL engine. The stub links a synthetic in-memory dataset and
-# cannot connect to any database, so a stub bundle looks fine and does nothing —
-# not what anyone following the README wants. Opt into it with DATAGREP_FFI=stub.
+# Default to the real engine; the stub cannot connect to any database. Opt in with DATAGREP_FFI=stub.
 if [ "${DATAGREP_FFI:-real}" != "stub" ]; then
     export DATAGREP_FFI=real
     REPO_ROOT="$(cd ../.. && pwd)"
     export DATAGREP_FFI_LIB_DIR="${DATAGREP_FFI_LIB_DIR:-${REPO_ROOT}/target/release}"
-    # ALWAYS, not just when the archive is missing. A stale .a is silently
-    # linked against fresh Swift, and the mismatch surfaces as nonsense far from
-    # here — an archive predating a profile-store migration produced "database
-    # schema version 2 is newer than this build supports (max 1)" against a
-    # database the same checkout had just migrated. cargo is incremental, so a
-    # no-op rebuild costs about a second.
+    # Always rebuild: a stale .a links silently against fresh Swift and fails far from here.
     if [ -z "${DATAGREP_SKIP_FFI_BUILD:-}" ]; then
         echo "==> building the engine (cargo build --release -p datagrep-ffi)"
         (cd "${REPO_ROOT}" && cargo build --release -p datagrep-ffi) || {
@@ -40,13 +30,7 @@ if [ "${DATAGREP_FFI:-real}" != "stub" ]; then
     }
 fi
 
-# SwiftPM does not treat libdatagrep_ffi.a as an input, so a rebuilt engine does
-# NOT trigger a relink — it happily keeps the executable it linked last time.
-# That is silent and evil: the Swift half is current, the Rust half is whatever
-# it was, and the mismatch surfaces somewhere unrelated. It shipped an app whose
-# engine predated a profile-store migration, which then refused to open the very
-# database this checkout had just migrated. Deleting the product forces the link
-# step; compilation is still cached, so this costs seconds.
+# SwiftPM does not track libdatagrep_ffi.a, so a newer engine needs the product deleted to relink.
 PRELINK_BIN="$(swift build -c "${CONFIG}" --show-bin-path)/datagrep-app"
 if [ -f "${PRELINK_BIN}" ] && [ "${DATAGREP_FFI_LIB_DIR:-}/libdatagrep_ffi.a" -nt "${PRELINK_BIN}" ]; then
     echo "==> engine is newer than the last link; forcing a relink"
@@ -77,28 +61,21 @@ if [ ${#SIDECARS[@]} -gt 0 ]; then
   echo "==> bundled ${#SIDECARS[@]} engine sidecar(s) into Contents/Helpers"
 fi
 
-# App icon. CFBundleIconFile below must match this basename WITHOUT extension
-# ("datagrep", not "datagrep.icns") — Finder/Dock resolve it themselves, and a
-# wrong value fails silently (app launches fine, just keeps the generic
-# document icon). macOS also caches Dock/Finder icon lookups aggressively per
-# bundle path, so a stale icon after rebuilding usually means the cache, not
-# this script — `touch` the .app and/or restart Dock/Finder to force it.
+# CFBundleIconFile must be this basename without extension; a wrong value fails silently.
+# A stale icon after rebuilding is the Dock/Finder cache: touch the .app or restart Dock.
 ICNS_SRC="${PWD}/../../assets/datagrep.icns"
 if [ -f "${ICNS_SRC}" ]; then
   cp "${ICNS_SRC}" "${APP}/Contents/Resources/${APP_NAME}.icns"
   echo "==> bundled ${APP_NAME}.icns"
 else
-  echo "==> WARNING: ${ICNS_SRC} missing — app will show the generic document icon" >&2
+  echo "==> WARNING: ${ICNS_SRC} missing; app will show the generic document icon" >&2
 fi
 
-# SwiftPM resource bundles (engine brand marks). `Bundle.module` resolves these
-# from Bundle.main.resourceURL, so they MUST be inside Contents/Resources — if
-# this loop copies nothing, every engine icon silently falls back to an SF
-# Symbol and `Bundle.module` traps on a target that has no other resource.
+# Bundle.module resolves from Contents/Resources; without these it traps or falls back to SF Symbols.
 shopt -s nullglob
 BUNDLES=("${BIN_DIR}"/*.bundle)
 if [ ${#BUNDLES[@]} -eq 0 ]; then
-  echo "==> WARNING: no .bundle in ${BIN_DIR} — engine icons will fall back to SF Symbols" >&2
+  echo "==> WARNING: no .bundle in ${BIN_DIR}; engine icons will fall back to SF Symbols" >&2
 else
   for b in "${BUNDLES[@]}"; do
     cp -R "${b}" "${APP}/Contents/Resources/"
@@ -133,24 +110,8 @@ PLIST
 
 printf 'APPL????' > "${APP}/Contents/PkgInfo"
 
-# Signature. Prefers a stable identity, falls back to ad-hoc.
-#
-# This is not cosmetic. macOS binds a keychain item's ACL to the signing
-# identity, and an ad-hoc signature has none — so the ACL ends up keyed on the
-# binary's cdhash, which changes on EVERY build. Each rebuild is therefore a
-# different app to the keychain, and the "datagrep wants to access key" prompt
-# comes back no matter how many times you click Always Allow.
-#
-# A self-signed certificate is enough to stop that: it gives every build the
-# same identity. Create one once, no Apple account needed:
-#
-#   Keychain Access → Certificate Assistant → Create a Certificate…
-#     Name: datagrep-dev   Identity Type: Self Signed Root
-#     Certificate Type: Code Signing
-#
-# Override the name with DATAGREP_SIGN_IDENTITY. Releases are signed with a real
-# Developer ID in .github/workflows/release.yml, which is what also clears the
-# Gatekeeper warning.
+# Ad-hoc signing keys keychain ACLs on the cdhash, so every rebuild re-prompts; prefer a stable identity.
+# Make one in Keychain Access (Self Signed Root, Code Signing) named datagrep-dev, or set DATAGREP_SIGN_IDENTITY.
 SIGN_IDENTITY="${DATAGREP_SIGN_IDENTITY:-datagrep-dev}"
 if command -v codesign >/dev/null 2>&1; then
   SIGN_AS="-"
@@ -170,7 +131,7 @@ if command -v codesign >/dev/null 2>&1; then
       || echo "==> codesign with ${SIGN_IDENTITY} failed (app will still run)"
   else
     codesign --force --sign - --timestamp=none "${APP}" >/dev/null 2>&1 \
-      && echo "==> ad-hoc signed (no '${SIGN_IDENTITY}' identity — the keychain will re-prompt after every build; see the comment above)" \
+      && echo "==> ad-hoc signed (no '${SIGN_IDENTITY}' identity; the keychain will re-prompt after every build; see the comment above)" \
       || echo "==> codesign failed (app will still run)"
   fi
 fi

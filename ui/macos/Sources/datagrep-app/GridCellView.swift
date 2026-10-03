@@ -89,7 +89,6 @@ final class GridCellView: NSView {
     private(set) var isEditable = false
     private var staged: MutationValue?
     private var stagedState: StagedState?
-    /// This row is staged for deletion.
     private var isDeleted = false
     private var isEditing = false
     private var chipRect: NSRect = .zero
@@ -297,7 +296,6 @@ final class GridCellView: NSView {
 
     var canBeginEditing: Bool { isEditable && !isPending && kind != .nested }
 
-    /// Turn this cell into a field editor over the value it is showing.
     func beginEditing() {
         guard canBeginEditing, !isEditing else { return }
         isEditing = true
@@ -337,7 +335,7 @@ final class GridCellView: NSView {
         switch stagedState {
         case .applied:
             return
-                "\(what) — written to the server. The grid still shows the rows as they were loaded; reload to see what is stored now."
+                "\(what): written to the server. The grid still shows the rows as they were loaded; reload to see what is stored now."
         case .conflicted(let why):
             return
                 "\(what), and the server refused it: this document changed after you loaded it, so nothing was written. \(why)"
@@ -345,9 +343,9 @@ final class GridCellView: NSView {
             return "\(what), and the write failed: \(why)"
         case .notAttempted:
             return
-                "\(what) — the batch stopped before reaching this document, so nothing was written for it and it is still staged."
+                "\(what): the batch stopped before reaching this document, so nothing was written for it and it is still staged."
         case .pending, .none:
-            return "\(what) — not written yet. Commit it from the bar below the grid."
+            return "\(what): not written yet. Commit it from the bar below the grid."
         }
     }
 
@@ -368,10 +366,10 @@ final class GridCellView: NSView {
 
     override var toolTip: String? {
         get {
-            if isPending { return "loading — this row has not been fetched yet" }
+            if isPending { return "loading: this row has not been fetched yet" }
             if let staging = stagingToolTip { return staging }
             switch kind {
-            case .absent: return "ABSENT — this field is not present in the document"
+            case .absent: return "ABSENT: this field is not present in the document"
             case .null: return "NULL"
             case .nested: return "click to open the detail panel"
             case .value: return text.isEmpty ? "empty string" : nil

@@ -2,7 +2,6 @@ import AppKit
 import DatagrepKit
 import SwiftUI
 
-/// Query history: everything datagrep has actually run, searchable.
 struct HistoryPanel: View {
     @ObservedObject var model: HistoryModel
     /// Present as a sheet? Then this is the dismissal. Nil when hosted inline.
@@ -128,7 +127,7 @@ struct HistoryPanel: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .help("Filter by outcome — ok, failed or cancelled")
+            .help("Filter by outcome: ok, failed or cancelled")
 
             if model.hasFilter {
                 Button("Clear") { model.clearFilters() }
@@ -152,7 +151,7 @@ struct HistoryPanel: View {
                 Label("No history yet", systemImage: "clock.arrow.circlepath")
             } description: {
                 Text(
-                    "Every statement datagrep runs is logged here automatically — the SQL, which connection it ran on, how long it took, and what came back."
+                    "Every statement datagrep runs is logged here automatically: the SQL, which connection it ran on, how long it took, and what came back."
                 )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -201,7 +200,6 @@ struct HistoryPanel: View {
             Image(systemName: "externaldrive")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            // Stated, not hidden: this is the whole point of the retention work.
             Text(model.retention.summary)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -276,7 +274,7 @@ private struct HistoryRow: View {
                     .background(
                         Capsule().fill(Color(nsColor: .quaternaryLabelColor).opacity(0.45))
                     )
-                    .help("Run \(entry.runCount) times in quick succession — collapsed into one entry")
+                    .help("Run \(entry.runCount) times in quick succession, collapsed into one entry")
                     .padding(.top, 2)
             }
         }
@@ -469,8 +467,8 @@ struct HistoryToolbarButton: View {
         }
         .help(
             history.entries.isEmpty
-                ? "Query history — every statement datagrep runs is logged here  ⌘Y"
-                : "Query history — \(history.entries.count.formatted()) statements, searchable  ⌘Y"
+                ? "Query history: every statement datagrep runs is logged here  ⌘Y"
+                : "Query history: \(history.entries.count.formatted()) statements, searchable  ⌘Y"
         )
     }
 }
