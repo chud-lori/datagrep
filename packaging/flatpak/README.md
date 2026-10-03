@@ -43,3 +43,17 @@ flatpak-builder --run build-dir packaging/flatpak/io.github.chud_lori.datagrep.y
 `cargo --offline` inside the sandbox resolves against the crates that
 flatpak-builder pre-downloaded from `cargo-sources.json` — regenerate it after
 any `Cargo.lock` change.
+
+## Engine sidecars (Go)
+
+The `golang` SDK extension builds `sidecar/` in the same module, installing
+the binaries into `/app/lib/datagrep/sidecars/`. Go is offline too, so
+`generate-go-sources.sh` resolves the module graph for linux/amd64 and
+linux/arm64. It writes each `.mod` and `.zip` from proxy.golang.org into
+`go-sources.json`, with its sha256 pinned. flatpak-builder lays those files out
+as a `file://` GOPROXY, and `go.sum` still verifies them. Without `sidecar/`
+the file is `[]`.
+
+```sh
+packaging/flatpak/generate-go-sources.sh
+```

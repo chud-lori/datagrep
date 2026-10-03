@@ -54,6 +54,22 @@ final class IdleCaretTextView: NSTextView {
         return ok
     }
 
+    /// The identifier run before the caret, matching what the engine calls the prefix.
+    override var rangeForUserCompletion: NSRange {
+        let ns = string as NSString
+        let caret = selectedRange()
+        guard caret.length == 0 else { return NSRange(location: NSNotFound, length: 0) }
+        var start = caret.location
+        while start > 0 {
+            let c = ns.character(at: start - 1)
+            let ident = c >= 0x80 || c == 0x5F || c == 0x24
+                || (c < 0x80 && CharacterSet.alphanumerics.contains(Unicode.Scalar(UInt8(c))))
+            guard ident else { break }
+            start -= 1
+        }
+        return NSRange(location: start, length: caret.location - start)
+    }
+
     override func resignFirstResponder() -> Bool {
         parkWorkItem?.cancel()
         parkWorkItem = nil
@@ -150,6 +166,9 @@ private final class TabBarHostingView: NSHostingView<EditorTabBar> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
+/// Runs off the main thread: (whole buffer, caret as a UTF-8 byte offset).
+typealias CompletionFetch = (String, Int) throws -> CompletionAnswer
+
 final class SQLEditorController: NSViewController, NSTextViewDelegate {
     private(set) var textView: IdleCaretTextView!
     /// The document, held strongly.
@@ -176,6 +195,14 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     private var autosaveItem: DispatchWorkItem?
 
     private var isSwappingDocument = false
+
+    /// Asked on the main thread each time; nil when no connection can answer.
+    var completionSource: (() -> CompletionFetch?)?
+    private let completionQueue = DispatchQueue(label: "datagrep.completion", qos: .userInitiated)
+    private var completionGeneration = 0
+    private var completionDebounce: DispatchWorkItem?
+    private var completionAnswer: (start: Int, answer: CompletionAnswer)?
+    private var lastEditWasTyping = false
 
     // MARK: - view
 
@@ -412,6 +439,94 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     }
 
     func focus() { view.window?.makeFirstResponder(textView) }
+
+    /// Rewrites the selection, or the whole buffer, as one undoable edit.
+    func reformat(_ transform: (String) throws -> String) throws {
+        loadViewIfNeeded()
+        let ns = textView.string as NSString
+        let selected = textView.selectedRange()
+        let range = selected.length > 0 ? selected : NSRange(location: 0, length: ns.length)
+        let source = ns.substring(with: range)
+        let formatted = try transform(source)
+        guard formatted != source, textView.shouldChangeText(in: range, replacementString: formatted)
+        else { return }
+        textView.textStorage?.replaceCharacters(in: range, with: formatted)
+        textView.didChangeText()
+        textView.setSelectedRange(
+            NSRange(location: range.location, length: selected.length > 0 ? (formatted as NSString).length : 0))
+    }
+
+    // MARK: - completion
+
+    func requestCompletions(after delay: TimeInterval) {
+        completionDebounce?.cancel()
+        guard isViewLoaded, let fetch = completionSource?() else { return }
+        let caret = textView.selectedRange()
+        guard caret.length == 0 else { return }
+        let text = textView.string
+        let caretUTF8 = (text as NSString).substring(to: caret.location).utf8.count
+        completionGeneration += 1
+        let generation = completionGeneration
+        let item = DispatchWorkItem { [weak self] in
+            self?.completionQueue.async {
+                let answer: CompletionAnswer?
+                do { answer = try fetch(text, caretUTF8) } catch {
+                    NSLog("datagrep completion failed: \(error)")
+                    answer = nil
+                }
+                DispatchQueue.main.async {
+                    self?.present(answer, generation: generation, caret: caret.location)
+                }
+            }
+        }
+        completionDebounce = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    private func present(_ answer: CompletionAnswer?, generation: Int, caret: Int) {
+        guard let answer, generation == completionGeneration,
+            textView.selectedRange() == NSRange(location: caret, length: 0)
+        else { return }
+        if let error = answer.error { NSLog("datagrep completion without the catalog: \(error)") }
+        guard !answer.items.isEmpty else { return }
+        completionAnswer = (caret - (answer.prefix as NSString).length, answer)
+        textView.complete(nil)
+    }
+
+    func textView(
+        _ textView: NSTextView, completions words: [String], forPartialWordRange charRange: NSRange,
+        indexOfSelectedItem index: UnsafeMutablePointer<Int>?
+    ) -> [String] {
+        guard let held = completionAnswer, held.start == charRange.location else {
+            requestCompletions(after: 0)
+            return []
+        }
+        let typed = (textView.string as NSString).substring(with: charRange).lowercased()
+        var seen = Set<String>()
+        let matches = held.answer.items.filter { item in
+            var rest = item.label.lowercased()[...]
+            for c in typed {
+                guard let at = rest.firstIndex(of: c) else { return false }
+                rest = rest[rest.index(after: at)...]
+            }
+            return seen.insert(item.insert).inserted
+        }
+        index?.pointee = matches.isEmpty ? -1 : 0
+        return matches.map(\.insert)
+    }
+
+    func textView(
+        _ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange,
+        replacementString: String?
+    ) -> Bool {
+        lastEditWasTyping =
+            replacementString.map { s in
+                s.count == 1 && s.unicodeScalars.allSatisfy {
+                    CharacterSet.alphanumerics.contains($0) || $0 == "_" || $0 == "."
+                }
+            } ?? false
+        return true
+    }
 
     /// Re-reads the profile list. Call after profiles are added or removed.
     func refreshConnections() {
@@ -819,6 +934,10 @@ final class SQLEditorController: NSViewController, NSTextViewDelegate {
     func textDidChange(_ notification: Notification) {
         guard !isSwappingDocument else { return }
         tabs.active?.isDirty = true
+        if lastEditWasTyping {
+            lastEditWasTyping = false
+            requestCompletions(after: 0.15)
+        }
         highlighter.refreshVisible()
         updateDecorations()
         scheduleAutosave()

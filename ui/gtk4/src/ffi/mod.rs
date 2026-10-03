@@ -5,17 +5,18 @@ use std::sync::Arc;
 
 use datagrep_ffi::{
     datagrep_browse_statement, datagrep_catalog_children_json, datagrep_catalog_describe_json,
-    datagrep_core_free, datagrep_core_new, datagrep_derive_statement, datagrep_export_cancel,
-    datagrep_export_formats_json, datagrep_export_free, datagrep_export_start,
-    datagrep_export_status_json, datagrep_filter_operators_json, datagrep_mutate,
-    datagrep_profiles_add, datagrep_profiles_list_json, datagrep_profiles_remove,
-    datagrep_query_cancel, datagrep_query_free, datagrep_query_on_progress, datagrep_query_rows,
-    datagrep_query_run, datagrep_query_status_json, datagrep_reread_documents, datagrep_rows_cell,
+    datagrep_complete_forget, datagrep_complete_json, datagrep_core_free, datagrep_core_new,
+    datagrep_derive_statement, datagrep_export_cancel, datagrep_export_formats_json,
+    datagrep_export_free, datagrep_export_start, datagrep_export_status_json,
+    datagrep_filter_operators_json, datagrep_mutate, datagrep_profiles_add,
+    datagrep_profiles_list_json, datagrep_profiles_remove, datagrep_query_cancel,
+    datagrep_query_free, datagrep_query_on_progress, datagrep_query_rows, datagrep_query_run,
+    datagrep_query_status_json, datagrep_reread_documents, datagrep_rows_cell,
     datagrep_rows_cell_detail_json, datagrep_rows_cell_kind, datagrep_rows_column_names_json,
     datagrep_rows_columns, datagrep_rows_count, datagrep_rows_envelope_json, datagrep_rows_free,
     datagrep_rows_pending, datagrep_safety_evaluate_json, datagrep_safety_pending_json,
-    datagrep_safety_satisfy, datagrep_string_free, DatagrepCore, DatagrepExport, DatagrepQuery,
-    DatagrepRows,
+    datagrep_safety_satisfy, datagrep_sql_format, datagrep_string_free, DatagrepCore,
+    DatagrepExport, DatagrepQuery, DatagrepRows,
 };
 // Not re-exported at the crate root, unlike the rest of the ABI surface.
 use datagrep_ffi::profiles::{
@@ -159,6 +160,22 @@ impl Core {
             datagrep_catalog_describe_json(self.raw.0, profile.as_ptr(), path.as_ptr(), &mut err)
         };
         owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+    }
+
+    /// Candidates at a UTF-8 byte offset; the first call per connection lists its tables.
+    pub fn complete_json(&self, profile: &str, text: &str, caret: usize) -> Result<String, Error> {
+        let (profile, text) = (nul_terminated(profile)?, nul_terminated(text)?);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let raw = unsafe {
+            datagrep_complete_json(self.raw.0, profile.as_ptr(), text.as_ptr(), caret, &mut err)
+        };
+        owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+    }
+
+    pub fn complete_forget(&self, profile: &str) {
+        if let Ok(profile) = nul_terminated(profile) {
+            unsafe { datagrep_complete_forget(self.raw.0, profile.as_ptr()) };
+        }
     }
 
     pub fn profile_json(&self, name: &str) -> Result<String, Error> {
@@ -347,6 +364,14 @@ pub fn browse_statement(
             &mut err,
         )
     };
+    owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
+}
+
+/// Clause-per-line SQL with upper-cased keywords; refused for an engine that is not SQL.
+pub fn sql_format(driver_id: &str, sql: &str) -> Result<String, Error> {
+    let (driver, sql) = (nul_terminated(driver_id)?, nul_terminated(sql)?);
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let raw = unsafe { datagrep_sql_format(driver.as_ptr(), sql.as_ptr(), &mut err) };
     owned_string_from_ffi(raw).ok_or_else(|| error_from_ffi(err))
 }
 

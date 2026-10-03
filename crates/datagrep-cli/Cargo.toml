@@ -18,6 +18,7 @@ datagrep-profiles = { path = "../datagrep-profiles" }
 datagrep-secrets = { path = "../datagrep-secrets" }
 datagrep-drv-postgres = { path = "../datagrep-drv-postgres" }
 datagrep-drv-sqlite = { path = "../datagrep-drv-sqlite" }
+datagrep-drv-sidecar = { path = "../datagrep-drv-sidecar" }
 
 clap = { version = "4", features = ["derive"] }
 serde_json = { workspace = true }

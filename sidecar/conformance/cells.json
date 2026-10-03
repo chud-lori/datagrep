@@ -1,0 +1,13 @@
+[
+  {"name": "i64", "logical": "I64", "wire": -9223372036854775808, "rust": "I64(-9223372036854775808)"},
+  {"name": "decimal", "logical": "Decimal", "wire": "12345678901234567890.10", "rust": "Decimal(\"12345678901234567890.10\")"},
+  {"name": "bytes", "logical": "Bytes", "wire": "AAH/", "rust": "Bytes(b\"\\0\\x01\\xff\")"},
+  {"name": "f64_nan", "logical": "F64", "wire": "NaN", "rust": "F64(NaN)"},
+  {"name": "f64_neg_inf", "logical": "F64", "wire": "-Infinity", "rust": "F64(-inf)"},
+  {"name": "date", "logical": "Date", "wire": 19723, "rust": "Date(19723)"},
+  {"name": "timestamp_utc", "logical": "Timestamp", "wire": {"us": 1704067200123456, "tz": "utc"}, "rust": "Timestamp { micros: 1704067200123456, tz: Utc }"},
+  {"name": "timestamp_naive", "logical": "Timestamp", "wire": {"us": 1704067200000000, "tz": "naive"}, "rust": "Timestamp { micros: 1704067200000000, tz: Naive }"},
+  {"name": "timestamp_offset", "logical": "Timestamp", "wire": {"us": 0, "tz": "-09:30"}, "rust": "Timestamp { micros: 0, tz: Offset(-570) }"},
+  {"name": "null", "logical": "Str", "wire": null, "rust": "Null"},
+  {"name": "tagged_override", "logical": "I64", "wire": {"$t": "str", "v": "n/a"}, "rust": "Str(\"n/a\")"}
+]

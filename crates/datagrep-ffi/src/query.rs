@@ -188,6 +188,8 @@ async fn drive(shared: Arc<QueryShared>, profile: String, sql: String) {
     }
 
     let statements = split_statements(&driver_id, &sql);
+    let _schema_change =
+        crate::complete::SchemaChange::watch(&shared.core, &profile, &driver_id, &statements);
     let Some((last, leading)) = statements.split_last() else {
         return shared.fail("sql contains no statement".to_string());
     };
@@ -481,6 +483,7 @@ pub fn language_for_driver(id: &str) -> Option<LanguageId> {
         "mongodb" => Some(LanguageId::MongoShell),
         "mysql" => Some(LanguageId::Sql(datagrep_api::SqlDialect::Mysql)),
         "elasticsearch" => Some(LanguageId::EsDsl),
+        "oracle" => Some(datagrep_drv_sidecar::ORACLE.language),
         _ => None,
     }
 }

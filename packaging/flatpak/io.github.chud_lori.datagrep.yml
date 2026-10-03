@@ -21,6 +21,7 @@ sdk: org.gnome.Sdk
 # base), not from rustup: rustup cannot run in the offline sandbox.
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.golang
 # The GTK4 app. The CLI is installed alongside it and stays reachable with
 # `flatpak run --command=datagrep-cli io.github.chud_lori.datagrep`.
 command: datagrep
@@ -51,10 +52,18 @@ modules:
   - name: datagrep
     buildsystem: simple
     build-options:
-      append-path: /usr/lib/sdk/rust-stable/bin
+      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/golang/bin
       env:
         CARGO_HOME: /run/build/datagrep/cargo
+        # go-sources.json lays the module graph out as a local proxy; go.sum still verifies it.
+        GOPROXY: file:///run/build/datagrep/goproxy
+        GOSUMDB: 'off'
+        GOTOOLCHAIN: local
+        GOMODCACHE: /run/build/datagrep/gomodcache
+        GOCACHE: /run/build/datagrep/gocache
     build-commands:
+      - bash packaging/build-sidecars.sh "linux/$(go env GOARCH)"
+      - find dist/.sidecars -name 'datagrep-sidecar-*' -exec install -Dm755 -t /app/lib/datagrep/sidecars {} +
       # The CLI first, from the root workspace; the GTK4 UI is a second
       # workspace and links datagrep-ffi (the full driver graph) as a crate.
       - cargo --offline build --release -p datagrep-cli
@@ -82,3 +91,4 @@ modules:
           - ui/gtk4/target
           - ui/macos/.build
       - cargo-sources.json
+      - go-sources.json

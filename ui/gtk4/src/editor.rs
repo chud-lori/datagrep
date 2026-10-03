@@ -1,8 +1,10 @@
 use adw::prelude::*;
 use adw::subclass::prelude::*;
-use gtk::glib;
+use gtk::{gio, glib};
 use sourceview5::prelude::*;
 
+use crate::completion;
+use crate::ffi;
 use crate::sql;
 use crate::store::SavedQueryRecord;
 
@@ -18,6 +20,7 @@ mod imp {
     pub struct EditorPage {
         pub buffer: OnceCell<sourceview5::Buffer>,
         pub view: OnceCell<sourceview5::View>,
+        pub completion: completion::Provider,
         pub record: RefCell<SavedQueryRecord>,
         pub untitled_number: Cell<u32>,
         pub dirty: Cell<bool>,
@@ -96,6 +99,10 @@ mod imp {
                 Some(run),
             ));
             view.add_controller(shortcuts);
+            view.completion().add_provider(&self.completion);
+            let menu = gio::Menu::new();
+            menu.append(Some("Format SQL"), Some("tabs.format"));
+            view.set_extra_menu(Some(&menu));
 
             obj.set_child(Some(
                 &gtk::ScrolledWindow::builder()
@@ -256,6 +263,27 @@ impl EditorPage {
             let directive = block.directives.connection.unwrap_or_default();
             self.emit_by_name::<()>("run-requested", &[&block.text, &directive]);
         }
+    }
+
+    pub fn set_completion_target(&self, target: completion::Target) {
+        self.imp().completion.set_target(target);
+    }
+
+    /// The selection, or the whole buffer when nothing is selected, as one undo step.
+    pub fn format_sql(&self, driver: &str) -> Result<(), ffi::Error> {
+        let buffer = self.buffer();
+        let (mut start, mut end) = buffer
+            .selection_bounds()
+            .unwrap_or_else(|| (buffer.start_iter(), buffer.end_iter()));
+        let source = buffer.text(&start, &end, true);
+        let formatted = ffi::sql_format(driver, &source)?;
+        if formatted != source.as_str() {
+            buffer.begin_user_action();
+            buffer.delete(&mut start, &mut end);
+            buffer.insert(&mut start, &formatted);
+            buffer.end_user_action();
+        }
+        Ok(())
     }
 
     pub fn apply_scheme(&self, dark: bool) {

@@ -51,6 +51,13 @@ fetch "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/co
 
 rm -rf "$APPDIR"
 
+SIDECAR_DIR="${SIDECAR_DIR:-$OUT_DIR/.sidecars/linux-amd64}"
+shopt -s nullglob
+for sidecar in "$SIDECAR_DIR"/datagrep-sidecar-*; do
+    install -Dm755 "$sidecar" "$APPDIR/usr/lib/datagrep/sidecars/$(basename "$sidecar")"
+done
+shopt -u nullglob
+
 export DEPLOY_PLATFORM_THEMES="${DEPLOY_PLATFORM_THEMES:-1}"
 
 export PATH="$TOOLS_DIR:$PATH"
@@ -67,6 +74,13 @@ if ! ls "$APPDIR"/usr/plugins/platformthemes/*.so >/dev/null 2>&1; then
     echo "error: no platform theme plugins in AppDir (install qt6-gtk-platformtheme)" >&2
     exit 1
 fi
+
+# linuxdeploy must leave the static sidecars byte-identical (no rpath patching).
+shopt -s nullglob
+for sidecar in "$SIDECAR_DIR"/datagrep-sidecar-*; do
+    cmp "$sidecar" "$APPDIR/usr/lib/datagrep/sidecars/$(basename "$sidecar")"
+done
+shopt -u nullglob
 
 echo
 echo "AppImage(s) in $OUT_DIR:"
