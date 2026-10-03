@@ -870,7 +870,7 @@ checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
 name = "datagrep-api"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "bitflags",
@@ -883,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "datagrep-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -906,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "datagrep-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "datagrep-drv-elasticsearch"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -942,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "datagrep-drv-mongo"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "bson",
@@ -959,7 +959,7 @@ dependencies = [
 
 [[package]]
 name = "datagrep-drv-mysql"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -974,7 +974,7 @@ dependencies = [
 
 [[package]]
 name = "datagrep-drv-postgres"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "datagrep-drv-redis"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1005,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "datagrep-drv-sidecar"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1021,7 +1021,7 @@ dependencies = [
 
 [[package]]
 name = "datagrep-drv-sqlite"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "datagrep-ffi"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1063,7 +1063,7 @@ dependencies = [
 
 [[package]]
 name = "datagrep-lang"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "datagrep-api",
  "thiserror",
@@ -1071,7 +1071,7 @@ dependencies = [
 
 [[package]]
 name = "datagrep-profiles"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "datagrep-api",
  "rusqlite",
@@ -1086,7 +1086,7 @@ dependencies = [
 
 [[package]]
 name = "datagrep-secrets"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "datagrep-api",
  "keyring",
@@ -1097,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "datagrep-tunnel"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "datagrep-api",
  "dirs",

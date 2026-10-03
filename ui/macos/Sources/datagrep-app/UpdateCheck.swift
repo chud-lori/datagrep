@@ -41,7 +41,7 @@ final class UpdateCheck: ObservableObject {
 
     static let manifestURL = URL(string: "https://chud-lori.github.io/datagrep/latest.json")!
 
-    static let fallbackVersion = "0.4.0"
+    static let fallbackVersion = "0.5.0"
 
     @Published private(set) var available: UpdateManifest?
 

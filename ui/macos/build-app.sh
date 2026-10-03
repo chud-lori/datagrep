@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 CONFIG="${CONFIG:-release}"
 APP_NAME="datagrep"
 BUNDLE_ID="com.lori.datagrep"
-VERSION="0.4.0"
+VERSION="0.5.0"
 
 # Default to the real engine; the stub cannot connect to any database. Opt in with DATAGREP_FFI=stub.
 if [ "${DATAGREP_FFI:-real}" != "stub" ]; then

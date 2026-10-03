@@ -75,7 +75,7 @@ func TestFrames(t *testing.T) {
 	three := uint64(3)
 	pos := uint32(14)
 	encoded := map[string]any{
-		"hello": wire.HelloReply{Protocol: 1, Engine: "oracle", EngineVersion: "0.4.0",
+		"hello": wire.HelloReply{Protocol: 1, Engine: "oracle", EngineVersion: "0.5.0",
 			Language: wire.LanguageUnclassified, Caps: wire.CapServerCancel | wire.CapSchemaDeclared | wire.CapPositionalParams},
 		"execute_table": wire.ExecuteReply{Cursor: 7, Shape: wire.Table([]wire.Field{
 			{Name: "ID", Logical: wire.Decimal, NativeType: str("NUMBER")},
