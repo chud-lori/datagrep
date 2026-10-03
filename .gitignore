@@ -21,3 +21,6 @@ packaging/flatpak/flatpak-cargo-generator.py
 .flatpak-builder/
 # ui/gtk4 is a standalone cargo workspace, for the same reason
 ui/gtk4/target/
+
+# sidecar engine binaries built locally
+/sidecar/bin/

@@ -1,0 +1,37 @@
+[package]
+name = "datagrep-drv-sidecar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Engines served by an out-of-process sidecar over length-prefixed JSON on stdio, behind the same driver traits as the native drivers."
+
+# The misbehaving peer the integration tests drive; never shipped.
+[[bin]]
+name = "datagrep-sidecar-fake"
+path = "tests/support/fake_sidecar.rs"
+test = false
+doc = false
+
+[dependencies]
+datagrep-api = { path = "../datagrep-api" }
+
+async-trait = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Bytes, Geo and raw cells travel as base64 strings; already in the graph via the HTTP drivers.
+base64 = "0.22"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "process", "io-util"] }
+tracing = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+# setrlimit/prctl in the child before exec; already in the graph via tokio.
+libc = "0.2"
+
+[dev-dependencies]
+datagrep-core = { path = "../datagrep-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[lints.clippy]
+uninlined_format_args = "allow"
