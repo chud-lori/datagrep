@@ -68,7 +68,7 @@ async fn stream_result_inner(
                 let _ = ctx.core.cancel(qid).await;
                 cancelled = true;
                 note = Some(
-                    "stopped: timed out — the server may still be executing this query".to_string(),
+                    "stopped: timed out; the server may still be executing this query".to_string(),
                 );
                 break;
             }

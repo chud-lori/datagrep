@@ -30,14 +30,12 @@ final class GridGutterHeader: NSView {
     override func mouseDown(with event: NSEvent) { onSelectAll?() }
 }
 
-/// The pinned row-number gutter.
 // Row numbers are ruler chrome, never table data — structurally excluded from copy.
 final class GridRowNumberRuler: NSRulerView {
     /// Weak: the scroll view owns both of us.
     weak var grid: GridTableView?
     var onSelectRow: ((Int, Bool) -> Void)?
 
-    // Cached once — never allocated per draw.
     private static let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
     private static let para: NSParagraphStyle = {
         let p = NSMutableParagraphStyle()

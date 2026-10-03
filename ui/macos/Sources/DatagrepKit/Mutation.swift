@@ -52,7 +52,7 @@ extension EditableResult {
             guard let value = MutationValue.decode(envelope[field]), value != .null else {
                 return .failure(
                     DatagrepError(
-                        "this document was loaded without `\(field)`, so an edit to it could only be sent unguarded — and an unguarded write would overwrite whatever the server holds now"
+                        "this document was loaded without `\(field)`, so an edit to it could only be sent unguarded, and an unguarded write would overwrite whatever the server holds now"
                     ))
             }
             expect.append((field, value))

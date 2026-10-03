@@ -61,6 +61,14 @@ char *datagrep_catalog_describe_json(DatagrepCore *, const char *profile, const 
 char *datagrep_browse_statement(const char *driver_id, const char *path_json,
                                 const char *database, char **err_out);
 
+/* [{"op","label","needs_value"},..] for this engine's filter bar; [] where a
+ * result cannot be wrapped in an SQL subquery. */
+char *datagrep_filter_operators_json(const char *driver_id);
+/* `statement` wrapped with the spec's WHERE/ORDER BY, quoted per dialect.
+ * spec_json: {"filters":[{"column","op","value"}],"sort":{"column","ascending"}|null}. */
+char *datagrep_derive_statement(const char *driver_id, const char *statement,
+                                const char *spec_json, char **err_out);
+
 /* caret = UTF-8 byte offset into text. Blocks on first use per connection.
  * {"prefix":str,"items":[{"label","insert","kind","detail":str|null}],"error":str|null}
  * Accepting an item replaces `prefix` before the caret with "insert". */

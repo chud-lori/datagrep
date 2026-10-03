@@ -107,7 +107,7 @@ private struct CellDetailPane: View {
             LegendRow(sample: .null, title: "NULL", note: "present, and null")
             LegendRow(sample: .empty, title: "", note: "present, empty string")
             LegendRow(sample: .absent, title: "—", note: "ABSENT: not in the document at all")
-            LegendRow(sample: .nested, title: "{n fields}", note: "nested — click to open here")
+            LegendRow(sample: .nested, title: "{n fields}", note: "nested: click to open here")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)

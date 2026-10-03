@@ -35,7 +35,7 @@ pub fn mongo_capabilities(transactions_supported: bool) -> Capabilities {
         param_style: ParamStyle::None,
         language: LanguageId::MongoShell,
         identifier_quote: '"',
-        // database -> collection -> field (ticket item 1's `catalog_levels`).
+        // database -> collection -> field.
         catalog_levels: 3,
     }
 }

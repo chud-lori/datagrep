@@ -176,10 +176,10 @@ private struct StatsStrip: View {
     private var inferredSentence: String {
         if let n = detail.sampledDocs {
             return
-                "Fields inferred from \(SchemaDetail.formatCount(n)) sampled documents — this engine declares no schema, so a field missing here may still exist elsewhere in the collection."
+                "Fields inferred from \(SchemaDetail.formatCount(n)) sampled documents. This engine declares no schema, so a field missing here may still exist elsewhere in the collection."
         }
         return
-            "Fields inferred from a sample — this engine declares no schema, so this list is what was seen, not what is guaranteed."
+            "Fields inferred from a sample. This engine declares no schema, so this list is what was seen, not what is guaranteed."
     }
 }
 

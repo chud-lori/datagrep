@@ -1,6 +1,6 @@
 import SwiftUI
 
-///      `MEASURE cold start exec -> window` is taken here.
+/// Keeps the editor and grid bridges off the startup critical path.
 @MainActor
 final class StartupStage: ObservableObject {
     static let shared = StartupStage()

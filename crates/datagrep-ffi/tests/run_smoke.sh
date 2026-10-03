@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
-# Build libdatagrep_ffi.a and link tests/smoke.c against it, exactly the way a
-# Swift app links the same archive. Prints the real link line it used.
-#
-#   ./tests/run_smoke.sh              # release (what ships)
-#   PROFILE=debug ./tests/run_smoke.sh
-#
-# `MANIFEST` may point at a workspace that resolves — the shared datagrep workspace
-# is written by several agents at once and can transiently fail to resolve,
-# so the smoke test is verified against an isolated scratch workspace. Default
-# is this crate's own manifest.
+# Link tests/smoke.c against libdatagrep_ffi.a the way the Swift app does.
+# PROFILE=debug for a debug build; MANIFEST overrides the cargo manifest.
 set -euo pipefail
 
 CRATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -27,10 +19,7 @@ STATIC="$LIB_DIR/libdatagrep_ffi.a"
 [ -f "$STATIC" ] || { echo "no $STATIC"; exit 1; }
 
 OUT="$LIB_DIR/datagrep_smoke"
-# The exact system libraries a Swift app must also pass. rusqlite is
-# `bundled`, so SQLite itself is inside the archive; Security/CoreFoundation
-# are the macOS keychain (datagrep-secrets), and libresolv/libiconv come in via
-# rustls/tokio.
+# The system libraries a Swift app must also pass; SQLite is bundled inside the archive.
 LINK_FLAGS=(-lc++ -framework Security -framework CoreFoundation -framework SystemConfiguration -lresolv -liconv)
 
 echo "--- cc smoke.c"

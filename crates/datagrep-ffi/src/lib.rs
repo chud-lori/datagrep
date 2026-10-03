@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod cells;
 pub mod complete;
 pub mod core;
+pub mod derive;
 pub mod drivers;
 pub mod export;
 pub mod ffi_util;
@@ -22,6 +23,7 @@ pub use crate::core::{datagrep_core_free, datagrep_core_new, datagrep_string_fre
 pub use browse::datagrep_browse_statement;
 pub use catalog::{datagrep_catalog_children_json, datagrep_catalog_describe_json};
 pub use complete::{datagrep_complete_forget, datagrep_complete_json, datagrep_sql_format};
+pub use derive::{datagrep_derive_statement, datagrep_filter_operators_json};
 pub use export::{
     datagrep_export_cancel, datagrep_export_formats_json, datagrep_export_free,
     datagrep_export_start, datagrep_export_status_json, DatagrepExport,

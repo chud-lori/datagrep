@@ -58,7 +58,7 @@ impl<'conn> OpenScan<'conn> {
     ) -> Result<Self, DbError> {
         let bound: Vec<SqlParam<'_>> = params.iter().map(SqlParam).collect();
 
-        // SAFETY: stmt is heap-boxed (stable address), only accessed via rows after construction, and rows is declared before stmt so it drops first — that trio makes erasing the Rows borrow to 'static sound.
+        // SAFETY: stmt is heap-boxed (stable address), only accessed via rows after this, and rows drops first, so erasing the Rows borrow to 'static is sound.
         let stmt_ptr: *mut rusqlite::Statement<'conn> = &mut *stmt;
         let rows = unsafe { &mut *stmt_ptr }
             .query(rusqlite::params_from_iter(bound))
@@ -224,7 +224,7 @@ pub(crate) fn compile_resume_clause(
     if order.len() != 1 {
         return Err(DbError::Unsupported {
             feature: format!(
-                "Op::Scan resume with {} sort keys — only single-key keyset resume is supported",
+                "Op::Scan resume with {} sort keys: only single-key keyset resume is supported",
                 order.len()
             ),
         });

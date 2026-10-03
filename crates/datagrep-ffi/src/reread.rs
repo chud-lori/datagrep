@@ -324,8 +324,6 @@ mod tests {
         assert_eq!(crate::query::object_path_field("postgres"), None);
     }
 
-    // ---- FFI-boundary error paths (no socket, no live server) ----------
-
     fn core() -> *mut DatagrepCore {
         let path = CString::new(":memory:").unwrap();
         let mut err: *mut c_char = std::ptr::null_mut();

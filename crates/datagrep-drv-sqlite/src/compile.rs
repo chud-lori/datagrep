@@ -38,7 +38,7 @@ pub(crate) fn field_ident(path: &FieldPath) -> Result<String, DbError> {
         [PathSeg::Field(name)] => quote_ident(name),
         _ => Err(DbError::Unsupported {
             feature: format!(
-                "nested/indexed field path `{path}` in a SQLite predicate/order/project — \
+                "nested/indexed field path `{path}` in a SQLite predicate/order/project: \
                  SQLite tables are flat"
             ),
         }),
@@ -85,7 +85,7 @@ pub(crate) fn compile_ddl(op: &DdlOp) -> Result<String, DbError> {
             if *kind != ObjectKind::Table {
                 return Err(DbError::Unsupported {
                     feature: format!(
-                        "SQLite can only rename a table — a {kind:?} has to be dropped and \
+                        "SQLite can only rename a table: a {kind:?} has to be dropped and \
                          recreated (`ALTER VIEW`/`ALTER INDEX` are syntax errors)"
                     ),
                 });

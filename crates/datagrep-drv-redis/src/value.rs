@@ -41,7 +41,7 @@ pub fn from_resp(v: redis::Value) -> Value {
             tracing::warn!(
                 variant = %variant_debug,
                 "unrecognized redis::Value variant (redis crate added a variant since this \
-                 driver was written) — falling back to Value::Unsupported"
+                 driver was written): falling back to Value::Unsupported"
             );
             Value::Unsupported {
                 type_name: "redis.value.unknown".into(),

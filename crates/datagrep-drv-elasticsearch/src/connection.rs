@@ -379,9 +379,9 @@ impl EsConnection {
             .and_then(Json::as_str)
             .unwrap_or("eq");
         let message = if relation == "eq" {
-            "hits.total (exact — under the tracking limit)"
+            "hits.total (exact, under the tracking limit)"
         } else {
-            "hits.total (LOWER BOUND — Elasticsearch stopped counting at track_total_hits)"
+            "hits.total (LOWER BOUND: Elasticsearch stopped counting at track_total_hits)"
         };
         if relation != "eq" {
             notices.push(Notice {
@@ -389,7 +389,7 @@ impl EsConnection {
                 code: Some(Arc::from("es.total_is_lower_bound")),
                 message: Arc::from(
                     format!(
-                        "this is at least {} matches, not exactly — request an exact count to run \
+                        "this is at least {} matches, not exactly: request an exact count to run \
                          _count instead",
                         value.unwrap_or(0)
                     )
@@ -455,7 +455,7 @@ impl EsConnection {
     async fn execute_ddl(&self, op: &DdlOp, opts: &ExecOpts) -> Result<Box<dyn Cursor>, DbError> {
         if self.read_only_active(opts) {
             return Err(DbError::Unsupported {
-                feature: "DDL: this connection is in read-only mode (enforced client-side — \
+                feature: "DDL: this connection is in read-only mode (enforced client-side; \
                           Elasticsearch has no read-only session)"
                     .into(),
             });
@@ -517,7 +517,7 @@ impl EsConnection {
         if self.read_only_active(opts) {
             return Err(DbError::Unsupported {
                 feature: "generated writes: this connection is in read-only mode (enforced \
-                          client-side — Elasticsearch has no read-only session)"
+                          client-side; Elasticsearch has no read-only session)"
                     .into(),
             });
         }
@@ -623,7 +623,7 @@ impl EsConnection {
         Ok(Box::new(DocsCursor::new(docs).with_notices(notices)))
     }
 
-    // TSDB indices (ES >= 9.4) carry sentinel _seq_no and reject or ignore if_seq_no, so refuse up front; best-effort — unreadable settings skip the check and the per-document guard still refuses at write time.
+    // TSDB indices (ES >= 9.4) carry a sentinel _seq_no, so refuse up front; unreadable settings fall back to the per-document guard.
     async fn refuse_tsdb_indices(
         &self,
         writes: &[CompiledWrite],
@@ -737,7 +737,7 @@ fn refuse_if_write(req: &ConsoleRequest) -> Result<(), DbError> {
     Err(DbError::Unsupported {
         feature: format!(
             "`{} {}` is not a read, and this connection is in read-only mode (enforced \
-             client-side — Elasticsearch has no read-only session)",
+             client-side; Elasticsearch has no read-only session)",
             req.method.as_str(),
             req.path
         ),

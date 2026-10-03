@@ -188,7 +188,6 @@ async fn op_mutate_insert_update_delete_round_trip() {
 
     let path = datagrep_api::ObjectPath::new(vec![Arc::from("t")]);
 
-    // Insert.
     let doc = Value::Document(Arc::new(datagrep_api::Document::from_fields(vec![
         (Arc::from("id"), Value::I64(1)),
         (Arc::from("v"), Value::Str(Arc::from("first"))),
@@ -222,7 +221,6 @@ async fn op_mutate_insert_update_delete_round_trip() {
         Value::Str(Arc::from("second"))
     );
 
-    // Delete.
     conn.execute(Request::Op(Op::Mutate(MutationBatch {
         mutations: vec![Mutation::Delete {
             path,

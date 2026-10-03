@@ -128,7 +128,6 @@ final class PendingEdits: ObservableObject {
         }
     }
 
-    /// Drop everything staged for one row.
     func discard(row: Int) {
         guard let id = rowIndex[row] else { return }
         documents.removeAll { $0.id == id }
@@ -213,7 +212,7 @@ final class PendingEdits: ObservableObject {
     }
 }
 
-// MARK: - the wire format, checkable without a cluster
+// MARK: - the wire format
 
 enum MutationProbe {
     static func runIfRequested() -> Bool {

@@ -15,8 +15,6 @@ fn parse(driver_id: &str, url: &str) -> Result<ConnectionConfig, String> {
     driver.parse_url(url).map_err(|e| e.to_string())
 }
 
-// ---- TLS defaults ------------------------------------------------------
-
 #[test]
 fn every_driver_declares_an_explicit_tls_default() {
     for id in known_driver_ids() {
@@ -110,8 +108,6 @@ fn a_driver_without_tls_refuses_rather_than_connecting_in_the_clear() {
         );
     }
 }
-
-// ---- read-only ---------------------------------------------------------
 
 #[test]
 fn the_client_side_guard_refuses_a_write_for_every_classifiable_engine() {

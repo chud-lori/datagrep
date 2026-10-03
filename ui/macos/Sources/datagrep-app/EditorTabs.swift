@@ -208,7 +208,7 @@ private struct EditorTabChip: View {
             }
         }
         .onHover { hovering = $0 }
-        .help(tab.name.map { "\($0)  ·  ⌘S saves" } ?? "Unsaved scratch tab — ⌘S names it")
+        .help(tab.name.map { "\($0)  ·  ⌘S saves" } ?? "Unsaved scratch tab (⌘S names it)")
     }
 }
 

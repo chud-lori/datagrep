@@ -33,7 +33,6 @@ async fn catalog_lists_tables_columns_and_completes() {
         "database -> table/view -> column"
     );
 
-    // --- database level ---
     let dbs = catalog
         .children(&ObjectPath::root(), ListOpts::default())
         .await
@@ -45,7 +44,6 @@ async fn catalog_lists_tables_columns_and_completes() {
         "expected a `main` database node, got {dbs:?}"
     );
 
-    // --- table/view level ---
     let main = ObjectPath::new(vec![Arc::from("main")]);
     let objects = catalog
         .children(&main, ListOpts::default())
@@ -81,7 +79,6 @@ async fn catalog_lists_tables_columns_and_completes() {
     assert_eq!(filtered.items.len(), 1);
     assert_eq!(name_of(&filtered.items[0]), "active_users");
 
-    // --- column level ---
     let users_path = ObjectPath::new(vec![Arc::from("main"), Arc::from("users")]);
     let cols = catalog
         .children(&users_path, ListOpts::default())
@@ -91,7 +88,6 @@ async fn catalog_lists_tables_columns_and_completes() {
     assert_eq!(col_names, vec!["id", "email", "age"]);
     assert!(cols.items.iter().all(|n| n.kind == ObjectKind::Column));
 
-    // --- describe ---
     let detail = catalog
         .describe(&users_path)
         .await
@@ -102,7 +98,6 @@ async fn catalog_lists_tables_columns_and_completes() {
     let identity = schema.identity.expect("users has a declared PRIMARY KEY");
     assert_eq!(identity.field_indices, vec![0], "`id` is field 0");
 
-    // --- complete ---
     let ctx = CompletionCtx {
         text: Arc::from("SELECT * FROM us"),
         offset: 16,

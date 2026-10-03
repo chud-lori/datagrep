@@ -746,7 +746,7 @@ mod tests {
         let err = parse("for (let i = 0; i < 10; i++) { db.a.insertOne({i: i}) }").unwrap_err();
         assert_eq!(
             err.to_string(),
-            "datagrep supports query expressions, not arbitrary JavaScript — use a raw command document for anything else"
+            "datagrep supports query expressions, not arbitrary JavaScript: use a raw command document for anything else"
         );
     }
 

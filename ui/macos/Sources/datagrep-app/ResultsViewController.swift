@@ -384,6 +384,7 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     /// Numeric columns render right-aligned; text left-aligned.
     private var rightAlignedByID: [NSUserInterfaceItemIdentifier: Bool] = [:]
     private var columnNames: [String] = []
+    var resultColumnNames: [String] { columnNames }
     let maxVisibleColumns = 30
     private(set) var hiddenColumnCount = 0
     private var didSizeColumns = false
@@ -399,7 +400,7 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
     var onStagingChanged: (() -> Void)?
     var onHiddenColumnsChanged: ((Int) -> Void)?
     var onSortRequested: ((String) -> Void)?
-    var onFilterRequested: ((String, String) -> Void)?
+    var onFilterRequested: ((RowFilter) -> Void)?
     var onCopied: ((String) -> Void)?
     var onSelectionChanged: ((String?) -> Void)?
     var sortColumn: String?
@@ -1194,8 +1195,12 @@ final class ResultsViewController: NSViewController, NSTableViewDataSource, NSTa
 
     @objc private func ctxFilter(_ sender: Any?) {
         guard let c = ctx(sender) else { return }
-        onFilterRequested?(
-            tableView.tableColumns[c.colPos].title, rawText(c.win, row: c.row, col: c.idx))
+        let column = tableView.tableColumns[c.colPos].title
+        let isNull = c.win.kind(absoluteRow: UInt64(c.row), col: c.idx) == .null
+        let value = rawText(c.win, row: c.row, col: c.idx)
+        // NULL and '' look alike in the grid, so an empty non-NULL cell matches both.
+        let op = isNull ? "is_null" : value.isEmpty ? "is_empty" : "eq"
+        onFilterRequested?(RowFilter(column: column, op: op, value: value))
     }
 
     @objc private func ctxSort(_ sender: Any?) {

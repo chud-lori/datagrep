@@ -1,10 +1,6 @@
 #!/bin/bash
-# Drives s1_idle_winit for the S1 measurement: launches it, samples CPU-time
-# and RSS (ps -o utime,stime / ps -o rss) and phys_footprint
-# (via the `footprint` tool) every 5s for ~65s, keeping the LAST sample taken
-# before the process exits as the "t_end" reading (the app self-quits after
-# its 6th 10s heartbeat, so we poll instead of racing a fixed sleep against
-# its exit). Captures the binary's own stderr heartbeat log too.
+# S1 measurement: samples CPU time, RSS and phys_footprint of s1_idle_winit every 5s.
+# The app quits itself after ~60s, so the last sample before exit is the t_end reading.
 set -uo pipefail
 
 BIN=/Users/nurchudlori/Projects/dbx/target-spike/release/s1_idle_winit

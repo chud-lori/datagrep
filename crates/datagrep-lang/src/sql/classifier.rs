@@ -164,24 +164,20 @@ fn classify_with(toks: &[Lexeme<'_>], mut idx: usize) -> StatementClass {
     }
     let mut body_class = StatementClass::Read;
     loop {
-        // CTE name.
         match toks.get(idx) {
             Some(Lexeme::Word(_)) => idx += 1,
             _ => return StatementClass::Unknown,
         }
-        // Optional column list.
         if matches!(toks.get(idx), Some(Lexeme::Open)) {
             idx = match skip_balanced(toks, idx) {
                 Some(i) => i,
                 None => return StatementClass::Unknown,
             };
         }
-        // AS
         match toks.get(idx) {
             Some(Lexeme::Word(w)) if w.eq_ignore_ascii_case("AS") => idx += 1,
             _ => return StatementClass::Unknown,
         }
-        // Optional [NOT] MATERIALIZED.
         if matches!(toks.get(idx), Some(Lexeme::Word(w)) if w.eq_ignore_ascii_case("NOT")) {
             idx += 1;
         }
@@ -189,7 +185,6 @@ fn classify_with(toks: &[Lexeme<'_>], mut idx: usize) -> StatementClass {
         {
             idx += 1;
         }
-        // CTE body.
         match toks.get(idx) {
             Some(Lexeme::Open) => {
                 let end = match skip_balanced(toks, idx) {

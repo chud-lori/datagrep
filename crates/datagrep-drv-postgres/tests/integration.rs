@@ -402,7 +402,7 @@ async fn catalog_and_queries_work_while_a_cursor_is_open() {
         other => panic!("expected Rows, got {other:?}"),
     }
 
-    // 1. Catalog browsing must not queue behind the open cursor.
+    // Catalog browsing must not queue behind the open cursor.
     let catalog = conn.catalog();
     let databases = tokio::time::timeout(
         DEADLINE,
@@ -473,7 +473,7 @@ async fn catalog_and_queries_work_while_a_cursor_is_open() {
     .expect("describe — decoding relkind must not panic");
     assert_eq!(detail.node.kind, datagrep_api::catalog::ObjectKind::View);
 
-    // 3. A whole second query must not queue behind the open cursor either.
+    // A whole second query must not queue behind the open cursor either.
     let mut other = tokio::time::timeout(DEADLINE, conn.execute(Request::native("SELECT 42")))
         .await
         .expect("a second execute() must not hang while a cursor is open")
@@ -488,7 +488,7 @@ async fn catalog_and_queries_work_while_a_cursor_is_open() {
         other => panic!("expected Rows, got {other:?}"),
     }
 
-    // 4. …and the original cursor is still perfectly usable afterwards.
+    // …and the original cursor is still perfectly usable afterwards.
     let more = tokio::time::timeout(DEADLINE, cursor.next_batch(FetchHint::default()))
         .await
         .expect("the original cursor must still stream")
@@ -499,7 +499,7 @@ async fn catalog_and_queries_work_while_a_cursor_is_open() {
         other => panic!("expected Rows, got {other:?}"),
     }
 
-    // 5. Closing the connection must not block on the still-pinned session.
+    // Closing the connection must not block on the still-pinned session.
     tokio::time::timeout(DEADLINE, conn.close())
         .await
         .expect("close() must not hang behind an open cursor")

@@ -320,7 +320,7 @@ fn prepare_request(req: &Request) -> Result<PreparedRequest, DbError> {
         Request::Op(Op::Explain { inner, analyze }) => {
             if *analyze {
                 return Err(DbError::Unsupported {
-                    feature: "EXPLAIN ANALYZE — SQLite has no run-time query analysis, only \
+                    feature: "EXPLAIN ANALYZE: SQLite has no run-time query analysis, only \
                               static EXPLAIN QUERY PLAN"
                         .to_string(),
                 });
@@ -474,7 +474,7 @@ fn keyed_where(
 ) -> Result<String, DbError> {
     if key.is_empty() {
         return Err(DbError::Unsupported {
-            feature: "mutation with no row identity — refuse to guess which row to affect"
+            feature: "mutation with no row identity: refuse to guess which row to affect"
                 .to_string(),
         });
     }
@@ -493,7 +493,7 @@ fn refuse_expect(expect: &[(datagrep_api::FieldPath, Value)]) -> Result<(), DbEr
         return Ok(());
     }
     Err(DbError::Unsupported {
-        feature: "conditional mutation (`expect`) — this driver cannot check-and-set".into(),
+        feature: "conditional mutation (`expect`): this driver cannot check-and-set".into(),
     })
 }
 
@@ -584,7 +584,7 @@ fn expect_exactly_one(n: usize, verb: &str) -> Result<(), DbError> {
         Err(DbError::Query {
             code: None,
             message: format!(
-                "expected exactly 1 row to {verb}, {n} did — row identity changed, refresh"
+                "expected exactly 1 row to {verb}, {n} did; row identity changed, refresh"
             ),
             position: None,
         })

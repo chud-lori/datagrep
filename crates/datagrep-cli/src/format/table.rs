@@ -190,7 +190,7 @@ impl<W: Write + Send> RowSink for TableSink<W> {
         if let (0, Some(n)) = (summary.rows_shown, summary.affected) {
             let plural = if n == 1 { "" } else { "s" };
             return match &summary.note {
-                Some(note) => writeln!(self.out, "({n} row{plural} affected — {note})"),
+                Some(note) => writeln!(self.out, "({n} row{plural} affected, {note})"),
                 None => writeln!(self.out, "({n} row{plural} affected)"),
             };
         }
@@ -198,7 +198,7 @@ impl<W: Write + Send> RowSink for TableSink<W> {
         match &summary.note {
             Some(note) => writeln!(
                 self.out,
-                "({} row{plural} shown — {note})",
+                "({} row{plural} shown, {note})",
                 summary.rows_shown
             ),
             None => writeln!(self.out, "({} row{plural})", summary.rows_shown),
@@ -272,7 +272,7 @@ mod tests {
         let text = render(rows, Some("stopped after 1 row (--limit)"));
         assert!(text
             .trim_end()
-            .ends_with("(1 row shown — stopped after 1 row (--limit))"));
+            .ends_with("(1 row shown, stopped after 1 row (--limit))"));
     }
 
     #[test]
@@ -325,7 +325,7 @@ mod tests {
             .unwrap();
         }
         let text = String::from_utf8(out).unwrap();
-        assert_eq!(text.trim_end(), "(0 rows shown — statement acknowledged)");
+        assert_eq!(text.trim_end(), "(0 rows shown, statement acknowledged)");
     }
 
     #[test]

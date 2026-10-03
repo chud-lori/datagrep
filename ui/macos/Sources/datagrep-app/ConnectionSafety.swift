@@ -109,7 +109,7 @@ struct ConnectionSafetyChip: View {
     }
 }
 
-// MARK: - the padlock: what rung this connection is on, and how to change it
+// MARK: - the padlock
 
 struct SafetyLevelMenu: View {
     @ObservedObject var model: AppModel
@@ -132,7 +132,7 @@ struct SafetyLevelMenu: View {
                         model.setSafetyLevel(option, for: model.activeProfile)
                     } label: {
                         Label {
-                            Text("\(option.title) — \(option.detail)")
+                            Text("\(option.title): \(option.detail)")
                         } icon: {
                             Image(systemName: option == level ? "checkmark" : option.symbol)
                         }
@@ -151,7 +151,7 @@ struct SafetyLevelMenu: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel("Safety level: \(level.title)")
-        .help("\(level.title) — \(level.detail)\n\nClick to change it for “\(model.activeProfile)”.")
+        .help("\(level.title): \(level.detail)\n\nClick to change it for “\(model.activeProfile)”.")
     }
 }
 

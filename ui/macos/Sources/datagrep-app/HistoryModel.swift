@@ -3,7 +3,6 @@ import DatagrepKit
 import Foundation
 import SwiftUI
 
-/// The view model behind `HistoryPanel`.
 @MainActor
 final class HistoryModel: ObservableObject {
     let store: QueryHistoryStore
@@ -56,7 +55,7 @@ final class HistoryModel: ObservableObject {
         store.load()
     }
 
-    // MARK: - recording (called from the query path, after the fact)
+    // MARK: - recording
 
     func executionStarted(sql: String, connection: String, engine: String) {
         let text = sql.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -189,7 +189,7 @@ impl SafetyGate {
             .position(|p| p.decision.challenge.as_deref() == Some(challenge))
         else {
             return Err(DbError::Auth(format!(
-                "no open safety challenge `{challenge}` on `{}` — it expired, was already used, or was never issued",
+                "no open safety challenge `{challenge}` on `{}`: it expired, was already used, or was never issued",
                 self.name
             )));
         };

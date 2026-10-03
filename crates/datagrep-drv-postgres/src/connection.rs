@@ -154,7 +154,7 @@ impl PgConnection {
                 return Err(DbError::Query {
                     code: None,
                     message: format!(
-                        "row identity changed — refresh (expected exactly 1 row affected, got {affected})"
+                        "row identity changed; refresh (expected exactly 1 row affected, got {affected})"
                     ),
                     position: None,
                 });

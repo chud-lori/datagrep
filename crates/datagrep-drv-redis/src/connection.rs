@@ -66,8 +66,6 @@ impl RedisConnection {
         flag
     }
 
-    // ---- Request::Native --------------------------------------------
-
     async fn execute_native(
         &self,
         text: &str,
@@ -186,8 +184,6 @@ impl RedisConnection {
         result
     }
 
-    // ---- Request::Op(Scan) --------------------------------------------
-
     async fn scan_cursor(
         &self,
         path: &ObjectPath,
@@ -198,7 +194,7 @@ impl RedisConnection {
         let glob = filter.map(compile_glob).transpose()?;
         match path.parts() {
             [] => Err(DbError::Unsupported {
-                feature: "Op::Scan at the catalog root — pick a database index first".into(),
+                feature: "Op::Scan at the catalog root: pick a database index first".into(),
             }),
             [_db] => Ok(Box::new(RedisPairsCursor::new(
                 self.manager.clone(),
@@ -212,8 +208,8 @@ impl RedisConnection {
                 if glob.is_some() {
                     return Err(DbError::Unsupported {
                         feature: format!(
-                            "Op::Scan filter combined with a keyspace-prefix path (`{prefix}`) \
-                             — Redis MATCH takes exactly one glob pattern and the prefix already \
+                            "Op::Scan filter combined with a keyspace-prefix path (`{prefix}`): \
+                             Redis MATCH takes exactly one glob pattern and the prefix already \
                              supplies it"
                         ),
                     });
@@ -328,8 +324,6 @@ impl RedisConnection {
         }
     }
 
-    // ---- Request::Op(Count) --------------------------------------------
-
     async fn count(
         &self,
         path: &ObjectPath,
@@ -342,7 +336,7 @@ impl RedisConnection {
             [_db, _prefix, key] => {
                 if filter.is_some() {
                     return Err(DbError::Unsupported {
-                        feature: "Op::Count filter on a single-key cardinality — HLEN/SCARD/\
+                        feature: "Op::Count filter on a single-key cardinality: HLEN/SCARD/\
                                   ZCARD/LLEN/XLEN take no filter"
                             .into(),
                     });
@@ -362,7 +356,7 @@ impl RedisConnection {
                     other => {
                         return Err(DbError::Unsupported {
                             feature: format!(
-                                "counting a Redis key of TYPE {other:?} — no natural element count \
+                                "counting a Redis key of TYPE {other:?}: no natural element count \
                                  (use Op::Scan to inspect a string's value instead)"
                             ),
                         })
@@ -467,13 +461,11 @@ impl RedisConnection {
         Ok(Box::new(OneShotCursor::ack(
             Some(estimate),
             Some(Arc::from(format!(
-                "estimate — extrapolated from a {sample_count}-key SCAN sample against \
+                "estimate: extrapolated from a {sample_count}-key SCAN sample against \
                  DBSIZE={dbsize}; not exact"
             ))),
         )))
     }
-
-    // ---- Request::Op(Mutate) --------------------------------------------
 
     async fn mutate(&self, batch: MutationBatch) -> Result<Box<dyn Cursor>, DbError> {
         if batch.mutations.is_empty() {
@@ -526,7 +518,7 @@ impl Connection for RedisConnection {
             Request::Native { text, params, .. } => {
                 if !params.is_empty() {
                     return Err(DbError::Unsupported {
-                        feature: "parameterized Request::Native params — Redis's protocol has no \
+                        feature: "parameterized Request::Native params: Redis's protocol has no \
                                   bind-parameter form for CLI text (ParamStyle::None); splice \
                                   values into the command text instead"
                             .into(),
@@ -544,7 +536,7 @@ impl Connection for RedisConnection {
             }) => {
                 if !order.is_empty() {
                     return Err(DbError::Unsupported {
-                        feature: "ORDER BY — no Redis SCAN-family command guarantees iteration \
+                        feature: "ORDER BY: no Redis SCAN-family command guarantees iteration \
                                   order (not hash-table order, and not even a sorted set's score \
                                   order); honoring one would misrepresent the result"
                             .into(),
@@ -552,7 +544,7 @@ impl Connection for RedisConnection {
                 }
                 if project.as_ref().is_some_and(|p| !p.is_empty()) {
                     return Err(DbError::Unsupported {
-                        feature: "column projection — Shape::Pairs has only a key and a value \
+                        feature: "column projection: Shape::Pairs has only a key and a value \
                                   side; refusing rather than silently dropping the requested \
                                   fields"
                             .into(),
@@ -573,12 +565,12 @@ impl Connection for RedisConnection {
             }) => self.count(&path, filter.as_ref(), exact, cancel).await,
             Request::Op(Op::Mutate(batch)) => self.mutate(batch).await,
             Request::Op(Op::Explain { .. }) => Err(DbError::Unsupported {
-                feature: "EXPLAIN — Redis commands are O(1)/O(N) primitives with no query \
+                feature: "EXPLAIN: Redis commands are O(1)/O(N) primitives with no query \
                           planner to explain (Caps::EXPLAIN is not set)"
                     .into(),
             }),
             Request::Op(Op::Ddl(_)) => Err(DbError::Unsupported {
-                feature: "DDL — Redis has no schema to declare (Caps::DDL is not set)".into(),
+                feature: "DDL: Redis has no schema to declare (Caps::DDL is not set)".into(),
             }),
         }
     }
@@ -602,7 +594,7 @@ impl Connection for RedisConnection {
 
     async fn begin(&self, _opts: TxOpts) -> Result<Box<dyn Transaction>, DbError> {
         Err(DbError::Unsupported {
-            feature: "interactive transactions — Redis MULTI/EXEC is a single optimistic \
+            feature: "interactive transactions: Redis MULTI/EXEC is a single optimistic \
                       pipeline, not an interactive transaction (no mid-transaction reads of \
                       your own writes, no savepoints)"
                 .into(),
@@ -692,14 +684,14 @@ fn mutation_key(path: &ObjectPath, key: &[(FieldPath, Value)]) -> Result<String,
                 .map(|s| s.to_string())
                 .map_err(|_| DbError::Unsupported {
                     feature:
-                        "mutation key is not valid UTF-8 — Redis keys through this driver must \
+                        "mutation key is not valid UTF-8: Redis keys through this driver must \
                           be text"
                             .into(),
                 })
         }
         other => Err(DbError::Unsupported {
             feature: format!(
-                "mutation key {other:?} — a Redis key is a single string, not a composite"
+                "mutation key {other:?}: a Redis key is a single string, not a composite"
             ),
         }),
     }
@@ -721,7 +713,7 @@ fn value_to_bytes(v: &Value) -> Result<Vec<u8>, DbError> {
         Value::Null => Ok(Vec::new()),
         other => Err(DbError::Unsupported {
             feature: format!(
-                "writing a {other:?} value to Redis — only scalar text/byte/number-shaped \
+                "writing a {other:?} value to Redis: only scalar text/byte/number-shaped \
                  values map to a Redis string/field value (JSON-encode structured data client-side)"
             ),
         }),
@@ -756,7 +748,7 @@ fn add_mutation_to_pipe(pipe: &mut redis::Pipeline, m: &Mutation) -> Result<(), 
                         return Err(DbError::Query {
                             code: None,
                             message: "Mutation::Insert Document had only the redundant \"key\" \
-                                      field — nothing to HSET"
+                                      field: nothing to HSET"
                                 .to_string(),
                             position: None,
                         });
@@ -808,7 +800,7 @@ fn refuse_expect(expect: &[(datagrep_api::FieldPath, Value)]) -> Result<(), DbEr
         return Ok(());
     }
     Err(DbError::Unsupported {
-        feature: "conditional mutation (`expect`) — this driver cannot check-and-set".into(),
+        feature: "conditional mutation (`expect`): this driver cannot check-and-set".into(),
     })
 }
 
