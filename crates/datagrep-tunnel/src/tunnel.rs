@@ -1,12 +1,14 @@
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use datagrep_api::SecretString;
 use russh::client::{self, AuthResult};
 use russh::keys::agent::client::AgentClient;
 use russh::keys::agent::AgentIdentity;
 use russh::keys::{self, PrivateKeyWithHashAlg, PublicKey};
+use russh::ChannelStream;
 
 use crate::auth::Auth;
 use crate::bridge::{spawn_bridge, LocalEnd};
@@ -48,14 +50,13 @@ impl<P: HostKeyPolicy + 'static> SshTunnel<P> {
     ) -> Result<Self, TunnelError> {
         let host = host.into();
         let user = user.into();
-        let config = Arc::new(client::Config::default());
         let handler = TunnelHandler {
             host: host.clone(),
             port,
             policy,
         };
 
-        let mut handle = client::connect(config, (host.as_str(), port), handler)
+        let mut handle = client::connect(client_config(), (host.as_str(), port), handler)
             .await
             .map_err(|e| e.into_tunnel_error(&host, port))?;
 
@@ -76,12 +77,25 @@ impl<P: HostKeyPolicy + 'static> SshTunnel<P> {
         self.port
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.handle.is_closed()
+    }
+
     pub async fn open_channel(
         &self,
         target_host: impl Into<String>,
         target_port: u16,
     ) -> Result<LocalEnd, TunnelError> {
-        let target_host = target_host.into();
+        Ok(spawn_bridge(
+            self.open_stream(target_host.into(), target_port).await?,
+        ))
+    }
+
+    pub(crate) async fn open_stream(
+        &self,
+        target_host: String,
+        target_port: u16,
+    ) -> Result<ChannelStream<client::Msg>, TunnelError> {
         let channel = self
             .handle
             .channel_open_direct_tcpip(target_host.clone(), target_port as u32, "127.0.0.1", 0)
@@ -91,7 +105,57 @@ impl<P: HostKeyPolicy + 'static> SshTunnel<P> {
                 target_port,
                 source,
             })?;
-        Ok(spawn_bridge(channel.into_stream()))
+        Ok(channel.into_stream())
+    }
+}
+
+fn client_config() -> Arc<client::Config> {
+    Arc::new(client::Config {
+        keepalive_interval: Some(Duration::from_secs(30)),
+        ..client::Config::default()
+    })
+}
+
+/// Completes key exchange only, so the offered host key can be shown before anything is trusted or sent.
+pub async fn probe_host_key(host: &str, port: u16) -> Result<PublicKey, TunnelError> {
+    let seen = Arc::new(Mutex::new(None));
+    let handler = ProbeHandler { seen: seen.clone() };
+    let outcome = client::connect(client_config(), (host, port), handler).await;
+    let key = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    match (key, outcome) {
+        (Some(key), _) => Ok(key),
+        (None, Err(source)) => Err(TunnelError::Ssh {
+            host: host.to_owned(),
+            port,
+            source,
+        }),
+        (None, Ok(_)) => Err(TunnelError::Ssh {
+            host: host.to_owned(),
+            port,
+            source: russh::Error::UnknownKey,
+        }),
+    }
+}
+
+struct ProbeHandler {
+    seen: Arc<Mutex<Option<PublicKey>>>,
+}
+
+impl client::Handler for ProbeHandler {
+    type Error = russh::Error;
+
+    fn check_server_key(
+        &mut self,
+        server_public_key: &PublicKey,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send {
+        *self
+            .seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(server_public_key.clone());
+        async { Ok(false) }
     }
 }
 

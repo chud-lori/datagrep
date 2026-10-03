@@ -44,6 +44,19 @@ pub enum TunnelError {
     #[error("host key for {host}:{port} was not accepted")]
     HostKeyRejected { host: String, port: u16 },
 
+    #[error(
+        "the SSH host key for {host}:{port} ({fingerprint}) is not trusted yet; \
+         test the connection from its settings to review and accept it"
+    )]
+    HostKeyUnknown {
+        host: String,
+        port: u16,
+        fingerprint: String,
+    },
+
+    #[error("SSH connection to {host}:{port} timed out")]
+    Timeout { host: String, port: u16 },
+
     #[error("unknown host key for {host}:{port}, but no UI is listening for a decision")]
     NoPromptListener { host: String, port: u16 },
 
