@@ -18,7 +18,7 @@ trap 'chmod -R u+w "$WORK" && rm -rf "$WORK"' EXIT
 find "$SIDECAR_ROOT" -name go.mod -not -path '*/vendor/*' | while read -r gomod; do
     for arch in amd64 arm64; do
         (cd "$(dirname "$gomod")" && GOOS=linux GOARCH="$arch" GOMODCACHE="$WORK" \
-            GOFLAGS=-mod=readonly GOTOOLCHAIN=local go list -deps ./... >/dev/null)
+            GOFLAGS="-mod=readonly -buildvcs=false" GOTOOLCHAIN=local go list -deps ./... >/dev/null)
     done
 done
 
