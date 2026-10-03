@@ -26,6 +26,7 @@ datagrep-core = { path = "../datagrep-core" }
 datagrep-lang = { path = "../datagrep-lang" }
 datagrep-profiles = { path = "../datagrep-profiles" }
 datagrep-secrets = { path = "../datagrep-secrets" }
+datagrep-tunnel = { path = "../datagrep-tunnel" }
 datagrep-drv-postgres = { path = "../datagrep-drv-postgres" }
 datagrep-drv-sqlite = { path = "../datagrep-drv-sqlite" }
 datagrep-drv-redis = { path = "../datagrep-drv-redis" }
@@ -56,6 +57,9 @@ arrow-schema = "59.1"
 # `SecretResolver::in_memory` — see DatagrepCore::with_store_in_memory_secrets.
 datagrep-secrets = { path = "../datagrep-secrets", features = ["test-support"] }
 tempfile = "3"
+# Global subscriber for the no-secret-in-logs test; its `log` bridge also captures russh.
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+tracing = "0.1"
 
 [lints.clippy]
 uninlined_format_args = "allow"

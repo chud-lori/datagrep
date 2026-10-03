@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::c_char;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use datagrep_api::caps::Caps;
@@ -8,6 +9,7 @@ use datagrep_core::session::ConnLease;
 use datagrep_core::{CoreApi, ProfileId, QueryId};
 use datagrep_profiles::Store;
 use datagrep_secrets::{SecretRef, SecretResolver};
+use datagrep_tunnel::{LocalForward, PublicKey, TofuStore};
 
 use crate::ffi_util::{guard, guard_quiet};
 use crate::runtime::runtime;
@@ -19,6 +21,10 @@ pub(crate) struct CoreInner {
     pub(crate) api: Arc<CoreApi>,
     pub(crate) store: Arc<Store>,
     pub(crate) secrets: Arc<SecretResolver>,
+    pub(crate) known_hosts: PathBuf,
+    pub(crate) system_known_hosts: Option<PathBuf>,
+    pending_host_keys: Mutex<HashMap<(String, u16), PublicKey>>,
+    forwards: Mutex<HashMap<ProfileId, LocalForward>>,
     registered: Mutex<HashMap<String, ProfileId>>,
     enforcement: Mutex<HashMap<String, Enforcement>>,
     server: Mutex<HashMap<String, (String, String)>>,
@@ -36,15 +42,29 @@ impl std::fmt::Debug for CoreInner {
 
 impl DatagrepCore {
     pub fn with_store(store: Store) -> Result<Self, String> {
-        Self::build(store, SecretResolver::new())
+        Self::build(
+            store,
+            SecretResolver::new(),
+            TofuStore::default_path(),
+            TofuStore::system_default_path(),
+        )
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_store_in_memory_secrets(store: Store) -> Result<Self, String> {
-        Self::build(store, SecretResolver::in_memory())
+        let pins = std::env::temp_dir().join(format!(
+            "datagrep-test-known-hosts-{}",
+            datagrep_profiles::new_id()
+        ));
+        Self::build(store, SecretResolver::in_memory(), pins, None)
     }
 
-    fn build(store: Store, secrets: SecretResolver) -> Result<Self, String> {
+    fn build(
+        store: Store,
+        secrets: SecretResolver,
+        known_hosts: PathBuf,
+        system_known_hosts: Option<PathBuf>,
+    ) -> Result<Self, String> {
         let rt = runtime()?;
         let _guard = rt.enter();
         let api = CoreApi::new();
@@ -53,6 +73,10 @@ impl DatagrepCore {
             api: Arc::new(api),
             store: Arc::new(store),
             secrets: Arc::new(secrets),
+            known_hosts,
+            system_known_hosts,
+            pending_host_keys: Mutex::new(HashMap::new()),
+            forwards: Mutex::new(HashMap::new()),
             registered: Mutex::new(HashMap::new()),
             enforcement: Mutex::new(HashMap::new()),
             server: Mutex::new(HashMap::new()),
@@ -71,7 +95,12 @@ impl CoreInner {
             return Ok((id, profile));
         }
 
-        let config = self.plaintext_config(&profile).await?;
+        let mut config = self.plaintext_config(&profile).await?;
+        let tunnel = crate::ssh::saved_tunnel(self, &profile).await?;
+        let forward = match crate::ssh::spec_for(self, tunnel.as_ref(), None).await? {
+            Some(spec) => Some(crate::ssh::route(self, spec, &mut config).await?),
+            None => None,
+        };
 
         let id = self
             .api
@@ -85,7 +114,11 @@ impl CoreInner {
             })
             .await;
 
-        let id = *self.lock_registered().entry(name.to_string()).or_insert(id);
+        let winner = *self.lock_registered().entry(name.to_string()).or_insert(id);
+        if let (true, Some(forward)) = (winner == id, forward) {
+            self.lock_forwards().insert(id, forward);
+        }
+        let id = winner;
 
         let _ = self.store.touch_profile_last_used(profile.id.clone()).await;
         Ok((id, profile))
@@ -223,9 +256,13 @@ impl CoreInner {
         self.lock_server().remove(name);
         self.lock_caps().remove(name);
         if let Some(id) = stale {
+            let forward = self.lock_forwards().remove(&id);
             let api = self.api.clone();
             if let Ok(rt) = runtime() {
-                rt.spawn(async move { api.disconnect(id).await });
+                rt.spawn(async move {
+                    api.disconnect(id).await;
+                    drop(forward);
+                });
             }
         }
     }
@@ -244,6 +281,20 @@ impl CoreInner {
 
     fn lock_enforcement(&self) -> std::sync::MutexGuard<'_, HashMap<String, Enforcement>> {
         self.enforcement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_forwards(&self) -> std::sync::MutexGuard<'_, HashMap<ProfileId, LocalForward>> {
+        self.forwards
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn lock_pending_host_keys(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<(String, u16), PublicKey>> {
+        self.pending_host_keys
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }

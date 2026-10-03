@@ -271,6 +271,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_tunnelled_profile_is_refused_rather_than_dialled_directly() {
+        let ctx = crate::context::test_ctx();
+        add(&ctx, "behind-ssh", "postgres://a@10.0.0.5/app")
+            .await
+            .unwrap();
+        let mut profile = ctx.find_profile("behind-ssh").await.unwrap();
+        let now = datagrep_profiles::now_ms();
+        let tunnel = ctx
+            .store
+            .create_tunnel(datagrep_profiles::Tunnel {
+                id: "t".into(),
+                name: "behind-ssh".into(),
+                host: "bastion".into(),
+                port: 22,
+                username: "me".into(),
+                auth: datagrep_profiles::TunnelAuth::Agent,
+                key_path: None,
+                secret_ref: None,
+                known_hosts_pin: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        profile.tunnel_id = Some(tunnel.id);
+        ctx.store.update_profile(profile).await.unwrap();
+
+        let err = ctx.open_profile("behind-ssh").await.unwrap_err();
+        assert!(err.to_string().contains("SSH tunnel"), "{err}");
+    }
+
+    #[tokio::test]
     async fn remove_deletes_the_profile() {
         let ctx = crate::context::test_ctx();
         add(&ctx, "gone", ":memory:").await.unwrap();
