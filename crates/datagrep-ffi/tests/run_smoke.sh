@@ -5,7 +5,7 @@ set -euo pipefail
 
 CRATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-release}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/Users/nurchudlori/Projects/dbx/target-ffi}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(cd "$CRATE_DIR/../.." && pwd)/target-ffi}"
 
 CARGO_FLAGS=(-p datagrep-ffi)
 [ "$PROFILE" = "release" ] && CARGO_FLAGS+=(--release)

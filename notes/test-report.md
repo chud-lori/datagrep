@@ -263,10 +263,6 @@ saved credentials.
 - The Postgres suite **cannot finish as shipped** (F2): with `--test-threads=1` it
   deadlocks on the second test alphabetically and the remaining six never run.
   Nothing in the harness times out; CI would hang until the job timeout.
-- Rebuilds emitted paths under `/Users/nurchudlori/Projects/datagrep/…` (not
-  `…/dbx`) for `datagrep-api`/`datagrep-drv-postgres` — stale absolute paths from a
-  previous checkout location baked into build artifacts; harmless but confusing in
-  backtraces.
 - The fixtures healthcheck trap in `fixtures/README.md` is accurately documented
   and the suggested sentinel poll works.
 

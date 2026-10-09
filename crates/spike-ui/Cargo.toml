@@ -13,8 +13,7 @@
 #          cd harness-winit && cargo build --release  (succeeds)
 # Results: ./SPIKE-REPORT.md
 #
-# CARGO_TARGET_DIR=/Users/nurchudlori/Projects/dbx/target-spike was used for
-# every build below, per the task's isolation instructions.
+# CARGO_TARGET_DIR=<repo>/target-spike was used for every build below.
 [package]
 name = "spike-ui"
 version = "0.0.0"

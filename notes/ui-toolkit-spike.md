@@ -1,7 +1,7 @@
 # datagrep UI toolkit spike report — S1, S8
 
 Ran on this machine: Apple Silicon (M1), macOS 15.6.1 (24G90), rustc/cargo 1.89.0,
-Xcode Command Line Tools 16.4 **only** (no Xcode.app). `CARGO_TARGET_DIR=/Users/nurchudlori/Projects/dbx/target-spike`
+Xcode Command Line Tools 16.4 **only** (no Xcode.app). `CARGO_TARGET_DIR=<repo>/target-spike`
 for every build below. Scope: design doc §1.1 (toolkit decision) and §8 (spikes S1, S8).
 
 **Headline finding, ahead of everything else:** gpui 0.2.2 (and therefore
@@ -203,7 +203,7 @@ crates/spike-ui/harness-winit/Cargo.toml <- same trick, own Cargo.lock, winit + 
                                           vice versa).
 ```
 
-Every build used `CARGO_TARGET_DIR=/Users/nurchudlori/Projects/dbx/target-spike`. No
+Every build used `CARGO_TARGET_DIR=<repo>/target-spike`. No
 file outside `crates/spike-ui/` was touched; the root `Cargo.toml` and `Cargo.lock` were
 never opened for writing (only read, early, to confirm the glob).
 
