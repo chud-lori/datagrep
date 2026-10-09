@@ -3,7 +3,7 @@
 # The app quits itself after ~60s, so the last sample before exit is the t_end reading.
 set -uo pipefail
 
-BIN=/Users/nurchudlori/Projects/dbx/target-spike/release/s1_idle_winit
+BIN="${BIN:-$(cd "$(dirname "$0")/../../.." && pwd)/target-spike/release/s1_idle_winit}"
 LOG=/tmp/spike_s1_winit_run.log
 : > "$LOG"
 
