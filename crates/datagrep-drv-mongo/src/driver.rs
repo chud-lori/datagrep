@@ -256,6 +256,13 @@ fn bool_field(cfg: &ResolvedConfig, key: &str) -> Result<Option<bool>, DbError> 
     }
 }
 
+/// The exact connection URI `connect` dials, for callers that hand it to
+/// `mongosh` (see [`crate::mongosh`]). Same assembly as the in-process driver,
+/// so credentials are resolved the one way.
+pub fn connection_uri(cfg: &ResolvedConfig) -> Result<String, DbError> {
+    build_uri(cfg)
+}
+
 fn build_uri(cfg: &ResolvedConfig) -> Result<String, DbError> {
     let hosts = str_field(cfg, "hosts")?.ok_or_else(|| {
         DbError::Config(ConfigError::MissingField {
