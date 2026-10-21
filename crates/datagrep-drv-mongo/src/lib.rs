@@ -5,6 +5,7 @@ pub mod cursor;
 pub mod driver;
 pub mod error;
 pub mod filter;
+pub mod mongosh;
 pub mod transaction;
 pub mod value;
 
